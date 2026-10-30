@@ -33,11 +33,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `max_check_slots` 1 to 8, `read_ahead` and `max_conflict_returns` at least 1; unknown keys are refused. Nothing in
   the drain reads the values yet, so with `max_in_flight = 1` the drain behaves as today, and the table does not
   change a reading's config digest.
+- `athena measure-build` (async drain build job A1, `docs/design/async-drain.md` section 12 and decision D145):
+  builds the workspace cold in two separate git worktrees of HEAD with different target directories and commits an
+  `athena.build-measurement/1` record under `records/build-measurements/`: T (bytes of one cold target directory),
+  S (bytes of one worktree's tracked files), the wall time of each build, and the `sccache` hit and miss counts of
+  each build, or that `sccache` is not installed. The worktrees and target directories are removed on every path,
+  and a build failure or unreadable `sccache` counts write no record. The cargo and `sccache` work sits behind the
+  `CargoBuilder` trait, so tests use a fake builder. The Hestia sweep (`athena hestia sweep`) runs the measurement
+  when no record exists and again when `Cargo.lock` changes, and skips it when free disk is below `[disk]
+  min_free_gb`; `athena status` prints the latest as a `build      measurement:` line, or says none exists yet.
+  Nothing has been measured by this change: the figures come from the records the command writes. No
+  `athena.toml` change; with `max_in_flight = 1` the drain behaves as today.
 - D145 accepted, decided by the brain under Sri's delegation on 2026-10-29. `docs/decisions.md` also gains an
-  "A1 measurements" entry (design section 12, job 1) that is not a measurement: `sccache --show-stats`, `du`, `df` and
-  `git worktree add` were each refused by the producer shell, so the entry records the command and error for each,
-  says the cause of D84's 0 hits was not found, and gives T about 6 GB and S about 0.2 GB as the design's estimates.
-  No `athena.toml` change; with `max_in_flight = 1` the drain behaves as today.
+  "A1 measurements" entry (design section 12, job 1) that says the numbers come from `athena measure-build` records,
+  none of which exists yet, gives T about 6 GB and S about 0.2 GB only as the design's estimates, and says the cause
+  of D84's 0 hits was not found.
 - `docs/spec.toml` now cites the whole of BRIEF.md, so the brief can be retired as the working copy of the
   requirements. A third layer adds 127 requirements: the opening goals (including "gets measurably faster, cheaper,
   and more correct"), who's who, settings, the operating model O1 to O5, the standards and boundaries, Part 1 items

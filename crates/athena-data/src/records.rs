@@ -2126,6 +2126,77 @@ impl ThroughputReview {
     }
 }
 
+/// The schema tag of a build measurement.
+pub const BUILD_MEASUREMENT_SCHEMA: &str = "athena.build-measurement/1";
+
+/// What `sccache` counted during one build: compile requests it answered from its cache and those it had
+/// to compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SccacheCounts {
+    pub hits: u64,
+    pub misses: u64,
+}
+
+/// The compile-cache figures of a build measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SccacheFigures {
+    /// `sccache` was not on the PATH, so both builds compiled everything themselves. This is not a count of
+    /// zero hits.
+    NotInstalled,
+    /// The counts of each build; the second build running after the first shows whether the cache answers
+    /// across worktrees.
+    Measured {
+        first: SccacheCounts,
+        second: SccacheCounts,
+    },
+}
+
+/// `athena.build-measurement/1`: the size and time of a cold workspace build, measured by
+/// `athena measure-build` in two separate worktrees with different target directories. Measurements are
+/// never edited; the latest is the newest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildMeasurement {
+    pub id: RecordId,
+    pub at: Timestamp,
+    /// The commit whose tree was built.
+    pub commit: String,
+    /// The git blob id of `Cargo.lock` at that commit; a new measurement is due when it changes.
+    pub cargo_lock_hash: String,
+    /// T: bytes in one cold `target/` directory after the first build.
+    pub target_bytes: u64,
+    /// S: bytes of the tracked files of one worktree.
+    pub source_bytes: u64,
+    /// Wall time of the first cold build, in seconds.
+    pub first_build_seconds: f64,
+    /// Wall time of the second cold build, in seconds.
+    pub second_build_seconds: f64,
+    pub sccache: SccacheFigures,
+}
+
+impl BuildMeasurement {
+    /// The most recent of `measurements`, by time and then id; None when there are none.
+    pub fn latest(measurements: &[BuildMeasurement]) -> Option<&BuildMeasurement> {
+        measurements
+            .iter()
+            .max_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)))
+    }
+
+    /// Why this record is not acceptable, if it is not.
+    pub fn validate(&self) -> Result<(), String> {
+        let good = |v: f64| v.is_finite() && v >= 0.0;
+        if !good(self.first_build_seconds) || !good(self.second_build_seconds) {
+            return Err("a build measurement's times are finite, non-negative seconds".into());
+        }
+        if self.commit.trim().is_empty() || self.cargo_lock_hash.trim().is_empty() {
+            return Err("a build measurement names its commit and its Cargo.lock hash".into());
+        }
+        Ok(())
+    }
+}
+
 /// The schema tag of a Hestia sweep.
 pub const HESTIA_SWEEP_SCHEMA: &str = "athena.hestia-sweep/1";
 
@@ -2576,6 +2647,8 @@ pub enum AnyRecord {
     CodeHealthBaseline(CodeHealthBaseline),
     #[serde(rename = "athena.throughput-review/1")]
     ThroughputReview(Box<ThroughputReview>),
+    #[serde(rename = "athena.build-measurement/1")]
+    BuildMeasurement(Box<BuildMeasurement>),
 }
 
 /// Why a file under `records/` is not acceptable.
@@ -2664,6 +2737,7 @@ impl AnyRecord {
             AnyRecord::Baseline(b) => b.validate().map_err(invalid)?,
             AnyRecord::Replay(r) => r.validate().map_err(invalid)?,
             AnyRecord::ThroughputReview(r) => r.validate().map_err(invalid)?,
+            AnyRecord::BuildMeasurement(r) => r.validate().map_err(invalid)?,
             AnyRecord::DefaultsProposal(p) => p.validate().map_err(invalid)?, // Totals are what reconciliation checks an outcome against; only the bootstrap has none
             // (acceptance verification 2).
             AnyRecord::Outcome(o) if o.job.is_request() && o.totals.is_none() => {
@@ -2769,6 +2843,9 @@ impl AnyRecord {
             AnyRecord::ThroughputReview(r) => {
                 format!("records/throughput-reviews/{}/{}.json", r.id.month(), r.id)
             }
+            AnyRecord::BuildMeasurement(r) => {
+                format!("records/build-measurements/{}/{}.json", r.id.month(), r.id)
+            }
         }
     }
 
@@ -2807,6 +2884,7 @@ impl AnyRecord {
             AnyRecord::Replay(_) => REPLAY_SCHEMA,
             AnyRecord::CodeHealthBaseline(_) => CODE_HEALTH_BASELINE_SCHEMA,
             AnyRecord::ThroughputReview(_) => THROUGHPUT_REVIEW_SCHEMA,
+            AnyRecord::BuildMeasurement(_) => BUILD_MEASUREMENT_SCHEMA,
         }
     }
 }
@@ -3808,6 +3886,95 @@ mod tests {
         none.proposal = None;
         none.followups.clear();
         assert!(none.validate().is_ok());
+    }
+
+    fn build_measurement_with(id: &str, sccache: SccacheFigures) -> BuildMeasurement {
+        BuildMeasurement {
+            id: RecordId::parse(id).unwrap(),
+            at: ts(),
+            commit: "0123456789abcdef0123456789abcdef01234567".into(),
+            cargo_lock_hash: "89abcdef0123456789abcdef0123456789abcdef".into(),
+            target_bytes: 4096,
+            source_bytes: 1024,
+            first_build_seconds: 61.5,
+            second_build_seconds: 12.25,
+            sccache,
+        }
+    }
+
+    #[test]
+    fn a_build_measurement_has_a_path_a_schema_and_round_trips() {
+        let measured = SccacheFigures::Measured {
+            first: SccacheCounts { hits: 0, misses: 7 },
+            second: SccacheCounts { hits: 5, misses: 2 },
+        };
+        for sccache in [measured, SccacheFigures::NotInstalled] {
+            let measurement = build_measurement_with("20261029-090000-5abc", sccache);
+            let record = AnyRecord::BuildMeasurement(Box::new(measurement.clone()));
+            assert_eq!(record.schema(), "athena.build-measurement/1");
+            assert_eq!(
+                record.canonical_path(),
+                "records/build-measurements/2026-10/20261029-090000-5abc.json"
+            );
+            let json = record.to_json();
+            let parsed = check_record_file(&record.canonical_path(), json.as_bytes())
+                .unwrap()
+                .unwrap();
+            assert_eq!(parsed, record);
+            let AnyRecord::BuildMeasurement(parsed) = parsed else {
+                panic!("a build measurement parses as one");
+            };
+            assert_eq!(*parsed, measurement);
+            assert!(matches!(
+                check_record_file(
+                    "records/code-health/2026-10/20261029-090000-5abc.json",
+                    json.as_bytes()
+                ),
+                Err(RecordError::Misplaced { .. })
+            ));
+        }
+        let one = build_measurement_with("20261029-090000-5abc", SccacheFigures::NotInstalled);
+        assert_eq!(
+            BuildMeasurement::latest(std::slice::from_ref(&one)),
+            Some(&one)
+        );
+        let mut newer =
+            build_measurement_with("20261029-100000-6abc", SccacheFigures::NotInstalled);
+        newer.at = one
+            .at
+            .checked_add(jiff::SignedDuration::from_secs(60))
+            .unwrap();
+        let both = vec![newer.clone(), one];
+        assert_eq!(BuildMeasurement::latest(&both), Some(&newer));
+        assert!(BuildMeasurement::latest(&[]).is_none());
+    }
+
+    #[test]
+    fn a_build_measurement_with_bad_times_or_no_lock_hash_is_refused() {
+        let ok = build_measurement_with("20261029-090000-5abc", SccacheFigures::NotInstalled);
+        assert!(ok.validate().is_ok());
+        let mut nan = ok.clone();
+        nan.first_build_seconds = f64::NAN;
+        assert!(nan.validate().is_err());
+        let mut negative = ok.clone();
+        negative.second_build_seconds = -1.0;
+        assert!(negative.validate().is_err());
+        let mut no_lock = ok.clone();
+        no_lock.cargo_lock_hash = " ".into();
+        assert!(no_lock.validate().is_err());
+        let mut no_commit = ok;
+        no_commit.commit.clear();
+        assert!(no_commit.validate().is_err());
+        // A NaN is written as null, so the file does not even parse; the rest parse and are refused as invalid.
+        let record = AnyRecord::BuildMeasurement(Box::new(nan));
+        assert!(check_record_file(&record.canonical_path(), record.to_json().as_bytes()).is_err());
+        for bad in [negative, no_lock, no_commit] {
+            let record = AnyRecord::BuildMeasurement(Box::new(bad));
+            assert!(matches!(
+                check_record_file(&record.canonical_path(), record.to_json().as_bytes()),
+                Err(RecordError::Invalid { .. })
+            ));
+        }
     }
 
     #[test]

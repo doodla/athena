@@ -45,10 +45,19 @@
 //! ([`priority_for_minutes`]), and the prediction is kept in an `athena.throughput-review/1` record. A later
 //! review compares the minutes measured after a change that cites the review with the prediction
 //! ([`throughput_followups`]).
+//!
+//! The sweep also measures the build. [`Athena::hestia_sweep_with`] runs [`Athena::measure_build_pass`], which
+//! calls [`Athena::measure_build`] (two cold workspace builds in separate worktrees, committed as an
+//! `athena.build-measurement/1` record) when no measurement record exists, and again whenever the content of
+//! `Cargo.lock` differs from the one the latest measurement built ([`measure_build_due`]). It is in the sweep
+//! and not in [`Athena::review_passes`], so `athena drain` never waits for two cold builds, and it is not a
+//! [`Check`], which cannot reach the records. A repository with no `Cargo.lock` is never measured.
 
 use crate::capability::{JobConfig, ToolGrant};
 use crate::commits::{NewFile, message};
+use crate::disk::{CargoBuild, CargoBuilder, GB, cargo_lock_blob};
 use crate::plan::Priority;
+use crate::state::format_bytes;
 use crate::status::{LandedJob, Throughput, landed_jobs, median};
 use crate::steward::StewardRequest;
 use crate::store::{JobRecords, JobState, Records};
@@ -57,8 +66,8 @@ use anyhow::{Context, Result, bail};
 use athena_agent::env::Side;
 use athena_context::{CONTRACT, Component, Composed, compose};
 use athena_data::records::{
-    AnyRecord, HestiaCheckResult, IntrospectionRecord, IntrospectionStatus, Invocation,
-    InvocationOutcome, OutcomeState, Role, ThroughputFollowup, ThroughputProposal,
+    AnyRecord, BuildMeasurement, HestiaCheckResult, IntrospectionRecord, IntrospectionStatus,
+    Invocation, InvocationOutcome, OutcomeState, Role, ThroughputFollowup, ThroughputProposal,
     ThroughputReview, ThroughputTrigger,
 };
 use athena_data::{JobId, RecordId};
@@ -86,6 +95,13 @@ pub trait Check {
     fn id(&self) -> &str;
     /// Looks at the system. `Err` means the check could not run, which is itself reported.
     fn run(&self, now: Timestamp) -> Result<CheckOutput>;
+}
+
+/// Whether a build measurement is due: none exists, or the git blob id of `Cargo.lock` now (`lock_hash`) is not
+/// the one the latest measurement built. The content of `Cargo.lock` decides, so a landing that leaves it
+/// alone does not cause another pair of cold builds.
+pub fn measure_build_due(latest: Option<&BuildMeasurement>, lock_hash: &str) -> bool {
+    latest.is_none_or(|m| m.cargo_lock_hash != lock_hash)
 }
 
 /// The checks a sweep runs when none are given. Empty in the skeleton; later jobs register theirs here.
@@ -1803,15 +1819,82 @@ impl Athena {
         lines
     }
 
+    /// The build measurement pass: runs [`Athena::measure_build`] when [`measure_build_due`] says so (no
+    /// measurement exists, or `Cargo.lock` at HEAD is not the one the latest measurement built) and returns the
+    /// new record. Returns None, and builds nothing, when it is not due, when HEAD has no `Cargo.lock`, in a
+    /// nested run, with the kill switch on, or when free disk space is below `[disk] min_free_gb` (a line says
+    /// so, and the next sweep tries again). A measurement that fails is an error, so the next sweep tries again.
+    pub fn measure_build_pass(
+        &self,
+        builder: &dyn CargoBuilder,
+        ui: &dyn Ui,
+    ) -> Result<Option<BuildMeasurement>> {
+        if self.nested.is_some() || self.state.registry().stopped() {
+            return Ok(None);
+        }
+        let Some(head) = self.git.head()? else {
+            return Ok(None);
+        };
+        let Some(lock_hash) = cargo_lock_blob(&self.git, &head)? else {
+            return Ok(None);
+        };
+        let records = Records::load(&self.git, &head)?;
+        if !measure_build_due(
+            BuildMeasurement::latest(&records.build_measurements),
+            &lock_hash,
+        ) {
+            return Ok(None);
+        }
+        let required = JobConfig::at(&self.git, &head)?
+            .config
+            .min_free_gb()
+            .saturating_mul(GB);
+        if let Some(free) = self.state.free_bytes()
+            && free < required
+        {
+            ui.line(&format!(
+                "hestia     build measurement due but not run: {} free, {} required",
+                format_bytes(free),
+                format_bytes(required)
+            ));
+            return Ok(None);
+        }
+        self.measure_build(builder, ui).map(Some)
+    }
+
+    /// The sweep with the build measurement pass in front: runs [`Athena::measure_build_pass`] with `builder`
+    /// (its outcome goes to `ui`; a failure does not stop the sweep), then [`Athena::hestia_sweep`] over
+    /// `checks`. The model-driven review passes are not run here; [`Athena::hestia_sweep_with`] runs them first.
+    pub fn hestia_sweep_measuring(
+        &self,
+        checks: &[Box<dyn Check>],
+        ui: &dyn Ui,
+        builder: &dyn CargoBuilder,
+    ) -> Result<Sweep> {
+        match self.measure_build_pass(builder, ui) {
+            Ok(Some(m)) => ui.line(&format!(
+                "hestia     build measurement {} recorded for Cargo.lock {}",
+                m.id,
+                &m.cargo_lock_hash[..m.cargo_lock_hash.len().min(12)]
+            )),
+            Ok(None) => {}
+            Err(e) => ui.line(&format!(
+                "hestia     build measurement: could not run: {e:#}"
+            )),
+        }
+        self.hestia_sweep(checks)
+    }
+
     /// Runs `checks`, commits the report as a record, and returns it. The review passes of
-    /// [`Athena::review_passes`] run first and their summary lines go to `ui`.
+    /// [`Athena::review_passes`] run first and their summary lines go to `ui`, then the build measurement
+    /// pass ([`Athena::measure_build_pass`]) with the real builder.
     pub fn hestia_sweep_with(&self, checks: &[Box<dyn Check>], ui: &dyn Ui) -> Result<Sweep> {
         if self.git.head()?.is_some() {
             for line in self.review_passes(ui) {
                 ui.line(&line);
             }
         }
-        self.hestia_sweep(checks)
+        self.hestia_sweep_measuring(checks, ui, &CargoBuild)
     }
 
     /// Runs `checks`, commits the report as a record, and returns it. Prints nothing; the sweep that also runs
@@ -3071,6 +3154,169 @@ mod tests {
         fn line(&self, text: &str) {
             self.0.lock().unwrap().push(text.to_string());
         }
+    }
+
+    /// A builder that runs no cargo: it counts its builds and writes a small file into the target directory.
+    #[derive(Default)]
+    struct CountingBuilder(std::cell::Cell<u32>);
+
+    impl CargoBuilder for CountingBuilder {
+        fn sccache_installed(&self) -> bool {
+            false
+        }
+
+        fn build(
+            &self,
+            _worktree: &std::path::Path,
+            target_dir: &std::path::Path,
+        ) -> Result<crate::disk::BuildRun> {
+            self.0.set(self.0.get() + 1);
+            std::fs::create_dir_all(target_dir)?;
+            std::fs::write(target_dir.join("out"), [1u8; 64])?;
+            Ok(crate::disk::BuildRun {
+                seconds: 2.5,
+                sccache: None,
+            })
+        }
+    }
+
+    /// Commits `Cargo.lock` with `text` on top of the repository.
+    fn commit_lock(dir: &std::path::Path, athena: &Athena, text: &str) {
+        std::fs::write(dir.join("Cargo.lock"), text).unwrap();
+        athena.git.run(["add", "-A"]).unwrap();
+        athena
+            .git
+            .run(["commit", "-q", "-m", "Change the lock file"])
+            .unwrap();
+    }
+
+    #[test]
+    fn measure_build_is_due_with_no_record_or_a_different_lock_and_not_otherwise() {
+        let record = |lock: &str| BuildMeasurement {
+            id: RecordId::parse("20261029-090000-5abc").unwrap(),
+            at: crate::now(),
+            commit: "0".repeat(40),
+            cargo_lock_hash: lock.into(),
+            target_bytes: 1,
+            source_bytes: 1,
+            first_build_seconds: 1.0,
+            second_build_seconds: 1.0,
+            sccache: athena_data::records::SccacheFigures::NotInstalled,
+        };
+        assert!(measure_build_due(None, "aaa"));
+        assert!(!measure_build_due(Some(&record("aaa")), "aaa"));
+        assert!(measure_build_due(Some(&record("aaa")), "bbb"));
+    }
+
+    #[test]
+    fn sweep_measures_build_when_no_record_exists_and_again_only_when_cargo_lock_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        commit_lock(dir.path(), &athena, "version = 4\n");
+        let builder = CountingBuilder::default();
+        let ui = Lines::default();
+
+        // No record exists: the sweep builds twice and records one measurement.
+        athena.hestia_sweep_measuring(&[], &ui, &builder).unwrap();
+        assert_eq!(builder.0.get(), 2);
+        let known = records(&athena);
+        assert_eq!(known.build_measurements.len(), 1);
+        let first = known.build_measurements[0].clone();
+        assert_eq!(first.target_bytes, 64);
+        assert_eq!(
+            Some(first.cargo_lock_hash.clone()),
+            cargo_lock_blob(&athena.git, &athena.head().unwrap()).unwrap()
+        );
+        {
+            let lines = ui.0.lock().unwrap();
+            assert!(
+                lines.iter().any(|l| l.contains("build measurement")),
+                "{lines:?}"
+            );
+        }
+
+        // The next sweep finds the record for this Cargo.lock and builds nothing, though HEAD moved.
+        athena.hestia_sweep_measuring(&[], &ui, &builder).unwrap();
+        assert_eq!(
+            builder.0.get(),
+            2,
+            "no second measurement for the same lock"
+        );
+        assert_eq!(records(&athena).build_measurements.len(), 1);
+
+        // A new Cargo.lock: the sweep measures again, and the newest record names the new lock.
+        commit_lock(dir.path(), &athena, "version = 4\n# a dependency changed\n");
+        athena.hestia_sweep_measuring(&[], &ui, &builder).unwrap();
+        assert_eq!(builder.0.get(), 4);
+        let known = records(&athena);
+        assert_eq!(known.build_measurements.len(), 2);
+        let newest = BuildMeasurement::latest(&known.build_measurements).unwrap();
+        assert_ne!(newest.cargo_lock_hash, first.cargo_lock_hash);
+        assert_eq!(
+            Some(newest.cargo_lock_hash.clone()),
+            cargo_lock_blob(&athena.git, &athena.head().unwrap()).unwrap()
+        );
+
+        // And once more with nothing changed: nothing runs.
+        athena.hestia_sweep_measuring(&[], &ui, &builder).unwrap();
+        assert_eq!(builder.0.get(), 4);
+    }
+
+    #[test]
+    fn sweep_measures_nothing_without_a_cargo_lock_with_low_disk_or_when_a_build_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut athena = athena_in(dir.path(), state.path());
+        let builder = CountingBuilder::default();
+        let ui = Lines::default();
+        // No Cargo.lock at HEAD: nothing to build.
+        athena.hestia_sweep_measuring(&[], &ui, &builder).unwrap();
+        assert_eq!(builder.0.get(), 0);
+        assert!(records(&athena).build_measurements.is_empty());
+
+        // Free disk space below `[disk] min_free_gb`: the pass says so and builds nothing.
+        commit_lock(dir.path(), &athena, "version = 4\n");
+        let roomy = std::mem::replace(
+            &mut athena.state,
+            StateDir::new(state.path().join("repo")).with_free_space(|_| Ok(GB)),
+        );
+        athena.hestia_sweep_measuring(&[], &ui, &builder).unwrap();
+        athena.state = roomy;
+        assert_eq!(builder.0.get(), 0);
+        assert!(
+            ui.0.lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("due but not run")),
+        );
+
+        // A failed measurement does not stop the sweep, writes no record and is tried again.
+        struct Failing;
+        impl CargoBuilder for Failing {
+            fn sccache_installed(&self) -> bool {
+                false
+            }
+            fn build(
+                &self,
+                _: &std::path::Path,
+                _: &std::path::Path,
+            ) -> Result<crate::disk::BuildRun> {
+                bail!("cargo is broken")
+            }
+        }
+        let sweep = athena.hestia_sweep_measuring(&[], &ui, &Failing).unwrap();
+        assert!(sweep.checks.is_empty());
+        assert!(records(&athena).build_measurements.is_empty());
+        assert!(
+            ui.0.lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("could not run") && l.contains("cargo is broken")),
+        );
+        athena.hestia_sweep_measuring(&[], &ui, &builder).unwrap();
+        assert_eq!(builder.0.get(), 2);
+        assert_eq!(records(&athena).build_measurements.len(), 1);
     }
 
     #[test]

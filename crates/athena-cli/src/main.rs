@@ -166,6 +166,15 @@ enum Command {
         #[command(subcommand)]
         action: HestiaAction,
     },
+    /// Measure the build: build the workspace cold in two separate git worktrees of HEAD, each with its own
+    /// target directory, and commit the result as a build-measurement record: T (one cold target directory),
+    /// S (one worktree's tracked files), the wall time of each build, and the sccache hit and miss counts of
+    /// each build (or that sccache is not installed). It takes minutes and needs the disk for two builds. The
+    /// Hestia sweep runs it when no record exists and when Cargo.lock changes; `athena status` shows the latest.
+    MeasureBuild {
+        #[arg(long)]
+        json: bool,
+    },
     /// Check a candidate `defaults.toml` against an open or accepted proposal and `defaults.toml` at HEAD:
     /// id, statement, version (base plus one) and parse. Exit 2 on a problem.
     CheckProposal {
@@ -1044,6 +1053,14 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
+        Command::MeasureBuild { json } => {
+            let measurement =
+                open(true)?.measure_build(&athena_core::disk::CargoBuild, &Terminal)?;
+            if json {
+                print_json(&measurement)?;
+            }
+            Ok(0)
+        }
         Command::CheckProposal { id, candidate } => {
             let athena = open(false)?;
             let text = std::fs::read_to_string(&candidate)?;
@@ -1588,6 +1605,30 @@ mod tests {
         assert!(
             Cli::try_parse_from(["athena", "hestia", "review", "--backfill", "--json"]).is_ok()
         );
+    }
+
+    #[test]
+    fn measure_build_is_a_subcommand_with_its_own_help() {
+        let parsed = Cli::try_parse_from(["athena", "measure-build"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::MeasureBuild { json: false }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["athena", "measure-build", "--json"])
+                .unwrap()
+                .command,
+            Command::MeasureBuild { json: true }
+        ));
+        let help = Cli::command().render_help().to_string();
+        assert!(help.contains("measure-build"), "{help}");
+        let mut command = Cli::command();
+        let sub = command
+            .find_subcommand_mut("measure-build")
+            .unwrap()
+            .render_help()
+            .to_string();
+        assert!(sub.contains("worktrees"), "{sub}");
     }
 
     #[test]

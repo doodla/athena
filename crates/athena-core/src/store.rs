@@ -251,6 +251,8 @@ pub struct Records {
     pub code_health_baselines: Vec<athena_data::records::CodeHealthBaseline>,
     /// Every throughput review (`crate::hestia`), oldest first; the last is the latest.
     pub throughput_reviews: Vec<athena_data::records::ThroughputReview>,
+    /// Every build measurement (`crate::disk`), oldest first; the last is the latest.
+    pub build_measurements: Vec<athena_data::records::BuildMeasurement>,
     /// Landing records (`landings/`, written after each merge), oldest first. Read from the tree itself and
     /// from the local records branch; one that cannot be read is left out, so a missing branch reads as none.
     pub landings: Vec<athena_data::history::Landing>,
@@ -346,6 +348,7 @@ impl Records {
                 AnyRecord::HestiaSweep(s) => records.hestia_sweeps.push(*s),
                 AnyRecord::CodeHealthBaseline(b) => records.code_health_baselines.push(b),
                 AnyRecord::ThroughputReview(t) => records.throughput_reviews.push(*t),
+                AnyRecord::BuildMeasurement(m) => records.build_measurements.push(*m),
                 AnyRecord::Invocation(i) if i.role == Role::Auditor => {
                     records.auditor_runs.push(*i);
                 }
@@ -392,6 +395,9 @@ impl Records {
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         records
             .throughput_reviews
+            .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+        records
+            .build_measurements
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         records.interventions.sort_by_key(|i| i.at);
         records.restarts.sort_by_key(|r| r.at);
@@ -482,6 +488,7 @@ impl Records {
             || self.work_decisions.iter().any(|r| &r.id == id)
             || self.hestia_sweeps.iter().any(|r| &r.id == id)
             || self.throughput_reviews.iter().any(|r| &r.id == id)
+            || self.build_measurements.iter().any(|r| &r.id == id)
     }
 
     /// The current state of each decision, folded from its append-only state records.

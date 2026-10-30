@@ -32,12 +32,23 @@
 //! environment cause after its candidate is built, or that is interrupted, leaves a resume mark
 //! ([`crate::state::ResumeMark`]) outside its job directory; [`resumable_stop`] says which stopped jobs
 //! `athena retry` resumes from that candidate, with no new planner or producer run.
+//!
+//! Sizing the disk needs numbers, and a restricted producer cannot take them. `athena measure-build`
+//! ([`Athena::measure_build`]) builds the workspace cold in two separate git worktrees with different target
+//! directories and commits an `athena.build-measurement/1` record: T (one cold target directory), S (one
+//! worktree's tracked files), the wall time of each build, and the `sccache` hit and miss counts of each build
+//! or that `sccache` is not installed. The cargo and `sccache` work sits behind [`CargoBuilder`], so tests give
+//! it a fake. The Hestia sweep runs the measurement when there is no record and again when `Cargo.lock`
+//! changes ([`crate::hestia::measure_build_due`]), and `athena status` shows the latest.
 
+use crate::commits::{NewFile, message};
 use crate::state::{StateDir, format_bytes};
-use crate::store::JobState;
+use crate::store::{JobState, Records};
 use crate::{Athena, Ui};
-use athena_data::JobId;
-use athena_data::records::OutcomeState;
+use athena_data::records::{
+    AnyRecord, BuildMeasurement, OutcomeState, SccacheCounts, SccacheFigures,
+};
+use athena_data::{JobId, RecordId};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -277,6 +288,294 @@ impl Athena {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// The build measurement (`athena measure-build`)
+
+/// What one cold build took, as the builder saw it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BuildRun {
+    /// Wall time of the build, in seconds.
+    pub seconds: f64,
+    /// The compile-cache counts of this build alone; `None` when no cache was in use.
+    pub sccache: Option<SccacheCounts>,
+}
+
+/// The part of a measurement that runs cargo and `sccache`. [`Athena::measure_build`] does everything else
+/// (the worktrees, the sizes, the record), so a test can supply a builder that only returns fixed numbers.
+pub trait CargoBuilder {
+    /// Whether `sccache` is installed. When it is not, both builds run without a compile cache.
+    fn sccache_installed(&self) -> bool;
+    /// Builds the whole workspace cold in `worktree` with `target_dir` as the build directory, and reports
+    /// the wall time and, when `sccache` is installed, the cache counts of this build alone.
+    fn build(&self, worktree: &Path, target_dir: &Path) -> anyhow::Result<BuildRun>;
+}
+
+/// The real builder: `cargo build --locked --workspace --all-targets`, through `sccache` when it is installed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CargoBuild;
+
+impl CargoBuilder for CargoBuild {
+    fn sccache_installed(&self) -> bool {
+        std::process::Command::new("sccache")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    fn build(&self, worktree: &Path, target_dir: &Path) -> anyhow::Result<BuildRun> {
+        use anyhow::Context;
+        let cached = self.sccache_installed();
+        let mut cargo = std::process::Command::new("cargo");
+        cargo
+            .args(["build", "--locked", "--workspace", "--all-targets"])
+            .current_dir(worktree)
+            .env("CARGO_TARGET_DIR", target_dir);
+        if cached {
+            // Counts start from zero, so they belong to this build alone; incremental builds are not cached.
+            let zeroed = std::process::Command::new("sccache")
+                .arg("--zero-stats")
+                .output()
+                .context("running `sccache --zero-stats`")?;
+            if !zeroed.status.success() {
+                anyhow::bail!("`sccache --zero-stats` failed");
+            }
+            cargo
+                .env("RUSTC_WRAPPER", "sccache")
+                .env("CARGO_INCREMENTAL", "0");
+        } else {
+            // No cache is installed, so no wrapper the environment names may stand in for one.
+            cargo
+                .env_remove("RUSTC_WRAPPER")
+                .env_remove("CARGO_BUILD_RUSTC_WRAPPER");
+        }
+        let started = std::time::Instant::now();
+        let out = cargo.output().context("running `cargo build`")?;
+        let seconds = started.elapsed().as_secs_f64();
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let tail: Vec<&str> = stderr.lines().rev().take(20).collect();
+            anyhow::bail!(
+                "`cargo build` failed in {}:\n{}",
+                worktree.display(),
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            );
+        }
+        let sccache = if cached {
+            let stats = std::process::Command::new("sccache")
+                .arg("--show-stats")
+                .output()
+                .context("running `sccache --show-stats`")?;
+            let text = String::from_utf8_lossy(&stats.stdout);
+            Some(parse_sccache_stats(&text).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "sccache is installed but the hit and miss counts in `sccache --show-stats` could not be read"
+                )
+            })?)
+        } else {
+            None
+        };
+        Ok(BuildRun { seconds, sccache })
+    }
+}
+
+/// The hit and miss counts in the text of `sccache --show-stats`: the lines `Cache hits` and `Cache misses`
+/// followed by a whole number. The per-language lines (`Cache hits (Rust)`) are not the totals and are
+/// skipped. `None` when either total is missing.
+pub fn parse_sccache_stats(text: &str) -> Option<SccacheCounts> {
+    let count = |label: &str| -> Option<u64> {
+        text.lines().find_map(|line| {
+            let rest = line.trim().strip_prefix(label)?;
+            // The label must end here: "Cache hits (Rust)" and "Cache hits rate" are other lines.
+            if !rest.starts_with(char::is_whitespace) {
+                return None;
+            }
+            rest.trim().parse().ok()
+        })
+    };
+    Some(SccacheCounts {
+        hits: count("Cache hits")?,
+        misses: count("Cache misses")?,
+    })
+}
+
+/// The bytes in the files under `dir`, counting each file's length and following no symbolic link. A
+/// directory that cannot be read counts nothing.
+pub fn dir_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => dir_bytes(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// The bytes of the files git tracks in the work tree at `worktree`.
+fn source_bytes(worktree: &Path) -> anyhow::Result<u64> {
+    let tracked = athena_git::Git::at(worktree).ls_files()?;
+    Ok(tracked
+        .iter()
+        .filter_map(|path| std::fs::symlink_metadata(worktree.join(path)).ok())
+        .filter(|meta| meta.is_file())
+        .map(|meta| meta.len())
+        .sum())
+}
+
+/// The git blob id of `Cargo.lock` at `commit`; `None` when that commit has no `Cargo.lock`.
+pub(crate) fn cargo_lock_blob(
+    git: &athena_git::Git,
+    commit: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(git
+        .ls_tree_under(commit, "Cargo.lock")?
+        .into_iter()
+        .find(|e| e.kind == "blob" && e.path == "Cargo.lock")
+        .map(|e| e.oid))
+}
+
+/// The scratch worktrees of one measurement. Dropping it removes them and the build directories, so every
+/// way out of a measurement (success, a failed build, an early error) leaves nothing behind.
+struct Scratch<'a> {
+    git: &'a athena_git::Git,
+    root: std::path::PathBuf,
+}
+
+impl Scratch<'_> {
+    fn worktree(&self, name: &str) -> std::path::PathBuf {
+        self.root.join(name)
+    }
+
+    fn target(&self, name: &str) -> std::path::PathBuf {
+        self.root.join(format!("target-{name}"))
+    }
+
+    fn remove(&self) {
+        use std::ffi::OsStr;
+        for name in ["a", "b"] {
+            let dir = self.worktree(name);
+            if dir.exists() {
+                let _ = self.git.run([
+                    OsStr::new("worktree"),
+                    OsStr::new("remove"),
+                    OsStr::new("--force"),
+                    dir.as_os_str(),
+                ]);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+        let _ = self.git.run(["worktree", "prune"]);
+    }
+}
+
+impl Drop for Scratch<'_> {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
+impl Athena {
+    /// Builds the workspace cold in two separate git worktrees of HEAD, each with its own target directory,
+    /// and commits the result as an `athena.build-measurement/1` record: T (the bytes of one cold target
+    /// directory), S (the bytes of one worktree's tracked files), the wall time of each build and the
+    /// `sccache` hit and miss counts of each build, or that `sccache` is not installed. The second build
+    /// shows whether a compile cache answers across worktrees. The worktrees and target directories live
+    /// under the state directory and are removed on every path. Fails, writing no record, when HEAD has no
+    /// `Cargo.lock`, when a build fails, or when `sccache` is installed but gave no counts.
+    pub fn measure_build(
+        &self,
+        builder: &dyn CargoBuilder,
+        ui: &dyn Ui,
+    ) -> anyhow::Result<BuildMeasurement> {
+        use std::ffi::OsStr;
+        let head = self.head()?;
+        let Some(lock_hash) = cargo_lock_blob(&self.git, &head)? else {
+            anyhow::bail!(
+                "{} has no Cargo.lock, so there is no workspace to build",
+                &head[..12]
+            );
+        };
+        let cached = builder.sccache_installed();
+        let scratch = Scratch {
+            git: &self.git,
+            root: self.state.root().join("measure-build"),
+        };
+        // A run that was killed may have left its worktrees behind.
+        scratch.remove();
+        std::fs::create_dir_all(&scratch.root)?;
+
+        let mut runs = Vec::new();
+        for name in ["a", "b"] {
+            let worktree = scratch.worktree(name);
+            self.git.run([
+                OsStr::new("worktree"),
+                OsStr::new("add"),
+                OsStr::new("--detach"),
+                worktree.as_os_str(),
+                OsStr::new(&head),
+            ])?;
+            ui.line(&format!(
+                "measure    cold build {} of 2 in its own worktree and target directory",
+                runs.len() + 1
+            ));
+            runs.push(builder.build(&worktree, &scratch.target(name))?);
+        }
+        let target_bytes = dir_bytes(&scratch.target("a"));
+        let source_bytes = source_bytes(&scratch.worktree("a"))?;
+        let (first, second) = (runs[0], runs[1]);
+        let sccache = if cached {
+            match (first.sccache, second.sccache) {
+                (Some(first), Some(second)) => SccacheFigures::Measured { first, second },
+                _ => anyhow::bail!(
+                    "sccache is installed but a build gave no hit and miss counts; no record was written"
+                ),
+            }
+        } else {
+            SccacheFigures::NotInstalled
+        };
+        drop(scratch);
+
+        let now = crate::now();
+        let known = Records::load(&self.git, &self.head()?)?;
+        let mut id = RecordId::generate(now);
+        while known.has_record_id(&id) {
+            id = RecordId::generate(now);
+        }
+        let measurement = BuildMeasurement {
+            id,
+            at: now,
+            commit: head,
+            cargo_lock_hash: lock_hash,
+            target_bytes,
+            source_bytes,
+            first_build_seconds: first.seconds,
+            second_build_seconds: second.seconds,
+            sccache,
+        };
+        measurement.validate().map_err(|e| anyhow::anyhow!(e))?;
+        let record = AnyRecord::BuildMeasurement(Box::new(measurement.clone()));
+        self.commit_records(
+            &[NewFile::record(&record)],
+            &message(
+                &format!(
+                    "Build measurement: target {}, source {}",
+                    format_bytes(measurement.target_bytes),
+                    format_bytes(measurement.source_bytes)
+                ),
+                "A cold workspace build measured in two separate worktrees with different target directories: \
+                 the size of one target directory, the size of the sources, the wall time of each build and the \
+                 compile-cache counts, or that no compile cache is installed.",
+                &[("Athena-Record", record.canonical_path())],
+            ),
+        )?;
+        ui.line(&crate::status::build_measurement_line(Some(&measurement)));
+        Ok(measurement)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +781,247 @@ mod tests {
             assert!(!resumable_stop(JobState::Closed(state), Some(&low)));
         }
         assert!(!resumable_stop(JobState::Proposed, None));
+    }
+
+    /// A builder that runs no cargo: it checks the worktree it is handed, writes a file of known length into
+    /// the target directory and returns fixed times and counts.
+    struct FakeBuilder {
+        installed: bool,
+        counts: [Option<SccacheCounts>; 2],
+        fail_second: bool,
+        calls: std::cell::RefCell<Vec<(std::path::PathBuf, std::path::PathBuf)>>,
+    }
+
+    /// Bytes the fake writes into the first and the second target directory.
+    const TARGET_WRITTEN: [usize; 2] = [3000, 7000];
+    const SECONDS: [f64; 2] = [61.5, 12.25];
+
+    impl FakeBuilder {
+        fn new(installed: bool, counts: [Option<SccacheCounts>; 2]) -> FakeBuilder {
+            FakeBuilder {
+                installed,
+                counts,
+                fail_second: false,
+                calls: Default::default(),
+            }
+        }
+
+        fn with_sccache() -> FakeBuilder {
+            FakeBuilder::new(
+                true,
+                [
+                    Some(SccacheCounts { hits: 0, misses: 9 }),
+                    Some(SccacheCounts { hits: 4, misses: 5 }),
+                ],
+            )
+        }
+    }
+
+    impl CargoBuilder for FakeBuilder {
+        fn sccache_installed(&self) -> bool {
+            self.installed
+        }
+
+        fn build(&self, worktree: &Path, target_dir: &Path) -> anyhow::Result<BuildRun> {
+            let n = self.calls.borrow().len();
+            self.calls
+                .borrow_mut()
+                .push((worktree.to_path_buf(), target_dir.to_path_buf()));
+            assert!(
+                worktree.join("Cargo.lock").is_file(),
+                "the worktree holds HEAD's files"
+            );
+            if n == 1 && self.fail_second {
+                anyhow::bail!("the second build failed");
+            }
+            std::fs::create_dir_all(target_dir.join("debug"))?;
+            std::fs::write(target_dir.join("debug/out"), vec![7u8; TARGET_WRITTEN[n]])?;
+            Ok(BuildRun {
+                seconds: SECONDS[n],
+                sccache: self.counts[n],
+            })
+        }
+    }
+
+    /// An Athena over a temp repository whose HEAD holds a `Cargo.lock` and two sources.
+    fn repo_with_lock() -> (tempfile::TempDir, tempfile::TempDir, Athena) {
+        let (dir, state, athena) = crate::code_health::tests::set_up();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Cargo.lock"), "version = 4\n").unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), vec![b'a'; 100]).unwrap();
+        std::fs::write(dir.path().join("src/b.rs"), vec![b'b'; 250]).unwrap();
+        athena.git.run(["add", "-A"]).unwrap();
+        athena
+            .git
+            .run(["commit", "-q", "-m", "Add a lock file and sources"])
+            .unwrap();
+        (dir, state, athena)
+    }
+
+    fn measurements(athena: &Athena) -> Vec<BuildMeasurement> {
+        Records::load(&athena.git, &athena.head().unwrap())
+            .unwrap()
+            .build_measurements
+    }
+
+    /// The bytes of every file git tracks in the repository: what S must equal.
+    fn tracked_bytes(athena: &Athena) -> u64 {
+        athena
+            .git
+            .ls_files()
+            .unwrap()
+            .iter()
+            .map(|p| std::fs::metadata(athena.git.dir().join(p)).unwrap().len())
+            .sum()
+    }
+
+    fn scratch_is_gone(athena: &Athena, builder: &FakeBuilder) {
+        for (worktree, target) in builder.calls.borrow().iter() {
+            assert!(!worktree.exists(), "{}", worktree.display());
+            assert!(!target.exists(), "{}", target.display());
+        }
+        assert!(!athena.state.root().join("measure-build").exists());
+        let listed = athena.git.run(["worktree", "list"]).unwrap();
+        assert_eq!(listed.lines().count(), 1, "{listed}");
+    }
+
+    #[test]
+    fn measure_build_writes_t_s_both_times_and_the_cache_counts() {
+        let (_dir, _state, athena) = repo_with_lock();
+        let builder = FakeBuilder::with_sccache();
+        let ui = Said::default();
+        let head = athena.head().unwrap();
+        // Counted before the run: the record it commits is not part of the tree it measured.
+        let source_before = tracked_bytes(&athena);
+
+        let measured = athena.measure_build(&builder, &ui).unwrap();
+
+        let records = measurements(&athena);
+        assert_eq!(records, vec![measured.clone()]);
+        // T is one target directory, the first, as the fake wrote it: not the sum of both.
+        assert_eq!(measured.target_bytes, TARGET_WRITTEN[0] as u64);
+        // S is the tracked files of one worktree: every file at HEAD, counted from the real checkout.
+        assert_eq!(measured.source_bytes, source_before);
+        assert!(measured.source_bytes >= 100 + 250 + 12);
+        assert_eq!(measured.first_build_seconds, 61.5);
+        assert_eq!(measured.second_build_seconds, 12.25);
+        assert_eq!(
+            measured.sccache,
+            SccacheFigures::Measured {
+                first: SccacheCounts { hits: 0, misses: 9 },
+                second: SccacheCounts { hits: 4, misses: 5 },
+            }
+        );
+        assert_eq!(measured.commit, head);
+        assert_eq!(
+            Some(measured.cargo_lock_hash.clone()),
+            cargo_lock_blob(&athena.git, &head).unwrap()
+        );
+        // Two builds, in two distinct worktrees with two distinct target directories.
+        let calls = builder.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_ne!(calls[0].0, calls[1].0);
+        assert_ne!(calls[0].1, calls[1].1);
+        drop(calls);
+        scratch_is_gone(&athena, &builder);
+        let said = ui.0.lock().unwrap().join("\n");
+        assert!(said.contains("61.5"), "{said}");
+    }
+
+    #[test]
+    fn measure_build_says_so_when_sccache_is_not_installed() {
+        let (_dir, _state, athena) = repo_with_lock();
+        let builder = FakeBuilder::new(false, [None, None]);
+
+        let measured = athena.measure_build(&builder, &Said::default()).unwrap();
+
+        assert_eq!(measured.sccache, SccacheFigures::NotInstalled);
+        assert_eq!(measured.target_bytes, TARGET_WRITTEN[0] as u64);
+        assert_eq!(measurements(&athena).len(), 1);
+        scratch_is_gone(&athena, &builder);
+    }
+
+    #[test]
+    fn measure_build_records_nothing_and_cleans_up_when_a_build_fails() {
+        let (_dir, _state, athena) = repo_with_lock();
+        let mut builder = FakeBuilder::with_sccache();
+        builder.fail_second = true;
+
+        let err = athena
+            .measure_build(&builder, &Said::default())
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("second build failed"),
+            "{err:#}"
+        );
+        assert!(measurements(&athena).is_empty());
+        assert_eq!(builder.calls.borrow().len(), 2);
+        scratch_is_gone(&athena, &builder);
+    }
+
+    #[test]
+    fn measure_build_refuses_installed_sccache_without_counts_and_a_repository_without_a_lock() {
+        let (_dir, _state, athena) = repo_with_lock();
+        // Installed, but the builder could not read the counts: a zero must not be recorded in their place.
+        let builder = FakeBuilder::new(true, [None, None]);
+        let err = athena
+            .measure_build(&builder, &Said::default())
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no hit and miss counts"),
+            "{err:#}"
+        );
+        assert!(measurements(&athena).is_empty());
+        scratch_is_gone(&athena, &builder);
+
+        let (_dir, _state, bare) = crate::code_health::tests::set_up();
+        let builder = FakeBuilder::with_sccache();
+        let err = bare.measure_build(&builder, &Said::default()).unwrap_err();
+        assert!(format!("{err:#}").contains("no Cargo.lock"), "{err:#}");
+        assert!(builder.calls.borrow().is_empty());
+        assert!(measurements(&bare).is_empty());
+    }
+
+    #[test]
+    fn sccache_totals_are_read_from_its_text_and_garbage_is_refused() {
+        let text = "Compile requests                      14\n\
+                    Compile requests executed             12\n\
+                    Cache hits                             5\n\
+                    Cache hits (Rust)                      4\n\
+                    Cache misses                           7\n\
+                    Cache misses (Rust)                    6\n\
+                    Cache hits rate                    41.67 %\n";
+        assert_eq!(
+            parse_sccache_stats(text),
+            Some(SccacheCounts { hits: 5, misses: 7 })
+        );
+        assert_eq!(
+            parse_sccache_stats("Cache hits 0\nCache misses 0\n"),
+            Some(SccacheCounts { hits: 0, misses: 0 })
+        );
+        assert_eq!(parse_sccache_stats(""), None);
+        assert_eq!(parse_sccache_stats("sccache: command not found"), None);
+        assert_eq!(parse_sccache_stats("Cache hits  3\n"), None);
+        assert_eq!(
+            parse_sccache_stats("Cache hits  x\nCache misses  2\n"),
+            None
+        );
+        assert_eq!(
+            parse_sccache_stats("Cache hits (Rust)  3\nCache misses (Rust)  2\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn directory_bytes_count_files_below_it() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("a/b")).unwrap();
+        std::fs::write(temp.path().join("x"), vec![0u8; 10]).unwrap();
+        std::fs::write(temp.path().join("a/y"), vec![0u8; 20]).unwrap();
+        std::fs::write(temp.path().join("a/b/z"), vec![0u8; 400]).unwrap();
+        assert_eq!(dir_bytes(temp.path()), 430);
+        assert_eq!(dir_bytes(&temp.path().join("missing")), 0);
     }
 
     #[test]

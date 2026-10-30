@@ -57,7 +57,10 @@
 //!   (prose-only);
 //! - [`hestia`]: `athena hestia sweep` and `athena hestia last`, the skeleton of Hestia's continuity sweep: a
 //!   list of checks run into one recorded report that lists every check with its count, where a failed check
-//!   becomes a finding; no checks ship yet;
+//!   becomes a finding; no checks ship yet. The sweep also runs the build measurement of [`disk`] when no record
+//!   of one exists or `Cargo.lock` changed;
+//! - [`disk`]: free disk space before dispatch, checks and verifier, and `athena measure-build`, which builds
+//!   cold in two worktrees and records T, S, both build times and the `sccache` counts;
 //! - [`code_health`]: file and function sizes of Athena's own sources, measured with `syn` after every landing;
 //!   a request is queued for each file over a threshold, and a design review every ten landings, counted from a
 //!   baseline record;

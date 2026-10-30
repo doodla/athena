@@ -3,11 +3,12 @@
 
 use crate::Athena;
 use crate::manage::pending_quantities;
+use crate::state::format_bytes;
 use crate::store::{JobRecords, JobState, Records};
 use anyhow::Result;
 use athena_data::records::{
-    Build, Critique, CritiqueVerdict, InterventionSource, Invocation, JobPlan, OutcomeState,
-    Reading, Role, text_cites_job,
+    Build, BuildMeasurement, Critique, CritiqueVerdict, InterventionSource, Invocation, JobPlan,
+    OutcomeState, Reading, Role, SccacheFigures, text_cites_job,
 };
 use athena_gate::invariant::{BOOTSTRAP_OUTCOME, BootstrapRange, bootstrap_range};
 use athena_git::Git;
@@ -1041,6 +1042,32 @@ pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
     ("requirement", "spec_gaps"),
 ];
 
+/// The line `athena status` prints for the latest build measurement (`athena measure-build`): T (one cold
+/// target directory), S (one worktree's sources), the wall time of each cold build and the compile-cache
+/// counts, with the commit and time it was taken. With no measurement it says so and how to make one.
+pub fn build_measurement_line(latest: Option<&BuildMeasurement>) -> String {
+    let Some(m) = latest else {
+        return "build      measurement: none yet (run `athena measure-build`, or the Hestia sweep makes one)"
+            .into();
+    };
+    let cache = match m.sccache {
+        SccacheFigures::NotInstalled => "sccache not installed".to_string(),
+        SccacheFigures::Measured { first, second } => format!(
+            "sccache build 1 {} hits / {} misses, build 2 {} hits / {} misses",
+            first.hits, first.misses, second.hits, second.misses
+        ),
+    };
+    format!(
+        "build      measurement: T {} target (one cold target directory) · S {} source (one worktree) · build 1 {:.2}s, build 2 {:.2}s · {cache} · commit {} at {}",
+        format_bytes(m.target_bytes),
+        format_bytes(m.source_bytes),
+        m.first_build_seconds,
+        m.second_build_seconds,
+        &m.commit[..m.commit.len().min(12)],
+        m.at
+    )
+}
+
 /// The state of the work.
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusView {
@@ -1082,6 +1109,9 @@ pub struct StatusView {
     /// jobs that did not land, computed from the job records; absent until a request job has landed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub throughput: Option<Throughput>,
+    /// The latest build measurement as one printed line ([`build_measurement_line`]), or the line that says
+    /// there is none yet.
+    pub build_measurement: String,
     /// Classes of work whose minutes per landed job fell or rose between their older and newer landed jobs,
     /// with the job after which a rising class got worse; absent until a class has enough landed jobs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1819,6 +1849,9 @@ impl Athena {
             producer_settings: producer_settings(&records),
             check_durations,
             throughput: Throughput::compute(&records),
+            build_measurement: build_measurement_line(BuildMeasurement::latest(
+                &records.build_measurements,
+            )),
             class_trend: crate::class_trend::ClassTrend::compute(&records),
             interventions_by_category: by_category,
             interventions_by_class: by_class,
@@ -2114,6 +2147,121 @@ mod mistake_tests {
                 "`athena status` prints no line starting {label:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod build_measurement_tests {
+    use super::*;
+    use crate::commits::{NewFile, message};
+    use athena_data::RecordId;
+    use athena_data::records::{AnyRecord, SccacheCounts};
+
+    fn measurement(
+        id: &str,
+        hours_ago: i64,
+        target: u64,
+        sccache: SccacheFigures,
+    ) -> BuildMeasurement {
+        BuildMeasurement {
+            id: RecordId::parse(id).unwrap(),
+            at: crate::now()
+                .checked_sub(jiff::SignedDuration::from_hours(hours_ago))
+                .unwrap(),
+            commit: "0123456789abcdef0123456789abcdef01234567".into(),
+            cargo_lock_hash: "89abcdef0123456789abcdef0123456789abcdef".into(),
+            target_bytes: target,
+            source_bytes: 2_500_000,
+            first_build_seconds: 61.5,
+            second_build_seconds: 12.25,
+            sccache,
+        }
+    }
+
+    fn commit(athena: &Athena, m: &BuildMeasurement) {
+        let record = AnyRecord::BuildMeasurement(Box::new(m.clone()));
+        athena
+            .commit_records(
+                &[NewFile::record(&record)],
+                &message(
+                    "Build measurement",
+                    "",
+                    &[("Athena-Record", record.canonical_path())],
+                ),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn the_line_shows_t_s_both_times_and_the_cache_counts_or_that_there_is_no_cache() {
+        let measured = measurement(
+            "20261029-090000-5abc",
+            0,
+            4_100_000_000,
+            SccacheFigures::Measured {
+                first: SccacheCounts { hits: 0, misses: 9 },
+                second: SccacheCounts { hits: 4, misses: 5 },
+            },
+        );
+        let line = build_measurement_line(Some(&measured));
+        for want in [
+            "T 4.1 GB",
+            "S 2.5 MB",
+            "build 1 61.50s",
+            "build 2 12.25s",
+            "sccache build 1 0 hits / 9 misses",
+            "build 2 4 hits / 5 misses",
+            "commit 0123456789ab",
+        ] {
+            assert!(line.contains(want), "{want:?} not in {line}");
+        }
+        let plain = measurement("20261029-090000-5abc", 0, 5, SccacheFigures::NotInstalled);
+        let line = build_measurement_line(Some(&plain));
+        assert!(line.contains("sccache not installed"), "{line}");
+        assert!(!line.contains("hits"), "{line}");
+        let none = build_measurement_line(None);
+        assert!(none.contains("measurement: none yet"), "{none}");
+        assert!(none.contains("athena measure-build"), "{none}");
+    }
+
+    #[test]
+    fn build_measurement_status_shows_the_latest_record_and_a_clear_line_when_there_is_none() {
+        let (_dir, _state, athena) = crate::code_health::tests::set_up();
+        let before = athena.status().unwrap();
+        assert!(
+            before.build_measurement.contains("none yet"),
+            "{}",
+            before.build_measurement
+        );
+
+        let older = measurement(
+            "20261029-080000-1abc",
+            5,
+            1_000_000,
+            SccacheFigures::NotInstalled,
+        );
+        let newer = measurement(
+            "20261029-090000-2abc",
+            1,
+            7_300_000_000,
+            SccacheFigures::Measured {
+                first: SccacheCounts { hits: 0, misses: 3 },
+                second: SccacheCounts { hits: 1, misses: 2 },
+            },
+        );
+        // Committed newest first: the latest is picked by time, not by file order.
+        commit(&athena, &newer);
+        commit(&athena, &older);
+
+        let view = athena.status().unwrap();
+        let line = &view.build_measurement;
+        assert!(line.contains("T 7.3 GB"), "{line}");
+        assert!(line.contains("S 2.5 MB"), "{line}");
+        assert!(line.contains("build 1 61.50s, build 2 12.25s"), "{line}");
+        assert!(line.contains("build 2 1 hits / 2 misses"), "{line}");
+        assert!(!line.contains("not installed"), "{line}");
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["build_measurement"], line.as_str());
     }
 }
 
