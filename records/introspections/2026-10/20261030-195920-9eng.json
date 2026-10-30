@@ -1,0 +1,32 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261030-195920-9eng",
+  "at": "2026-10-30T19:59:20.559277491Z",
+  "trigger": "failure",
+  "job": "20261030-070002-d103",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "failed",
+  "what_happened": "Job 20261030-070002-d103 (\"Give each job a read-only evidence snapshot and athena status --snapshot\") ended failed before the verifier ran. The free-disk guard found 9.3 GB free and 10.0 GB required, so it stopped the job with an environment message. No acceptance criteria were reported unmet, no findings were raised, and no checks ran. The work was not judged. The message says to free disk and run `athena retry`.",
+  "failure_class": "20261026-140223-4xmw",
+  "new_class": false,
+  "earlier_cases": [
+    "20261030-143550-0hbg"
+  ],
+  "decisions_matched": [],
+  "cause": "Athena treats free disk as a precondition it tests only just before the verifier. It does not reclaim space it owns (old build targets, finished job working copies). It does not check space at admission or before dispatch. So the producer's spend is committed before the job learns the environment cannot support verification. The job then ends in a state that only offers a manual retry. This is the second failure of this kind within hours, so the disk pressure is recurring and nothing handles it. Parallel starts with no combined disk check, a related known gap, likely add to the pressure.",
+  "prevention_kind": "code-check",
+  "prevention": "Athena should own disk hygiene. It should check free disk against the required threshold before dispatching a producer. When space is short, it should automatically delete what it created (finished job working copies and stale build targets) and re-measure. If space is still short, it should hold the job as waiting-for-disk instead of failing it, and spend nothing. It should resume the job automatically once space is free. The pre-verifier guard should then trigger the same cleanup and wait. It should not end the job failed. A job held for the environment should not count as a failure.",
+  "proposed_request": "Make Athena keep enough free disk for its jobs without an the person running Athena. Outcome: (1) Before a job's producer is dispatched, and again before the verifier, Athena checks free disk against the configured requirement. (2) If space is short, Athena deletes only what it created and no longer needs (finished or closed job working copies, stale build targets), then measures again. (3) If space is still short, the job is held as waiting for disk, not failed, and no producer or verifier spend is incurred. It resumes by itself when space is free, and `athena status` shows the hold and the free and required amounts. (4) A hold for disk is never counted as a failure or as scope-guard spend. Acceptance: a test with a fake low-disk reading shows cleanup running and the job proceeding when cleanup frees enough space. A second test shows the job held, not failed, when cleanup cannot free enough, and then resumed when space returns. A third shows the cleanup never touches a job that is running or unlanded. Then retry job 20261030-070002-d103 (read-only evidence snapshot and athena status --snapshot) once the disk is free.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.087792,
+    "input_tokens": 2,
+    "output_tokens": 1104
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}

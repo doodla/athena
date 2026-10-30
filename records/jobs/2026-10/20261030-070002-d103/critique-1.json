@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-070002-d103",
+  "round": 1,
+  "at": "2026-10-30T19:01:34.958930325Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/verification.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/verification.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-agent/src/policy.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-agent/src/policy.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/status_snapshot.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/status_snapshot.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Nothing checks that dispatch actually gives the producer and verifier policies access to the evidence path, and the plan itself says the outcome fails without it.",
+      "evidence": "policy.rs:17-19 and confine (line 395) deny any path that resolves outside `root`. The plan adds `read_roots`, but it has not found where the producer policy is built (open question 1). In the snapshot I could find `Policy {` literals only in admission.rs:513, planning.rs:224/582 and reading.rs:238. The only planned policy tests are unit tests of `confine`. If dispatch or verification.rs never sets `read_roots`, criteria 1–4 all still pass: the briefs name the path and the snapshot exists. Yet every Read, Grep or `cargo run -- status --snapshot` the agent makes is denied, so the user's outcome (a job can check real-records criteria) is never shown. Fix: Extend the criterion 1 dispatch test. Load the policy file written for the producer at dispatch, and the one written for the verifier at verification, and call `athena_agent::policy::evaluate` on each. A Read of `<evidence>/records/<file>` and the Bash command the brief tells the agent to run (`cargo run -p athena-cli -- status --snapshot <path>`) must both give NoObjection. A Write or Edit under the same path must be denied. Before planning, resolve where the producer policy is built (grep `producer_grant`, `capability.rs` and the policy file writer).",
+      "location": "Plan decision 5, step 5 and the criterion 1 demonstration; crates/athena-agent/src/policy.rs:395 (confine)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan widens only Athena's hook. It does not check whether Claude Code's own directory scope allows Read/Grep/Glob outside the working directory under the flags Athena passes.",
+      "evidence": "command_line passes `--restricted`, `--permission-mode <mode>` and `--permission-prompts none`. The hook answers NoObjection, not allow, so Claude Code's own rules decide (policy.rs:43-50). No `--add-dir` is passed anywhere in crates/ (grep found none). Whether reads outside the start directory are allowed under these flags was not checked. Fix: Add a step that settles this. If Claude Code needs it, add the evidence dir as an additional directory on the AgentInvocation and assert it in a `command_line` test. Otherwise, say in the plan why it is not needed.",
+      "location": "Plan decision 5; crates/athena-agent/src/claude.rs:114-147 (command_line)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Snapshot mode leaves undecided which status sections read git history or local state. The view could then mix the producer's one-commit repo with the snapshot.",
+      "evidence": "`status()` calls `bootstrap_range(&self.git, &head)` (status.rs:1725), `self.git.current_branch()` (line 1835) and `self.state_name(job)` (line 1656), which reads the local state dir for running and held jobs. In a producer's working copy these give one-commit and empty-state answers. The plan's criterion 3 test asserts `jobs_by_state` equals the snapshot's records, which depends on how `state_name` behaves with no state. Fix: Decide now. In snapshot mode, sections that need history either read `history.json` or are omitted with a stated note. Job state comes from records only. Make the criterion 3 assertion name exactly which fields come from the snapshot.",
+      "location": "Plan decision 6 and open question on `bootstrap_range`; crates/athena-core/src/status.rs:1725, 1834-1835, 1656",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The producer brief is committed in the prediction commit, and the plan would put a machine state path into it without deciding how it is redacted.",
+      "evidence": "dispatch builds a redactor (mod.rs:755) and composes the producer brief (mod.rs:791), which is committed before work. The evidence path sits under the user's state directory. System facts note a boundary scan and a `[personal_data]` check on tracked text. Fix: Decide in the plan: the committed brief holds the path through the existing redactor or a stable placeholder, and the prompt holds the real path. Add an assertion to the criterion 1 or 4 test that the stored brief has no absolute home or state path.",
+      "location": "Plan open question on redaction; crates/athena-core/src/run/mod.rs:755-791",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Athena's scope findings are weighed here, not repeated. The extra files are justified by the outcome and the test seams.",
+      "evidence": "Without policy.rs the snapshot is unreachable. verification.rs is where VerifierInputs is built. The test files are the seams the criteria name. Fix: Keep them, and list each with its reason in the criterion 5 observation so the verifier does not count them as scope creep.",
+      "location": "Files list (verification.rs, run/tests.rs, policy.rs, tests/status_snapshot.rs)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot by reading and grepping the code. Its overall design holds up. The per-job evidence dir sits under the job directory. Read-only is enforced with mode bits plus `chattr +i` and proved with a root control and a write probe; the existing `unlock_dir` (athena-git snapshot.rs:389) is reused for cleanup. Splitting `Records::load` (store.rs:309) gives one code path, so throughput parity holds; `Throughput::compute` (status.rs:1851) reads only `Records`, and that includes the landings, which the plan copies. Agent access is correctly identified as necessary: `confine` (policy.rs:395) denies paths outside the working copy. The one major gap is that no demonstration checks that dispatch actually wires the evidence path into the producer and verifier policies. The plan has not even found where the producer policy is built. So every criterion could pass while agents are still denied the snapshot, which defeats the request's purpose. Smaller items: whether Claude Code's own directory scope allows reads outside the working copy is unchecked; snapshot-mode handling of `bootstrap_range` and local job state is undecided; redaction of the machine path in the committed producer brief is undecided. Adding the policy assertions to the dispatch test fixes the major finding, so the verdict is revise."
+}

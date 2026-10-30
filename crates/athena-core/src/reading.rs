@@ -727,7 +727,7 @@ impl Athena {
             received_at: crate::now(),
             channel: "cli".into(),
         };
-        self.first_reading(&jc, &records, &request, true, ui)
+        self.first_reading(&jc, &records, &request, true, None, ui)
     }
 
     /// `athena ask --later`: records a request to be read and run later. Nothing is read and no model is
@@ -818,23 +818,41 @@ impl Athena {
             .request
             .clone()
             .ok_or_else(|| anyhow::anyhow!("job {} has no request record", job.id()))?;
-        self.first_reading(&jc, &records, &request, false, ui)
+        self.first_reading(&jc, &records, &request, false, None, ui)
     }
 
-    /// Reads `request` for the first time and commits the reading, with the request record when
-    /// `with_request` is set.
+    /// Reads again a job whose first read gave no reading (the reader failed): the request is already
+    /// recorded, so only the new invocation and its reading are committed. The invocation is numbered after
+    /// the ones already made, and what they cost counts against the job's budget.
+    pub(crate) fn read_unread(&self, job: &JobRecords, ui: &dyn Ui) -> Result<Proposal> {
+        self.refuse_if_stopped()?;
+        let head = self.head()?;
+        let jc = JobConfig::at(&self.git, &head)?;
+        let records = crate::store::Records::load(&self.git, &head)?;
+        let request = job
+            .request
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("job {} has no request record", job.id()))?;
+        self.first_reading(&jc, &records, &request, false, Some(job), ui)
+    }
+
+    /// Reads `request` and commits the reading, with the request record when `with_request` is set. `prior`
+    /// is the job's records when an earlier read gave no reading and this one reads it again.
     fn first_reading(
         &self,
         jc: &JobConfig,
         records: &Records,
         request: &Request,
         with_request: bool,
+        prior: Option<&JobRecords>,
         ui: &dyn Ui,
     ) -> Result<Proposal> {
         let job = request.job.clone();
         let redactor = self.redactor(&jc.config, Some(&job))?;
         let attempt =
             earlier_attempt_with(records, &request.text, &redactor, &|j| self.running(j))?;
+        let seq = prior.map_or(1, JobRecords::next_seq);
+        let before = prior.map_or(0.0, JobRecords::spent_usd);
         let (reading, invocations, error) = self.read_for(
             jc,
             records,
@@ -843,8 +861,8 @@ impl Athena {
             attempt.as_ref(),
             &[],
             1,
-            1,
-            0.0,
+            seq,
+            before,
             &redactor,
             ui,
         )?;
@@ -853,19 +871,25 @@ impl Athena {
             files.push(NewFile::record(&AnyRecord::Request(request.clone())));
         }
         files.extend(invocation_files(&invocations));
+        // What this read cost; an earlier read's cost was counted when it was made.
         let spent_usd = total_cost(&invocations);
         let invocation = invocations.last().cloned().expect("a read makes one");
         if let Some(r) = &reading {
             files.push(NewFile::record(&AnyRecord::Reading(Box::new(r.clone()))));
         }
+        let again = if prior.is_some() { " again" } else { "" };
         let subject = match &reading {
-            Some(r) => format!("Read a request: {}", r.title),
-            None => "Read a request (the reader failed)".to_string(),
+            Some(r) => format!("Read a request{again}: {}", r.title),
+            None => format!("Read a request{again} (the reader failed)"),
         };
-        let body = "The request, the reader's reading with its forecasts, and the reader's invocation, committed before any work.";
+        let body = failed_reading_body(
+            "The request, the reader's reading with its forecasts, and the reader's invocation, committed before any work.",
+            reading.is_none().then_some(error.as_deref()).flatten(),
+            &redactor,
+        );
         let commit = self.commit_records(
             &files,
-            &message(&subject, body, &[("Athena-Job", job.as_str().to_string())]),
+            &message(&subject, &body, &[("Athena-Job", job.as_str().to_string())]),
         )?;
         Ok(Proposal {
             job,
@@ -1034,8 +1058,12 @@ impl Athena {
         if let Some(id) = &intervention_id {
             trailers.push(("Athena-Intervention", id.as_str().to_string()));
         }
-        let body = "The user's one-line correction, the intervention it implies, and the new reading with its forecasts.";
-        let commit = self.commit_records(&files, &message(&subject, body, &trailers))?;
+        let body = failed_reading_body(
+            "The user's one-line correction, the intervention it implies, and the new reading with its forecasts.",
+            reading.is_none().then_some(error.as_deref()).flatten(),
+            &redactor,
+        );
+        let commit = self.commit_records(&files, &message(&subject, &body, &trailers))?;
         // A correction is an event: it is introspected at once; this never blocks or fails the command.
         if let Some(id) = &intervention_id {
             self.introspect_intervention(id, ui);
@@ -1049,6 +1077,25 @@ impl Athena {
             commit,
         })
     }
+}
+
+/// The longest reader error a commit body carries, in characters.
+const READER_ERROR_MAX: usize = 1000;
+
+/// The body of a reading commit. When the reader gave no usable reading, `error` is why, and the body names
+/// it, so the failed-reading commit says what went wrong. The text is redacted, put on one line and cut
+/// to [`READER_ERROR_MAX`] characters; if redaction fails, the body says the text was withheld, so the
+/// commit is still made.
+fn failed_reading_body(base: &str, error: Option<&str>, redactor: &Redactor) -> String {
+    let Some(error) = error else {
+        return base.to_string();
+    };
+    let one_line = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    let shown = match redactor.redact(&one_line) {
+        Ok(text) => crate::truncate_at_word(&text, READER_ERROR_MAX),
+        Err(_) => "(withheld: it could not be checked for secrets)".to_string(),
+    };
+    format!("{base}\n\nThe reader gave no usable reading: {shown}")
 }
 
 /// The record files of the invocations one read made, in order.

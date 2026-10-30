@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-185443-hydf",
+  "round": 1,
+  "at": "2026-10-30T20:05:45.44445375Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Appending `: <reason>` to every 'not read' line also changes lines that have nothing to do with unread jobs: go errors with no job, budget-stopped reads and no-capability readings.",
+      "evidence": "`push` formats `drain      {item} → {job} ({outcome})`, and the outcome is 'not read' for every arm of `(_, error, _)` in `run_job`, not only the new Unread case. The plan says the change avoids 'altering lines for other outcomes', but it still alters every existing 'not read' line. Fix: Either print the reason only for the new Unread return, or grep tests/drain.rs and the display tests for `(not read)` before editing, and update any exact-match assertions on purpose. Say which in the plan.",
+      "location": "Plan decision 5 / drain.rs `push` (line 1039) and the job-None read path in `run_job` (lines 1129-1139)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`athena go` on an unread Proposed job now spends reader budget with no prompt. User-facing text that points to `athena correct` as the way to re-read may now be stale.",
+      "evidence": "The old bail text at run/mod.rs:332 was the only pointer to `athena correct` for this state. The plan grepped tests, but not CLI help text or docs that describe what `go` does for a Proposed job. Fix: Before editing, grep main.rs help text and docs/ for 'has no reading' and 'correct ... reads it again'. Make sure the main.rs Reread printing shows the reader error when the re-read fails again. Mention the new `go` behavior in the CHANGELOG entry too.",
+      "location": "Plan Risks, first bullet / Open question 4 (main.rs GoResult::Reread printing)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The criterion says the reader 'returns unparseable output'; the plan's fake returns no structured output.",
+      "evidence": "A structured reading that does not parse may take the refusal path, which runs the reader twice inside one read. The plan explains this choice in decision 6. Fix: In the test's doc comment, say that 'no structured reading' is the unparseable case used and why, so the verifier does not count it as a gap against the criterion.",
+      "location": "Criterion 1 wording vs. plan decision 6",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A skipped item stays Proposed with no reading, so every later drain will read it twice again.",
+      "evidence": "Nothing in the plan marks or deprioritises the item after it is skipped. That is within scope, since the reading bounds the re-read per item, not per job. Fix: Optionally have the skip note say the job stays proposed and can be re-read with `athena go <id>` or closed, so the person running drain knows what to do next.",
+      "location": "Plan step 5 (`ItemEnd::Skipped`)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot code, reading the files directly. It finds the fault in the places where it actually starts. First, in reading.rs, `first_reading` (lines 826-878) and `correct` (lines 916-1051) commit a fixed body and drop the `error` that `read_for` returns, which is only handed back in `Proposal.reader_error`. Second, in run/mod.rs, `go_job`'s Proposed/no-reading arm (lines 331-333) bails. RealSteps::read turns that bail into `Read { job: None, error }`, so the drain's second attempt counts a second failure and `attempts` (drain.rs lines 1300-1302) ends `ItemEnd::Failed`, which sets RepeatedFailure. The plan's fixes match those spots. A new `read_unread` path uses the job's `next_seq`/`spent_usd`, as `correct` already does. A new `RunStep::Unread` branch is restricted to `ReadOf::Queued`, `!pre_read`, with both a job and an error. An unread counter is kept apart from `failures`, and a new `ItemEnd::Skipped` sets no stop. Together these fix the cause rather than the log line, and leave RepeatedFailure unchanged for jobs that were read. The test seams exist: `real_steps_with` (tests/drain.rs:2208), `rated_scenario` (:3253), `RecordingLander` (:1335), `common::Lines`, `Fixture::athena(script)`, a public `FakeTurn.structured`, and `Tweak`/`athena_with` in run_pin_tests.rs. The error text 'the reader returned no structured reading' (reading.rs:495) comes back as an error value, not an `Err`, so `first_reading` still commits. Choosing no-structured-output over a refused reading, so that 'exactly twice' means one drain re-read, is sound reasoning. Each demonstration would fail without the behavior it covers. I have only minor points; none blocks the plan."
+}

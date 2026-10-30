@@ -2097,6 +2097,147 @@ fn real_steps_read_an_unread_but_specifiable_request_once_and_then_run_it() {
     assert_eq!(readers, 1, "read by the pass, not again to run");
 }
 
+const UNREAD_FIRST: &str =
+    "Add the first demo study to studies/demo/\n- the demo study has a pin, claims and an intro";
+const UNREAD_SECOND: &str =
+    "Add the second demo study to studies/demo/\n- the demo study has a pin, claims and an intro";
+/// What the reader's failure says when it returns no structured reading.
+const NO_STRUCTURED_READING: &str = "the reader returned no structured reading";
+
+/// The rated scenario, except that the first `bad` reader calls for the request that says "first demo study"
+/// return no structured reading. Returns the script and the count of reader calls made for that request.
+fn reader_fails_for_first_request(bad: usize) -> (Script, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let inner = rated_scenario().script();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let script: Script = Box::new(move |spec| {
+        let mut turn = inner(spec);
+        if spec.role == Role::Reader && spec.user_prompt.contains("first demo study") {
+            let call = counted.fetch_add(1, Ordering::SeqCst);
+            if call < bad {
+                turn.structured = None;
+            }
+        }
+        turn
+    });
+    (script, calls)
+}
+
+#[test]
+fn a_reader_that_gives_no_reading_is_read_once_more_then_skipped_with_its_error() {
+    use std::sync::atomic::Ordering;
+    let fx = Fixture::new();
+    let (script, reads) = reader_fails_for_first_request(usize::MAX);
+    let athena = fx.athena(script);
+    let (first, _) = athena.queue(UNREAD_FIRST).unwrap();
+    let (second, _) = athena.queue(UNREAD_SECOND).unwrap();
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = real_steps_with(&athena, &lander, &lines);
+
+    let report = drain::drain(&steps, limits(50.0), &lines).unwrap();
+    let text = display::drain(&report);
+
+    // The reader ran twice for the item: the read, and one read again.
+    assert_eq!(reads.load(Ordering::SeqCst), 2, "{text}");
+    // The error is on the drain's line for the item, each time it was read...
+    let log = lines.0.lock().unwrap().clone();
+    let shown: Vec<&String> = log
+        .iter()
+        .filter(|l| l.starts_with("drain") && l.contains(first.as_str()))
+        .collect();
+    assert_eq!(shown.len(), 2, "{log:?}");
+    assert!(
+        shown
+            .iter()
+            .all(|l| l.contains("(not read)") && l.contains(NO_STRUCTURED_READING)),
+        "{shown:?}"
+    );
+    // ...and in the committed failed-reading records, one for each read.
+    let committed = fx
+        .git
+        .run(["log", "--format=%B", "--grep", "the reader failed"])
+        .unwrap();
+    assert_eq!(
+        committed.matches(NO_STRUCTURED_READING).count(),
+        2,
+        "{committed}"
+    );
+    assert!(committed.contains("Read a request (the reader failed)"));
+    assert!(committed.contains("Read a request again (the reader failed)"));
+
+    // The item is skipped with its reason; that is not a repeated failure.
+    assert_ne!(report.stop, Stop::RepeatedFailure, "{text}");
+    // The second item landed and met the target, which is what ended the run.
+    assert_eq!(report.stop, Stop::TargetMet, "{text}");
+    assert_eq!(report.failed_item, None);
+    assert_eq!(report.jobs[0].item, first.as_str());
+    assert_eq!(report.jobs[0].outcome, "not read");
+    assert!(
+        report.jobs[0]
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains(NO_STRUCTURED_READING)),
+        "{:?}",
+        report.jobs[0]
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("skipped") && n.contains(NO_STRUCTURED_READING)),
+        "{:?}",
+        report.notes
+    );
+    assert!(text.contains(NO_STRUCTURED_READING), "{text}");
+
+    // The drain went on to the next item, which was read and run.
+    let landed: Vec<String> = lander
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(job, _)| job.clone())
+        .collect();
+    assert_eq!(landed, [second.as_str().to_string()], "{text}");
+    assert_eq!(report.landed, 1, "{text}");
+}
+
+#[test]
+fn a_re_read_that_succeeds_runs_the_item() {
+    use std::sync::atomic::Ordering;
+    let fx = Fixture::new();
+    let (script, reads) = reader_fails_for_first_request(1);
+    let athena = fx.athena(script);
+    let (first, _) = athena.queue(UNREAD_FIRST).unwrap();
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = real_steps_with(&athena, &lander, &lines);
+
+    let report = drain::drain(&steps, limits(50.0), &lines).unwrap();
+    let text = display::drain(&report);
+
+    assert_eq!(reads.load(Ordering::SeqCst), 2, "{text}");
+    assert_ne!(report.stop, Stop::RepeatedFailure, "{text}");
+    assert_eq!(report.landed, 1, "{text}");
+    assert_eq!(report.jobs.len(), 2, "{text}");
+    assert_eq!(report.jobs[0].outcome, "not read");
+    assert_eq!(report.jobs[1].outcome, "passed");
+    assert_eq!(report.jobs[1].job, first.as_str());
+    assert_eq!(
+        lander
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(j, _)| j.as_str())
+            .collect::<Vec<_>>(),
+        [first.as_str()]
+    );
+    assert!(report.notes.iter().all(|n| !n.contains("skipped")));
+}
+
 /// Commits two recorded introspections of one cause, in two jobs, so the error review backfill has a repeated
 /// cause that nothing has queued a request for.
 fn seed_repeated_cause(fx: &Fixture, athena: &Athena) {

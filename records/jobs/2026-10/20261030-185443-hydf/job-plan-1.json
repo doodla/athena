@@ -1,0 +1,224 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-185443-hydf",
+  "round": 1,
+  "at": "2026-10-30T20:04:33.296396523Z",
+  "invocation_seq": 2,
+  "approach": "Fault starts in two places. (1) reading.rs: the failed-reading commit in `first_reading` and `correct` drops the error text that `read_for` returns; it is carried to the caller in `Proposal.reader_error` but never committed. Fix: add a small helper that appends the redacted, length-capped error to the commit body when no reading was made, used by both commits. (2) The drain's second attempt for an unread Proposed job calls `go`, which bails (\"has no reading yet\") and counts as a second failure, so `Stop::RepeatedFailure` fires and the reader is never asked again. Fix in core: `go_job`'s Proposed-with-no-reading arm re-reads through a new `read_unread` (same code as `first_reading`, no request record, with the next invocation seq and spent taken from the job's records) and returns `GoResult::Reread`. Fix in drain.rs: in `run_job`, for a `ReadOf::Queued` read that was not pre-read and came back with a job but a reader error, return a new `RunStep::Unread(reason)` and print the reason on the drain line. `attempts` counts unread results separately from `failures`: the first one loops once (the existing second attempt now really re-reads); the second ends the item as new `ItemEnd::Skipped`, with a note naming the reason, and `finish` ignores it, so no stop is set and the next item runs. Failures after a read, retries (`ReadOf::Retry`), and go errors with no job stay on the old path. No new record type or data file.",
+  "decisions": [
+    {
+      "choice": "Make the drain's re-read happen by changing `go_job` (Proposed, no reading) to read again and return `GoResult::Reread`, not by adding a Steps method.",
+      "reason": "RealSteps::read(Queued) already calls `go`; the second attempt then re-reads with no new trait method or stub changes. It also matches what `go` already does for a Queued job, and the old error was only a pointer to `athena correct`. No existing test pins the old message (only run/mod.rs contains it).",
+      "rejected": [
+        {
+          "option": "RealSteps::read calls `athena.correct(job, \"<fixed line>\")` for an unread job",
+          "why": "Needs an invented correction line, and the commit says 'after a correction' with the body 'The user's one-line correction', which is false."
+        },
+        {
+          "option": "Add a new Steps method `reread_unread` with a default",
+          "why": "More surface (trait, stubs, RealSteps) for the same effect; `Steps::reread` is already meant for stale readings and RealSteps does not implement it."
+        }
+      ]
+    },
+    {
+      "choice": "Put the error in the commit body of the failed-reading commit (and the same for the correction path), redacted and capped; not in a record.",
+      "reason": "Criteria ask for the error in the commit or record; a body line avoids touching the records allow-list and round-trip test. Redaction matches how the correction line is already treated; if redaction fails the body says the text was withheld, so the commit never fails because of it.",
+      "rejected": [
+        {
+          "option": "Add an error field to the Invocation or Reading record",
+          "why": "Changes record schema, the allow-list and the round-trip test; out of the small change."
+        }
+      ]
+    },
+    {
+      "choice": "Count unread results apart from `failures` in `attempts`; the second one ends the item as `ItemEnd::Skipped` (no stop) with a note carrying the reason.",
+      "reason": "Keeps `Stop::RepeatedFailure` and `ATTEMPTS` untouched for jobs that were read, as criterion 8 requires, and bounds the re-read to one per item.",
+      "rejected": [
+        {
+          "option": "Return `ItemEnd::Failed` on the second unread result",
+          "why": "Sets RepeatedFailure, which is the bug."
+        },
+        {
+          "option": "Change `ATTEMPTS` or count the first unread result as no attempt at all",
+          "why": "Would alter the rule for every failure."
+        }
+      ]
+    },
+    {
+      "choice": "Restrict the new `Unread` path to `ReadOf::Queued` with `!pre_read` and `read.job.is_some() && read.error.is_some()`.",
+      "reason": "A retry (`ReadOf::Retry`) makes a new job and go-errors with `job: None` (lock held, stopped, budget) are different failures; the brief says only unread jobs change.",
+      "rejected": [
+        {
+          "option": "Treat every read error as unread",
+          "why": "Would change the repeated-failure rule for retries and for go errors."
+        }
+      ]
+    },
+    {
+      "choice": "Show the reason on the drain line by extending `push` to append `: <reason>` only when the outcome is `not read`.",
+      "reason": "The error then appears in the drain log for the item without altering lines for other outcomes that existing tests may match.",
+      "rejected": [
+        {
+          "option": "Print the reason for every outcome",
+          "why": "Changes many existing lines and risks old assertions."
+        }
+      ]
+    },
+    {
+      "choice": "Test the drain with the real `RealSteps` and a wrapped `Scenario` script that sets `turn.structured = None` for the first item's reader calls (ReadError::Failed: 'the reader returned no structured reading'), not a refused reading.",
+      "reason": "A refused reading makes `read_for` run the reader twice inside one read, which would hide whether the drain re-read; the no-structured-output failure runs the reader once per read, so 'exactly twice' means one re-read. The request has acceptance bullets so the plan pass does not read it first.",
+      "rejected": [
+        {
+          "option": "Use the `Stub` Steps in tests/drain.rs",
+          "why": "The stub cannot show the error in a committed record or the real go re-read."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `failed_reading_body` (appends the redacted, capped reader error to the commit body when no reading was made) and use it in `first_reading` and `correct`. Give `first_reading` an optional prior `&JobRecords` so a re-read uses `next_seq()`, `n = 1` and the job's spent; add `pub(crate) read_unread` using it with subject 'Read a request again (the reader failed)' / 'Read a request again: <title>' and no request record.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "In `go_job`, the `JobState::Proposed` arm with `latest_reading() == None` calls `read_unread` and returns `GoResult::Reread` instead of bailing. One arm only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `RunStep::Unread(String)` returned from `run_job` for an unread `ReadOf::Queued` read with a job and an error; `push` appends the reason for outcome 'not read'; `attempts` counts unread results apart from `failures` and ends the second as new `ItemEnd::Skipped` with a note; `finish` treats Skipped as no stop; update the `JobLine` doc and the `Stop::RepeatedFailure` doc to say unread jobs are skipped.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the two real-steps tests (skip after one re-read with the error visible and the next item run; re-read that succeeds runs the item).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add tests that a no-structured-output read commits the error text and that `go` on that job re-reads once.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One Unreleased entry for the committed and printed reader error and the one re-read then skip.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In reading.rs add `failed_reading_body(base, error, redactor)`: base body, then 'The reader gave no usable reading: <error>' when the error is Some, redacted (fallback sentence on redaction failure), trimmed and capped (about 1000 chars). Use it in `first_reading` and in `correct`'s body.",
+    "In reading.rs give `first_reading` a `prior: Option<&JobRecords>` argument (callers: the `ask` path passes None, `read_queued` passes None); when Some, use `seq = prior.next_seq()`, `spent = prior.spent_usd()` and the 'again' subjects. Add `pub(crate) fn read_unread(&self, job: &JobRecords, ui) -> Result<Proposal>` mirroring `read_queued` (stopped check, head, JobConfig, records, request, first_reading with with_request false).",
+    "In run/mod.rs replace the `None => bail!(...)` arm of the Proposed match in `go_job` with `None => self.read_unread(&job, ui).map(|p| GoResult::Reread(Box::new(p)))`. Keep the `Some(_) => unreachable!` arm.",
+    "In drain.rs add `RunStep::Unread(String)` and `ItemEnd::Skipped`. In `run_job`, in the `(_, error, _)` arm, return `Unread(reason)` when `matches!(from, ReadOf::Queued(_)) && !pre_read && read.job.is_some() && read.error.is_some()`, after pushing the line (outcome 'not read', reason the error); otherwise the old Failed return. Extend `push` to print `: <reason>` for outcome 'not read'.",
+    "In `attempts` keep `let mut unread = 0;`. On `RunStep::Unread(reason)`: `unread += 1`; if `unread >= 2`, add a note 'item <id> is skipped: <reason>' and return `ItemEnd::Skipped`; else `continue` the loop without touching `failures` (re-check `stop_requested` at the top as now). In `finish` add `ItemEnd::Skipped` to the no-stop arm. Fix the `JobLine` and `Stop::RepeatedFailure` doc text.",
+    "Add tests in crates/athena-core/src/run_pin_tests.rs: a read with `turn.structured = None` commits the `reader_error` text (git show of `proposal.commit`), and `go` on that job with a working reader returns `Reread` with a reading after exactly one more reader call.",
+    "Add the two tests in crates/athena-cli/tests/drain.rs using `real_steps_with`, `Lines`, `RecordingLander`, `rated_scenario()` wrapped in a closure that clears `structured` for the first request's reader calls (all but the first call in the success test), with a counter, and asserting everything listed under criteria 1 and 2.",
+    "Add the CHANGELOG.md entry under Unreleased in plain words.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix failures, paying attention to the existing RepeatedFailure tests."
+  ],
+  "risks": [
+    {
+      "risk": "`athena go <id>` on an unread Proposed job now re-reads (spends reader budget) instead of printing a hint.",
+      "mitigation": "Only `go_job`'s unread-Proposed arm changes, and it returns the same `GoResult::Reread` as the Queued arm. A pin test covers it; the full test run checks no test relied on the bail."
+    },
+    {
+      "risk": "The re-read could loop or overspend.",
+      "mitigation": "Drain bounds it to one re-read per item through the unread counter; `go_job` itself has no loop. The reader's per-job budget check (`check_budget`, `spent` from `job.spent_usd()`) still applies."
+    },
+    {
+      "risk": "Invocation record path collision (seq 1 reused) on re-read.",
+      "mitigation": "`read_unread` takes `seq = job.next_seq()`; the pin test runs `ask` then `go` and loads the records, which fails on a duplicate invocation path."
+    },
+    {
+      "risk": "A long or multi-line error, or secret text in the reader's output, ends up in a commit.",
+      "mitigation": "Cap the error at a fixed length, trim it, and keep it in the body, not the subject. Redaction failure falls back to a fixed sentence."
+    },
+    {
+      "risk": "The new branch changes behavior for retries, go errors or read-ahead items.",
+      "mitigation": "`Unread` is returned only for `ReadOf::Queued`, `!pre_read`, `job.is_some() && error.is_some()`; the existing RepeatedFailure tests in tests/drain.rs are rerun."
+    },
+    {
+      "risk": "Existing assertions on drain log lines break.",
+      "mitigation": "`push` adds the reason only for outcome 'not read'; run the full drain tests and `display` tests."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test in crates/athena-cli/tests/drain.rs. Entry point: `drain::drain(&steps, limits(50.0), &lines)` with `real_steps_with(&athena, &lander, &lines)`; `athena` from `fx.athena(script)` (exists today). Precondition: two queued requests, each with an acceptance bullet (like the text at tests/drain.rs ~2020) so the plan has no missing parts and the first read happens in `attempts`. Seam: wrap `rated_scenario().script()` in a closure that, for Role::Reader whose `user_prompt` contains the first request's text, counts the call and sets `turn.structured = None` (FakeTurn.structured is pub; the Script seam exists in `Fixture::athena`); every other call is the unchanged scenario. `lines` is `common::Lines` (exists). The logic under test (go, read_queued, drain) is real; only the model output is faked.",
+      "command": "cargo test -p athena-cli --test drain a_reader_that_gives_no_reading_is_read_once_more_then_skipped_with_its_error",
+      "observes": "Reader calls for item one equal 2; a `Lines` entry starting `drain` contains 'the reader returned no structured reading'; `fx.git.run([\"log\",\"--format=%B\",\"--grep\",\"the reader failed\"])` output contains the same text; the lander recorded the second item's job (the drain ran the next item).",
+      "fails_without": "Without the commit-body change the `git log` text has no error text; without the `go` re-read the reader runs once, not twice; without the Skipped end the item ends RepeatedFailure and the second item is never run, so the assertions on reader count, lander and the next item fail."
+    },
+    {
+      "criterion": 2,
+      "method": "Same test as criterion 1 (second part) plus a second new test. Entry point and seam as in 1. Test A asserts on the returned `Report`: `report.stop != Stop::RepeatedFailure`, `report.jobs[0].outcome == \"not read\"` with `reason` containing the error text, a `report.notes` entry containing 'skipped' and the error text, and `display::drain(&report)` showing the reason. Test B: the script fails the reader only on its first call for the item, then behaves normally.",
+      "command": "cargo test -p athena-cli --test drain -- a_reader_that_gives_no_reading a_re_read_that_succeeds_runs_the_item",
+      "observes": "Test A: no repeated-failure stop, the skipped item reported with its reason. Test B: reader called twice, `report.landed == 1`, stop is QueueEmpty (or not RepeatedFailure), lander has the item's job.",
+      "fails_without": "Without the Skipped end the stop is RepeatedFailure and `report.jobs[0].reason` has no skip note; without the go re-read the second test's item never lands because the second attempt bails."
+    },
+    {
+      "criterion": 3,
+      "method": "New tests in crates/athena-core/src/run_pin_tests.rs beside `a_reader_that_does_not_complete_is_not_read_again` (~line 1763). Entry point: `athena.ask(\"study the demo\", &Quiet)` built with the existing `repo`, `athena_with` and a `Tweak` that sets `turn.structured = None` for Role::Reader (the same seam that test uses today). Then `go` on that job with a working reader: assert it returns `GoResult::Reread` with a reading, with no invocation seq collision and the reader called exactly twice in total. Also a `correct` variant is covered by the same helper.",
+      "command": "cargo test -p athena-core a_reader_that_returns_no_reading_commits_its_error",
+      "observes": "`proposal.reader_error` is Some; `git.run([\"show\",\"-s\",\"--format=%B\",&proposal.commit])` contains the `reader_error` text; for the go re-read, the commit subject starts 'Read a request again'.",
+      "fails_without": "Without the helper in `first_reading` the commit body lacks the error and the assertion fails."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff of reading.rs. The helper that builds the failed-reading body takes `error` (from `read_for`'s third value, which becomes `Proposal.reader_error`) and is used in `first_reading` and in `correct`. The behavior is proved by criterion 3's test.",
+      "command": "git diff -- crates/athena-core/src/reading.rs",
+      "observes": "The commit body is built from the error text; `message(&subject, &body, ...)` in the failed-reading branch now receives a body that contains it.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three checks Athena will run. Each is a whole simple cargo command; the verifier may run them one at a time.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "Not applicable: this is the repository's own gate (fmt, clippy -D warnings, full tests including the existing RepeatedFailure tests and any test touching `go` on a Proposed job)."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of CHANGELOG.md. Add one entry under `## [Unreleased]` in its `### Fixed` or `### Changed` section (the first `### Added` at line 10 belongs to Unreleased; choose the Fixed section found after it). Entry in plain words for a person running `athena drain`: the reader's error is committed with the failed-reading record and printed on the drain line; a Proposed job with no reading is read once more and then skipped with its reason, not counted as a repeated failure.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The new entry names both changes.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "List changed files after the producer run. Expected only: crates/athena-core/src/reading.rs, crates/athena-core/src/run/mod.rs (one arm of `go_job`), crates/athena-core/src/run_pin_tests.rs, crates/athena-cli/src/drain.rs, crates/athena-cli/tests/drain.rs, CHANGELOG.md.",
+      "command": "git status --short",
+      "observes": "No other path appears; athena.toml, defaults.toml, .github/workflows, records/, status.rs, store.rs and athena-git/src/lib.rs are absent.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run the whole existing drain test file with the new tests. Entry point is `drain::drain` over the existing `Stub`; those items fail after being read (Stub reads give a job with no error), so they never take the new Unread branch.",
+      "command": "cargo test -p athena-cli --test drain",
+      "observes": "All existing RepeatedFailure assertions still pass: stop RepeatedFailure and the failed item named.",
+      "fails_without": "If `failures`, ATTEMPTS or the Failed path were changed, `the_same_item_failing_twice_is_a_repeated_failure_naming_the_item`, `a_landing_failure_is_a_failure_and_no_rating_is_taken_as_success` and `a_pass_that_landed_nothing_cannot_report_target_met_from_a_stale_rating` (existing tests at ~751, ~884, ~648) would fail."
+    }
+  ],
+  "open_questions": [
+    "Does the plan pass (drain.rs ~1445) read the test's requests before `attempts`? The tests use requests with an acceptance bullet so `missing()` is empty; the producer should confirm by running the test. A request read in the plan pass is refused there with 'the request could not be read: <why>' (error already shown), not through the new path.",
+    "Does `Redactor::redact` run gitleaks on every failed reading, and is that acceptable in the unit tests? If it needs a binary missing in the test environment, fall back to the withheld text; check how `correct` is tested.",
+    "Pin tests: does any existing test or doc string expect `athena go` on a Proposed unread job to error? A grep found only the message in run/mod.rs; the full `cargo test` will confirm.",
+    "The producer should check main.rs ~740 (`GoResult::Reread` printing) shows the reader error for an `athena go` re-read that fails again, as it does for a Queued job."
+  ],
+  "producer_section_sha256": "2273c7cea1bb20a8c03a9ac92f46342e6a2cae54615eaa339547f4f1cd0a0d7e"
+}
