@@ -650,6 +650,127 @@ pub fn boundary_scan(text: &str) -> Vec<BoundaryHit> {
     found
 }
 
+/// The plain wording that stands in for each word of [`boundary_words`], as (word, replacement) pairs.
+/// The words are built from fragments, like the list itself, so no tracked file holds them. Every
+/// replacement reads as ordinary prose and holds no boundary word.
+fn plain_alternatives() -> Vec<(String, &'static str)> {
+    let table: [([&str; 2], &str); 17] = [
+        (["oper", "ator"], "the person running Athena"),
+        (["oper", "ators"], "the people running Athena"),
+        (["op", "ctl"], "the Athena command-line tool"),
+        (["c", "cr"], "the hosted runner"),
+        (["sand", "box"], "isolated environment"),
+        (["sand", "boxes"], "isolated environments"),
+        (["sand", "boxed"], "isolated"),
+        (["lea", "se"], "claim"),
+        (["lea", "ses"], "claims"),
+        (["hand", "off"], "transfer"),
+        (["hand", "offs"], "transfers"),
+        (["hand-", "off"], "transfer"),
+        (["hand-", "offs"], "transfers"),
+        (["cloud", " session"], "hosted run"),
+        (["cloud", " sessions"], "hosted runs"),
+        (["remote", " session"], "hosted run"),
+        (["remote", " sessions"], "hosted runs"),
+    ];
+    let mut pairs: Vec<(String, &'static str)> =
+        table.iter().map(|(w, r)| (w.concat(), *r)).collect();
+    // Longest first, so a plural is never cut short by its singular.
+    pairs.sort_by_key(|(w, _)| std::cmp::Reverse(w.len()));
+    pairs
+}
+
+/// Replace every case-insensitive occurrence of the ASCII `needle` in `text` with `replacement`.
+fn replace_ascii_ignore_case(text: &str, needle: &str, replacement: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let needle = needle.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(&needle) {
+        let start = from + found;
+        out.push_str(&text[from..start]);
+        out.push_str(replacement);
+        from = start + needle.len();
+    }
+    out.push_str(&text[from..]);
+    out
+}
+
+/// Replace each whole-word occurrence of a boundary word in `text` with its plain wording, keeping a
+/// leading capital. The same whole-word rule as [`boundary_scan`] decides what counts as a match.
+fn replace_boundary_words(text: &str) -> String {
+    let pairs = plain_alternatives();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        let Some(ch) = text[i..].chars().next() else {
+            break;
+        };
+        let at_word_start = text[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word_char(c));
+        let hit = if at_word_start {
+            pairs.iter().find(|(word, _)| {
+                text.get(i..i + word.len())
+                    .is_some_and(|piece| piece.eq_ignore_ascii_case(word))
+                    && text[i + word.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !is_word_char(c))
+            })
+        } else {
+            None
+        };
+        match hit {
+            Some((word, replacement)) => {
+                if ch.is_uppercase() {
+                    let mut chars = replacement.chars();
+                    if let Some(first) = chars.next() {
+                        out.extend(first.to_uppercase());
+                        out.push_str(chars.as_str());
+                    }
+                } else {
+                    out.push_str(replacement);
+                }
+                i += word.len();
+            }
+            None => {
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+/// Rewrite `text` so the boundary scan ([`boundary_scan`]) finds nothing in it, for text that Athena itself
+/// writes and that later becomes a request or a record. Each word of [`boundary_words`] becomes plain
+/// wording (the first word, for the one who runs Athena, becomes "the person running Athena"); each
+/// machine-path fragment of [`boundary_fragments`] becomes `[local path]`. Matching ignores case, and a
+/// replacement keeps a leading capital. Text with no hit comes back unchanged.
+///
+/// The result is scanned again. If a term survives, for example because a replacement landed against
+/// other characters and made a new match, this returns an error that names the term and line, so a writer
+/// refuses the text instead of writing something admission would reject.
+pub fn plain_boundary_text(text: &str) -> Result<String, String> {
+    if boundary_scan(text).is_empty() {
+        return Ok(text.to_string());
+    }
+    let mut cleaned = text.to_string();
+    for fragment in boundary_fragments() {
+        cleaned = replace_ascii_ignore_case(&cleaned, &fragment, "[local path]");
+    }
+    let cleaned = replace_boundary_words(&cleaned);
+    match boundary_scan(&cleaned).first() {
+        None => Ok(cleaned),
+        Some(hit) => Err(format!(
+            "the text holds `{}` on line {}, which could not be reworded",
+            hit.term, hit.line
+        )),
+    }
+}
+
 /// Producer guidance on what the verifier can see (D43). Without it, a producer cites its own
 /// `git status` or `git diff` runs as evidence, or pins a document to a commit made only for verification.
 const VERIFIER_VISIBILITY: &str = "The verifier sees only the candidate diff, in a fresh snapshot. \
@@ -2432,6 +2553,51 @@ mod tests {
             1
         );
         assert!(boundary_scan("Add a changelog entry.").is_empty());
+    }
+
+    #[test]
+    fn plain_boundary_text_rewrites_every_listed_word_and_fragment() {
+        let word = ["oper", "ator"].concat();
+        let plural = ["oper", "ators"].concat();
+        let path = ["/home", "/user/x"].concat();
+        let text = format!(
+            "Ask {word}.\n{} must agree, and {}. See {path}.\nä{word}ö stays.",
+            plural.to_uppercase(),
+            word.to_uppercase()
+        );
+        let cleaned = plain_boundary_text(&text).unwrap();
+        assert!(boundary_scan(&cleaned).is_empty(), "{cleaned}");
+        assert!(cleaned.contains("Ask the person running Athena."));
+        assert!(cleaned.contains("The people running Athena must agree"));
+        assert!(cleaned.contains("[local path]/x"));
+        // A word inside a longer word is not a hit, so it is left alone.
+        assert!(cleaned.contains(&format!("ä{word}ö stays")));
+        // Every listed word comes out clean, whatever its case.
+        for listed in boundary_words() {
+            let cleaned =
+                plain_boundary_text(&format!("A {} here.", listed.to_uppercase())).unwrap();
+            assert!(boundary_scan(&cleaned).is_empty(), "{listed}: {cleaned}");
+        }
+    }
+
+    #[test]
+    fn plain_boundary_text_leaves_clean_text_unchanged() {
+        let text = "  Add a changelog entry.\n\nCooperators accrue the opcode.  \n";
+        assert_eq!(plain_boundary_text(text).unwrap(), text);
+    }
+
+    #[test]
+    fn plain_boundary_text_clears_a_word_that_a_path_rewrite_uncovers() {
+        // A path glued to a word hides the word from the scan; once the path is replaced the word shows,
+        // so the rewrite must clear it too.
+        let text = format!(
+            "{}{}x",
+            ["oper", "ator"].concat(),
+            ["claude", "-0/"].concat()
+        );
+        let cleaned = plain_boundary_text(&text).unwrap();
+        assert_eq!(cleaned, "the person running Athena[local path]x");
+        assert!(boundary_scan(&cleaned).is_empty());
     }
 
     #[test]

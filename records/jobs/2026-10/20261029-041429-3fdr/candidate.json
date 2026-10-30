@@ -1,0 +1,151 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261029-041429-3fdr",
+  "base_commit": "b8607d760b6731086006f07e1e64f6926401138c",
+  "base_fingerprint": "sha256:87b6c8908795e72be0c10e21d6ebc6406edad24f5d5c383f35fa71f7536ccfaa",
+  "previous_job": "20261029-210827-18fc",
+  "candidate_commit": "69990e7e5d1c55c768fdb187b0da341e42a8cfae",
+  "candidate_tree": "3894a9a8eee521bf608b33aa54614debcd63c57e",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 234396
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 161404
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 163418
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 83780
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 76687
+    },
+    {
+      "path": "crates/athena-core/src/work_decisions.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23592
+    }
+  ],
+  "fingerprint": "sha256:0d9863b1066bde8e3fd548123435fede9c119250ca3b8d46c0bed0f0caced47e",
+  "violations": [],
+  "producer_report": {
+    "summary": "Athena's own writers now keep boundary words out of the text that becomes a request or a record. Root cause: each writer copied model, record or file text into a request or record without checking it against the admission scan. On 2026-10-29 that left a steward proposal that approve-work could never admit. I added one shared check, `plain_boundary_text` in athena-context/src/briefs.rs, built on `boundary_words`, `boundary_fragments` and `boundary_scan`. It rewrites each boundary word to plain wording and each machine-path fragment to `[local path]`. The first word in the list becomes 'the person running Athena' and its plural 'the people running Athena'. Matching ignores case and keeps a leading capital. Text with no hit comes back unchanged. The result is scanned again, and a term that survives returns an Err naming it. Callers: (1) steward.rs: `StewardRequest::new` rewrites title, body and acceptance, which also covers the root-cause, spec, throughput and backfill requests. It refuses a file path with a hit, naming the term. `validate_item` rewrites the title and request and refuses a key with a hit. (2) hestia.rs: `root_cause_request_at` rewrites the cause, class and finished text, `try_error_review` rewrites the text before `self.queue`, and `mentions` compares the reworded cause. (3) introspect.rs: `apply_answer` rewrites the four prose fields and the new class name and description. An Err sets `record.failure`. The model's own words echoed into failure notes go through `withheld_if_unclean`. (4) work_decisions.rs: `approve_request` now returns `Result<String>` and rewrites the whole built request, because it copies in cited file, job and commit text. `approve_work` uses `?`. Tests: unit tests for the helper, one test per writer (steward proposal, a key and path refusal, Hestia error review, Hestia root-cause request, introspection writer), and an approve-work test. The approve-work test first shows the raw text is refused by `ask` with 'not admitted', then shows `approve_work` succeeds, the stored request is clean, `check_boundary_and_repo_files` passes and the decision names the job. CHANGELOG.md has a Fixed entry. Every test builds the boundary word from fragments.",
+    "files": [
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/steward.rs",
+      "crates/athena-core/src/hestia.rs",
+      "crates/athena-core/src/introspect.rs",
+      "crates/athena-core/src/work_decisions.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-context plain_boundary",
+        "result": "pass",
+        "note": "run before the later edits; the helper's unit tests also ran in the full suite"
+      },
+      {
+        "command": "cargo test -p athena-core steward",
+        "result": "pass",
+        "note": "18 tests, including the new steward ones"
+      },
+      {
+        "command": "cargo test -p athena-core boundary",
+        "result": "pass",
+        "note": "12 tests: the steward and Hestia writer tests and the existing boundary tests"
+      },
+      {
+        "command": "cargo test -p athena-core introspect",
+        "result": "pass",
+        "note": "14 tests, including the new writer test"
+      },
+      {
+        "command": "cargo test -p athena-core approve_work",
+        "result": "pass",
+        "note": "1 test"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after cargo fmt --all"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 tests"
+      },
+      {
+        "command": "cargo test --locked -q",
+        "result": "pass",
+        "note": "Every test binary reported ok with 0 failed. Run once for the full suite (a first run's output could not be read back, so it was re-run quietly)."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core`. A test per writer (steward proposal, Hestia error review, Hestia root-cause request, introspection writer) feeds a fixture whose source text holds a boundary word (built from fragments) and asserts the written text has no hits from boundary_scan and says 'the person running Athena' or another plain alternative.",
+        "status": "met",
+        "evidence": "These tests build the word from fragments and assert `boundary_scan` is empty and the text holds 'the person running Athena'. All passed under `cargo test -p athena-core steward|boundary|introspect` and in the full `cargo test --locked -q` (athena-core: 682 passed, 0 failed). Tests: steward::tests::a_steward_proposal_with_a_boundary_word_is_written_without_it (checks the queued request and the work item titles, applied and proposed), hestia::tests::an_error_review_of_a_cause_with_a_boundary_word_queues_a_request_without_it (the request is admitted by `queue`), hestia::tests::a_root_cause_request_for_a_cause_with_a_boundary_word_has_none, and introspect::tests::an_introspection_with_a_boundary_word_is_written_without_it."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core`. A test seeds a steward proposal from a source with a boundary word, calls approve_work, and asserts it succeeds and the submitted request passes check_boundary_and_repo_files.",
+        "status": "met",
+        "evidence": "work_decisions::tests::approve_work_succeeds_on_a_proposal_whose_text_holds_a_boundary_word passes. The seeded title and cited file hold the word. `ask` on the raw text fails with 'not admitted'. `approve_work` returns Ok. The stored request has no `boundary_scan` or `scan_request_input` hits and holds 'the person running Athena'. `check_boundary_and_repo_files(reading, None)` is Ok, and one WorkDecision names the job."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass, including `cargo test -p xtask --test policy`.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check` (clean), `cargo clippy --all-targets --locked -- -D warnings` (clean), `cargo test -p xtask --test policy` (12 passed) and `cargo test --locked -q` (all ok, 0 failed)."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing that writers now keep boundary words out of proposals and requests, with no boundary word in the entry itself.",
+        "status": "met",
+        "evidence": "CHANGELOG.md has a new bullet at the top of the Unreleased 'Fixed' section naming the root cause and the shared `plain_boundary_text` check. `cargo test -p xtask --test policy` passes, and that scan reads tracked files including CHANGELOG.md."
+      },
+      {
+        "criterion": "steward.rs, hestia.rs and introspect.rs each call the shared boundary check before writing text that becomes a request or record; a Grep of the diff shows the call in all three.",
+        "status": "met",
+        "evidence": "`plain_boundary_text` is called in steward.rs (`StewardRequest::new`, `validate_item`), hestia.rs (`root_cause_request_at`, `try_error_review`, `mentions`) and introspect.rs (`apply_answer`, `withheld_if_unclean`). `git diff -U0` on the three files shows the calls. work_decisions.rs calls it in `approve_request`."
+      }
+    ],
+    "open_issues": [
+      "The plan asked for a helper unit test where a rewrite leaves a residue and returns Err. I could not build such an input without a test hook (the rewrite never recreates a hit), so that Err branch has no test. I added a test for the nearest real case instead: a word glued to a path fragment is cleared once the path is replaced.",
+      "A steward key that holds a listed word, such as 'lease-expiry', is refused and the item dropped. The key grammar leaves no safe rewrite, and a stored key is compared as written. The reason names the word, so the steward can retry with a plain key.",
+      "Work items and requests already written are not rewritten (out of scope). An old proposal is cleaned when approve-work builds its request."
+    ],
+    "mistakes": [
+      "My first draft of the helper's unit tests had a test comment and fixture that did not match the behaviour: a word followed by '/' is already a whole-word hit. I replaced it before running the tests."
+    ],
+    "learnings": [
+      "`StewardRequest::new` is the single builder for every steward-channel request (steward, root-cause, spec, throughput, backfill), so cleaning there covers all of them.",
+      "`queue` and `ask` both call `refuse_banned_input` (the boundary scan on the request text) before anything is committed. A refused request leaves no record, so the failed-admission step can be shown in a test without changing state.",
+      "A reader that declines (capability null with a decline_reason) still yields a committed proposal, so approve_work can be tested in athena-core with `test_support::make_athena` and no capability.",
+      "`plain_boundary_text` cannot easily return Err. Replacements are neutral, and rewriting a path fragment can uncover a word that was glued to it (for example a word followed straight by a path), but the word pass runs after the fragment pass and clears it. The Err branch is a defensive guard."
+    ],
+    "desires": [
+      "Bash blocks `tail`, `grep` and pipes, and Read/Grep refuse paths outside the working directory. A long `cargo test` output that gets persisted elsewhere then cannot be read back, so I had to rerun the suite with `-q`."
+    ]
+  }
+}

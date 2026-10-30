@@ -20,6 +20,7 @@ use crate::state::StateDir;
 use crate::store::{JobState, Records};
 use anyhow::{Context, Result, bail};
 use athena_agent::env::Side;
+use athena_context::briefs::plain_boundary_text;
 use athena_context::outputs::{
     RefKindOutput, RungOutput, StewardItemOutput, StewardKindOutput, StewardOutput, steward_schema,
 };
@@ -459,6 +460,10 @@ impl StewardRequest {
     /// bullet (`-`, `*` or a number and a dot), because `athena plan` would read them as acceptance.
     /// `acceptance` is at least one non-blank single line, and `files` at least one path (a directory ends
     /// with `/`).
+    ///
+    /// The title, body and acceptance are run through [`plain_boundary_text`], so a word the admission
+    /// scan rejects is reworded (the one running Athena becomes "the person running Athena") instead of
+    /// making the request unworkable. A path with such a word cannot be reworded and is refused.
     pub fn new(
         priority: Option<crate::plan::Priority>,
         title: &str,
@@ -466,11 +471,27 @@ impl StewardRequest {
         acceptance: &[String],
         files: &[String],
     ) -> Result<Self, String> {
-        let title = title.trim();
+        // The finished text is read by admission's boundary scan, so any boundary word in the words the
+        // model or a source gave is reworded here. A path cannot be reworded, so one with a hit is refused.
+        let title = plain_boundary_text(title.trim())?;
+        let title = title.as_str();
+        let body = plain_boundary_text(body)?;
+        let acceptance = acceptance
+            .iter()
+            .map(|a| plain_boundary_text(a.trim()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let acceptance: Vec<&str> = acceptance.iter().map(|a| a.as_str()).collect();
+        for path in files {
+            if let Some(hit) = athena_context::briefs::boundary_scan(path).first() {
+                return Err(format!(
+                    "the path {path:?} holds `{}`, which a request may not hold",
+                    hit.term
+                ));
+            }
+        }
         if title.is_empty() || title.contains('\n') {
             return Err("a steward request has a one-line title".into());
         }
-        let acceptance: Vec<&str> = acceptance.iter().map(|a| a.trim()).collect();
         if acceptance.is_empty() || acceptance.iter().any(|a| a.is_empty() || a.contains('\n')) {
             return Err(
                 "a steward request has at least one acceptance bullet, each one line".into(),
@@ -777,6 +798,13 @@ fn check_key(key: &str) -> Result<String, String> {
             "{key:?}: a key has letters, digits, and : _ . / , - only"
         ));
     }
+    // A key is stored and compared as written, so it is refused, not reworded.
+    if let Some(hit) = athena_context::briefs::boundary_scan(key).first() {
+        return Err(format!(
+            "{key:?}: a key may not hold `{}`; use a plain key",
+            hit.term
+        ));
+    }
     if key.starts_with("blind-spot:") {
         return Err(format!(
             "{key:?}: blind-spot keys are made by Athena from the source's name"
@@ -823,7 +851,9 @@ fn validate_item(
     role: &RoleDefinition,
     records: &Records,
 ) -> Result<ProposedChange, String> {
-    let title = item.title.trim().to_string();
+    // The title is stored in the work item and copied into requests, so it is reworded here, before the
+    // length check, because the plain wording can be longer.
+    let title = plain_boundary_text(item.title.trim())?;
     if title.is_empty() || title.contains('\n') || title.chars().count() > MAX_TITLE {
         return Err(format!(
             "a title is one line of 1 to {MAX_TITLE} characters"
@@ -854,7 +884,8 @@ fn validate_item(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("{key}: evidence: {e}"))?;
     let rung = ladder(item.rung);
-    let request = item.request.unwrap_or_default().trim().to_string();
+    let request = plain_boundary_text(item.request.unwrap_or_default().trim())
+        .map_err(|e| format!("{key}: request: {e}"))?;
     if role.may_change(rung) && request.is_empty() {
         return Err(format!(
             "{key}: rung {} is at or below your limit, so the item needs a request to queue",
@@ -1618,6 +1649,101 @@ mod tests {
                 &JobId::parse("20261010-153012-k7q2").unwrap()
             )]
         );
+    }
+
+    /// The word for the one who runs Athena, built from fragments so no tracked file holds it.
+    fn boundary_word() -> String {
+        ["oper", "ator"].concat()
+    }
+
+    /// The text of the request a queued file holds.
+    fn queued_text(file: &NewFile) -> String {
+        match AnyRecord::parse(&file.path, &file.bytes).unwrap() {
+            AnyRecord::Request(request) => request.text,
+            other => panic!("not a request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_steward_proposal_with_a_boundary_word_is_written_without_it() {
+        let word = boundary_word();
+        let role = steward(at());
+        let records = records_with_job("20261010-153012-k7q2");
+        let mut raw = item(
+            StewardKindOutput::Proposal,
+            "proposal:recurring-duty",
+            RungOutput::DefaultsConventions,
+        );
+        raw.title = format!("Tell the {word} when a duty recurs");
+        raw.request = Some(format!(
+            "Ask the {word} before each run.\n- The {word} is told\nFiles: records/jobs"
+        ));
+        // The seed trips the admission scan, so the test would fail if nothing cleaned it.
+        assert!(!crate::reading::scan_request_input(&raw.title).is_empty());
+
+        let valid = validate_items(vec![raw.clone()], &role, &records);
+        assert!(valid.rejected.is_empty(), "{:?}", valid.rejected);
+        let change = &valid.changes[0];
+        assert!(change.title.contains("the person running Athena"));
+
+        // Applied: the queued request holds no boundary word and passes the admission scan.
+        let (decision, work_item) =
+            decide(&role, change, &RequestQueue, &BTreeSet::new(), at()).unwrap();
+        let Decision::Applied(queued) = decision else {
+            panic!("the change is on a rung the role may change");
+        };
+        let text = queued_text(&queued.file);
+        assert!(
+            athena_context::briefs::boundary_scan(&text).is_empty(),
+            "{text}"
+        );
+        assert!(crate::reading::scan_request_input(&text).is_empty());
+        assert!(text.contains("the person running Athena"), "{text}");
+        assert!(athena_context::briefs::boundary_scan(&work_item.title).is_empty());
+
+        // Proposed only (above the role's limit): the stored work item is clean too.
+        raw.key = "proposal:above".into();
+        raw.rung = RungOutput::DesignDecisions;
+        let valid = validate_items(vec![raw], &role, &records);
+        let (decision, work_item) = decide(
+            &role,
+            &valid.changes[0],
+            &RequestQueue,
+            &BTreeSet::new(),
+            at(),
+        )
+        .unwrap();
+        assert_eq!(decision, Decision::Proposed);
+        assert!(athena_context::briefs::boundary_scan(&work_item.title).is_empty());
+        assert!(work_item.title.contains("the person running Athena"));
+    }
+
+    #[test]
+    fn a_key_or_path_with_a_boundary_word_is_refused_with_the_word_named() {
+        let word = boundary_word();
+        let role = steward(at());
+        let records = records_with_job("20261010-153012-k7q2");
+        let valid = validate_items(
+            vec![item(
+                StewardKindOutput::Proposal,
+                &format!("proposal:{word}"),
+                RungOutput::DesignDecisions,
+            )],
+            &role,
+            &records,
+        );
+        assert!(valid.changes.is_empty());
+        assert!(valid.rejected[0].contains(&word), "{:?}", valid.rejected);
+
+        let err = StewardRequest::new(
+            None,
+            "Title",
+            "",
+            &strings(&["fmt passes"]),
+            &[format!("crates/{word}/")],
+        )
+        .unwrap_err();
+        assert!(err.contains(&word), "{err}");
     }
 
     #[test]

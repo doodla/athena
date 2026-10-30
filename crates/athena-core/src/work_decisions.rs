@@ -5,8 +5,9 @@
 //! whose request only pointed at the work item would be read blind.
 //!
 //! `athena approve-work <id>` therefore builds the request from the work item itself ([`approve_request`]): its
-//! title, rung, source and evidence, with the content of every cited record copied into the text. The request
-//! goes through the usual reading, like `athena accept-proposal`. `athena reject-work <id> --why "..."` records
+//! title, rung, source and evidence, with the content of every cited record copied into the text. Words the
+//! admission scan rejects are reworded first, so a proposal is never stuck at admission. The request goes
+//! through the usual reading, like `athena accept-proposal`. `athena reject-work <id> --why "..."` records
 //! the reason. Work items are never edited, so each decision is an appended `athena.work-decision/1` record
 //! that names the work item; an item with a decision is no longer open ([`open_proposals`]).
 
@@ -14,6 +15,7 @@ use crate::commits::{NewFile, message};
 use crate::store::Records;
 use crate::{Athena, Ui};
 use anyhow::{Result, bail};
+use athena_context::briefs::plain_boundary_text;
 use athena_data::RecordId;
 use athena_data::records::{
     AnyRecord, RefKind, Reference, WorkDecision, WorkDecisionState, WorkItem, WorkItemKind,
@@ -269,7 +271,17 @@ fn render(reference: &Reference, records: &Records, git: &Git, head: &str) -> St
 /// The request text of the ordinary job that carries out an approved proposal. It states the work item's
 /// title, rung, source and evidence, and copies the content of each cited record into the text, because the
 /// reader cannot open `records/`.
-pub fn approve_request(item: &WorkItem, records: &Records, git: &Git, head: &str) -> String {
+///
+/// The copied content comes from files, jobs and commits that may hold a word the admission scan rejects (a
+/// proposal about a recurring duty of the person running Athena is a case), and a request holding one is
+/// refused, so the proposal could never be worked. The finished text therefore goes through
+/// [`plain_boundary_text`], which rewords such words. It is an error only when a word cannot be reworded.
+pub fn approve_request(
+    item: &WorkItem,
+    records: &Records,
+    git: &Git,
+    head: &str,
+) -> Result<String> {
     let mut out = format!(
         "{title}\n\n\
          A person approved this proposal from the steward role. Carry the work out as an ordinary change.\n\
@@ -292,7 +304,12 @@ pub fn approve_request(item: &WorkItem, records: &Records, git: &Git, head: &str
             render(reference, records, git, head)
         ));
     }
-    out
+    plain_boundary_text(&out).map_err(|why| {
+        anyhow::anyhow!(
+            "the request for work item {} cannot be made admissible: {why}",
+            item.id
+        )
+    })
 }
 
 impl Athena {
@@ -310,7 +327,7 @@ impl Athena {
         let head = self.head()?;
         let known = Records::load(&self.git, &head)?;
         let item = find_open(&known, id)?.clone();
-        let request = approve_request(&item, &known, &self.git, &head);
+        let request = approve_request(&item, &known, &self.git, &head)?;
         let reading = self.ask(&request, ui)?;
         let known = Records::load(&self.git, &self.head()?)?;
         let next = approval(
@@ -455,6 +472,117 @@ mod tests {
         assert_eq!(within.len(), 1);
         assert_eq!(within[0].rung, Ladder::Implementation);
         assert_eq!(above.len(), 2, "above the limit, and an unknown role");
+    }
+
+    /// A repository with `athena.toml`, `defaults.toml` and the files given, and an Athena whose reader
+    /// declines every request (so no capability is needed). Returns the directories that keep it alive.
+    fn repo_with(files: &[(&str, &str)]) -> (tempfile::TempDir, tempfile::TempDir, Athena) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let git = Git::at(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        for (key, value) in [
+            ("user.name", "Test User"),
+            ("user.email", "noreply@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            git.run(["config", key, value]).unwrap();
+        }
+        let mut all = vec![
+            ("athena.toml", include_str!("../../../athena.toml")),
+            ("defaults.toml", include_str!("../../../defaults.toml")),
+        ];
+        all.extend_from_slice(files);
+        for (path, text) in all {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "Start"]).unwrap();
+        let script = Box::new(|_: &athena_agent::AgentInvocation| {
+            athena_agent::fake::FakeTurn::output(serde_json::json!({
+                "title": "Describe the duty",
+                "summary": "Describe the duty in the notes.",
+                "class_of_work": "docs",
+                "capability": null,
+                "decline_reason": "not a request",
+                "producer_model": "claude-haiku-5-5",
+                "defaults_applied": [{ "id": "strangers", "how": "plain words" }],
+                "assumptions": [],
+                "question": null,
+                "acceptance_criteria": [{ "text": "The notes describe the duty.", "kind": "content" }],
+                "deliverables": [{ "path": "docs/duty.md", "action": "modify", "p": 0.9 }],
+                "out_of_scope": ["Other files"],
+                "forecast": {
+                    "p_reading_accepted": 0.8,
+                    "p_verification_passes": 0.7,
+                    "p_user_intervenes": 0.1,
+                    "cost_usd": { "p10": 0.05, "p50": 0.2, "p90": 0.8 },
+                    "wall_time_s": { "p10": 5.0, "p50": 30.0, "p90": 300.0 },
+                    "departures": null
+                }
+            }))
+        });
+        let athena = crate::test_support::make_athena(&git, state.path(), vec![], script);
+        (dir, state, athena)
+    }
+
+    #[test]
+    fn approve_work_succeeds_on_a_proposal_whose_text_holds_a_boundary_word() {
+        let word = ["oper", "ator"].concat();
+        let note = format!("The {word} must be told when a duty recurs.\n");
+        let (dir, _state, athena) = repo_with(&[("docs/duty.md", &note)]);
+        let mut proposal = item(WorkItemKind::Proposal);
+        proposal.title = format!("Tell the {word} about a recurring duty");
+        proposal.source = Reference::path("docs/duty.md");
+        proposal.evidence = vec![Reference::path("docs/")];
+        let record = AnyRecord::WorkItem(Box::new(proposal.clone()));
+        let file = NewFile::record(&record);
+        let full = dir.path().join(&file.path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, &file.bytes).unwrap();
+        athena.git.run(["add", "-A"]).unwrap();
+        athena
+            .git
+            .run(["commit", "-q", "-m", "Seed a steward proposal"])
+            .unwrap();
+
+        // The seed fails admission when its text is used as it stands: this is the 2026-10-29 failure.
+        let raw = format!("{}\n\n{note}", proposal.title);
+        assert!(!crate::reading::scan_request_input(&raw).is_empty());
+        let refused = athena.ask(&raw, &crate::Quiet).unwrap_err();
+        assert!(refused.to_string().contains("not admitted"), "{refused}");
+
+        let reading = athena
+            .approve_work(&proposal.id.to_string(), &crate::Quiet)
+            .expect("the proposal is approved");
+        let known = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let text = &known.jobs[reading.job.as_str()]
+            .request
+            .as_ref()
+            .unwrap()
+            .text;
+        assert!(
+            athena_context::briefs::boundary_scan(text).is_empty(),
+            "{text}"
+        );
+        assert!(crate::reading::scan_request_input(text).is_empty());
+        assert!(text.contains("the person running Athena"), "{text}");
+        // The reading the job was given passes the admission checks too.
+        crate::reading::check_boundary_and_repo_files(reading.reading.as_ref().unwrap(), None)
+            .unwrap();
+        // The decision names the job.
+        let [decision] = known.work_decisions.as_slice() else {
+            panic!("one decision")
+        };
+        assert_eq!(
+            decision.decision,
+            WorkDecisionState::Approved {
+                job: reading.job.clone()
+            }
+        );
     }
 
     #[test]
