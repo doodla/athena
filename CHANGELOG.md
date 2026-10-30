@@ -113,6 +113,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Structure pass job R9: the test modules `critic_soundness_tests` and `produce_and_verify_order_tests` moved
+  out of `run/mod.rs` into the new `run/tests.rs`, declared in `mod.rs` as `#[cfg(test)] mod tests;`. No
+  behavior change. The test text is unchanged except the `use super::*;` line of each module, which is now
+  `use super::super::*;` because the modules sit one level deeper. The `check_seam` test seam stays in
+  `mod.rs`, because production code in `checks.rs` reads it. Callers keep their `run::` paths.
+
 - Structure pass job R8 (split step 4): stages S8 to S10 (the verifier's inputs, the verifier run with its one
   rerun, and the redaction and assembly of the verification) and `verifier_snapshot` moved out of
   `run/mod.rs` into the new `run/verification.rs`. No behavior change. In detail:
