@@ -1028,6 +1028,7 @@ pub struct Bootstrap {
 /// marker.
 pub const STATUS_MEASURE_LABELS: &[(&str, &str)] = &[
     ("throughput", "throughput"),
+    ("trend", "class_trend"),
     ("checks", "check_durations"),
     ("planning", "planning_cost"),
     ("keep rule", "keep_rule"),
@@ -1081,6 +1082,10 @@ pub struct StatusView {
     /// jobs that did not land, computed from the job records; absent until a request job has landed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub throughput: Option<Throughput>,
+    /// Classes of work whose minutes per landed job fell or rose between their older and newer landed jobs,
+    /// with the job after which a rising class got worse; absent until a class has enough landed jobs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_trend: Option<crate::class_trend::ClassTrend>,
     pub interventions_by_category: BTreeMap<String, usize>,
     pub interventions_by_class: BTreeMap<String, usize>,
     /// Mistakes per class and per cause, with the prevention proposed. Apart from `interventions_by_category`,
@@ -1814,6 +1819,7 @@ impl Athena {
             producer_settings: producer_settings(&records),
             check_durations,
             throughput: Throughput::compute(&records),
+            class_trend: crate::class_trend::ClassTrend::compute(&records),
             interventions_by_category: by_category,
             interventions_by_class: by_class,
             mistakes: mistake_report(&records),

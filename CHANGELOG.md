@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena status` prints a `trend` line (requirement OLY-9-10, mechanism `crates/athena-core/src/class_trend.rs`):
+  for each class of work with at least four landed jobs, the median minutes per landed job in the older half
+  against the newer half, the classes improving, and, for a class that got worse, the earlier landed job after
+  which it rose. The line is absent until a class has enough landed jobs.
 - Read-ahead and the stale-reading re-check in the drain (async drain build job 5, `docs/design/async-drain.md`
   section 4 and decision D145). When more than one job runs at once, `drain_concurrent` now also reads, and for a
   hard job plans, up to `read_ahead` items ahead of the running batch, on one extra thread. An item is read ahead
