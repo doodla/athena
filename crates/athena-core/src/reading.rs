@@ -1820,6 +1820,47 @@ pub fn job_ids_in(text: &str) -> Vec<RecordId> {
     ids
 }
 
+/// The jobs a request depends on, in order, without repeats: the retry link of a "try again on <job>"
+/// request, then every full job id on a line that starts with "Depends on" (any case; a quote mark `>`, a
+/// list marker, bold marks or a number may come first, and a colon may follow). A job id anywhere else in the
+/// text is a reference, not a dependency: [`job_ids_in`] still finds it for the reader.
+pub fn dependency_ids_in(text: &str) -> Vec<RecordId> {
+    const KEYWORD: &str = "depends on";
+    let mut ids: Vec<RecordId> = Vec::new();
+    let mut add = |id: RecordId| {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    };
+    if let Some(id) = retry_reference(text)
+        .ok()
+        .flatten()
+        .and_then(|reference| RecordId::parse(reference).ok())
+    {
+        add(id);
+    }
+    for line in text.lines() {
+        let line = line.trim_start_matches(|c: char| c.is_whitespace() || "> -*+".contains(c));
+        let digits = line.chars().take_while(char::is_ascii_digit).count();
+        let line = match line[digits..].strip_prefix(['.', ')']) {
+            Some(rest) if digits > 0 => rest.trim_start(),
+            _ => line,
+        };
+        let Some(head) = line.get(..KEYWORD.len()) else {
+            continue;
+        };
+        let rest = &line[KEYWORD.len()..];
+        if head.eq_ignore_ascii_case(KEYWORD)
+            && !rest.starts_with(|c: char| c.is_ascii_alphanumeric())
+        {
+            for id in job_ids_in(rest) {
+                add(id);
+            }
+        }
+    }
+    ids
+}
+
 /// Whether a word of a request looks like a repository path: it has a directory part or a file extension.
 pub(crate) fn looks_like_path(word: &str) -> bool {
     let w = word.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || "/._-".contains(c)));
@@ -2113,9 +2154,12 @@ pub fn request_text_touches(text: &str) -> Vec<String> {
 ///   words are what it touches.
 /// - The rung is `rung_hint` when the caller knows it (a steward proposal carries it), else [`infer_rung`]
 ///   from what the request and the reading serve in `lookup.brief`, else `None`, which the plan flags.
-/// - A request depends on every other job whose full id it names (a retry, or "after <job>").
+/// - A request depends only on the jobs [`dependency_ids_in`] finds: a full job id on a line that starts with
+///   "Depends on", or the retry link of a "try again on <job>" request. A job id anywhere else in the text
+///   ("after <job>", evidence it cites) is a reference only: the reader is shown it, but it never holds the
+///   item. A request never depends on itself.
 /// - Open questions are also filled by lookup: every touched path that does not exist (a file a reading
-///   creates is excepted), and every referenced job that is not among the records.
+///   creates is excepted), and every dependency that is not among the records.
 /// - A read request whose design names no existing code it changes or reuses, and does not list only files it
 ///   creates, gets `code_problem` set ([`crate::plan::code_reference_problem`]), so the plan refuses it before
 ///   production. This is the early form of the check the verifier made only at the final verdict.
@@ -2131,7 +2175,7 @@ pub fn plan_entry(
     let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     let mut entry = crate::plan::PlanEntry::bare(job.id().as_str(), &job.title());
     entry.priority = job.priority();
-    entry.depends_on = job_ids_in(text)
+    entry.depends_on = dependency_ids_in(text)
         .into_iter()
         .map(|id| id.as_str().to_string())
         .filter(|id| id != job.id().as_str())
@@ -4161,13 +4205,26 @@ mod tests {
             ["- it prints hello", "- cargo test passes"]
         );
         assert_eq!(entry.touches, ["crates/cli/src/main.rs"]);
-        assert_eq!(entry.depends_on, ["20261012-075824-1x28"]);
+        assert!(
+            entry.depends_on.is_empty(),
+            "an id after 'after' is a reference, not a dependency"
+        );
         assert_eq!(
             entry.rung,
             Some(Ladder::Implementation),
             "inferred from the path"
         );
         assert!(entry.missing().is_empty());
+
+        job.request.as_mut().unwrap().text = format!(
+            "{}\nDepends on 20261012-075824-1x28",
+            job.request.as_ref().unwrap().text
+        );
+        let entry = plan_entry(&job, None, &everything);
+        assert_eq!(entry.depends_on, ["20261012-075824-1x28"]);
+        job.request.as_mut().unwrap().text =
+            "Add a greeting to crates/cli/src/main.rs after 20261012-075824-1x28\n- it prints hello\n- cargo test passes"
+                .into();
 
         job.readings = vec![final_reading(&job)];
         let entry = plan_entry(&job, Some(Ladder::DesignDecisions), &everything);
@@ -4435,7 +4492,7 @@ mod tests {
     fn open_questions_name_a_missing_path_and_an_unresolved_job_for_read_and_unread_requests() {
         let mut job = job_with_checks(vec![]);
         job.request.as_mut().unwrap().text =
-            "Update crates/gone/src/x.rs and docs/here.md after 20261012-075824-1x28\n- it works"
+            "Update crates/gone/src/x.rs and docs/here.md\nDepends on 20261012-075824-1x28\n- it works"
                 .into();
         let lookup = Lookup {
             job_exists: &|_| false,
@@ -4618,6 +4675,150 @@ mod tests {
         assert_eq!(names, ["20261012-075824-1x28", "20261011-000000-abcd"]);
         assert!(job_ids_in("add 1x28 and 2026-10-12 and latest").is_empty());
         assert!(job_ids_in("x120261012-075824-1x28 or 20261012-075824-1x28z").is_empty());
+    }
+
+    const REJECTED: &str = "20261012-075824-1x28";
+
+    /// The plan entry of an unread request with `text`, planned as an implementation request.
+    fn entry_of_text(text: &str) -> crate::plan::PlanEntry {
+        let mut job = job_with_checks(vec![]);
+        job.request.as_mut().unwrap().text = text.into();
+        let everything = Lookup {
+            job_exists: &|_| true,
+            path_exists: &|_| true,
+            brief: &[],
+        };
+        let entry = plan_entry(
+            &job,
+            Some(athena_data::roles::Ladder::Implementation),
+            &everything,
+        );
+        assert!(entry.missing().is_empty(), "{:?}", entry.missing());
+        entry
+    }
+
+    fn rejected_history() -> Vec<crate::plan::JobEnd> {
+        vec![crate::plan::JobEnd {
+            id: REJECTED.into(),
+            ending: crate::plan::Ending::Failed("rejected".into()),
+            retry_of: None,
+        }]
+    }
+
+    #[test]
+    fn a_request_that_only_cites_a_rejected_job_is_planned_not_held() {
+        let entry = entry_of_text(&format!(
+            "Add a greeting to crates/cli/src/main.rs\nJob {REJECTED} was rejected, see its findings.\n- it prints hello"
+        ));
+        assert_ne!(entry.id, REJECTED);
+        assert!(entry.depends_on.is_empty(), "{:?}", entry.depends_on);
+        let plan = crate::plan::Plan::build_with(std::slice::from_ref(&entry), &rejected_history());
+        assert_eq!(plan.order, [entry.id.as_str()], "{plan:?}");
+        assert!(plan.refused.is_empty(), "{:?}", plan.refused);
+    }
+
+    #[test]
+    fn a_depends_on_line_naming_a_rejected_job_with_no_landed_retry_still_holds_the_item() {
+        let entry = entry_of_text(&format!(
+            "Add a greeting to crates/cli/src/main.rs\nDepends on {REJECTED}\n- it prints hello"
+        ));
+        let plan = crate::plan::Plan::build_with(std::slice::from_ref(&entry), &rejected_history());
+        assert!(plan.order.is_empty(), "{plan:?}");
+        let held = plan.refused.iter().find(|r| r.id == entry.id).unwrap();
+        assert!(held.missing.is_empty());
+        assert!(
+            held.reason.contains(&format!("depends on {REJECTED}"))
+                && held.reason.contains("rejected"),
+            "{}",
+            held.reason
+        );
+
+        // A landed retry of the rejected job releases the item.
+        let mut history = rejected_history();
+        history.push(crate::plan::JobEnd {
+            id: "20261013-000000-abcd".into(),
+            ending: crate::plan::Ending::Landed,
+            retry_of: Some(REJECTED.into()),
+        });
+        let plan = crate::plan::Plan::build_with(std::slice::from_ref(&entry), &history);
+        assert_eq!(plan.order, [entry.id.as_str()], "{plan:?}");
+        assert!(plan.refused.is_empty());
+    }
+
+    #[test]
+    fn dependencies_are_only_depends_on_ids_and_the_retry_link() {
+        let other = "20261011-000000-abcd";
+        let depends = |text: &str| -> Vec<String> {
+            dependency_ids_in(text)
+                .iter()
+                .map(|id| id.as_str().to_string())
+                .collect()
+        };
+
+        // The retry link is a dependency, and a retry is not held by the job it retries.
+        let retry = format!("try again on {REJECTED}");
+        assert_eq!(depends(&retry), [REJECTED]);
+        let retry_with_dot = format!("Try again on {REJECTED}.");
+        assert_eq!(depends(&retry_with_dot), [REJECTED]);
+        assert!(
+            depends("try again on 1x28").is_empty(),
+            "short ids never parse"
+        );
+
+        // An id on a 'Depends on' line is a dependency, once, wherever else it is cited.
+        let both =
+            format!("See {REJECTED} for why.\nDepends on {REJECTED}\nIt cites {REJECTED} again.");
+        assert_eq!(depends(&both), [REJECTED]);
+
+        // The same id elsewhere in the text is not; the one on the line is.
+        let mixed = format!("Evidence is {REJECTED}.\n> - Depends on: {other}");
+        assert_eq!(depends(&mixed), [other]);
+
+        // Shapes of a 'Depends on' line.
+        for line in [
+            format!("Depends on {other}"),
+            format!("depends on {other}"),
+            format!("DEPENDS ON: {other}"),
+            format!("  > Depends on {other}"),
+            format!("- Depends on {other}"),
+            format!("* **Depends on:** {other}"),
+            format!("2. Depends on {other}"),
+            format!("3) Depends on {other}."),
+        ] {
+            assert_eq!(depends(&format!("Goal\n{line}\n- done")), [other], "{line}");
+        }
+        let two = format!("Depends on {other} and {REJECTED}");
+        assert_eq!(depends(&two), [other, REJECTED]);
+
+        // Other wordings are references.
+        for text in [
+            format!("Add a greeting after {REJECTED}"),
+            format!("Follows up on {REJECTED}"),
+            format!("The fix depends on the evidence in {REJECTED}"),
+            format!("Dependsonx {REJECTED}"),
+            format!("Depends on\n{REJECTED}"),
+        ] {
+            assert!(depends(&text).is_empty(), "{text}");
+        }
+
+        // Through the plan: a retry of a rejected job is ordered, not held by it.
+        let entry = entry_of_text(&format!("{retry}\n- it works"));
+        assert_eq!(entry.depends_on, [REJECTED]);
+        let history = vec![
+            rejected_history().remove(0),
+            crate::plan::JobEnd {
+                id: entry.id.clone(),
+                ending: crate::plan::Ending::Other,
+                retry_of: Some(REJECTED.into()),
+            },
+        ];
+        let plan = crate::plan::Plan::build_with(std::slice::from_ref(&entry), &history);
+        assert_eq!(plan.order, [entry.id.as_str()], "{plan:?}");
+
+        // The job's own id is never a dependency.
+        let own = job_with_checks(vec![]).id().as_str().to_string();
+        let entry = entry_of_text(&format!("Add a thing to a.rs\nDepends on {own}\n- done"));
+        assert!(entry.depends_on.is_empty());
     }
 
     fn criterion_result(
