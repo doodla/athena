@@ -215,7 +215,11 @@ come first. Nothing here changes a limit until job 10.
 1. **Measure the build cache and disk.** Depends on: nothing. Find the cause of D84's 0 hits (run `sccache --show-stats`
    in a job's build, which the producer could not do then) and measure hits across two per-job worktrees with
    different target directories; measure T and S. Output: numbers in a records note; no `athena.toml` change. Decides
-   whether alternative e is worth costing.
+   whether alternative e is worth costing. A producer's working copy cannot take these measurements, so this job
+   became a command: `athena measure-build` builds cold in two worktrees and commits an
+   `athena.build-measurement/1` record (T, S, both build times, the `sccache` counts of each build or that it is not
+   installed). The Hestia sweep runs it when no record exists and when `Cargo.lock` changes, and `athena status`
+   shows the latest. The numbers are those records, read once they exist.
 2. **`[drain.pipeline]` config table.** Depends on: none. Schema, validation, defaults at today's behavior, tests.
 3. **In-flight table.** Depends on: 2. The local file of job id, stage and worktree, written at each stage change and
    read at start.

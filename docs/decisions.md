@@ -3843,30 +3843,29 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
 
 ### A1 measurements (design section 12, job 1; for D145 and D84)
 
-Recorded 2026-10-29, second attempt. The producer shell enforces a command list (`cargo`, `chmod`, `git status`,
-`git diff`, `git log`, `git show`, `ls`, `mv`, `rm`). Each measuring command was tried and refused before it ran, so
-no figure below is a measurement. Where a number appears it is the design's estimate
-(`docs/design/async-drain.md`, lines 103-104) and is labeled as one.
+Two producer attempts to take these measurements returned no numbers: a producer's restricted working copy cannot
+run `sccache`, `du`, `df` or `git worktree`, and cannot hold two full builds. So the measurement is now code. The
+command `athena measure-build` (`Athena::measure_build` in `crates/athena-core/src/disk.rs`) runs in Athena's own
+environment. It builds the workspace cold (`cargo build --locked --workspace --all-targets`) in two separate git
+worktrees of HEAD, each with its own target directory, and commits one `athena.build-measurement/1` record under
+`records/build-measurements/` holding:
 
-- **`sccache --show-stats` output:** could not run. Command tried: `sccache --show-stats`. Error: "Athena policy:
-  `sccache` is not on the producer role's list (cargo, chmod, git, ls, mv, rm); use the Read, Grep, and Glob tools
-  to inspect files". The refusal came from the shell policy, so it says nothing about whether `sccache` is
-  installed. `df -h .` was refused the same way (`df` is not on the list), so free disk is also unknown.
-- **Cause of D84's 0 hits:** not found. Tried: the `sccache` command above (refused); a read of the repository,
-  where no `*.toml` names sccache (design section 2), so any wrapper setting would have to come from the build
-  job's environment. D84's "not reproduced" outcome stands.
-- **Hits across two worktrees with different target directories:** could not run. Command tried:
-  `git worktree add ../wt-a1 HEAD`. Error: "Athena policy: git worktree is not allowed; Athena owns git state.
-  Allowed: git status, diff, log, show". Without a second worktree and `sccache`, hits and misses are unknown for
-  both. Command for a later job: in each worktree set `RUSTC_WRAPPER=sccache` and a distinct `CARGO_TARGET_DIR`, run
-  `sccache --zero-stats`, `cargo build --locked`, then `sccache --show-stats`; compare the second run's hits with
-  the first run's misses.
-- **T (one cold `target/`):** could not measure. Command tried: `du -sk .` (stand-in for `du -sk "$CARGO_TARGET_DIR"`
-  after `cargo build --locked --all-targets`). Error: "Athena policy: `du` is not on the producer role's list
-  (cargo, chmod, git, ls, mv, rm)". Estimate, not measured: T about 6 GB (design, lines 103-104).
-- **S (worktree source size):** could not measure, same `du` refusal. Command for a later job:
-  `git ls-files -z | xargs -0 du -ck | tail -n 1` in a fresh worktree (kilobytes). Estimate, not measured: S about
-  0.2 GB (design, lines 103-104).
-- **Effect on D145:** none. Alternative e (re-enable a compiler cache) stays uncosted, and the disk budget still
-  rests on the estimates. A run whose shell allows `sccache`, `du` and `git worktree` should replace the estimates
-  with measurements. No `athena.toml` change was made.
+- **T:** the bytes in one cold target directory (the first build's).
+- **S:** the bytes of the tracked files of one worktree.
+- **The wall time of each build.**
+- **The `sccache` hit and miss counts of each build**, or the statement that `sccache` is not installed. When it is
+  installed the build runs with `RUSTC_WRAPPER=sccache` and the counts are zeroed before each build, so the second
+  build's hits against the first build's misses show whether the cache answers across worktrees, which is the
+  question behind D84's 0 hits. The command refuses to record a zero where it could not read the counts.
+
+The numbers in this entry are therefore the numbers in those records, and no figure is written here. The records
+are produced by the Hestia sweep, which runs the measurement when no record exists and again when `Cargo.lock`
+changes, or by running the command by hand; `athena status` shows the latest as its `build measurement` line.
+**Status: no record exists yet**, so the disk budget of D145 still rests on its estimates (T about 6 GB and S about
+0.2 GB, `docs/design/async-drain.md`, lines 103-104; estimates, not measured). Whoever reads the first record
+should replace those estimates with its figures.
+
+- **Cause of D84's 0 hits:** not found. This change records the counts that bear on it and does not look for the
+  cause. D84's "not reproduced" outcome stands until a record with `sccache` figures exists.
+- **Effect on D145:** none yet. Alternative e (re-enable a compiler cache) stays uncosted until a record shows the
+  cache figures. No `athena.toml` change was made.

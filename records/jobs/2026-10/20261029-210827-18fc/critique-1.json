@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-210827-18fc",
+  "round": 1,
+  "at": "2026-10-30T03:38:33.968974291Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/store.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/store.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/display.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/display.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The free-disk guard calls df_free_bytes directly, not the injectable StateDir free-space seam, so the sweep test depends on the real free disk of the test machine.",
+      "evidence": "crates/athena-core/src/state.rs:139 `with_free_space` and :146 `free_bytes()` provide an injectable free-space reader. Tests use `crate::test_support::plenty_of_space` (for example run/mod.rs:2260 and run_pin_tests.rs:161). The plan says the pass 'refuses when `df_free_bytes` is below `jc.config.min_free_gb()`', and the criterion 3 test relies on 'a real temp dir' having more than min_free_gb free. A CI runner low on disk would make the pass skip, and the test would fail for reasons that have nothing to do with the trigger. Fix: In measure_build_pass, compare `self.state.free_bytes()` with `min_free_gb`. In the sweep test, build the Athena with `.with_free_space(plenty_of_space)`. Optionally add one case with a low-space fake that shows the pass is skipped.",
+      "location": "Risks (first bullet) and step 7, free-disk guard in measure_build_pass; criterion 3 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "S is described two ways: tracked-file bytes from `git.ls_files()`, and 'from worktree A'. Which repository's file list and which files' sizes are used is unclear.",
+      "evidence": "Step 5: '`source_bytes` (sum of tracked file sizes via `git.ls_files()` and metadata)' and 'S from worktree A'. `ls_files` (athena-git lib.rs:808) runs against the main repository's index and working tree. The main working copy can hold uncommitted changes that the detached HEAD worktree does not have. The request asks for the worktree source size. Fix: Define S as the sum of the sizes of the files tracked at HEAD, read from worktree A (paths from ls-files run in worktree A, or `ls-tree -r -l HEAD`). Say in the record doc that S excludes `.git`. The disk.rs test should assert S against the files committed at HEAD.",
+      "location": "Step 5 / Decision 1, `source_bytes`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 3 says run_sweep runs the measurement, but the plan tests hestia_sweep_measuring instead. The reason is sound, but the verifier needs to know about the change.",
+      "evidence": "hestia.rs:99 `pub fn run_sweep(checks: &[Box<dyn Check>], id: RecordId, at: Timestamp) -> Sweep` is pure and has no access to records or git, so it cannot commit a record. The sweep that commits is hestia_sweep_with (hestia.rs:1808). Fix: Keep the design. Say in the test's doc comment and in the CHANGELOG entry that the trigger belongs to `athena hestia sweep` (hestia_sweep_with → hestia_sweep_measuring), not to run_sweep's Check list, so the verifier can match the test to criterion 3.",
+      "location": "Open questions (first bullet), criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "If a measurement fails, every later sweep starts two more cold builds, with no backoff.",
+      "evidence": "The plan writes no record when a build fails or the sccache stats cannot be parsed, and measure_build_due returns true while no record exists. A repository whose build fails will repeat two cold builds on every sweep. Fix: Either accept this and state it in the module docs, or skip the pass when the latest Hestia sweep record already notes a failed measurement for the same Cargo.lock hash. Keep this small, or defer it to a later job.",
+      "location": "Open questions (third bullet), retry after a failed measurement",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read hestia.rs (run_sweep at 99, review_passes at 1742, hestia_sweep_with at 1808), store.rs (Records::load at 307–417 and has_record_id at 471), state.rs (free_bytes and with_free_space) and config.rs (min_free_gb). The plan's claims about the code hold. Records::load sends every record kind it does not list to an `other` arm, which calls `.expect(\"every other record names its job\")`, so the extra store.rs change is needed. review_passes runs at the start of every drain and hestia_sweep_with calls it, so putting the pass after it, in a new hestia_sweep_measuring, keeps the two cold builds out of drains. display.rs is needed to print the status line. Athena flagged store.rs and display.rs as outside the deliverables, but both are justified. The design is sound. The builder trait wraps only cargo and sccache. Worktree creation, sizing, record assembly and cleanup run as real code in the tests. The Cargo.lock git blob id is an exact trigger that needs no new dependency. Separate per-build sccache figures, with \"not installed\" told apart from zero, answer the D84 question. Each demonstration names a real or planned seam and would fail without the behavior. Remaining issues are minor: the free-disk guard should read the injectable StateDir::free_bytes, not call df_free_bytes, so the sweep test does not depend on the CI runner's free disk; S needs one clear definition; and criterion 3's wording names run_sweep, which the plan tests through hestia_sweep_measuring and flags as an open question."
+}

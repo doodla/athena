@@ -1049,6 +1049,7 @@ pub fn status(v: &StatusView) -> String {
     if let Some(throughput) = &v.throughput {
         let _ = writeln!(out, "{}", throughput.text());
     }
+    let _ = writeln!(out, "{}", v.build_measurement);
     if let Some(trend) = &v.class_trend {
         out.push_str(&trend_section(trend));
     }
