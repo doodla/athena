@@ -328,9 +328,10 @@ impl Athena {
                     Outputs { ui, stages },
                 ),
                 Some(_) => unreachable!("a reading without a capability is declined"),
-                None => bail!(
-                    "job {id} has no reading yet (the reader failed); `athena correct {id} \"<line>\"` reads it again"
-                ),
+                // The first read gave no reading (the reader failed): read it again, as for a queued job.
+                None => self
+                    .read_unread(&job, ui)
+                    .map(|p| GoResult::Reread(Box::new(p))),
             },
             JobState::Declined => bail!(
                 "job {id} was declined: {}. Correct it with `athena correct {id} \"<line>\"`, or `athena close {id} --why \"...\"`",

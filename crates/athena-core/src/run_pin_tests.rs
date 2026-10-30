@@ -1782,3 +1782,97 @@ fn a_reader_that_does_not_complete_is_not_read_again() {
     assert!(proposal.reader_error.is_some());
     assert_eq!(*reads.lock().unwrap(), 1, "only a refusal is read again");
 }
+
+#[test]
+fn a_reader_that_returns_no_reading_commits_its_error() {
+    let (dir, git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        Arc::new(|spec, turn| {
+            if spec.role == Role::Reader {
+                turn.structured = None;
+            }
+        }),
+    );
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    assert!(proposal.reading.is_none());
+    let error = proposal.reader_error.clone().expect("the reader failed");
+    let message = git
+        .run(["show", "-s", "--format=%B", &proposal.commit])
+        .unwrap();
+    assert!(
+        message.contains(&error),
+        "the failed-reading commit names the reader's error {error:?}; it says:\n{message}"
+    );
+    assert!(message.contains("(the reader failed)"));
+}
+
+#[test]
+fn a_job_with_no_reading_is_read_again_by_go_and_the_error_is_committed_again() {
+    let (dir, git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let reads: Arc<Mutex<usize>> = Arc::default();
+    let counted = reads.clone();
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        Arc::new(move |spec, turn| {
+            if spec.role == Role::Reader {
+                let mut reads = counted.lock().unwrap();
+                *reads += 1;
+                // The first two reads fail; the third works.
+                if *reads <= 2 {
+                    turn.structured = None;
+                }
+            }
+        }),
+    );
+    let first = athena.ask("study the demo", &Quiet).unwrap();
+    assert!(first.reading.is_none());
+
+    // Read again by `go`: no reading again, and the error is committed again, with a new invocation.
+    let GoResult::Reread(second) = athena
+        .go(first.job.as_str(), AcceptedBy::User, &Quiet)
+        .unwrap()
+    else {
+        panic!("a job with no reading is read again");
+    };
+    assert_eq!(*reads.lock().unwrap(), 2);
+    assert!(second.reading.is_none());
+    let error = second
+        .reader_error
+        .clone()
+        .expect("the reader failed again");
+    let message = git
+        .run(["show", "-s", "--format=%B", &second.commit])
+        .unwrap();
+    assert!(message.starts_with("Read a request again (the reader failed)"));
+    assert!(message.contains(&error), "{message}");
+
+    // And once more: this read works, and the job has a reading.
+    let GoResult::Reread(third) = athena
+        .go(first.job.as_str(), AcceptedBy::User, &Quiet)
+        .unwrap()
+    else {
+        panic!("a job with no reading is read again");
+    };
+    assert_eq!(*reads.lock().unwrap(), 3);
+    assert!(third.reader_error.is_none());
+    assert!(third.reading.is_some());
+    let message = git
+        .run(["show", "-s", "--format=%B", &third.commit])
+        .unwrap();
+    assert!(message.starts_with("Read a request again: "));
+    let head = git.rev_parse("HEAD").unwrap().unwrap();
+    let records = crate::store::Records::load(&git, &head).unwrap();
+    let job = &records.jobs[first.job.as_str()];
+    let seqs: Vec<u32> = job.invocations.iter().map(|i| i.seq).collect();
+    assert_eq!(seqs, vec![1, 2, 3], "each read is its own invocation");
+    assert_eq!(job.readings.len(), 1);
+}

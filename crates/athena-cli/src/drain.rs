@@ -771,7 +771,8 @@ pub enum Stop {
     TargetMet,
     /// The next call's cap did not fit what was left of the budget.
     BudgetSpent,
-    /// One item failed twice.
+    /// One item failed twice. An item whose reader gave no reading twice is not this: it is skipped, with its
+    /// reason, and the next item runs.
     RepeatedFailure,
     /// Nothing is queued (or everything queued was worked). This is not success.
     QueueEmpty,
@@ -845,7 +846,7 @@ pub struct JobLine {
     /// The job itself; a retry of an item is a job with another id.
     pub job: String,
     /// How the job ended: `passed` (landed on the local branch), `rejected`, `failed`, `blocked`, `not read`,
-    /// `not run` or `no outcome`.
+    /// `not run` or `no outcome`. For `not read`, `reason` is the reader's error.
     pub outcome: String,
     pub reason: Option<String>,
     pub cost_usd: f64,
@@ -1006,6 +1007,9 @@ enum ItemEnd {
     NeedsAccepting,
     /// Dispatch was held for lack of free disk space; the item stays queued, and nothing else stops.
     Held,
+    /// The item's reader gave no reading twice. It is skipped with its reason and the next item runs; this
+    /// is not a failed run, so it does not stop the drain.
+    Skipped,
 }
 
 enum RunStep {
@@ -1025,10 +1029,18 @@ enum RunStep {
     /// The job was held at dispatch for lack of free disk space. It is not a failure and not tried again in
     /// this run.
     Held,
+    /// A queued job's reader gave no reading, with this reason. The job is recorded without a reading; its
+    /// next attempt reads it again. It is not a failure of a run.
+    Unread(String),
     Budget,
     JobLimit,
     /// Another worker had already ended the run.
     Ended,
+}
+
+/// `text` on one line, for a line of the drain's log.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
@@ -1037,8 +1049,13 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
     }
 
     fn push(&self, line: JobLine) -> usize {
+        // A job that was not read says why on its line: the reader's error is what the person needs.
+        let why = match (&line.reason, line.outcome.as_str()) {
+            (Some(reason), "not read") => format!(": {}", one_line(reason)),
+            _ => String::new(),
+        };
         self.ui.line(&format!(
-            "drain      {} → {} ({})",
+            "drain      {} → {} ({}){why}",
             line.item, line.job, line.outcome
         ));
         let mut st = self.st();
@@ -1130,7 +1147,17 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 line.reason = Some(error.clone().unwrap_or_else(|| {
                     "no capability fits the request, so there is nothing to run".into()
                 }));
+                // A queued job whose reader failed is recorded with no reading: it is read once more, not
+                // counted as a failed run.
+                let unread = matches!(from, ReadOf::Queued(_))
+                    && !pre_read
+                    && read.job.is_some()
+                    && read.error.is_some();
+                let reason = line.reason.clone().unwrap_or_default();
                 self.push(line);
+                if unread {
+                    return RunStep::Unread(reason);
+                }
                 return RunStep::Failed {
                     job: item.job.clone(),
                     retry: false,
@@ -1253,6 +1280,8 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         let mut retry = item.interrupted;
         let mut passed: Option<(String, usize)> = None;
         let mut failures = 0;
+        // Reads that gave no reading. One is read again; a second skips the item.
+        let mut unread = 0;
         loop {
             if passed.is_none() {
                 // A job boundary: the previous attempt, if any, is over and the next has not started.
@@ -1274,6 +1303,18 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     RunStep::Ended => return ItemEnd::Idle,
                     RunStep::NeedsAccepting => return ItemEnd::NeedsAccepting,
                     RunStep::Held => return ItemEnd::Held,
+                    RunStep::Unread(reason) => {
+                        unread += 1;
+                        if unread >= 2 {
+                            self.note(format!(
+                                "item {} is skipped: the reader gave no reading twice: {}",
+                                item.job,
+                                one_line(&reason)
+                            ));
+                            return ItemEnd::Skipped;
+                        }
+                        continue;
+                    }
                     RunStep::Passed(job, at) => passed = Some((job, at)),
                     RunStep::Failed {
                         job,
@@ -1657,7 +1698,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             ItemEnd::Budget => self.set_stop(Stop::BudgetSpent, None),
             ItemEnd::JobLimit => self.set_stop(Stop::JobLimit, None),
             ItemEnd::Stop => self.set_stop(Stop::Requested, None),
-            ItemEnd::Idle | ItemEnd::NeedsAccepting | ItemEnd::Held => {}
+            ItemEnd::Idle | ItemEnd::NeedsAccepting | ItemEnd::Held | ItemEnd::Skipped => {}
         }
     }
 

@@ -285,6 +285,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The reader's error is now kept and shown when it gives no usable reading. The commit titled "Read a request (the
+  reader failed)" (and the one after a correction) used to drop the error text that `Proposal.reader_error`
+  carried; its body now says "The reader gave no usable reading:" and the error, redacted, on one line and cut
+  to 1000 characters. `athena drain` prints the same error on its line for the item (`not read: <error>`). A
+  queued job whose reader gave no reading used to fail its second attempt too, because `athena go` on such a job
+  only printed a hint, so two such results set the "repeated failure" stop and ended the run. A job with no reading
+  is now read once more (`athena go` reads it, as it does a queued job, in a commit titled "Read a request again");
+  if that read gives none too, the drain skips the item with a note giving the reason and goes on to the next one.
+  The skip does not set the "repeated failure" stop; a job that failed after it was read is counted as before.
 - Only a job id on a "Depends on" line, and the retry link of a "try again on <job>" request, are now
   dependencies in `athena plan`; a job id cited anywhere else in a request no longer holds the item.
   `reading::plan_entry` took every full job id quoted in the request text as a dependency, so since rejected
