@@ -37,6 +37,69 @@ pub struct Config {
     /// serialized form when absent and reset in [`Config::reading_inputs`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<DiskConfig>,
+    /// Async drain settings (`[drain]`, `docs/design/async-drain.md` section 11). Absent means every value in
+    /// [`PipelineConfig::default`], which keeps today's one-job-at-a-time drain. Left out of the serialized form
+    /// when absent and reset in [`Config::reading_inputs`]. Read through [`Config::pipeline`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain: Option<DrainConfig>,
+}
+
+/// The highest value `[drain.pipeline] max_check_slots` may take. A bound chosen here, not given by the design.
+pub const MAX_CHECK_SLOTS_CEILING: u32 = 8;
+
+/// `[drain]`: settings for the async drain (`docs/design/async-drain.md` section 11).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrainConfig {
+    /// `[drain.pipeline]`. Absent means [`PipelineConfig::default`].
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
+}
+
+/// `[drain.pipeline]`: how far the drain overlaps jobs (`docs/design/async-drain.md` section 11). The defaults
+/// are today's behavior. No drain code reads these values yet; later build jobs (section 12) will.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipelineConfig {
+    /// Producers running at once, from 1 to [`MAX_CONCURRENCY_CEILING`]. Default 1, which keeps today's behavior.
+    #[serde(default = "PipelineConfig::default_one")]
+    pub max_in_flight: u32,
+    /// Checks running at once, from 1 to [`MAX_CHECK_SLOTS_CEILING`]. Default 1.
+    #[serde(default = "PipelineConfig::default_one")]
+    pub max_check_slots: u32,
+    /// Jobs read and planned ahead of the one starting; at least 1. Default 1.
+    #[serde(default = "PipelineConfig::default_one")]
+    pub read_ahead: u32,
+    /// Gigabytes kept free beyond the per-job budget (design section 5). Default 10.
+    #[serde(default = "PipelineConfig::default_reserve_disk_gb")]
+    pub reserve_disk_gb: u64,
+    /// Conflict returns to the producer before a thrash stop; at least 1. Default 2.
+    #[serde(default = "PipelineConfig::default_max_conflict_returns")]
+    pub max_conflict_returns: u32,
+}
+
+impl PipelineConfig {
+    fn default_one() -> u32 {
+        1
+    }
+    fn default_reserve_disk_gb() -> u64 {
+        10
+    }
+    fn default_max_conflict_returns() -> u32 {
+        2
+    }
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        PipelineConfig {
+            max_in_flight: 1,
+            max_check_slots: 1,
+            read_ahead: 1,
+            reserve_disk_gb: 10,
+            max_conflict_returns: 2,
+        }
+    }
 }
 
 /// The free disk space, in gigabytes, below which a job is held at dispatch.
@@ -440,6 +503,8 @@ pub enum ConfigError {
     Parallel(u32),
     #[error("[job_plan] {0} must be positive")]
     JobPlan(&'static str),
+    #[error("[drain.pipeline] {0} is out of range (see docs/design/async-drain.md section 11)")]
+    DrainPipeline(&'static str),
     #[error("[models] {0} = {1:?} is not an effort level (one of low, medium, high, xhigh, max)")]
     Effort(&'static str, String),
     #[error("[models] hard_producer_model {0} is not in producer_allowed")]
@@ -466,6 +531,7 @@ impl Config {
         relevant.landing = Landing::default();
         relevant.job_plan = None;
         relevant.disk = None;
+        relevant.drain = None;
         serde_json::to_string(&relevant).expect("a parsed configuration serializes")
     }
 
@@ -574,7 +640,28 @@ impl Config {
                 return Err(ConfigError::JobPlan("critic_timeout_s"));
             }
         }
+        let p = self.pipeline();
+        if !(1..=MAX_CONCURRENCY_CEILING).contains(&p.max_in_flight) {
+            return Err(ConfigError::DrainPipeline("max_in_flight"));
+        }
+        if !(1..=MAX_CHECK_SLOTS_CEILING).contains(&p.max_check_slots) {
+            return Err(ConfigError::DrainPipeline("max_check_slots"));
+        }
+        if p.read_ahead == 0 {
+            return Err(ConfigError::DrainPipeline("read_ahead"));
+        }
+        if p.max_conflict_returns == 0 {
+            return Err(ConfigError::DrainPipeline("max_conflict_returns"));
+        }
         Ok(())
+    }
+
+    /// The `[drain.pipeline]` settings, or [`PipelineConfig::default`] when `[drain]` is absent
+    /// (`docs/design/async-drain.md` section 11).
+    pub fn pipeline(&self) -> PipelineConfig {
+        self.drain
+            .as_ref()
+            .map_or_else(PipelineConfig::default, |d| d.pipeline)
     }
 
     /// The display name for a model, for Co-Authored-By trailers.
@@ -769,6 +856,69 @@ pub(crate) mod tests {
         let empty = Config::parse(&format!("{REPO_CONFIG}\n[disk]\n")).unwrap();
         assert_eq!(empty.min_free_gb(), 10);
         // A reading records this digest; the section must not move it.
+        assert_eq!(set.reading_inputs(), base.reading_inputs());
+        assert_eq!(digest(&set), digest(&base));
+    }
+
+    #[test]
+    fn drain_pipeline_defaults_keep_todays_behavior() {
+        let base = Config::parse(REPO_CONFIG).unwrap();
+        assert!(base.drain.is_none());
+        let p = base.pipeline();
+        assert_eq!(
+            (
+                p.max_in_flight,
+                p.max_check_slots,
+                p.read_ahead,
+                p.reserve_disk_gb,
+                p.max_conflict_returns
+            ),
+            (1, 1, 1, 10, 2)
+        );
+        let explicit = "\n[drain.pipeline]\nmax_in_flight = 1\nmax_check_slots = 1\nread_ahead = 1\n\
+                        reserve_disk_gb = 10\nmax_conflict_returns = 2\n";
+        let parsed = Config::parse(&format!("{REPO_CONFIG}{explicit}")).unwrap();
+        assert_eq!(parsed.pipeline(), base.pipeline());
+        let empty = Config::parse(&format!("{REPO_CONFIG}\n[drain.pipeline]\n")).unwrap();
+        assert_eq!(empty.pipeline(), base.pipeline());
+    }
+
+    #[test]
+    fn the_repository_config_resolves_max_in_flight_to_one() {
+        assert_eq!(
+            Config::parse(REPO_CONFIG).unwrap().pipeline().max_in_flight,
+            1
+        );
+    }
+
+    #[test]
+    fn bad_drain_pipeline_settings_are_refused_naming_the_key() {
+        let too_many = format!("max_in_flight = {}", MAX_CONCURRENCY_CEILING + 1);
+        let too_many_slots = format!("max_check_slots = {}", MAX_CHECK_SLOTS_CEILING + 1);
+        for (line, key) in [
+            ("max_in_flight = 0", "max_in_flight"),
+            (too_many.as_str(), "max_in_flight"),
+            ("max_check_slots = 0", "max_check_slots"),
+            (too_many_slots.as_str(), "max_check_slots"),
+            ("read_ahead = 0", "read_ahead"),
+            ("max_conflict_returns = 0", "max_conflict_returns"),
+            ("surprise = 1", "surprise"),
+        ] {
+            let text = format!("{REPO_CONFIG}\n[drain.pipeline]\n{line}\n");
+            let error = Config::parse(&text).expect_err(line).to_string();
+            assert!(error.contains(key), "{line}: {error}");
+        }
+    }
+
+    #[test]
+    fn reading_inputs_ignore_a_non_default_drain_pipeline() {
+        let base = Config::parse(REPO_CONFIG).unwrap();
+        let text = format!(
+            "{REPO_CONFIG}\n[drain.pipeline]\nmax_in_flight = 3\nmax_check_slots = 2\nread_ahead = 4\n\
+             reserve_disk_gb = 20\nmax_conflict_returns = 5\n"
+        );
+        let set = Config::parse(&text).unwrap();
+        assert_eq!(set.pipeline().max_in_flight, 3);
         assert_eq!(set.reading_inputs(), base.reading_inputs());
         assert_eq!(digest(&set), digest(&base));
     }

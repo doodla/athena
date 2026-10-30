@@ -1,0 +1,147 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261029-142849-04d9",
+  "n": 1,
+  "at": "2026-10-29T23:31:41.575413062Z",
+  "invocation_seq": 1,
+  "base_commit": "aeb095ee16aba66b7373c74209a57a47b42bab1d",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add [drain.pipeline] config table with validation and safe defaults",
+  "summary": "Add a `drain` section with a `pipeline` table (max_in_flight, max_check_slots, read_ahead, reserve_disk_gb, max_conflict_returns) to athena-data's Config, with design section 11 defaults (1,1,1,10,2), validation, tests, and a CHANGELOG entry. Config-only: nothing reads the values yet, so drain behaves as today; audience is the later build jobs and reviewers of the async-drain design.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Implementation and tests are Rust in athena-data."
+    },
+    {
+      "id": "tested",
+      "how": "New unit tests; cargo test and clippy -D warnings required."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria exercise Config::parse outcomes, not struct existence."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to config.rs plus the changelog."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments cite the design section for an outside reader."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criteria check parsed defaults and refusals, not activity."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-data/src/config.rs. Entry point is Config::parse (toml::from_str with deny_unknown_fields, then Config::validate, which returns ConfigError variants); reading_inputs resets non-reading sections (parallel, landing, job_plan, disk) before digesting. No probing/resolution order applies beyond parse then validate.",
+    "Code survey: no record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are not involved; the records allow-list is untouched.",
+    "Design: docs/design/async-drain.md sections 11 and 12 (job 2). Defaults: max_in_flight=1, max_check_slots=1, read_ahead=1, reserve_disk_gb=10, max_conflict_returns=2. Absent [drain] must equal those defaults.",
+    "Following the `disk`/`job_plan` pattern: the new `drain` field is Option, skipped when None in serialization and reset in reading_inputs, so existing config digests and readings stay valid.",
+    "Validation bounds are not given by the design. I assume max_in_flight 1..=8 (matching MAX_CONCURRENCY_CEILING), max_check_slots >= 1 and <= max_in_flight-independent small ceiling, read_ahead >= 1, max_conflict_returns >= 1, reserve_disk_gb any non-negative u64; a ConfigError variant names the offending key.",
+    "Config-only: no drain runtime code is changed and athena.toml is not edited (job 10 raises max_in_flight). Higher refusal rate: the change refuses only configs that newly contain a [drain.pipeline] table with out-of-range values, so expected 0% of newly refused past readings."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-data`: tests through Config::parse show an athena.toml with no [drain] section yields pipeline values 1,1,1,10,2, and an explicit [drain.pipeline] with those values parses equal to it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-data`: tests through Config::parse show max_in_flight = 0 and above the ceiling, max_check_slots = 0, read_ahead = 0, max_conflict_returns = 0 and an unknown key under [drain.pipeline] are each rejected with an error naming the key.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-data`: a test shows Config::reading_inputs is identical with and without a non-default [drain.pipeline], and the repository's real athena.toml still parses with max_in_flight resolving to 1.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test --workspace`: the existing drain and config tests pass with no edits to existing test bodies.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings`: both succeed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry describing the [drain.pipeline] table, its defaults, and that max_in_flight = 1 keeps today's behavior.",
+      "kind": "content"
+    },
+    {
+      "text": "Each new public item in config.rs has a doc comment stating its meaning and default, citing docs/design/async-drain.md section 11; the change expects 0% of newly refused readings because absent or default tables stay valid.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Reading or acting on the new values in the drain runtime (later build jobs)",
+    "Editing athena.toml or raising max_in_flight to 3 (build job 10)",
+    "Disk-guard, check-slot, read-ahead or conflict-return behavior",
+    "Changes to defaults.toml or .github/workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.7,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.95,
+        "p90": 2.4
+      },
+      "wall_time_s": {
+        "p10": 380.0,
+        "p50": 1400.0,
+        "p90": 2900.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.721832884097035,
+      "p_verification_passes": 0.6732673267326733,
+      "p_user_intervenes": 0.07889908256880734,
+      "cost_usd": {
+        "p10": 0.5467339401391867,
+        "p50": 1.194743764052125,
+        "p90": 2.9661775287876604
+      },
+      "wall_time_s": {
+        "p10": 539.0830900658711,
+        "p50": 1697.26090066347,
+        "p90": 3226.2729757029806
+      }
+    }
+  },
+  "departures": "Slightly higher acceptance and pass odds than reference: the change is small, mirrors the existing disk and parallel patterns, and is config-only."
+}
