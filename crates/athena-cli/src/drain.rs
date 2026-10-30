@@ -127,6 +127,11 @@
 //!   even after idle jobs' build directories are removed, `athena go` returns [`athena_core::disk::LowDisk`].
 //!   The item is left queued (outcome `environment: low disk`, with the free and required amounts, plus a
 //!   note); that is not a failure, is not retried, and stops nothing. A later drain runs the same job.
+//! - **A short budget holds a job.** A job's own budget (`[budget] job_usd`) must cover everything still to run
+//!   (`athena_core::reading::budget_reserve`). When it does not, `athena go` returns
+//!   [`athena_core::reading::BudgetShort`] before spending anything. The item is left queued (outcome
+//!   `budget short`, with the shortfall and the config line, plus a note); that is not a failure, is not
+//!   retried, and the next item runs.
 //! - **In-limit proposals are approved, approved jobs are worked.** An open proposal whose rung the role that
 //!   raised it may change itself (its newest recorded definition decides; a role with no recorded definition
 //!   has no limit) is approved as `athena approve-work` would, which reads the job and records the decision.
@@ -305,6 +310,10 @@ pub struct Read {
     /// Whether a capability fits, so the job can run.
     pub runnable: bool,
     pub error: Option<String>,
+    /// True when the read was refused before any money was spent because the job's budget does not cover
+    /// the whole path ([`athena_core::reading::BudgetShort`]). The error says by how much. The item is left
+    /// queued: it is neither a failure nor tried again in this run, and the next item runs.
+    pub held: bool,
 }
 
 /// The result of running a job to its end.
@@ -318,9 +327,10 @@ pub struct Run {
     /// is not run until a person accepts it. The job is still proposed: it is neither retried nor counted as
     /// a failure.
     pub needs_accepting: bool,
-    /// True when dispatch was held for lack of free disk space (`environment: low disk`). The job is still
-    /// proposed and was not run: it is neither retried nor counted as a failure, and a later drain runs the
-    /// same job once space is free.
+    /// True when dispatch was held for lack of free disk space (`environment: low disk`), or because the
+    /// job's budget does not cover the whole path still to run (`budget short`). The job is still proposed
+    /// and was not run: it is neither retried nor counted as a failure, and a later drain runs the same job
+    /// once space is free or the budget is raised.
     pub held: bool,
 }
 
@@ -512,6 +522,7 @@ pub trait Steps {
             cost: 0.0,
             runnable: false,
             error: Some("this Steps cannot read an already-read job again".into()),
+            held: false,
         }
     }
     /// What an earlier run left in the in-flight table, one line per leftover row, and a line when the file
@@ -1005,12 +1016,17 @@ enum ItemEnd {
     Idle,
     /// The item's reading was made again with a different scope; it stays queued, and nothing else stops.
     NeedsAccepting,
-    /// Dispatch was held for lack of free disk space; the item stays queued, and nothing else stops.
+    /// Dispatch was held for lack of free disk space, or the job's budget did not cover the whole path; the
+    /// item stays queued, and nothing else stops.
     Held,
     /// The item's reader gave no reading twice. It is skipped with its reason and the next item runs; this
     /// is not a failed run, so it does not stop the drain.
     Skipped,
 }
+
+/// The outcome of an item held because its job's budget does not cover the whole path still to run; also the
+/// start of the reason a run held for it gives.
+const BUDGET_SHORT: &str = "budget short";
 
 enum RunStep {
     /// The job passed; its line is at this index.
@@ -1026,7 +1042,7 @@ enum RunStep {
     /// The job was read again with a different scope and waits for a person to accept it. It is not a
     /// failure and not tried again.
     NeedsAccepting,
-    /// The job was held at dispatch for lack of free disk space. It is not a failure and not tried again in
+    /// The job was held for lack of free disk space or of budget. It is not a failure and not tried again in
     /// this run.
     Held,
     /// A queued job's reader gave no reading, with this reason. The job is recorded without a reading; its
@@ -1114,6 +1130,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 cost: 0.0,
                 runnable: true,
                 error: None,
+                held: false,
             },
             Source::Read => self.steps.read(from),
         };
@@ -1147,6 +1164,18 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 line.reason = Some(error.clone().unwrap_or_else(|| {
                     "no capability fits the request, so there is nothing to run".into()
                 }));
+                // Refused before any money was spent because the budget does not cover the whole path: the
+                // item stays queued with its reason on one line, and the next item runs.
+                if read.held {
+                    line.outcome = BUDGET_SHORT.into();
+                    self.note(format!(
+                        "item {} is left queued: {}",
+                        item.job,
+                        one_line(line.reason.as_deref().unwrap_or("its budget is short"))
+                    ));
+                    self.push(line);
+                    return RunStep::Held;
+                }
                 // A queued job whose reader failed is recorded with no reading: it is read once more, not
                 // counted as a failed run.
                 let unread = matches!(from, ReadOf::Queued(_))
@@ -1198,7 +1227,11 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 RunStep::NeedsAccepting
             }
             _ if run.held => {
-                line.outcome = athena_core::disk::LOW_DISK.into();
+                line.outcome = if run.reason.starts_with(BUDGET_SHORT) {
+                    BUDGET_SHORT.into()
+                } else {
+                    athena_core::disk::LOW_DISK.into()
+                };
                 self.note(format!(
                     "item {} is left queued: {}",
                     item.job,
@@ -2609,6 +2642,7 @@ impl Steps for RealSteps<'_> {
                 error: p.reader_error.clone(),
                 cost: p.spent_usd,
                 job: Some(p.job.as_str().to_string()),
+                held: false,
             },
             Err(error) => Read {
                 job: None,
@@ -2618,6 +2652,9 @@ impl Steps for RealSteps<'_> {
                 },
                 runnable: false,
                 error: Some(format!("{error:#}")),
+                held: error
+                    .downcast_ref::<athena_core::reading::BudgetShort>()
+                    .is_some(),
             },
         }
     }
@@ -2654,13 +2691,22 @@ impl Steps for RealSteps<'_> {
                 needs_accepting: true,
                 held: false,
             },
-            Err(error) => Run {
-                outcome: None,
-                reason: format!("{error:#}"),
-                cost,
-                needs_accepting: false,
-                held: error.downcast_ref::<athena_core::disk::LowDisk>().is_some(),
-            },
+            Err(error) => {
+                let short = error
+                    .downcast_ref::<athena_core::reading::BudgetShort>()
+                    .is_some();
+                Run {
+                    outcome: None,
+                    reason: if short {
+                        format!("{BUDGET_SHORT}: {error:#}")
+                    } else {
+                        format!("{error:#}")
+                    },
+                    cost,
+                    needs_accepting: false,
+                    held: short || error.downcast_ref::<athena_core::disk::LowDisk>().is_some(),
+                }
+            }
         }
     }
 
@@ -2861,6 +2907,7 @@ mod tests {
                 cost: self.read_cost,
                 runnable: true,
                 error: None,
+                held: false,
             }
         }
         fn run(&self, job: &str) -> Run {
@@ -3402,6 +3449,7 @@ mod read_ahead_tests {
                 cost: 0.1,
                 runnable: true,
                 error: None,
+                held: false,
             }
         }
         fn run(&self, job: &str) -> Run {
@@ -3475,6 +3523,7 @@ mod read_ahead_tests {
                 cost: 0.1,
                 runnable: true,
                 error: None,
+                held: false,
             }
         }
     }

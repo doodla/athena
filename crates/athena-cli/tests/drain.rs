@@ -163,6 +163,7 @@ impl Steps for Stub {
             cost: 0.1,
             runnable: true,
             error: None,
+            held: false,
         }
     }
     fn run(&self, job: &str) -> Run {
@@ -4785,6 +4786,7 @@ mod parallel {
                 cost: 0.1,
                 runnable: true,
                 error: None,
+                held: false,
             }
         }
         fn run(&self, job: &str) -> Run {

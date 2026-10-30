@@ -82,8 +82,8 @@ fn a_cap_between_the_producer_alone_and_planning_plus_the_producer_stops_the_job
     // Each invocation costs $0.01 (the reader's included). The producer and verifier caps are $3 and $2.
     // Left before planning: 5.025 - 0.01 = 5.015, enough. Left after planning: 5.025 - 0.03 = 4.995, not.
     let config = format!(
-        "{}\n[job_plan]\nenabled = true\nplanner_usd = 0.005\ncritic_usd = 0.005\n",
-        with_job_usd(&test_config(), "5.025")
+        "{}\n[job_plan]\nenabled = true\nplanner_usd = 0.005\ncritic_usd = 0.005\nmax_rounds = 1\n",
+        with_job_usd(&test_config(), "5.025").replace("reader_usd = 0.50", "reader_usd = 0.01")
     );
     let fx = Fixture::with_config(&config);
     let scenario = Scenario::default();
@@ -110,6 +110,115 @@ fn a_cap_between_the_producer_alone_and_planning_plus_the_producer_stops_the_job
         ["01-reader.json", "02-planner.json", "03-critic.json"]
     );
     assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
+/// The page the drain rates after a landing.
+struct StubPage;
+
+impl athena_core::audience::Page for StubPage {
+    fn fetch(&self, _: &str) -> anyhow::Result<String> {
+        Ok("<h1>Start here</h1><p>firstmate hands work to agents.</p>".into())
+    }
+}
+
+/// A land step that records the jobs it was asked to land.
+#[derive(Default)]
+struct RecordingLander(Mutex<Vec<String>>);
+
+impl athena_cli::drain::Lander for RecordingLander {
+    fn land(
+        &self,
+        _: &athena_core::Athena,
+        job: &str,
+        _: &dyn athena_core::Ui,
+    ) -> athena_cli::drain::Landing {
+        self.0.lock().unwrap().push(job.to_string());
+        athena_cli::drain::Landing::Landed {
+            changed: Vec::new(),
+        }
+    }
+}
+
+#[test]
+fn a_short_job_is_skipped_with_its_reason_and_the_next_item_runs() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // No `[job_plan]`: a job needs the reader 0.50, the producer 3.00 and the verifier 2.00, so 5.50 in all.
+    // The budget is 6.00. The first item's reader fails once and costs 0.60 (the pattern of a reader that
+    // returns no reading), so its second read, made by the drain, finds 5.40 left: $0.10 short.
+    let fx = Fixture::with_config(&with_job_usd(&test_config(), "6.00"));
+    let inner = Scenario::default().script();
+    let first_reads = Arc::new(AtomicUsize::new(0));
+    let counted = first_reads.clone();
+    let script: athena_agent::fake::Script = Box::new(move |spec| {
+        let mut turn = inner(spec);
+        if spec.role == Role::Reader
+            && spec.user_prompt.contains("first demo study")
+            && counted.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            turn.structured = None;
+            turn.cost_usd = 0.60;
+        }
+        turn
+    });
+    let athena = fx.athena(script);
+    // Each request carries an acceptance bullet, so the drain's plan is complete without reading it first.
+    let (first, _) = athena
+        .queue("Add the first demo study to studies/demo/\n- the demo study has a pin")
+        .unwrap();
+    let (second, _) = athena
+        .queue("Add the second demo study to studies/demo/\n- the demo study has a pin")
+        .unwrap();
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = athena_cli::drain::RealSteps {
+        athena: &athena,
+        ui: &lines,
+        page: &StubPage,
+        lander: &lander,
+    };
+    let limits = athena_cli::drain::Limits {
+        budget_usd: 50.0,
+        target_rating: 5,
+        max_jobs: 10,
+    };
+
+    let report = athena_cli::drain::drain(&steps, limits, &lines).unwrap();
+    let text = athena_cli::display::drain(&report);
+
+    // The first item is held, once, with its shortfall and the config line, on one note and one log line.
+    let prefix = format!("item {} is left queued:", first.as_str());
+    let notes: Vec<&String> = report
+        .notes
+        .iter()
+        .filter(|n| n.starts_with(&prefix))
+        .collect();
+    assert_eq!(notes.len(), 1, "{:?}", report.notes);
+    assert!(notes[0].contains("$0.10 short"), "{}", notes[0]);
+    assert!(notes[0].contains("[budget] job_usd"), "{}", notes[0]);
+    assert!(!notes[0].contains('\n'));
+    let log = lines.0.lock().unwrap().clone();
+    let held: Vec<&String> = log
+        .iter()
+        .filter(|l| l.starts_with("drain") && l.contains("(budget short)"))
+        .collect();
+    assert_eq!(held.len(), 1, "{log:?}");
+    assert!(held[0].contains(first.as_str()), "{}", held[0]);
+    // The reader ran for it once (the drain's first read); the second read was refused before the reader.
+    assert_eq!(first_reads.load(Ordering::SeqCst), 1, "{text}");
+    // It is held, not a failed run, so the drain does not stop on it...
+    assert_ne!(
+        report.stop,
+        athena_cli::drain::Stop::RepeatedFailure,
+        "{text}"
+    );
+    assert_eq!(report.failed_item, None, "{text}");
+    // ...and the next item, which has the budget, is read, run and landed.
+    assert_eq!(
+        *lander.0.lock().unwrap(),
+        [second.as_str().to_string()],
+        "{text}"
+    );
+    assert_eq!(report.landed, 1, "{text}");
 }
 
 #[test]

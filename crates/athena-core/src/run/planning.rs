@@ -99,26 +99,19 @@ impl Athena {
         let last_round = round >= cfg.max_rounds;
         let id = ctx.id().clone();
         let p = ctx.prediction.clone();
-        let budget = &jc.config.budget;
         let request = ctx
             .job
             .request
             .as_ref()
             .map(|r| r.text.clone())
             .unwrap_or_default();
-        let after = budget.producer_usd + budget.verifier_usd;
         let grant = planning_grant();
         let snap_dir = self.state.job_dir(&id).join(format!("plan-{round}"));
         let no_env = std::collections::BTreeMap::new();
         let verifier_commands = ctx.capability.verifier_grant(jc).commands;
 
         // The planner.
-        if let Err(e) = self.check_budget(
-            jc,
-            ctx.spent(closing),
-            cfg.planner_usd + after,
-            "planner, with the producer and verifier",
-        ) {
+        if let Err(e) = self.preflight(jc, ctx.spent(closing), ReserveStage::Planner { round }) {
             self.stop_planning(ctx, closing, &format!("{e}"));
             return Ok(RoundEnd::Stopped);
         }
@@ -277,12 +270,7 @@ impl Athena {
         }
 
         // The critic.
-        if let Err(e) = self.check_budget(
-            jc,
-            ctx.spent(closing),
-            cfg.critic_usd + after,
-            "critic, with the producer and verifier",
-        ) {
+        if let Err(e) = self.preflight(jc, ctx.spent(closing), ReserveStage::Critic { round }) {
             self.stop_planning(ctx, closing, &format!("{e}"));
             // The plan stands as a record even though no critic reviewed it.
             closing.plans.push(plan);

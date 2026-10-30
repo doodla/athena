@@ -52,6 +52,107 @@ pub fn same_scope(old: &Reading, new: &Reading) -> bool {
         && deliverables(old) == deliverables(new)
 }
 
+/// Where a job is when its budget is checked against everything still to run (see [`budget_reserve`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveStage {
+    /// Before the reader: the whole path, the reader included, with every planning round when `[job_plan]`
+    /// is enabled (the reading's `hard` flag and capability are not known yet, so the planning terms are
+    /// counted; over-reserving is the safe side).
+    Admission,
+    /// Before anything is committed for a dispatched job. `planned` is whether this job will be planned.
+    Dispatch { planned: bool },
+    /// Before the planner of round `round` (1-based): this round and every later one, then the producer and
+    /// the verifier.
+    Planner { round: u32 },
+    /// Before the critic of round `round` (1-based): this critic, every later round, then the producer and
+    /// the verifier.
+    Critic { round: u32 },
+    /// Planning is over (or there was none): the producer and the verifier.
+    Run,
+}
+
+/// The one computation of what a job must still be able to afford, in dollars, from `stage` on. Every cap is
+/// read from `config`, so a changed cap in athena.toml changes the reserve with no code change. Each planning
+/// round is a planner call and a critic call, up to `[job_plan] max_rounds` of them.
+pub fn budget_reserve(config: &athena_data::Config, stage: ReserveStage) -> f64 {
+    let budget = &config.budget;
+    let after = budget.producer_usd + budget.verifier_usd;
+    let (planner, critic, max_rounds) = config.job_plan.map_or((0.0, 0.0, 0), |p| {
+        (p.planner_usd, p.critic_usd, p.max_rounds)
+    });
+    let rounds = |n: u32| f64::from(n) * (planner + critic);
+    match stage {
+        ReserveStage::Admission => {
+            let planning = if config.job_plan.is_some_and(|p| p.enabled) {
+                rounds(max_rounds)
+            } else {
+                0.0
+            };
+            budget.reader_usd + planning + after
+        }
+        ReserveStage::Dispatch { planned } => {
+            let planning = if planned { rounds(max_rounds) } else { 0.0 };
+            planning + after
+        }
+        ReserveStage::Planner { round } => rounds(max_rounds.saturating_sub(round) + 1) + after,
+        ReserveStage::Critic { round } => critic + rounds(max_rounds.saturating_sub(round)) + after,
+        ReserveStage::Run => after,
+    }
+}
+
+/// A job whose budget does not cover what still has to run. It is returned before the money is spent, so
+/// nothing was spent and no state changed; the drain holds such a job instead of counting a failure.
+#[derive(Debug, Clone, Copy)]
+pub struct BudgetShort {
+    /// What is left of the job's budget.
+    pub left: f64,
+    /// The job's whole budget, `[budget] job_usd`.
+    pub job_usd: f64,
+    /// What the stage needs.
+    pub reserve: f64,
+    pub stage: ReserveStage,
+}
+
+impl BudgetShort {
+    /// How much more budget the job needs.
+    pub fn shortfall(&self) -> f64 {
+        (self.reserve - self.left).max(0.0)
+    }
+}
+
+impl std::fmt::Display for BudgetShort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self.stage {
+            ReserveStage::Admission => {
+                "the reader, every planning round, the producer and the verifier"
+            }
+            ReserveStage::Dispatch { planned: true } => {
+                "every planning round, the producer and the verifier"
+            }
+            ReserveStage::Dispatch { planned: false } | ReserveStage::Run => {
+                "the producer and the verifier"
+            }
+            ReserveStage::Planner { .. } => {
+                "this planner call, every planning round after it, the producer and the verifier"
+            }
+            ReserveStage::Critic { .. } => {
+                "this critic call, every planning round after it, the producer and the verifier"
+            }
+        };
+        write!(
+            f,
+            "the job has ${:.2} of its ${:.2} budget left, ${:.2} short of the ${:.2} it needs for {what}; \
+             raise `[budget] job_usd` in athena.toml through a job, or close this one",
+            self.left,
+            self.job_usd,
+            self.shortfall(),
+            self.reserve
+        )
+    }
+}
+
+impl std::error::Error for BudgetShort {}
+
 /// What `ask` and `correct` leave behind: a proposed (or declined) job, committed.
 #[derive(Debug, Clone)]
 pub struct Proposal {
@@ -299,6 +400,24 @@ impl Athena {
                 left.max(0.0),
                 jc.config.budget.job_usd
             );
+        }
+        Ok(())
+    }
+
+    /// Refuses, before any money is spent on the next stage, a job whose budget cannot cover everything that
+    /// still has to run from `stage` on (see [`budget_reserve`]). `spent` is what the job has spent so far.
+    /// The error is a [`BudgetShort`], so a caller can tell a hold made before spend from a failed run.
+    pub(crate) fn preflight(&self, jc: &JobConfig, spent: f64, stage: ReserveStage) -> Result<()> {
+        let reserve = budget_reserve(&jc.config, stage);
+        let left = jc.config.budget.job_usd - spent;
+        if reserve > left + 1e-9 {
+            return Err(BudgetShort {
+                left: left.max(0.0),
+                job_usd: jc.config.budget.job_usd,
+                reserve,
+                stage,
+            }
+            .into());
         }
         Ok(())
     }
@@ -853,6 +972,8 @@ impl Athena {
             earlier_attempt_with(records, &request.text, &redactor, &|j| self.running(j))?;
         let seq = prior.map_or(1, JobRecords::next_seq);
         let before = prior.map_or(0.0, JobRecords::spent_usd);
+        // The whole path must be affordable before the reader spends anything.
+        self.preflight(jc, before, ReserveStage::Admission)?;
         let (reading, invocations, error) = self.read_for(
             jc,
             records,
@@ -916,6 +1037,10 @@ impl Athena {
             bail!("{}", self.pause_refusal(&pause));
         }
         let seeded = has_retry_introspection(&records, job);
+        // A retry is a new job, judged on its own spend, which starts at 0. The check is made here too so a
+        // retry that cannot be afforded prints no resume note; `ask` makes it again before the reader runs.
+        let jc = JobConfig::at(&self.git, &head)?;
+        self.preflight(&jc, 0.0, ReserveStage::Admission)?;
         // `ask` refuses a job that is not rejected, failed or interrupted before any model is called.
         self.state.registry().reap();
         // A job that stopped for the environment, or was interrupted, after its candidate was built resumes
@@ -3520,6 +3645,83 @@ mod tests {
         ] {
             assert!(description.contains(area), "{area}: {description}");
         }
+    }
+
+    fn shipped_config() -> athena_data::Config {
+        athena_data::Config::parse(include_str!("../../../athena.toml")).unwrap()
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn shipped_budget_covers_the_reserve() {
+        // Shipped caps: reader 0.50, planner and critic 0.75 over 3 rounds, producer 3.00, verifier 2.00.
+        let config = shipped_config();
+        let reserve = budget_reserve(&config, ReserveStage::Admission);
+        assert!(close(reserve, 10.0), "{reserve}");
+        // The shipped job budget of 12.00 covers it; the recorded 8.00 is $2.00 short.
+        assert!(config.budget.job_usd >= reserve);
+        let short = BudgetShort {
+            left: 8.0,
+            job_usd: 8.0,
+            reserve,
+            stage: ReserveStage::Admission,
+        };
+        assert!(close(short.shortfall(), 2.0));
+        let text = short.to_string();
+        assert!(text.contains("$2.00 short"), "{text}");
+        assert!(text.contains("[budget] job_usd"), "{text}");
+        assert!(text.contains("budget left"), "{text}");
+        // A reserve that left out the critic and later rounds would be smaller than the real one.
+        let plan = config.job_plan.expect("the shipped config plans");
+        assert!(reserve > config.budget.reader_usd + plan.planner_usd + 5.0);
+    }
+
+    #[test]
+    fn every_stage_counts_only_what_is_still_to_run_and_takes_its_caps_from_config() {
+        let mut config = shipped_config();
+        let plan = config.job_plan.as_mut().expect("the shipped config plans");
+        plan.enabled = true;
+        for max_rounds in 1..=4 {
+            config.job_plan.as_mut().unwrap().max_rounds = max_rounds;
+            let at = |stage| budget_reserve(&config, stage);
+            let plan = config.job_plan.unwrap();
+            let after = config.budget.producer_usd + config.budget.verifier_usd;
+            let round = plan.planner_usd + plan.critic_usd;
+            assert!(close(at(ReserveStage::Run), after));
+            assert!(close(at(ReserveStage::Dispatch { planned: false }), after));
+            assert!(close(
+                at(ReserveStage::Dispatch { planned: true }),
+                f64::from(max_rounds) * round + after
+            ));
+            assert!(close(
+                at(ReserveStage::Admission),
+                config.budget.reader_usd + f64::from(max_rounds) * round + after
+            ));
+            // The first planner is the whole planning path; the first critic is that less the planner.
+            assert!(close(
+                at(ReserveStage::Planner { round: 1 }),
+                at(ReserveStage::Dispatch { planned: true })
+            ));
+            assert!(close(
+                at(ReserveStage::Critic { round: 1 }),
+                at(ReserveStage::Admission) - config.budget.reader_usd - plan.planner_usd
+            ));
+            // The last critic needs only itself, the producer and the verifier.
+            assert!(close(
+                at(ReserveStage::Critic { round: max_rounds }),
+                plan.critic_usd + after
+            ));
+        }
+        // A changed cap changes the reserve with no code change.
+        config.budget.verifier_usd += 1.0;
+        let wider = budget_reserve(&config, ReserveStage::Run);
+        assert!(close(wider, 6.0), "{wider}");
+        // With planning off, admission is the reader, the producer and the verifier.
+        config.job_plan = None;
+        assert!(close(budget_reserve(&config, ReserveStage::Admission), 6.5));
     }
 
     /// A valid reading of one README deliverable, with the given forecast median wall time (seconds).

@@ -285,6 +285,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- One budget reserve now covers the whole path of a job, checked before the money is spent. Root cause: the budget
+  was checked only per invocation, after reading and planning had already spent, and the reserve it used left out
+  the critic and every later planning round, so a job could start with a budget that could not pay for the planning
+  rounds it was allowed (jobs 20261028-082151-67fa, 20261030-033434-3v30 and 20261030-151818-2c8g). The new
+  `reading::budget_reserve` is the only place that adds the caps, all read from athena.toml: the reader, plus
+  `max_rounds` times the planner and critic caps when `[job_plan]` is enabled, plus the producer and the verifier
+  (10.00 with the shipped caps). `Athena::preflight` applies it at admission (`ask`, a queued job's read, and a
+  read made again with its earlier spend), in `retry` (judged on the new job's own spend, which starts at 0), at
+  dispatch before anything is committed (with the planning terms only for a job that will be planned), before each
+  planner call and each critic call (counting only the rounds still to run), and after planning. A shortfall is a
+  typed `BudgetShort` error that names the shortfall, the reserve and the `[budget] job_usd` line in athena.toml.
+  The drain holds such an item: one `item <id> is left queued: ...` note, outcome `budget short`, not a failure, and
+  the next item that has the budget still runs. The higher refusal at admission is intended: the shipped
+  `job_usd = 12.00` covers the 10.00 reserve, and a job with less is refused before the reader runs. Four existing
+  tests got budget or cap numbers only so they still sit near the new reserve (`a_job_over_budget_is_refused_before_its_next_invocation`,
+  the cap-between planning test, the budget-runs-out-before-the-rerun test, and a planning test now using 4 rounds
+  instead of 5); `drain::Read` gained a `held` field, so two test literals in `tests/drain.rs` set it to false.
 - The reader's error is now kept and shown when it gives no usable reading. The commit titled "Read a request (the
   reader failed)" (and the one after a correction) used to drop the error text that `Proposal.reader_error`
   carried; its body now says "The reader gave no usable reading:" and the error, redacted, on one line and cut

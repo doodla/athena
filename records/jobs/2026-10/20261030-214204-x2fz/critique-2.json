@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-214204-x2fz",
+  "round": 2,
+  "at": "2026-10-30T21:55:59.063556899Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Several test rows rely on the fake driver reporting a turn that costs more than its role's cap (planner 6.24 against a 0.75 cap, reader 4.00 or 0.60 against a 0.50 cap).",
+      "evidence": "planning.rs:116/280 and reading.rs:387 check the cap only before an invocation. I found no clamping of cost_usd in the fake files (Grep `cost_usd.*(min|clamp|cap)` in **/fake*.rs found nothing), so the rows will probably work. But a real driver cannot spend these amounts, and a later post-invocation cap check would break the tests for reasons unrelated to the reserve. The plan raises this risk itself in its open questions. Fix: Where possible, reach the same 'left' values with in-cap costs and a smaller job_usd. For criterion 6, for example, use job_usd 5.90 with a 0.45 queue-time reader cost: left is 5.45 against the 5.50 reserve. If over-cap costs remain, add a comment saying the fake's oversized cost stands in for accumulated spend.",
+      "location": "Demonstrations, criteria 4(a), 4(c), 5 and 6",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Admission always reserves for planning, so a retry that resumes from a kept candidate (no planner or producer runs) is refused when job_usd is below 10.00, even though it needs only the verifier.",
+      "evidence": "reading.rs:921-934: a resumable retry runs no planner or producer. Admission cannot know the capability, but `retry` can tell from `resumable_job` and `read_resume` whether this retry resumes. Fix: Accept this as the safe side, which the plan already does. Also add a sentence to the CHANGELOG entry that a resumed retry is held to the full reserve, so someone running Athena with a lowered job_usd understands the refusal.",
+      "location": "Decision 3 / Risks: admission over-reserves",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The early `preflight(Admission, 0.0)` in `retry` duplicates the identical check in `ask`→`first_reading`. It also changes which refusal a non-retryable job reports.",
+      "evidence": "retry (reading.rs:935) calls `self.ask`, which reaches first_reading with prior None and spent 0. The early call can therefore never refuse anything the later one would accept. The plan's own risk list notes that it reorders the 'not retryable' refusal. Fix: Keep the call only if the producer confirms no existing test asserts the 'not retryable' wording for a job whose budget is short. Otherwise place it immediately before the resume note, after any eligibility check available in `retry`. Its stated purpose is to suppress the resume note, so the comment should say that.",
+      "location": "Decision 4 / Step 2: explicit preflight in retry",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The forced edit changes max_rounds, a cap that shapes the test's planning loop, instead of the budget.",
+      "evidence": "The plan says the test 'relies on two mechanical passes'. Lowering max_rounds changes the number of planning rounds the test allows, while the edits to lifecycle.rs and job_plan.rs change only budget values. Fix: Prefer raising job_usd in that test's config, if the helper exposes it, so the round count the test was written for is kept. Change max_rounds only if job_usd cannot be raised.",
+      "location": "Files: run/tests.rs `repo_with_planning(5)` → 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the accepted reading. I checked the sites it names against the snapshot: check_budget at reading.rs:287; first_reading at :841, where `before = prior.map_or(0.0, spent_usd)` at :855; retry at :909, which calls `ask` and so creates a new job; the planner and critic checks at planning.rs:116 and :280, which use `cfg.X_usd + after`; the producer-plus-verifier check in dispatch at run/mod.rs:750 and the later one at :931; the LowDisk downcast in the drain at drain.rs:2662 and the Held branch in run_job at :1200. RealSteps::read reaches the queued re-read through `athena.go` (drain.rs:2579), and its Err arm builds a Read with `job: None` (:2613). That confirms the plan's point that a budget hold at re-read needs a new `held` flag on Read. One reserve function with a stage enum is a sound root-cause fix. The stage sums agree with each other: Dispatch{planned} equals Planner{1}, and Critic{1} equals Admission minus reader and planner. Each behavioral demonstration runs the production path (`ask`/`go`, the real drain over RealSteps) against seams that exist today: `athena_with` in run_pin_tests.rs:153, plus `athena_with`, `planning_script` and `repo_with_planning` in run/tests.rs. Each would fail on the base commit for the reasons the plan gives. For example, in criterion 5, at $8.00 left the base passes the 5.00 dispatch check and the 5.75 planner check, so it reaches the planner. Touching run/tests.rs (Athena's finding) is justified: the new reserve forces an edit there, and it is the only athena-core harness with a scripted planner and critic. My remaining findings are minor: tests that rely on the fake driver reporting costs above a role's cap, the over-reserve for resumed retries, a retry preflight that duplicates the admission check, and an edit to an existing test that changes max_rounds rather than the budget."
+}
