@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-151827-48rm",
+  "round": 2,
+  "at": "2026-10-30T15:29:49.177509853Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan says a job id cited without 'Depends on' becomes a dependency on base. It does not, so the e5sg test is built on a wrong premise and cannot catch the fault it is meant to catch.",
+      "evidence": "In reading.rs, lines 1824-1827 document `dependency_ids_in`: it counts only full job ids on a line starting with 'Depends on'. Line 2158 says a job id anywhere else in the text is not a dependency. The tests at reading.rs 4768-4774 check exactly this. HISTORY.txt line 6 shows commit 9f3946d of 2026-10-30, 'Count only 'Depends on' ids and retry links as plan dependencies'. Even so, candidate (e) says a bare id 'becomes depends_on in reading::plan_entry (2178)'. The criterion 3 (A) fixture also gives the cited job a landed retry 'so e is not held'. With a landed retry, item e is worked first under both the old bare-id rule and the current one. So the test would pass on a build that still held e5sg, and it shows nothing about the e5sg shape. This also undermines criterion 5: the stated cause has to match the evidence. Fix: Correct candidate (e): on base a bare citation is not a dependency. This makes candidate (b), a drain built before 9f3946d/d72e755, the leading explanation for e5sg; say so with that evidence. In criterion 3 (A), give the cited job a failed (or rejected) history entry with no landed retry. Then assert that e is still in group 1, is dispatched first and gets no 'held' line. That test fails under the old rule. Leave reading.rs unchanged unless that test fails on base.",
+      "location": "Approach candidate (e); Decision 6; Demonstration for criterion 3 (A)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say what replan does with an id that is still pending but missing from the fresh queue. It could be dropped silently, or treated as having no plan entry and moved to the front.",
+      "evidence": "`batches_for` puts items 'with no plan entry' first, one per batch (drain.rs 1973-1979). Test fixtures such as World (drain.rs 2804) and the one at 3321 return a fixed item list. They do not list a job approved during the run. RealSteps::queue (2459-2493) does list it, through approved_work. An approved-now id that had an entry in the first plan but none in a later queue() would then jump ahead of better-priority items, or disappear without a line. Fix: Have replan reuse the item's last known entry, or call steps.plan_entry(id), when the fresh queue lacks it. Decide 'no plan entry' only from the first view. If an id has really left the queue (dropped by the owner), log it once as 'left the queue during the run'.",
+      "location": "Decision 1 / Step 4 (replan entries from the fresh queue().plan restricted to age ids); Risk 'Dropping an unplanned item'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An item counts as done once take_until_done handles it, whatever the outcome. So an item that `work` took but did not run gets no passed-over line.",
+      "evidence": "take_until_done (drain.rs 1675-1679) inserts item.job into st.done after every `work` call, whatever the result. An example is a reading that returns not runnable or fails inside work. Fix: Define 'worked' explicitly, for example as a run that started. Either confirm by reading `work` and `finish` that every early-exit outcome already prints a ui line naming the item, or include those outcomes in the end-of-run log.",
+      "location": "Step 7 / Decision 3 ('planned ids not in State.done or begun')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test for a priority record present before the run is expected to pass on base, so it shows nothing about the change.",
+      "evidence": "The plan says so itself. `prepare` already plans through Plan::build_with with entry_of's priority (drain.rs 1481), and `athena plan` uses the same `prepare` (drain.rs 2101-2112). Fix: Keep it as a regression guard, but say in the change description that criterion 1's symptom does not reproduce on base. The evidence then points to candidate (a) or (b) for the reported ignored record, not to the order code.",
+      "location": "Demonstration for criterion 1",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The oracle for the approval case comes from entries the test re-sorts itself, not from the queue order `athena plan` would use.",
+      "evidence": "`plan()` (drain.rs 2101-2112) never approves, so `athena plan` has no counterpart for this case. The read, approved, unread order is drain-only (1941-1964). Fix: Say in the test comment that this case pins drain's own documented age order and is not an agreement check with `athena plan`.",
+      "location": "Demonstration for criterion 3 (B)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan should be revised. What I read: drain.rs, plan.rs, reading.rs and HISTORY.txt. Most of the plan holds up against the code: `drain_with` builds its batches once (drain.rs 1969-2004). Refusals and cycles go only to `d.note`. `athena plan` and drain share `prepare` and its single `Plan::build_with` call. `Plan` has no held field (held items sit in `refused`), and `disjoint` is private in plan.rs. Extracting `coordinate`, adding `replan` and logging once at the end of `drain_with` is a sound, focused design. The only existing test that compares UI lines exactly (drain.rs 2925) has an empty queue, so the new end-of-run lines will not break it. The major problem is a factual error about base: the plan says a bare job id in a request becomes a dependency, but reading.rs (1824-1827, 2158) and commit 9f3946d show that only 'Depends on' lines count. Because of that, the e5sg test gives the cited job a landed retry. That makes it pass under both the old rule and the new one, so it cannot show the e5sg fault, and the cause statement needed for criterion 5 starts from a wrong premise. The minor findings: what replan does with an id missing from the fresh queue, whether items `work` took but did not run get a line, and the criterion 1 test that passes on base."
+}
