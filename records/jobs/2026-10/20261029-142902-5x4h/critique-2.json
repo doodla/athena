@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-142902-5x4h",
+  "round": 2,
+  "at": "2026-10-30T01:46:58.326536994Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "When a reading is stale, the default answer is 'the reading still holds'. That contradicts section 4 and fails unsafe.",
+      "evidence": "docs/design/async-drain.md:82-84 says the drain 'queues a fresh reading if they overlap'. In the plan, a stale reading goes to `recheck`, whose default `true` keeps it. Any later Steps that turns on `read_ahead` but forgets `recheck` would quietly run on a stale reading. The plan already chose a fail-loud default for `reread`; `recheck` should follow the same logic. Fix: Make the default `recheck` return false, so a stale reading gets a fresh reading through `reread`, whose default refusal fails loudly. Or drop the `recheck` hook and always call `reread` on overlap, as section 4 says. Update the 'kept when recheck says it holds' test to match.",
+      "location": "Plan decision 1 / decision 4 (default `recheck` returns true)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stop test would still pass without the `PumpDone` guard, so it does not show the guard is needed.",
+      "evidence": "Step 7 has the pump exit on its own when it sees a stop or `steps.stop_requested()`, with a 20 ms poll. A stop requested through `stop_requested` ends the pump within about 20 ms even without the guard, so the 2 s elapsed check passes either way. The guard only matters when the batch loop exits while the pump sees no stop, for example when a worker panics. Fix: Either drop the claim that this test fails without the guard, or add a test where the batch loop ends without a stop the pump can see (such as a worker panic caught with `catch_unwind` around `drain_concurrent`) and assert that the call returns.",
+      "location": "Demonstrations, criterion 1, test `read_ahead_ends_with_the_drain_when_a_stop_is_requested`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan departs from the reading's assumption that `read_ahead` comes from `Config.drain.pipeline`. In production the feature cannot be turned on at all.",
+      "evidence": "The accepted reading says 'read_ahead is read from the existing Config.drain.pipeline'. The plan makes RealSteps return 0 and leaves `plan_ahead`, `recheck` and `reread` at their defaults, so only fakes exercise the new code. main.rs:1127-1141 still passes `[parallel] max_concurrency`. The plan gives a reason (there is no safe re-read or planning-only entry) and lists this as an open question. Fix: Say plainly in the CHANGELOG entry and the module doc that this job only adds the drain mechanism. Raise the deviation from the reading with the user, rather than leaving it in the open questions alone.",
+      "location": "Plan decision 7 / Open questions (RealSteps keeps read_ahead 0)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The test asserts on a log entry 'plan b' that no step in the plan produces.",
+      "evidence": "The fake is said to log `plan_ahead <id>`. Nothing says which call logs `plan b`, yet the test needs `plan_ahead b` < `plan b` < `end a`. Fix: Say that the fake logs `plan b` when it returns Some(Planned), or assert only on `plan_ahead b`.",
+      "location": "Demonstrations, criterion 1, log order `plan_ahead b` < `plan b`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "There is a lot of new concurrency code and 13 new thread tests for one producer run.",
+      "evidence": "Section 12 sizes each job at about 15 minutes. This plan adds a pump thread, a condvar protocol, seven State fields, a run_job source enum, a moved batch loop, a drop guard and 13 tests that depend on thread timing. Fix: Keep the window, staleness and bound-1 tests, and fold the shared-only cases into table rows of fewer tests, so the run stays within one producer job.",
+      "location": "Steps 3-10 (size)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read drain.rs (State, run_job, land, work, take_until_done, run_parallel, drain_concurrent, RealSteps::read), the private disjoint rule in plan.rs, design sections 4, 11 and 12, and athena.toml. The plan holds up against the code. drain_concurrent and the Steps trait are the seams it says they are. Default trait methods keep main.rs and tests/drain.rs compiling without edits. Landing::Landed { changed } already gives the paths that landed. The copied rule matches plan.rs's overlap, SHARED_APPEND_ONLY and disjoint exactly, and the parity test goes through Plan::build, which is pub. The plan also gets the RealSteps hazard right: read(Queued) calls athena.go, so a separate reread hook is needed. Each behavior test goes through drain_concurrent with a fake that only logs calls and supplies data. The pump, the window, the claim logic, the staleness check and the choice of which reading runs are all production code, and the order checks would fail without the behavior. The remaining issues are minor. The default recheck returns true, so a stale reading is kept, which is the opposite of what section 4 says. The test for the drop guard does not actually need the guard to pass. Production stays inert, which departs from the reading's assumption about Config.drain.pipeline but is disclosed. There is also some risk the job does not fit one producer run. None of these blocks the plan."
+}

@@ -1,0 +1,203 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261029-142902-5x4h",
+  "round": 1,
+  "at": "2026-10-30T01:42:07.272996305Z",
+  "invocation_seq": 4,
+  "approach": "Add read-ahead to the parallel drain path only. New default-off methods on `Steps` (`read_ahead`, `plan_cap`, `plan_ahead`, `recheck`) let `drain_concurrent` stay source-compatible with every existing caller and fake. When `max_concurrency` is above 1 and `steps.read_ahead()` is above 0, `run_parallel` starts one extra \"pump\" thread in the same `thread::scope`. The pump reads (and, for hard jobs, plans) the next unclaimed items in plan order, keeping at most `read_ahead` read-but-not-started readings in `State.ahead`. It skips an item whose plan touches overlap an in-flight job. Workers claim an item, wait if the pump is mid-read on it, then run it as a pre-read job (the existing `item.read` path in `run_job`). `land()` records each landing's changed paths. At job start, if landings since the read touch the reading's paths (`Steps::plan_entry(job).touches`), the reading is marked stale in a note and `Steps::recheck` is asked. If it says the reading no longer holds, the item is read fresh by the existing `run_job` read. With `read_ahead` 0 or a bound of 1 no pump exists and behavior is unchanged. `RealSteps` is not changed, so production stays inert until a later job wires it. This revision only fixes the finding: criterion 4's demonstration now states what fails without the behavior. The design is unchanged.",
+  "decisions": [
+    {
+      "choice": "Expose read-ahead through new default methods on `Steps` (`read_ahead() -> u32 = 0`, `plan_cap() -> f64 = 0.0`, `plan_ahead(&str) -> Option<Planned> = None`, `recheck(&str, &[String]) -> bool = true`) instead of changing `drain_concurrent`'s signature.",
+      "reason": "`drain_concurrent` is called by crates/athena-cli/src/main.rs and crates/athena-cli/tests/drain.rs. The brief limits the change to drain.rs, reading.rs and CHANGELOG.md and forbids editing existing tests, so the signature cannot change. Default methods keep every existing `Steps` impl compiling. The test still goes through `drain_concurrent`.",
+      "rejected": [
+        {
+          "option": "Add a `read_ahead` parameter to `drain_concurrent`",
+          "why": "Breaks main.rs and the integration tests, which are outside the allowed files."
+        },
+        {
+          "option": "Add a new `drain_pipelined` entry point and leave `drain_concurrent` alone",
+          "why": "The criterion says the test is driven through `drain_concurrent`; a second entry point would leave that path untested."
+        }
+      ]
+    },
+    {
+      "choice": "Do not add a field to `Read` or `Run`. Hardness comes from `Steps::plan_ahead` returning `Some`.",
+      "reason": "crates/athena-cli/tests/drain.rs builds `Read { job, cost, runnable, error }` as full struct literals, so a new field would stop it compiling.",
+      "rejected": [
+        {
+          "option": "Add `hard: bool` to `Read`",
+          "why": "Breaks existing struct literals in tests that must stay unchanged."
+        }
+      ]
+    },
+    {
+      "choice": "The reading's touched paths come from the existing `Steps::plan_entry(job).touches`. The changed paths come from `Landing::Landed { changed }`. reading.rs stays unchanged.",
+      "reason": "Both seams exist today. A path-overlap helper is a few lines of pure code and belongs next to its only caller in drain.rs. The brief says reading.rs changes only if needed.",
+      "rejected": [
+        {
+          "option": "Add a touched-paths accessor or overlap helper to reading.rs",
+          "why": "Not needed; `plan_entry` already exposes the touches, and the helper would be a second home for one caller's logic."
+        }
+      ]
+    },
+    {
+      "choice": "On a stale reading the drain calls `Steps::recheck`. If it returns false the item's `read` flag stays false, so `run_job` reads it fresh through the existing path. A true result, or no overlap, uses the reading as is.",
+      "reason": "Matches section 4: keep the reading, re-check the touched paths at job start, queue a fresh reading if they overlap. Reuses the budget-guarded read in `run_job`.",
+      "rejected": [
+        {
+          "option": "Always re-read when anything landed",
+          "why": "Wastes reader dollars on untouched readings, contradicting the 'used as is' criterion."
+        },
+        {
+          "option": "Drain calls `steps.read` to re-read a reading already made",
+          "why": "`RealSteps::read(Queued)` on a read job would run it through `athena go`."
+        }
+      ]
+    },
+    {
+      "choice": "Read-ahead exists only in `run_parallel` (bound above 1). Serial `drain` and bound 1 never start a pump.",
+      "reason": "max_in_flight = 1 must behave as today. Reading ahead needs a second thread, which the serial path does not have.",
+      "rejected": [
+        {
+          "option": "Read ahead in the serial path with a helper thread",
+          "why": "Changes bound-1 behavior and the order of calls that existing tests log."
+        }
+      ]
+    },
+    {
+      "choice": "The window is the number of readings made and not yet claimed (`State.ahead.len()` plus reads in progress), capped at `read_ahead`. Items are taken in flattened plan order. The pump skips an item whose plan touches overlap an in-flight item's touches.",
+      "reason": "Gives the 'never more than read_ahead ahead' bound a single number to assert. Plan order keeps reading order equal to run order.",
+      "rejected": [
+        {
+          "option": "Limit by position in the queue",
+          "why": "Positions shift as items finish and are harder to assert."
+        }
+      ]
+    },
+    {
+      "choice": "The pump's reads reuse `State.read_cost`, the existing mechanism charging a planning-pass read to the item's job line. Reads and plans hold their caps in `Budget` while in flight, and the job limit is checked as `started + ahead + reading < max_jobs`.",
+      "reason": "Budget and job-limit rules stay as documented; nothing can overspend.",
+      "rejected": [
+        {
+          "option": "Charge read-ahead outside the budget",
+          "why": "Violates the budget rule."
+        }
+      ]
+    },
+    {
+      "choice": "Leave `RealSteps` on the default `read_ahead() == 0`, `plan_ahead() == None`, `recheck() == true`, and say so in the changelog and doc comments.",
+      "reason": "Planner and critic rounds run inside `Athena::go`, with no planning-only entry; exposing one is outside the three files. A real `recheck` needs a way to re-read a read job, which `read(Queued)` cannot do safely. Wiring `[drain.pipeline]` into main.rs belongs to build job 10.",
+      "rejected": [
+        {
+          "option": "Override `read_ahead` in `RealSteps` from `[drain.pipeline]`",
+          "why": "Turns read-ahead on with a no-op re-check, which could use a stale reading in production."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add the `Steps` default methods, the `Planned` type, `State` fields, the pump thread in `run_parallel`, claim and wait logic, landing-path tracking in `land`, the stale check, notes for unused readings, module doc text, and new unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased/Added entry for read-ahead and the stale-reading re-check, saying max_in_flight = 1 is unchanged.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In drain.rs add `pub struct Planned { pub cost: f64, pub error: Option<String> }`. Add default methods to `Steps` with doc comments for an outside reader: `read_ahead(&self) -> u32 { 0 }`, `plan_cap(&self) -> f64 { 0.0 }`, `plan_ahead(&self, job: &str) -> Option<Planned> { None }` (Some means the job is hard and planned), `recheck(&self, job: &str, changed: &[String]) -> bool { true }`.",
+    "Extend `State` with `ahead: BTreeMap<String, usize>` (job to landings seen when its read began), `reading: BTreeSet<String>`, `claimed: BTreeSet<String>`, `in_flight: BTreeMap<String, Vec<String>>`, `landings: Vec<Vec<String>>`, `touches: BTreeMap<String, Vec<String>>` (from `view.plan`, filled in `drain_with` before `run`) and `pump_done: bool`. Add a `Condvar` to `Drain` and initialize everything in `Drain::new`.",
+    "In `Drain::land`, on `Landing::Landed { changed }` push `changed` onto `st.landings` and notify the condvar.",
+    "In `take_until_done`, after popping an item: insert it into `claimed` and `in_flight` (with its touches), wait while the pump has it in `reading`, then call `work`. After `finish`, remove it from `in_flight` and notify. In `work`, before the first attempt, call a new `use_reading_ahead(&mut item)`: if the item has an `ahead` entry, take it, compute the paths changed by `landings[seen..]`, compare with `steps.plan_entry(job).touches` (fall back to `state.touches`; match on equality or directory prefix; empty touches with any landing counts as overlap). No overlap sets `item.read = true`. Overlap pushes a note naming the job and paths, calls `steps.recheck`, and sets `item.read = true` only if it returns true.",
+    "Add `fn read_ahead_pump(&self, upcoming: &[Item], window: usize)` in the `Sync` impl. Loop: exit on stop or `pump_done`. Pick the next unclaimed, unread, not-interrupted item in order. Require `ahead.len() + reading.len() < window`, `started + ahead + reading < max_jobs`, `!steps.stop_requested()`, plan touches not overlapping any `in_flight` touches, and budget fitting `caps.read`. Hold the cap, insert into `reading`, release the lock, call `steps.read(ReadOf::Queued)`, lock again, release, add the cost and record it in `read_cost`. If runnable with no error and `job == item.job`, call `steps.plan_ahead` under a held `plan_cap` and add its cost. Insert into `ahead` with the landing count taken before the read began. Always remove from `reading` and notify. Otherwise wait on the condvar with a 20 ms timeout.",
+    "Change `run_parallel`: when `workers > 1` and `steps.read_ahead() > 0`, run the batch loop and the pump inside one outer `std::thread::scope`, flatten batches into `upcoming`, and set `pump_done` and notify after the last batch. Keep the existing path verbatim when read-ahead is off. No signature change to `drain_concurrent`.",
+    "At the end of `drain_with`, add a note for each reading left in `ahead` that no job used. Update the module doc text with a bullet on read-ahead, the stale re-check, the bound-1 rule and the default-off hooks.",
+    "Add unit tests in `mod tests`: a `Sync` `ReadAheadWorld` fake with a shared log and counters, and a helper building complete `PlanEntry` values. Tests: `read_ahead_reads_and_plans_the_next_hard_job_while_the_current_one_runs`, `read_ahead_never_runs_further_ahead_than_the_window`, `a_stale_reading_is_rechecked_when_its_job_starts`, `an_untouched_reading_is_used_as_is`, `no_read_ahead_with_a_bound_of_one`, `a_read_ahead_read_must_fit_the_budget`, `read_ahead_skips_an_item_that_shares_paths_with_a_job_in_flight`. Do not edit existing test bodies.",
+    "Add the CHANGELOG.md bullet under `## [Unreleased]` / `### Added` in the existing style, covering read-ahead, the stale re-check, bound 1 unchanged, and that the real steps do not turn it on yet.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked`. Confirm `git status` shows only drain.rs and CHANGELOG.md."
+  ],
+  "risks": [
+    {
+      "risk": "Deadlock or lost wakeup between the pump and the workers.",
+      "mitigation": "All waits use `Condvar::wait_timeout` (about 20 ms) and re-check state under the `State` lock. The pump exits on stop, on `pump_done`, or when no candidate is left. Tests have 5-second deadlines and fail instead of hanging."
+    },
+    {
+      "risk": "Double reading: the pump and a worker read the same item.",
+      "mitigation": "The pump marks the item in `State.reading` under the lock before calling `steps.read`. A worker that claims an item waits until it leaves `reading`, then takes the stored reading from `ahead` if there is one."
+    },
+    {
+      "risk": "Overspend or job-limit overrun from reads made ahead.",
+      "mitigation": "The pump holds the read cap (and plan cap) in `Budget` while a call is in flight, adds the real cost afterwards, and requires `started + ahead + reading < max_jobs`. A test with a tight budget shows no read starts when it does not fit."
+    },
+    {
+      "risk": "Flaky timing in the thread tests.",
+      "mitigation": "Assertions are on log order forced by production invariants (dependency chain, batch order, window rule), not elapsed time. The fake's blocking has a 5-second cap and fails the assertion instead of hanging."
+    },
+    {
+      "risk": "Readings made ahead are left unused if the drain stops early, costing dollars.",
+      "mitigation": "A note names each unused ahead reading; the item stays read and queued so the next drain runs it without a second read. The window is capped by `read_ahead`."
+    },
+    {
+      "risk": "Existing behavior drifts for bound 1 or read_ahead 0.",
+      "mitigation": "No pump, no `ahead` and no `reading` entries exist on those paths, and the new `State` fields stay empty. Existing unit and integration tests run unchanged and are part of the criterion 3 and 4 checks."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New unit tests in `mod tests` of crates/athena-cli/src/drain.rs call the production entry point `drain_concurrent(&fake, limits, &Quiet, 2)`. The fake `ReadAheadWorld` implements `Steps`, is `Sync`, and keeps a `Mutex<Vec<String>>` log plus atomic counters. It overrides `read_ahead()` to 1 and `plan_ahead()` to return `Some` for the hard job. `queue()` returns a chain a→b→c (b hard) with complete plan entries built with `PlanEntry::bare`. Seam: the `Steps` trait, which exists today; step 1 adds the four default methods. The fake's `run(a)` polls for up to 5 seconds until `read b` and `plan b` are logged, holds 200 ms, then logs `end a`. The fake only records calls; the pump, window rule and ordering are production code. Guards: bound 2 gives workers above 1, and read_ahead above 0. A second test sets read_ahead to 2 on a chain a→b→c→d.",
+      "command": "cargo test --locked -p athena-cli --lib read_ahead",
+      "observes": "The log has `start a` < `read b` < `plan b` < `end a`; `read c` comes after `start b`; there is no `plan c` (c is not hard); a counter of readings made minus runs started never exceeds read_ahead. In the read_ahead 2 test, b and c are read and d is not while a runs.",
+      "fails_without": "With no pump, `read b` is logged only after `end a`, so the order assertion fails. With no window bound, `read c` appears before `start b` and the counter exceeds 1, so the bound assertion fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Two unit tests through `drain_concurrent(&fake, limits, &Quiet, 2)` with read_ahead 1 and a→b, b depending on a, and `plan_entry(\"b\")` returning touches `[\"src/b.rs\"]`. In the stale test the fake's `land(\"a\")` returns `Landed { changed: [\"src/b.rs\"] }` and its `recheck` logs `recheck b [src/b.rs]` and returns false. In the clean test `land(\"a\")` returns `[\"README.md\"]`. The fake only supplies data and logs; the overlap test, the note and the fresh-read decision are production code in drain.rs. Seam: `Steps::plan_entry` (exists today) and `Steps::recheck` (added in step 1).",
+      "command": "cargo test --locked -p athena-cli --lib stale_reading",
+      "observes": "Stale test: `recheck b` appears once, after `land a` and before `start b`; `read b` appears twice (ahead, then fresh); `Report.notes` has a line naming b and src/b.rs as stale. Clean test: no `recheck`, `read b` exactly once, and b runs on that reading.",
+      "fails_without": "Without landing-path tracking and the overlap check there is no `recheck` call and no stale note, so the stale test fails. If every landing forced a re-check, the clean test would see a `recheck` and a second `read b`, so it fails."
+    },
+    {
+      "criterion": 3,
+      "method": "A new unit test, `no_read_ahead_with_a_bound_of_one`, runs the same fake with read_ahead 1 through `drain_concurrent(..., 1)` and through `drain(...)`. Seam: `Steps` default methods (step 1). Existing tests (the `mod tests` in drain.rs and all of crates/athena-cli/tests/drain.rs) run unchanged; `git diff -- crates/athena-cli` shows only added test functions in drain.rs and no edits to tests/drain.rs.",
+      "command": "cargo test --locked -p athena-cli",
+      "observes": "`read b` is logged only after `end a`, no `plan_ahead` call is made at bound 1, and every existing drain test passes with unedited bodies.",
+      "fails_without": "If the pump started at bound 1, `read b` would precede `end a` and the new test fails. If the default methods changed behavior, the existing unedited drain tests in drain.rs and tests/drain.rs would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three Athena checks in order on the finished change (producer runs `cargo fmt --all` first). The `&&` chain stops at the first failure, so exit 0 means all three passed. This is the gate over the new pump, `Steps` defaults, `Planned`, State fields and tests: they must be formatted, warning-free under -D warnings (no unused fields or methods, no needless clones, no lock held across a call), and every test, old and new, must pass.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three commands exit 0. The test run includes the new read-ahead and stale-reading tests and the unedited existing drain tests, so it reports them passing.",
+      "fails_without": "Unformatted new code makes `cargo fmt --check` exit non-zero. Any clippy warning from the new code (for example an unused `Planned` field or `plan_cap` default) makes clippy exit non-zero under -D warnings. If the read-ahead behavior were missing or broke bound-1 behavior, the criterion 1, 2 or 3 tests (or an existing drain test) would fail and `cargo test` would exit non-zero."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff of CHANGELOG.md for a new bullet under `## [Unreleased]` / `### Added`, in the existing style.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The bullet describes read-ahead and the stale-reading re-check from section 4 of the async-drain design. It says reading and planning of hard jobs run up to `read_ahead` items ahead only when more than one job runs at once, that a reading whose paths a landing changed is re-checked at job start, that `max_in_flight = 1` is unchanged, and that the real steps do not turn it on yet.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the list of changed paths.",
+      "command": "git status",
+      "observes": "Only crates/athena-cli/src/drain.rs and CHANGELOG.md are modified. reading.rs is unchanged because `plan_entry` already exposes the touches. Nothing under athena.toml, defaults.toml or .github/workflows, and no other test file, appears.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Hard-job planning has no real implementation: planner and critic rounds run inside `Athena::go` (athena-core run/planning.rs) with no planning-only entry. `RealSteps` keeps `plan_ahead() == None`; a later job must expose that entry.",
+    "The real stale re-check needs a way to re-read a job that is already read. `RealSteps::read(Queued)` calls `athena go`, which would run it. Default `recheck() == true` keeps production inert. Which Athena call should a real `recheck` use?",
+    "Nothing wires `[drain.pipeline] max_in_flight` or `read_ahead` into `drain_concurrent` from main.rs; main.rs still passes `[parallel] max_concurrency`. Left for build job 10. Is that intended?",
+    "A read made ahead that fails or is not runnable is not stored, so the worker reads again and a failing read can be paid for twice. Acceptable, or should the failure be reported instead?"
+  ],
+  "producer_section_sha256": "8942c9ab57f35a4e4ad7510492792e21c1b951b6949af8dd4d27850d9e7a9086"
+}

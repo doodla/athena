@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261029-142902-5x4h",
+  "round": 1,
+  "at": "2026-10-30T01:43:29.981478389Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "A new path-overlap rule in drain.rs differs from the existing disjoint-paths rule and gives obvious false positives",
+      "evidence": "docs/design/async-drain.md:85-86 says read-ahead skipping uses \"the same disjoint-paths rule as `[parallel]` today\". That rule is crates/athena-core/src/plan.rs:334-361: `overlap` matches a directory prefix only at a `/` boundary, and `disjoint` drops SHARED_APPEND_ONLY = [CHANGELOG.md, docs/decisions.md, README.md] (plan.rs:344) because a clash there is caught by the landing check. The plan instead matches 'on equality or directory prefix' and never mentions the shared files. Every job in this repository adds a CHANGELOG.md entry, so a job in flight and the next reading nearly always both touch CHANGELOG.md. Under the plan's rule, read-ahead would be skipped almost always, and every landing would mark every reading stale and call recheck. The plan's own clean-path test uses README.md as the landed change, a shared file, which hides the issue. Fix: Use the existing rule. Either make plan.rs's `overlap`/`disjoint` (or a `paths_overlap(&[String], &[String])` that drops SHARED_APPEND_ONLY) `pub` and call it from drain.rs, or, if plan.rs must stay outside the allowed files, copy it exactly: `/` boundary, shared append-only files ignored, empty touches meaning 'unknown, so not disjoint'. Use it for both the in-flight skip and the stale check. Add a test case where both the landing and the reading touch CHANGELOG.md plus disjoint code paths, and show that the reading is used as is and that read-ahead is not skipped. If plan.rs needs an edit, say so as a scope question; it is outside the three named files.",
+      "location": "Plan step 4 and step 5 (the overlap rule for the stale check and for skipping items that share paths with a job in flight); Decision 3",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The test fixtures do not fix the touched paths the pump's skip rule needs, so the tests as described may not pass",
+      "evidence": "PlanEntry::bare sets `touches: Vec::new()` (plan.rs:248). Under the existing disjoint rule (plan.rs:360), empty touches are never disjoint, so the pump would skip b while a is in flight. The plan does not say how it treats empty touches for the in-flight skip. The criterion 2 test gives b the touches [src/b.rs] and has a's landing change src/b.rs, but it never states a's planned touches. If a's plan touches overlap src/b.rs, the pump correctly skips b and no read-ahead reading exists to go stale. Fix: State in the demonstrations the exact `touches` of every fixture entry: disjoint, non-empty paths for a, b, c and d in criterion 1. In criterion 2, a's planned touches must be disjoint from src/b.rs while its landing changes src/b.rs (the plan underestimated, which is the case section 4 covers). Add a test showing the pump skips an item whose touches overlap the job in flight. That test already exists as read_ahead_skips_an_item_that_shares_paths_with_a_job_in_flight, but it needs a stated observation and a stated failure without the behavior.",
+      "location": "Demonstrations, criteria 1 and 2 (the test fixtures)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The fresh read reuses read(Queued) on a job that is already read, the same call the plan calls unsafe",
+      "evidence": "Decision 4 rejects having the drain call `steps.read` again because `RealSteps::read(Queued)` 'would run it through `athena go`' (drain.rs:1883-1884). Yet setting item.read = false makes run_job call `self.steps.read(from)` with ReadOf::Queued (drain.rs:746), which is the same call. Fix: State plainly that the fresh read path is only right for fakes until a later job adds a safe re-read. Better, route the fresh read through a dedicated Steps hook (for example `reread(&str) -> Read`, default unimplemented or refusing), so a later job wiring RealSteps cannot hit `athena go` by accident.",
+      "location": "Decision 4 and plan step 4 (fresh read after recheck returns false)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The read-ahead reading's job id is dropped; a pre-read run uses item.job",
+      "evidence": "run_job's pre_read path fabricates `Read { job: Some(target) }` from `last_job`, which starts as item.job (drain.rs:738-744, 881). Read::job is documented as possibly a different job (drain.rs:271). The plan plans only when `job == item.job`, but it does not say what the drain stores or runs when the read returns a different id. Fix: Store read.job in `ahead`, and when the drain uses the reading, set last_job to it. Otherwise store the reading only when read.job == item.job and say so, with a note for the other case.",
+      "location": "Plan step 5 (storing the read-ahead reading) and step 4 (setting item.read = true)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "One assertion checks the fake, not the drain",
+      "evidence": "Hardness comes entirely from the fake's `plan_ahead` returning Some or None (Decision 2). The absence of `plan c` only shows that the drain calls plan_ahead and the fake returned None, unless the log records the call itself. Fix: Log every plan_ahead call in the fake and assert that the drain asked for c's plan and recorded no plan cost for c. Or drop that assertion and rely on the `plan b` ordering, which does test the drain.",
+      "location": "Demonstrations, criterion 1, the observation \"there is no `plan c` (c is not hard)\"",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The pump's lifetime in the outer scope and how it ends on early stops are not stated",
+      "evidence": "run_parallel creates a scope per batch (drain.rs:1257-1269). The plan nests these in an outer scope with the pump and sets pump_done only after the last batch. On an early `return` when stopped() (drain.rs:1259-1261), pump_done must still be set, or the outer scope waits until the pump notices `stop`. Fix: Say that pump_done is set on every exit from the batch loop (a guard or a single exit path), and add a test that stops after the first job and checks that the drain returns before its deadline.",
+      "location": "Plan step 6 and Risks (the pump thread and the batch loop)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the plan against drain.rs (the Steps trait, State, run_job, land, work, take_until_done, run_parallel, drain_concurrent and RealSteps::read), plan.rs (PlanEntry::bare, overlap, disjoint, SHARED_APPEND_ONLY) and section 4 and job list of docs/design/async-drain.md. The plan's seams are real. Steps can take new default methods, and Read's full struct literals do rule out a new field. Landing::Landed carries `changed` and Steps::plan_entry carries `touches`. RealSteps::read(Queued) really does call `athena.go`, so leaving RealSteps off is a defensible scope choice, and the plan raises it as an open question. One problem is in the approach itself. The plan writes its own path-overlap rule in drain.rs (\"equality or directory prefix\", empty touches count as overlap). Section 4 of the design asks for \"the same disjoint-paths rule as `[parallel]` today\", which is plan.rs `disjoint`/`overlap`. That rule has a `/` boundary on prefixes and leaves out the shared append-only files (CHANGELOG.md, docs/decisions.md, README.md). Almost every job in this repository touches and lands CHANGELOG.md. Under the plan's rule nearly every read-ahead would be skipped as clashing with the job in flight, and nearly every reading would be marked stale and re-checked. That is a rule with obvious false positives, and it differs from the design. The test fixtures also need stating: with bare entries (empty touches) the pump would skip every item under either rule, and in the stale test, item a's touches must be disjoint from src/b.rs. Without both, the criterion 1 and 2 tests cannot pass as written. Smaller issues: a fresh read after a failed re-check goes through the same read(Queued) call the plan itself calls unsafe; the reading's own job id is not kept; and one assertion only checks the fake. None of these block the plan."
+}

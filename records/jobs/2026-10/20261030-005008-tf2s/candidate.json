@@ -1,0 +1,151 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261030-005008-tf2s",
+  "base_commit": "abb7aeef4d78219b77b561a6dbdb224b427096c9",
+  "base_fingerprint": "sha256:831b658bb9060f43482d91b7e716909b272a870faff8ba64ebd8aa3463424121",
+  "previous_job": "20261029-142849-04d9",
+  "candidate_commit": "f05c367fcc8c8c34a84db36dfd1e294d7f340cf6",
+  "candidate_tree": "baa59ed381de6e0726eb25725f04c08f2a1e221d",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 230978
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 103000
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 170682
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11961
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31693
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16774
+    }
+  ],
+  "fingerprint": "sha256:b955cce2bac6fc921c8b1432ed20391890bf25d0c245a234f813fb297c87ef51",
+  "violations": [],
+  "producer_report": {
+    "summary": "I added the local in-flight table and fixed the wrong-path finding from the rejected attempt. The new tests, the clippy run and the policy scan pass. I did not run the full workspace suite or `cargo fmt --check`; both are left to Athena's checks.\n\n**Root cause fix.** The rejected candidate recorded the kept-work directory (`kept/<id>/work`). That directory only exists after a timeout. The live work tree is `jobs/<id>/work`. `state.rs` now has `StateDir::work_tree_in(job_dir)` and `work_tree(job)`, and both the producer snapshot in `run/producer.rs` and the table use them, so the two paths cannot differ.\n\n**The table.** It lives in `state.rs` as `InFlightTable`, stored as `in-flight.json`. Each row holds job id, stage (`producer`, `checks` or `landing`) and the live work tree.\n- A row is updated in place by job id.\n- Writes go to a temp file and are renamed over the table.\n- A missing file reads as an empty table.\n- A corrupt file is renamed aside to `in-flight.json.corrupt` (numbered if that name is taken) before the new table is written.\n- An I/O error is returned as an error, not treated as an empty table.\n\n**Drain.** `drain.rs` gains three `Steps` methods with defaults: `in_flight_table`, `worktree` and `run_staged`. The drain writes the producer stage before a run and the landing stage before landing. It removes the row when the run does not pass or landing ends. At start it reports leftover rows as notes and does not act on them, and a corrupt table is a note too. `RealSteps::worktree` returns `state.work_tree(id)`. With `max_in_flight = 1` the drain behaves as before.\n\n**Checks stage.** `RealSteps::run_staged` wraps the Ui and moves the row to `checks` when the run prints its \"producer   ...\" line, which comes after the producer finishes. That infers the stage from output text rather than a hook in the run itself (see open issues).\n\n**Tests.** Six unit tests in `state.rs` and nine in the new `mod in_flight` in `tests/drain.rs`; no existing test changed.\n- The `RealSteps` tests read the table from inside the producer script. They check the row equals the directory the producer was given and is not the kept path.\n- The timed-out test confirms the kept directory exists afterwards and no row ever names it.\n\nCHANGELOG.md has a new entry and `async-drain.md` section 11 notes that build job 3 is implemented.",
+    "files": [
+      "crates/athena-core/src/state.rs",
+      "crates/athena-core/src/run/producer.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md",
+      "docs/design/async-drain.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test drain in_flight",
+        "result": "pass",
+        "note": "9 passed, including both RealSteps tests"
+      },
+      {
+        "command": "cargo test -p athena-cli drain",
+        "result": "pass",
+        "note": "all drain tests pass (unit and integration)"
+      },
+      {
+        "command": "cargo test -p athena-core state",
+        "result": "pass",
+        "note": "19 passed, including the new table tests"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed"
+      },
+      {
+        "command": "cargo clippy --workspace --all-targets -- -D warnings",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied; formatting only"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test using the real steps implementation (RealSteps), not a stub, shows the table row's worktree equals the producer's live work tree (the StateDir job_dir/work path that run/producer.rs uses) while the producer stage runs, and is not the kept/<id>/work path. Run: cargo test -p athena-cli drain.",
+        "status": "met",
+        "evidence": "in_flight::the_real_steps_record_the_producers_live_work_tree_and_not_the_kept_one uses RealSteps. A script hook reads in-flight.json when the producer starts and asserts job id, stage producer and worktree == job_dir(id)/work == the workdir the producer was given. It also asserts worktree != kept_work_dir. Passes under cargo test -p athena-cli drain."
+      },
+      {
+        "criterion": "A test shows a timed-out job whose work is kept records the live work tree while it runs, and the kept-work directory is not used in the table. Run: cargo test -p athena-cli drain.",
+        "status": "met",
+        "evidence": "in_flight::a_timed_out_job_records_the_live_work_tree_while_it_runs_and_the_kept_directory_is_never_used uses RealSteps with a TimedOut producer and max_jobs 1. The row is the live path while it runs, the kept dir has src/partial.rs afterwards, no row ever names it, and the table is empty at the end. Passes."
+      },
+      {
+        "criterion": "A test calls drain with test Steps and max_in_flight = 1 and shows the in-flight file holds job id, stage and worktree at the producer, checks and landing stages, and no entry after the job closes. Run: cargo test -p athena-cli drain.",
+        "status": "met",
+        "evidence": "in_flight::the_file_holds_job_stage_and_worktree_at_producer_checks_and_landing_and_nothing_after_close calls drain::drain (serial, one job in flight) with a Stub wrapper. It asserts the file contents at the three stages and an empty table afterwards. in_flight::a_run_that_fails_or_a_landing_that_fails_leaves_no_row covers the failure paths. Pass."
+      },
+      {
+        "criterion": "Tests pre-write an in-flight file with a leftover entry and show it is read and reported at drain start; a missing file and a corrupt file do not fail the drain, and a corrupt file is kept (renamed aside) rather than silently overwritten. Run: cargo test -p athena-cli and cargo test -p athena-core state.",
+        "status": "met",
+        "evidence": "in_flight::a_leftover_entry_is_read_and_reported_at_drain_start, a_missing_file_is_an_empty_table_and_the_drain_runs and a_corrupt_file_is_a_note_and_is_kept_aside_not_overwritten pass. The last checks in-flight.json.corrupt holds the original bytes. state::tests::a_corrupt_in_flight_table_is_kept_not_overwritten and an_unreadable_in_flight_table_is_an_error_not_an_empty_table pass in cargo test -p athena-core state."
+      },
+      {
+        "criterion": "state.rs unit tests show the table round-trips, updates a stage in place, removes an entry, and writes atomically. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "state::tests::in_flight_table_round_trips_updates_in_place_and_removes and in_flight_table_is_written_through_a_rename pass (19 state-filtered tests passed). I ran the state filter, not the whole athena-core suite."
+      },
+      {
+        "criterion": "No existing test in drain.rs is modified or deleted (git diff), and cargo fmt --check, cargo clippy --workspace --all-targets -- -D warnings and cargo test --workspace pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks for fmt --check and the full workspace test run. I ran clippy --workspace --all-targets -D warnings (clean) and cargo fmt --all. My only edits to tests/drain.rs insert a new mod in_flight before the parallel section; no existing test lines were changed."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry describing the in-flight table (job id, stage, worktree; written at stage changes; read at drain start; unchanged at max_in_flight = 1). Check with git diff CHANGELOG.md.",
+        "status": "met",
+        "evidence": "A new first bullet under Unreleased/Added describes the table: job id, stage and worktree, written at stage changes, read at start, behavior unchanged at max_in_flight = 1."
+      },
+      {
+        "criterion": "docs/design/async-drain.md section 11 notes that build job 3 is implemented. The diff touches only drain.rs, state.rs, CHANGELOG.md, the design doc, and tests in crates/athena-cli/tests/drain.rs if needed; athena.toml, defaults.toml and workflows are unchanged. New public items have doc comments for an outside reader.",
+        "status": "met",
+        "evidence": "Section 11 has a new paragraph starting 'Build job 3 is implemented'. Files changed: drain.rs, state.rs, run/producer.rs (one line, the deliverable list names it), CHANGELOG.md, the design doc, tests/drain.rs. No config or workflow files were touched. All new public items in state.rs and the new Steps methods have doc comments. The policy scan test passes."
+      }
+    ],
+    "open_issues": [
+      "RealSteps decides the checks stage from the run's 'producer   ' output line (StageWatch in drain.rs). If that line changes, the stage stays at producer and the table is less precise, but the work tree path is not affected. A callback inside athena-core's run would be sturdier; I did not add one, to keep the change small.",
+      "The default Steps::worktree returns /work/<job>. That is a test placeholder for steps with no real work tree; RealSteps overrides it.",
+      "Leftover rows are only reported. They stay in the file until a later job (crash recovery) acts on them."
+    ],
+    "mistakes": [
+      "My first timed-out test let the retry consume the kept work and failed. I fixed it by limiting the drain to one job."
+    ],
+    "learnings": [
+      "The live work tree is jobs/<id>/work. The kept path kept/<id>/work is filled only after a timeout, and a successful retry removes it, so the timed-out test uses max_jobs = 1.",
+      "Athena::go takes any Ui, so RealSteps can wrap it to observe lines.",
+      "The run prints 'producer   ...' only after the producer finishes, and the checks come next. That is the only signal for the checks stage outside athena-core.",
+      "Section 11 of async-drain.md is the config block; the ordered build jobs list is section 12. The job-3 note sits in section 11 as asked."
+    ],
+    "desires": [
+      "A stage hook in athena-core's run, so the drain does not infer the checks stage from the producer's printed line."
+    ]
+  }
+}
