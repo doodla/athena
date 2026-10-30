@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013323-nmnv",
+  "round": 1,
+  "at": "2026-10-30T08:30:14.016263461Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "tests/drain.rs is on the brief's out-of-scope list, not only missing from the deliverables",
+      "evidence": "The out-of-scope list says the files 20261030-013143-as0j landed, including tests/drain.rs, 'stay as landed'. The plan explains why it leaves the deliverable list (job_plan.rs lacks `real_steps` and the other helpers) but never mentions this out-of-scope line. Adding one test does not undo as0j's work, so the intent is probably kept, but the conflict should be named. Fix: Say in Decision 6 and the open questions that tests/drain.rs is also on the out-of-scope list, and that an append-only new test leaves as0j's landed changes as they are.",
+      "location": "Files: crates/athena-cli/tests/drain.rs; Decision 6",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The request's own example may never be released",
+      "evidence": "`retried_job` only recognizes a request that starts with 'try again on <job>' (reading.rs:1252-1257, `retry_reference` at 1502). The plan itself says as0j may have been re-asked in other words. If so, 5c0p would be held with no way to release it, even though as0j landed. The reading accepted using the existing link, so this does not change the design, but the owner needs to know. Fix: In the CHANGELOG entry or the hold reason, tell the owner what releases a held item: a landed job whose request is 'try again on <id>'. Keep the open question about as0j so the owner can decide how to release 5c0p.",
+      "location": "Risks, first item; Open questions, last item",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 2, Case 2 describes a job that is both landed and open",
+      "evidence": "Case 2 has `r` landed and linked to `x`, and also an open entry that `b` depends on. A landed job is closed, so it cannot be a queued plan entry (Prepare builds entries from the queue view). The 'b comes after r' assertion therefore tests a state real records never produce. Fix: Split it into two realistic cases: (a) `r` landed and not an entry, so `b` is ordered; (b) `r` still open as an entry while `x` is rejected with no landed retry, so `b` stays held. Case (b) pins down the behavior for the request's own scenario, where the retry is queued alongside the dependent.",
+      "location": "Demonstrations, Criterion 2, Case 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The CLI test makes a job rejected in a fragile way",
+      "evidence": "The main path rewrites a landed job's Outcome to rejected and commits it with `commit_records_to`. That job's change is already on main, and `Records::load` validation may refuse the rewritten Outcome. The plan's own risk list says so and offers a fallback. Fix: Make the fallback the main path: first reach a real rejection with a scenario whose verdict fails, then queue 'try again on <x>' with a passing scenario and run it to landed. Rewrite records only if no rejecting scenario is available.",
+      "location": "Demonstrations, Criterion 3 setup; Step 8",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot and it is sound. The fault is where the plan says it is. In plan.rs, `Plan::build` (line 418) treats any dependency outside the open entries as done, because the ready filter at line 458 is `done.contains(d) || !known.contains(&d.as_str())`. Both `athena plan` (main.rs:1174, through `drain::plan`) and drain build their plan in `Drain::prepare` (drain.rs:1475), so fixing it once covers both. Keeping `build` and adding `build_with` with plain `JobEnd` data puts the rule in plan.rs, where it can be unit-tested, and leaves every existing `Plan::build` call and `PlanEntry`/`QueueView` literal unchanged. The `Steps` trait already has default methods (`plan_entry` at drain.rs:465), so a default `job_history` method that returns an empty list is consistent with the existing code. Drain already lists `plan.refused` as \"not worked\" (drain.rs:1980), and refused entries stay in `view.plan`, so a held item will not run as an unplanned item. The retry link the plan reuses is the existing `reading::retried_job` (reading.rs:1254), which scope_guard and status also use. The end states it relies on (Rejected, Failed, TimedOut, Stale) exist in `OutcomeState`. Each demonstration calls the real production code with plain data or real records, and each would fail under today's rule. Athena flagged that the CLI test goes in tests/drain.rs; the plan justifies that and adds only one test there. Remaining issues are minor: tests/drain.rs is also on the out-of-scope list, the request's own example may not carry a retry link, one criterion-2 test case describes an impossible state, and the way the CLI test makes a rejected job is fragile."
+}

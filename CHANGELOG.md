@@ -216,6 +216,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A dependency on a rejected or failed job with no landed retry now holds the dependent item. `athena plan`
+  and drain treated every dependency outside the open items as met, so a rejected job and a landed one looked
+  alike: on 2026-10-30 job 20261029-142858-5c0p, which names 20261029-142853-x4nr (rejected twice, re-asked as
+  20261030-013143-as0j), was ordered before its dependency existed. A dependency is now met when the named job
+  landed, or when a landed job is linked to it as its retry ("try again on <job>", also through a chain of
+  retries). Otherwise (rejected, failed, timed out or stale) the item, and every item that depends on it, is
+  left out of the order and listed under the held-back items with a `held` line that names the dependency. The
+  retry itself is not held by the job it retries. The rule is `Plan::build_with`, given the jobs' end states
+  (`reading::job_history`); `Plan::build` with no history is unchanged. Dropped, declined, abandoned and
+  unknown ids still count as met.
 - Athena's own writers no longer write words that its admission scan rejects. On 2026-10-29 a steward
   proposal described a recurring duty with a boundary word for the person running Athena, and approving it
   failed at admission, so the proposal could never be worked. The root cause was that each writer copied

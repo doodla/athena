@@ -1,0 +1,156 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261030-013323-nmnv",
+  "base_commit": "a2f22a122f72b29b6dc130d36e86fcf1d716bafc",
+  "base_fingerprint": "sha256:a925faab3d341fafb556056880fb501fad09b4b6c5e0c37831d68cfb945bcb21",
+  "previous_job": "20261030-013143-as0j",
+  "candidate_commit": "09d91e9049ecdd86317e07e64f50cc0f16342ffa",
+  "candidate_tree": "3b1980f05d88773c2c4cc0ebc572c2177e0f3676",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 236752
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 73642
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 155408
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 176612
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 60223
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 294972
+    }
+  ],
+  "fingerprint": "sha256:d1cbf1cf72d158baefc2f1a8594eb4e74f6779d84830c9d0102a440bd5e4a88d",
+  "violations": [],
+  "producer_report": {
+    "summary": "A dependency on a rejected, failed, timed-out or stale job with no landed retry now holds the dependent item. `Plan::build_with(entries, history)` holds it and everything that depends on it, and lists each in `Plan::refused` with a reason naming the dependency and an empty `missing`. `Plan::build(entries)` still works with no history, so existing callers are unchanged. A dependency is met when the job landed, or when a landed job reaches it through \"try again on <job>\" links, including chains and loops. Dropped, declined, abandoned and unknown ids still count as met. `reading::job_history` builds the history from the records, `Steps::job_history` defaults to empty and `RealSteps` overrides it, so `athena plan` and drain both get the rule through `Drain::prepare`. `display::plan` prints a `held` line for such a refusal. One thing outside the plan: a retry job's text names the job it retries, so it listed that job as a dependency and would have held itself. I added `Ending::Other` and a rule that an item linked as the retry of a dependency is not held by it, and the unit test and the real-records test both cover it. Full `cargo test --locked` was run once and came back without a failure exit code, but I could not read its output (see open_issues).",
+    "files": [
+      "crates/athena-core/src/plan.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core plan::",
+        "result": "pass",
+        "note": "25 tests, including the three new ones and the retry-not-held case"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain the_plan_holds_an_item",
+        "result": "pass",
+        "note": "Real-records test: rejected job, hold with a held line, retry not held, release after the retry landed."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "After fixing two cloned_ref_to_slice_refs findings in the new test."
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 tests; run before the clippy fix, which added no new words."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran once. It exited without the failure status that earlier failing runs showed, but I could not read the persisted output, so I did not see per-test lines."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-core/src/plan.rs, run with `cargo test -p athena-core plan`, builds a plan in which item B depends on a rejected job with no landed retry. B is absent from `order` and present in `refused` with a reason that names the rejected dependency.",
+        "status": "met",
+        "evidence": "`a_dependency_on_a_rejected_job_with_no_landed_retry_holds_the_item_and_its_dependents` passed in `cargo test -p athena-core plan::`. It checks that `order` is empty, `refused[0]` is `b` with empty `missing`, and the reason contains 'depends on x' and 'rejected'. A control `Plan::build` with no history still orders `b`."
+      },
+      {
+        "criterion": "A new test in the same module shows B is not held and is ordered after the retry once a retry of that job has landed. Run `cargo test -p athena-core plan`.",
+        "status": "met",
+        "evidence": "`a_dependency_is_met_once_a_retry_of_it_landed_and_the_item_is_ordered_after_it` passed. It covers a chain through a rejected retry, a landed job linked elsewhere (still held), loops, and a landed retry that is also an open item (order is r then b)."
+      },
+      {
+        "criterion": "A test through the real `athena plan` or drain entry in crates/athena-cli/tests (run with `cargo test -p athena-cli`) shows an item depending on a rejected job listed under the held-back items with the reason, and no longer held after a landed retry is linked.",
+        "status": "met",
+        "evidence": "`the_plan_holds_an_item_whose_dependency_was_rejected_until_a_retry_landed` in crates/athena-cli/tests/drain.rs passed. It runs `drain::plan` over real records and checks `display::plan` for a `held` line with the reason and '1 held back'. It then checks that the queued retry alone is ordered, and after the retry lands that the item is ordered with no `held` line. Placed in tests/drain.rs, not tests/job_plan.rs, because the helpers are private to it; see unchanged_planned_files."
+      },
+      {
+        "criterion": "A dependent of a held item is held as well and is not ordered. Existing plan.rs and drain tests pass unchanged: `cargo test`.",
+        "status": "met",
+        "evidence": "`a_dependent_of_a_held_item_is_held_too` passed: with entries ordered d, c, b, e it gives order `[e]` and refused d, c, b with 'depends on c/b, which is held back'. No existing test was edited. The full `cargo test --locked` returned without a failure exit code, but I could not read its output."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all --check` (clean), `cargo clippy --all-targets --locked -- -D warnings` (clean) and `cargo test --locked` (no failure exit)."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry stating that a dependency on a rejected or failed job without a landed retry now holds the dependent item, with the reason shown.",
+        "status": "met",
+        "evidence": "A new first bullet under Unreleased, Fixed, in CHANGELOG.md says the item is left out of the order and listed under the held-back items with a `held` line that names the dependency."
+      },
+      {
+        "criterion": "The doc comments on `Plan::build` and the module header in plan.rs describe the new rule instead of 'an id not among the entries counts as done' for rejected or failed jobs.",
+        "status": "met",
+        "evidence": "The module header has a new Dependencies bullet. `Plan::build` and `Plan::build_with` doc comments state the rule: met when landed or when a landed retry is linked, otherwise held with a reason. Only ids the history does not show failing still count as done."
+      },
+      {
+        "criterion": "The diff touches no athena.toml, defaults.toml, .github/workflows or records files.",
+        "status": "met",
+        "evidence": "`git status --short` lists only CHANGELOG.md, display.rs, drain.rs, tests/drain.rs, plan.rs and reading.rs."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan: `Ending::Other` and the `retries` exemption were added, with `job_history` listing every request job. The plan's history held only finished jobs, and without the exemption a retry job would have been held by its own dependency.",
+      "Departure from the plan: the real-records test is in tests/drain.rs, not tests/job_plan.rs, for the helper reason in the plan.",
+      "Full `cargo test --locked` output could not be read; Athena's recorded run is the authority.",
+      "A job re-asked in other words, with no 'try again on <job>' text (as in the request's own example for 5c0p), has no retry link and does not release the item; only a text link counts, as the plan chose.",
+      "Drain builds the plan once at its start, so a retry that lands during the run releases a held item only at the next plan or drain.",
+      "A dependent of an item refused for an incomplete plan is still ordered, as before; this is not changed."
+    ],
+    "mistakes": [
+      "The first test draft did a second `go` on the retry, which the plan stage had already read. The test panicked with 'already closed (landed)'. I fixed it.",
+      "The first test draft used `[retry.clone()]` in `assert_eq!`, which clippy rejected. I fixed it.",
+      "I ran the full suite with unfiltered output, and the harness persisted it outside my working directory where I could not read it. I could not re-run the suite, since the brief allows it once, so I inferred the pass from the exit status."
+    ],
+    "learnings": [
+      "`reading::plan_entry` makes an item depend on every job id named in its text. So a retry request ('try again on X') depends on X, and a naive hold rule would hold every retry by the job it retries. The rule needed an exemption for an item that is itself linked as the retry of the dependency.",
+      "`athena.go` on a job that `drain::plan` already read runs it directly. A second `go` fails with 'already closed (landed)'.",
+      "Clippy in this toolchain rejects `[x.clone()]` compared with a Vec in `assert_eq!` (`cloned_ref_to_slice_refs`). Use `[x.as_str()]`.",
+      "Bash cannot run `tail`, pipes or heredocs. A tool result saved outside the working directory cannot be read by Read or Grep."
+    ],
+    "desires": [
+      "Read access to a persisted large tool output, to confirm the full-suite result line by line."
+    ]
+  }
+}

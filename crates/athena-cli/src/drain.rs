@@ -145,7 +145,7 @@
 
 use athena_core::audience::{LivePage, Page, Target};
 use athena_core::gh::GhCli;
-use athena_core::plan::{Plan, PlanEntry, Refusal};
+use athena_core::plan::{JobEnd, Plan, PlanEntry, Refusal};
 use athena_core::pr::LinkState;
 use athena_core::state::{Stage, StageSink};
 pub use athena_core::status::{BUILD_PATHS, touches_build};
@@ -464,6 +464,12 @@ pub trait Steps {
     /// default) keeps the entry the queue view carried.
     fn plan_entry(&self, _job: &str) -> Option<PlanEntry> {
         None
+    }
+    /// How earlier jobs ended, for the plan's dependency rule: a dependency on a job that was rejected or failed
+    /// holds the item unless a landed job is linked to it as its retry. The default is no history, so every
+    /// dependency outside the queue counts as done.
+    fn job_history(&self) -> Vec<JobEnd> {
+        Vec::new()
     }
     /// Whether the user asked the loop to stop. It is asked only between jobs, never during one, so a job
     /// that has started is finished (and landed and rated) first. Not asking to stop is the default.
@@ -1472,7 +1478,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             .filter(|e| !forced.iter().any(|f| f.id == e.id))
             .cloned()
             .collect();
-        let mut plan = Plan::build(&entries);
+        let mut plan = Plan::build_with(&entries, &self.steps.job_history());
         for contradiction in plan.priority_violations(&entries) {
             self.note(format!("plan order contradicts priority: {contradiction}"));
         }
@@ -2495,6 +2501,12 @@ impl Steps for RealSteps<'_> {
         let records = self.records().ok()?;
         let head = self.athena.head().ok()?;
         self.entry_of(&records, &head, job)
+    }
+
+    fn job_history(&self) -> Vec<JobEnd> {
+        self.records()
+            .map(|r| athena_core::reading::job_history(&r))
+            .unwrap_or_default()
     }
 
     fn approve(&self, proposal: &str) -> Approval {

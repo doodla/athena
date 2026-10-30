@@ -1,0 +1,170 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-013323-nmnv",
+  "n": 1,
+  "at": "2026-10-30T08:25:06.254671747Z",
+  "invocation_seq": 2,
+  "base_commit": "cc83e54d2e6794c7c3a683b29e76c2c6298456e4",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Hold items whose dependency was rejected with no landed retry",
+  "summary": "Fix `athena plan` and drain ordering so a dependency counts as met only when the named job landed, or a landed job is linked as its retry. An item depending on a rejected or failed job with no landed successor is held back, with the reason under the plan's held-back items. Goal: stop jobs like 20261029-142858-5c0p running before their dependency 20261029-142853-x4nr has a landed successor (20261030-013143-as0j). Audience: the owner reading the plan and the drain.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The change is Rust in crates/athena-core and crates/athena-cli."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus cargo test and clippy -D warnings are criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the held and released ordering through Plan::build and the plan entry, not that fields exist."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name the cargo commands the verifier runs."
+    },
+    {
+      "id": "root-cause",
+      "how": "The rule is fixed in Plan::build, which both `athena plan` and the drain use, not in one caller."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the dependency rule."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that a dependent is not ordered before a landed successor exists."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-core/src/plan.rs is the entry point. `Plan::build` (line ~418) gets only the open entries. A dependency on an id outside them counts as done (`!known.contains`), so a rejected or landed job is treated alike. `Plan::refused` (a `Refusal` with a reason) is what the display lists as held-back items (crates/athena-cli/src/display.rs ~581). crates/athena-cli/src/drain.rs (~1469 `Plan::build`, ~2354 `entry_of`) builds the entries from records, and crates/athena-core/src/reading.rs `plan_entry` with its `Lookup` fills `depends_on`. No record or data file is added under crates/, so check_record_file and AnyRecord are not touched.",
+    "Design: `PlanEntry` gets a field (default empty) listing each dependency that is unmet and why, such as rejected or failed with no landed successor. `Plan::build` moves such an entry, and anything that depends on it, to `refused` with a reason naming the dependency, instead of ordering it. `entry_of` in drain.rs (and `reading::plan_entry` if needed) fills the field from job records: end state landed means met; else a job whose retry-of link names it and which landed means met. Tests in plan.rs use `Plan::build` with that field. The spec's Files line names only plan.rs and CHANGELOG.md, but populating it from records needs drain.rs and reading.rs, so they are listed at lower probability.",
+    "Previous jobs. 20261029-142858-5c0p (A4, failed, never verified, no candidate): not redone here. This change only stops it being ordered ahead of its dependency; its own work stays for a later run. 20261029-142853-x4nr (A3, rejected): its candidate (drain.rs, state.rs, CHANGELOG.md) is dropped. Its findings no longer apply because 20261030-013143-as0j, which landed, fixed the worktree path and the stages. 20261030-013143-as0j (landed, pass): kept as landed, including drain.rs, state.rs, run/mod.rs, run/producer.rs, tests/drain.rs, tests/lifecycle.rs, CHANGELOG.md and docs/design/async-drain.md. Its minor finding (a moved row keeps the verifier stage) is a separate issue and left alone.",
+    "A job counts as the retry of another by the existing retry link in the job records (the same link that `RealSteps::read`'s Retry branch uses); no new link is invented.",
+    "A failed or rejected dependency with a landed retry is met. A dependency on a job id that does not exist keeps today's behavior (counts as done), since the request only concerns rejected and failed jobs."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-core/src/plan.rs, run with `cargo test -p athena-core plan`, builds a plan in which item B depends on a rejected job with no landed retry. B is absent from `order` and present in `refused` with a reason that names the rejected dependency.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test in the same module shows B is not held and is ordered after the retry once a retry of that job has landed. Run `cargo test -p athena-core plan`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test through the real `athena plan` or drain entry in crates/athena-cli/tests (run with `cargo test -p athena-cli`) shows an item depending on a rejected job listed under the held-back items with the reason, and no longer held after a landed retry is linked.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A dependent of a held item is held as well and is not ordered. Existing plan.rs and drain tests pass unchanged: `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry stating that a dependency on a rejected or failed job without a landed retry now holds the dependent item, with the reason shown.",
+      "kind": "content"
+    },
+    {
+      "text": "The doc comments on `Plan::build` and the module header in plan.rs describe the new rule instead of 'an id not among the entries counts as done' for rejected or failed jobs.",
+      "kind": "content"
+    },
+    {
+      "text": "The diff touches no athena.toml, defaults.toml, .github/workflows or records files.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "p": 0.4
+    }
+  ],
+  "out_of_scope": [
+    "Reworking or re-running 20261029-142858-5c0p (A4); its work stays for a later job",
+    "20261029-142853-x4nr's candidate changes to drain.rs, state.rs and CHANGELOG.md: dropped, superseded by 20261030-013143-as0j",
+    "Changes to files 20261030-013143-as0j landed: run/mod.rs, run/producer.rs, state.rs, tests/drain.rs, tests/lifecycle.rs and docs/design/async-drain.md stay as landed",
+    "The in-flight row stage issue from 20261030-013143-as0j's verification",
+    "Changes to athena.toml, defaults.toml, .github/workflows",
+    "Creating new retry links or changing how retries are recorded"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1700.0,
+        "p90": 3300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7198924731182796,
+      "p_verification_passes": 0.670926517571885,
+      "p_user_intervenes": 0.07633136094674556,
+      "cost_usd": {
+        "p10": 0.5300199390027948,
+        "p50": 1.194743764052125,
+        "p90": 3.0965260024158847
+      },
+      "wall_time_s": {
+        "p10": 531.8921143870002,
+        "p50": 1704.323319354,
+        "p90": 3424.892355433001
+      }
+    }
+  },
+  "departures": "The change must feed dependency states from job records into the plan entries, which the Files line omits, so cost and time sit a little above the reference.",
+  "urgent_reason": "It stops the drain working a job before its dependency exists, which causes failed and rejected attempts (5c0p stopped with no code written).",
+  "hard_reason": "It changes the rule that holds work in the plan and the drain's order, so a mistake could hold or release the wrong jobs.",
+  "producer_effort": "high"
+}

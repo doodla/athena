@@ -511,8 +511,9 @@ pub fn land_pr(report: &athena_core::gh::PrReport) -> String {
 }
 
 /// What `athena plan` prints: the order, the parallel groups, each planned item's goal, rung, acceptance, open
-/// questions, dependencies and touched paths, then the items held back with the reason. With nothing open it
-/// says so.
+/// questions, dependencies and touched paths, then the items held back with the reason (a `flagged` line for an
+/// incomplete plan, a `held` line for a dependency that was rejected or failed with no landed retry). With
+/// nothing open it says so.
 pub fn plan(report: &crate::drain::PlanReport) -> String {
     let mut out = String::new();
     if report.entries.is_empty() {
@@ -582,14 +583,19 @@ pub fn plan(report: &crate::drain::PlanReport) -> String {
         if let Some(e) = report.entries.iter().find(|e| e.id == r.id) {
             entry_lines(&mut out, e);
         }
-        let _ = writeln!(
-            out,
-            "flagged     {} · {} lacks {}: {}",
-            r.id,
-            r.title,
-            r.missing.join(", "),
-            r.reason
-        );
+        if r.missing.is_empty() {
+            // Held for a dependency that has not landed: the plan is complete, so nothing "lacks".
+            let _ = writeln!(out, "held        {} · {}: {}", r.id, r.title, r.reason);
+        } else {
+            let _ = writeln!(
+                out,
+                "flagged     {} · {} lacks {}: {}",
+                r.id,
+                r.title,
+                r.missing.join(", "),
+                r.reason
+            );
+        }
     }
     for note in &report.notes {
         let _ = writeln!(out, "note        {note}");

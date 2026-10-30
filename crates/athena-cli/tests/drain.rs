@@ -4450,6 +4450,84 @@ fn a_study_whose_model_contradicts_itself_fails_the_floor_without_a_model_call()
     assert_eq!(check.cost, 0.0);
 }
 
+#[test]
+fn the_plan_holds_an_item_whose_dependency_was_rejected_until_a_retry_landed() {
+    let fx = Fixture::new();
+    // The dependency is rejected: the verifier finds a criterion unmet.
+    let mut failing = rated_scenario();
+    failing.verdict = rejecting_verdict();
+    let rejecting = fx.athena(failing.script());
+    let (dependency, _) = rejecting.queue(FIRST).unwrap();
+    let dependency = dependency.as_str().to_string();
+    rejecting.go(&dependency, AcceptedBy::Flag, &Quiet).unwrap();
+    rejecting.go(&dependency, AcceptedBy::Flag, &Quiet).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(
+        records.jobs[&dependency].state(),
+        JobState::Closed(OutcomeState::Rejected)
+    );
+
+    // An item that says it depends on the rejected job.
+    let athena = fx.athena(rated_scenario().script());
+    let (dependent, _) = athena
+        .queue(&format!("{SECOND}\nThis comes after {dependency}."))
+        .unwrap();
+    let dependent = dependent.as_str().to_string();
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    // No retry has landed: the item is held back with the reason, not ordered.
+    let report = drain::plan(&steps, 5.0, &Quiet).unwrap();
+    assert!(
+        !report.plan.order.contains(&dependent),
+        "{:?}",
+        report.plan.order
+    );
+    let held = report
+        .plan
+        .refused
+        .iter()
+        .find(|r| r.id == dependent)
+        .unwrap_or_else(|| panic!("{dependent} is held: {:?}", report.plan));
+    assert!(held.missing.is_empty());
+    assert!(
+        held.reason.contains(&dependency) && held.reason.contains("rejected"),
+        "{}",
+        held.reason
+    );
+    let text = display::plan(&report);
+    assert!(text.contains("1 held back"), "{text}");
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("held") && l.contains(&dependent))
+        .unwrap_or_else(|| panic!("a held line for {dependent}: {text}"));
+    assert!(line.contains(&held.reason), "{line}");
+
+    // The retry names the rejected job, so it is not held by it; the item still waits for the retry to land.
+    let (retry, _) = athena.queue(&format!("try again on {dependency}")).unwrap();
+    let retry = retry.as_str().to_string();
+    let report = drain::plan(&steps, 5.0, &Quiet).unwrap();
+    assert_eq!(report.plan.order, [retry.as_str()], "{:?}", report.plan);
+    let refused: Vec<&str> = report.plan.refused.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(refused, [dependent.as_str()]);
+
+    // The retry (already read by the plan) is run and lands: the item is no longer held.
+    athena.go(&retry, AcceptedBy::Flag, &Quiet).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(
+        records.jobs[&retry].state(),
+        JobState::Closed(OutcomeState::Landed)
+    );
+    let report = drain::plan(&steps, 5.0, &Quiet).unwrap();
+    assert_eq!(report.plan.order, [dependent.as_str()], "{:?}", report.plan);
+    assert!(report.plan.refused.is_empty(), "{:?}", report.plan.refused);
+    let text = display::plan(&report);
+    assert!(
+        !text.lines().any(|l| l.starts_with("held")) && text.contains("0 held back"),
+        "{text}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // Parallel drain: `drain_concurrent` with `[parallel] max_concurrency`
 
