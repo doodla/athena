@@ -84,7 +84,7 @@ impl Athena {
         // The producer, in a detached snapshot of the base with a one-commit repository of its own. A
         // tree-seeded retry's work tree holds the rejected candidate's files on top of that base commit, so
         // the change list below is still against the base.
-        let work = job_dir.join("work");
+        let work = crate::state::StateDir::work_tree_in(job_dir);
         if work.exists() {
             crate::pin::remove_tree(&work)?;
         }
