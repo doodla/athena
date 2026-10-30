@@ -151,8 +151,12 @@ Point 4. A wait is not work. While one job waits for CI or while the drain rebui
   (landing is held), and stops with a message, as D140 does today. Nothing lands on top of a main the drain cannot
   build.
 - Crash mid-flight: the in-flight table (job id, stage, worktree path) is written to a local file at each stage change.
-  On restart the drain re-reads it: a job in the producer stage resumes through the existing retry path; a job in the
-  landing stage re-checks whether its branch already landed before doing anything.
+  A stage change is the run entering the producer (again on each send-back), the checks, the verifier, or the landing;
+  the run reports it itself, and no output text is matched. A rejected or failed job's row waits for its retry, which
+  moves the row to the new job and sets it to producer when the retry's producer starts. On restart the drain re-reads
+  the file: a job in the producer stage resumes through the existing retry path; a job in the landing stage re-checks
+  whether its branch already landed before doing anything. Build job 3 only reads the file and reports leftover rows;
+  acting on them is build job 9.
 
 ## 8. Ordering of records commits with several jobs in flight
 
@@ -222,7 +226,16 @@ come first. Nothing here changes a limit until job 10.
    shows the latest. The numbers are those records, read once they exist.
 2. **`[drain.pipeline]` config table.** Depends on: none. Schema, validation, defaults at today's behavior, tests.
 3. **In-flight table.** Depends on: 2. The local file of job id, stage and worktree, written at each stage change and
-   read at start.
+   read at start. *Implemented (D145).* The file is `in-flight.json` in the state directory, one row per job being
+   worked (`InFlight` in `crates/athena-cli/src/drain.rs`). The stage comes from the run: `Athena::go_with_stages`
+   tells a `StageSink` when it enters the producer (again after a send-back), the checks, the verifier and, for a
+   blocked job, the landing; the drain's own landing step reports landing. The worktree is the producer's live work
+   tree, `StateDir::work_dir` (`jobs/<id>/work`), the path the producer's snapshot uses, and not the kept work of a
+   timed out job. A row is removed when the item's work ends, and after a landing; the retry of a rejected job
+   takes over the old job's row, so a send-back after the checks or the verifier shows as the same row going back
+   to producer. A drain reads the file at its start and notes each leftover row without acting on it. A missing file is
+   empty; a file that cannot be read is moved to `in-flight.json.corrupt` and noted. A failed write is a warning
+   line, never a job failure. At `max_in_flight = 1` nothing else about the drain changes.
 4. **Per-job worktree start.** Depends on: 3. Create and remove a worktree and its target directory per job; the disk
    bound from section 5 computed from job 1's numbers.
 5. **Read-ahead.** Depends on: 2. Read and plan up to `read_ahead` jobs, with the stale-reading re-check.

@@ -74,17 +74,13 @@ impl Athena {
 
     /// Stage S2: the producer's detached snapshot of the base, with the grant, brief frame and environment
     /// its invocations use.
-    pub(super) fn producer_snapshot(
-        &self,
-        ctx: &RunContext<'_>,
-        job_dir: &std::path::Path,
-    ) -> Result<ProducerWork> {
+    pub(super) fn producer_snapshot(&self, ctx: &RunContext<'_>) -> Result<ProducerWork> {
         let jc = ctx.jc;
         let p = ctx.prediction.clone();
         // The producer, in a detached snapshot of the base with a one-commit repository of its own. A
         // tree-seeded retry's work tree holds the rejected candidate's files on top of that base commit, so
         // the change list below is still against the base.
-        let work = job_dir.join("work");
+        let work = self.state.work_dir(ctx.id());
         if work.exists() {
             crate::pin::remove_tree(&work)?;
         }
@@ -152,6 +148,8 @@ impl Athena {
         // The criteria the last report left to Athena's checks; the verifier judges them from the checks.
         let mut left_criteria: Vec<String>;
         let report = loop {
+            // Every pass enters the producer stage, so a send-back reports it again.
+            ctx.stages.enter(&id, Stage::Producer);
             let mut spec = self.agent_spec(
                 jc,
                 &id,

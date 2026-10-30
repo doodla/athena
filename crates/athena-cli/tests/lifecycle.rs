@@ -1565,6 +1565,50 @@ fn a_criterion_unmet_before_verification_goes_back_to_the_producer_not_the_verif
     );
 }
 
+/// Keeps every stage the run reports, in order.
+#[derive(Default)]
+struct StageLog(Mutex<Vec<(String, athena_core::state::Stage)>>);
+
+impl athena_core::state::StageSink for StageLog {
+    fn enter(&self, job: &athena_data::JobId, stage: athena_core::state::Stage) {
+        self.0.lock().unwrap().push((job.to_string(), stage));
+    }
+}
+
+#[test]
+fn stage_report_names_the_producer_again_after_a_send_back_then_checks_then_the_verifier() {
+    use athena_core::state::Stage;
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario.report = unmet_criterion_report();
+    scenario.report_when_sent_back = Some(full_test_report("pass"));
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let stages = StageLog::default();
+    let f = finished(
+        athena
+            .go_with_stages(
+                proposal.job.as_str(),
+                AcceptedBy::User,
+                &Lines::default(),
+                &stages,
+            )
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    let seen = stages.0.lock().unwrap().clone();
+    let job = proposal.job.to_string();
+    assert_eq!(
+        seen,
+        [
+            (job.clone(), Stage::Producer),
+            (job.clone(), Stage::Producer),
+            (job.clone(), Stage::Checks),
+            (job, Stage::Verifier),
+        ]
+    );
+}
+
 #[test]
 fn a_criterion_still_unmet_after_the_send_back_reaches_the_verifier_flagged() {
     let texts = criteria_texts(&default_reading());

@@ -12,6 +12,42 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+/// A stage of a run, as the run pipeline enters it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage {
+    Producer,
+    Checks,
+    Verifier,
+    Landing,
+}
+
+impl Stage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stage::Producer => "producer",
+            Stage::Checks => "checks",
+            Stage::Verifier => "verifier",
+            Stage::Landing => "landing",
+        }
+    }
+}
+
+/// Told by the run pipeline each time it enters a stage of a job: every producer invocation (so the
+/// producer's send-back after a failed self-check reports `Producer` again), the checks, the verifier and
+/// the landing. Nothing infers a stage from output text; this is the one source.
+pub trait StageSink {
+    fn enter(&self, job: &JobId, stage: Stage);
+}
+
+/// The sink that ignores every report, for callers that do not track stages.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoStages;
+
+impl StageSink for NoStages {
+    fn enter(&self, _job: &JobId, _stage: Stage) {}
+}
+
 /// One repository's state directory.
 #[derive(Debug, Clone)]
 pub struct StateDir {
@@ -51,6 +87,13 @@ impl StateDir {
     /// The job's own directory: snapshots, live records, build directories.
     pub fn job_dir(&self, job: &JobId) -> PathBuf {
         self.root.join("jobs").join(job.as_str())
+    }
+
+    /// The producer's live work tree: where its snapshot is created and where its invocations run. The
+    /// producer stage and anything that names the work tree of a running job use this one path. It is not
+    /// [`kept_work_dir`](StateDir::kept_work_dir), which holds the work of a job that timed out.
+    pub fn work_dir(&self, job: &JobId) -> PathBuf {
+        self.job_dir(job).join("work")
     }
 
     /// Where the work tree of a job whose producer hit its deadline is kept. It lies outside the job's own
@@ -386,6 +429,30 @@ mod tests {
 
     fn blocks(path: &Path) -> u64 {
         std::fs::symlink_metadata(path).unwrap().blocks() * 512
+    }
+
+    #[test]
+    fn the_live_work_tree_is_under_the_job_directory_and_not_the_kept_one() {
+        let state = StateDir::new(PathBuf::from("/state"));
+        let work = state.work_dir(&job());
+        assert_eq!(work, state.job_dir(&job()).join("work"));
+        assert_eq!(work, PathBuf::from("/state/jobs/20261023-181804-j42y/work"));
+        assert_ne!(work, state.kept_work_dir(&job()));
+    }
+
+    #[test]
+    fn stage_names_are_lowercase_and_match_their_serialized_form() {
+        for stage in [
+            Stage::Producer,
+            Stage::Checks,
+            Stage::Verifier,
+            Stage::Landing,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&stage).unwrap(),
+                format!("\"{}\"", stage.as_str())
+            );
+        }
     }
 
     #[test]
