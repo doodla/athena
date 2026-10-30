@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-151827-48rm",
+  "round": 1,
+  "at": "2026-10-30T15:24:24.797715391Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan treats the drain's order as already equal to Plan::build_with's order, apart from staleness. But drain_with changes the order before and after planning in ways `athena plan` never does, and the plan names none of them as a candidate cause.",
+      "evidence": "`athena plan` (drain.rs 2101-2112) calls steps.queue() and then prepare with no other steps. drain_with does three more things. (a) approve_all approves jobs and adds their plan entries. (b) It splits items into read-then-approved-then-unread and, when anything was approved, re-sorts view.plan by that position (1941-1964). That changes the age tiebreak Plan uses. (c) Items with no plan entry are dispatched ahead of every planned item, each in a batch of its own (1971-1979). Any of these can make the dispatch order differ from `athena plan` with no stale plan. A replan that reads queue() again would also get RealSteps order, not the partitioned order, so the tiebreak could differ between the first plan and later ones. Fix: Add (b) and (c) to the candidate causes and say which evidence each one explains. Make the first plan and every replan use one ordering of entries, so the tiebreak is the same as `athena plan`'s, or justify the partition in a comment. Extend the criterion-3 test with an approved-now item and a read item that is younger than an unread one, so the oracle comparison covers this path.",
+      "location": "Approach / candidate causes; drain.rs drain_with lines 1938-1985",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The criteria ask for a priority record, but the fixture hands the drain a PlanEntry that already has priority Low. The step that turns a record into a priority is never run, so that part is tested only through a double.",
+      "evidence": "For a queued job that did not come from a proposal, the priority comes from reading::plan_entry (reading.rs 2177 `entry.priority = job.priority()`, with the addendum override guarded by `job.priorities.is_empty()` at 2221). entry_of (drain.rs 2385-2402) only re-applies it for proposals. The plan says the fixture 'gives u a PlanEntry with priority Low, as entry_of does', so a fault in record-to-priority would go unseen. The plan also expects criterion 1 to pass on base. Fix: In Ranked::queue, build each PlanEntry by calling the public athena_core::reading::plan_entry on a Job record whose text says urgent and whose priorities hold a 'low' record. For the mid-run test, append the record to that Job. The real conversion then runs inside the drain test. Keep the oracle outside the fixture.",
+      "location": "Demonstrations, criteria 1 and 2 (Ranked fixture)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A clash alone does not leave an item unworked, and neither does a dependency that fails mid-run once a replan runs. The table cases as written do not produce the reasons they name.",
+      "evidence": "With max_in_flight 1, Plan puts a clashing item in a later group and it is still worked (drain.rs 1980-1985). After a dependency fails, replan calls build_with with the new history, which refuses or holds the dependent item. So it gets 'held', not 'not ready'. The plan does not define what Plan::wait_reason returns in either case. Fix: Combine (d) with a run end, such as a stop or job limit before the clashing item, and assert the combined reason. Define wait_reason's output for each case, and state for (e) whether the expected reason is held or not ready.",
+      "location": "Demonstrations, criterion 4 cases (d) and (e)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 'rebuild only when changed' gate saves almost nothing. The costly part, queue(), runs every time, and the key includes job history, which changes after every item ends.",
+      "evidence": "RealSteps::queue (2440-2494) reads all records and calls entry_of for each item. entry_of does a git show of BRIEF.md and path_exists lookups per item (2375-2384). The comparison happens after this read, and every finished job adds to history, so the key differs after nearly every item. Fix: State honestly in the code comment that the replan runs after each item, and give its cost as a records read plus git lookups with no model call. Do not present the key check as the thing that limits cost. Optionally skip the queue re-read when no records changed since the last read.",
+      "location": "Decision 1 / Risks (replan cost)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Re-reading the queue mid-run will pick up requests queued during the drain. An underspecified one is never read (replan does not call read), so it is logged as refused, where a fresh drain would have read it first. That is a behavior change the plan does not mention.",
+      "evidence": "Risk 2 keeps forced refusals and replan never calls Steps::read. prepare reads underspecified items only in the first pass (1414-1474). Fix: Decide explicitly how replan treats items that were not in the first view: ignore them for this run, or include them with a distinct 'queued during the run; not read' reason. Document the choice in the CHANGELOG entry and add a test for it.",
+      "location": "Decision 1 / step 4 (replan re-reads queue)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Verdict: revise. The plan fits the request and the accepted reading. It retries the job, adds re-planning between items or batches, and logs passed-over items at the end of the run. It keeps the overlap rule in plan.rs through a new Plan::wait_reason, which is sound. The named code exists: prepare at 1414 calls Plan::build_with at 1481, and drain_with, run_serial, run_batches, take_until_done and the World fixture are all there. I read drain.rs and confirmed that `athena plan` (drain.rs 2101) uses the same RealSteps::queue, entry_of and prepare as the drain. So in this snapshot the two cannot differ at the start of a run because of the Plan code itself. The plan is right to treat staleness and an older build as candidates. It misses real divergences in drain_with: it approves jobs and re-sorts the plan by read-then-approved-then-unread position, which changes the age tiebreak, and it dispatches items with no plan entry ahead of all planned items. Criterion 5 requires naming these and removing or justifying them. A replan that reads queue() again could also order the tiebreak differently from the first plan. The criterion-1 and criterion-2 tests hand the drain a ready-made priority instead of a priority record, so the record-to-priority step through reading::plan_entry goes untested. The fix is cheap: build fixture entries with the public plan_entry. Smaller issues: two criterion-4 cases (clash, and a dependency failing mid-run) will not produce the reasons they name; the change-check on the replan does not reduce the cost of the queue re-read; and how replan treats newly queued requests is not decided."
+}

@@ -113,6 +113,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `[budget] job_usd` in `athena.toml` rose from 8.00 to 12.00. A hard job reads, plans and critiques before the
+  producer runs, and a second reading or planning round left less than the planner, producer and verifier caps
+  need (2026-10-30: $2.50 spent, $5.50 left, $5.75 needed), so the job stopped before any code was written. The
+  per-stage caps are unchanged. A test now pins `job_usd` and checks that the caps summed over two reading and
+  two planning rounds fit within it.
 - Structure pass job R9: the test modules `critic_soundness_tests` and `produce_and_verify_order_tests` moved
   out of `run/mod.rs` into the new `run/tests.rs`, declared in `mod.rs` as `#[cfg(test)] mod tests;`. No
   behavior change. The test text is unchanged except the `use super::*;` line of each module, which is now

@@ -738,6 +738,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_repository_budget_covers_two_reading_and_two_planning_rounds() {
+        let config = Config::parse(REPO_CONFIG).unwrap();
+        let b = &config.budget;
+        let plan = config.job_plan.as_ref().unwrap();
+        assert_eq!(b.job_usd, 12.0);
+        let need = 2.0 * b.reader_usd
+            + 2.0 * (plan.planner_usd + plan.critic_usd)
+            + b.producer_usd
+            + b.verifier_usd;
+        assert!(
+            need <= b.job_usd,
+            "two reading and two planning rounds need ${need:.2} but job_usd is ${:.2}",
+            b.job_usd
+        );
+    }
+
+    #[test]
     fn the_repository_config_names_an_effort_per_role_and_a_hard_producer_setting() {
         let m = Config::parse(REPO_CONFIG).unwrap().models;
         assert!(EFFORT_LEVELS.contains(&m.reader_effort.as_str()));

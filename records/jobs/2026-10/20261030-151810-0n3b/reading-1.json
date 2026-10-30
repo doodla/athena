@@ -1,0 +1,151 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-151810-0n3b",
+  "n": 1,
+  "at": "2026-10-30T15:33:17.235946771Z",
+  "invocation_seq": 2,
+  "base_commit": "b2706866eaace912e3fce582716cf94557bb2f10",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Raise job_usd budget from 8.00 to 12.00 with a covering test",
+  "summary": "Change [budget] job_usd in athena.toml from 8.00 to 12.00 so hard jobs with a second reading or planning round can still run the producer and verifier. Add a test over the repository's athena.toml that pins 12.00 and checks the summed per-stage caps fit, plus a CHANGELOG.md entry. The audience is whoever runs hard jobs and reviews the budget.",
+  "class_of_work": "config",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New test plus cargo test and clippy -D warnings criteria."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the budget value and that the summed caps fit, not just that the file changed."
+    },
+    {
+      "id": "mechanism",
+      "how": "A test enforces the budget relation so it cannot drift silently."
+    },
+    {
+      "id": "small",
+      "how": "One focused config change with its test and changelog."
+    },
+    {
+      "id": "rust",
+      "how": "The test is written in Rust."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: hard jobs must not stop for budget after two reading and two planning rounds; audience is the maintainer who runs hard jobs.",
+    "The only value change in athena.toml is job_usd under [budget]; reader_usd 0.50, producer_usd 3.00, verifier_usd 2.00 and [job_plan] planner_usd 0.75, critic_usd 0.75, max_rounds 3 stay as they are (read in athena.toml).",
+    "Summed caps with two reading and two planning rounds: 2*0.50 + 2*(0.75+0.75) + 3.00 + 2.00 = 9.00, which is within 12.00 and above the old 8.00 only once the extra rounds count; the test computes this from the parsed config rather than hard-coding it.",
+    "Several tests include athena.toml with include_str!; run_pin_tests.rs line 870 does .replace(\"job_usd = 8.00\", ...) and would silently stop tightening the budget, so it must be updated to \"job_usd = 12.00\" to keep that test meaningful.",
+    "The new test goes in an existing test module that already parses the repository's athena.toml (for example crates/athena-data/src/config.rs with REPO_CONFIG); the producer picks the field names from the Config struct.",
+    "Code survey: read crates/athena-core/src/run_pin_tests.rs (config() at line 79 loads athena.toml via include_str!, line 870 replaces job_usd), and grepped crates/athena-data/src/config.rs (REPO_CONFIG at line 706) and other crates for include_str! of athena.toml. No record or data file is added under crates/, so check_record_file and AnyRecord are not touched. The change adds no refusal rule; it loosens a limit, so no newly-refused-readings percentage applies."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "athena.toml [budget] has job_usd = 12.00 and reader_usd = 0.50, producer_usd = 3.00, verifier_usd = 2.00 are unchanged; git diff of athena.toml shows only that one line changed.",
+      "kind": "content"
+    },
+    {
+      "text": "A test in crates/ parses the repository's athena.toml (include_str!) and asserts job_usd == 12.00, and asserts that 2 x reader cap + 2 x (planner cap + critic cap) + producer cap + verifier cap is at most job_usd, with the caps read from the parsed config.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-core/src/run_pin_tests.rs replaces \"job_usd = 12.00\" instead of \"job_usd = 8.00\" in the tight-budget test, so that test still tightens the budget.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry stating job_usd rose from 8.00 to 12.00 and why (second reading or planning round on a hard job exhausted the budget).",
+      "kind": "content"
+    },
+    {
+      "text": "Run cargo test: the new budget test and the whole suite pass, including when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo clippy --all-targets -- -D warnings and cargo fmt --check: both are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The new test fails if athena.toml's job_usd is set back to 8.00 (verifier checks by reading the assertion against the diff).",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing reader_usd, producer_usd, verifier_usd or any [job_plan] value.",
+    "Changing how budgets are enforced or how rounds are counted in code.",
+    "Editing records/ or any other config file."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.68,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1700.0,
+        "p90": 3400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7578947368421053,
+      "p_verification_passes": 0.65625,
+      "p_user_intervenes": 0.11515151515151514,
+      "cost_usd": {
+        "p10": 0.009606153474127311,
+        "p50": 0.4490369,
+        "p90": 0.7133607751919206
+      },
+      "wall_time_s": {
+        "p10": 295.4377568180542,
+        "p50": 754.0380174400001,
+        "p90": 1906.910258664418
+      }
+    }
+  },
+  "departures": "Marked hard, so planning and critique add some cost over the reference; otherwise near the reference.",
+  "urgent_reason": "It cuts failed hard jobs that stop on budget before the producer runs, which wastes the reading and planning spend.",
+  "hard_reason": "It changes a spending limit that can stop a job before it writes code, which is a rule that can hold work in the run pipeline.",
+  "producer_effort": "high"
+}

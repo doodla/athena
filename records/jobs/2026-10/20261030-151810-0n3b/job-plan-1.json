@@ -1,0 +1,168 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-151810-0n3b",
+  "round": 1,
+  "at": "2026-10-30T15:34:29.112423721Z",
+  "invocation_seq": 3,
+  "approach": "Change `job_usd = 8.00` to `job_usd = 12.00` in the [budget] table of athena.toml. Add one test beside the existing REPO_CONFIG tests in crates/athena-data/src/config.rs. It parses REPO_CONFIG, asserts job_usd == 12.0, and asserts that 2*reader_usd + 2*(planner_usd + critic_usd) + producer_usd + verifier_usd (all read from the parsed Config) is at most job_usd. Two existing tests hard-code the old value and must change with it: run_pin_tests.rs line 870 (the .replace of \"job_usd = 8.00\") and crates/athena-cli/tests/drain.rs line 2855 (`assert_eq!((caps.read, caps.run), (0.5, 8.0))`). Add an Unreleased \"Changed\" entry to CHANGELOG.md. crates/athena-core/src/run/tests.rs needs no edit: it uses athena.toml only for check_timeout_s, and I found no job_usd or 8.00 there.",
+  "decisions": [
+    {
+      "choice": "Put the new test in crates/athena-data/src/config.rs next to the_repository_config_plans_hard_jobs_only_with_the_designs_caps, reading the caps from Config::parse(REPO_CONFIG).",
+      "reason": "REPO_CONFIG already include_str!s athena.toml there, and Budget and JobPlan are in scope. The sum comes from parsed fields, so the test follows later cap changes and only the 12.0 pin is hard-coded.",
+      "rejected": [
+        {
+          "option": "Put the test in run_pin_tests.rs in athena-core",
+          "why": "Its config() helper alters the config (job_plan on/off), so it is not the plain repository file."
+        },
+        {
+          "option": "Hard-code 9.00 as the expected sum",
+          "why": "The brief asks for the sum computed from the parsed caps. A hard-coded sum would drift from the caps."
+        }
+      ]
+    },
+    {
+      "choice": "Update crates/athena-cli/tests/drain.rs line 2855 from 8.0 to 12.0, although the brief's deliverables do not list that file.",
+      "reason": "That test asserts caps.run equals the repository's job_usd (drain.rs src line 2435 sets run: jc.config.budget.job_usd). It fails after the raise. The edit is a one-number test change.",
+      "rejected": [
+        {
+          "option": "Leave drain.rs untouched",
+          "why": "cargo test fails, which breaks criterion 5."
+        },
+        {
+          "option": "Loosen the assertion to read the value from the config",
+          "why": "It is a pin on the repository caps; changing the literal keeps its meaning (read plus run exceeds the default budget of 2)."
+        }
+      ]
+    },
+    {
+      "choice": "Make run_pin_tests.rs replace \"job_usd = 12.00\" with \"job_usd = 2.60\".",
+      "reason": "The string replace is silent when the pattern is absent, so the test would stop tightening the budget and no longer exercise the rerun refusal.",
+      "rejected": [
+        {
+          "option": "Parse and mutate the Config instead of using a string replace",
+          "why": "A larger change than the brief needs."
+        }
+      ]
+    },
+    {
+      "choice": "Do not touch any other [budget] or [job_plan] value.",
+      "reason": "The brief puts them out of scope. The new test relies on them as they are.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "[budget] job_usd 8.00 -> 12.00 (one line; governance file the brief lists as a deliverable).",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add a test in the existing tests module that parses REPO_CONFIG, pins job_usd == 12.0 and checks the summed caps with two reading and two planning rounds fit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Line 870: replace \"job_usd = 12.00\" in the tight-budget test, with a comment fix if it names 8.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Line 2855: the repository's job_usd cap in the assertion goes from 8.0 to 12.0. This file is not in the brief's list; it is needed to keep cargo test green.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a Changed entry under [Unreleased] for the raise and its reason.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In athena.toml line 38, change `job_usd = 8.00` to `job_usd = 12.00`. Change nothing else.",
+    "In crates/athena-data/src/config.rs, in `mod tests` after the_repository_config_plans_hard_jobs_only_with_the_designs_caps (about line 738), add `#[test] fn the_repository_budget_covers_two_reading_and_two_planning_rounds()`. It runs `let config = Config::parse(REPO_CONFIG).unwrap(); let b = &config.budget; let plan = config.job_plan.as_ref().unwrap();`, then `assert_eq!(b.job_usd, 12.0);`. Then it computes `let need = 2.0 * b.reader_usd + 2.0 * (plan.planner_usd + plan.critic_usd) + b.producer_usd + b.verifier_usd;` and asserts `need <= b.job_usd` with a message showing both numbers. Compare floats carefully: 9.00 against 12.00 needs no epsilon.",
+    "In crates/athena-core/src/run_pin_tests.rs line 870, change the replaced pattern to \"job_usd = 12.00\" and keep the replacement \"job_usd = 2.60\". Fix any nearby comment that names 8.",
+    "In crates/athena-cli/tests/drain.rs line 2855, change `(0.5, 8.0)` to `(0.5, 12.0)`.",
+    "In CHANGELOG.md under [Unreleased], add a Changed bullet: [budget] job_usd rose from 8.00 to 12.00 in athena.toml, because a hard job reads, plans and critiques before the producer runs and a second reading or planning round left less than the planner, producer and verifier caps need (2026-10-30: $2.50 spent, $5.50 left, $5.75 needed). The per-stage caps are unchanged, and a test now pins job_usd and checks the caps summed over two reading and two planning rounds fit.",
+    "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked; fix any fallout."
+  ],
+  "risks": [
+    {
+      "risk": "Other tests depend on the repository's job_usd without naming it (CLI tests build on athena.toml via test_config).",
+      "mitigation": "I grepped for job_usd across .rs and .toml files and for 8.00 / 8.0 / budget_usd in crates. The only hard-coded users of the repository value are run_pin_tests.rs:870 and drain.rs:2855. Both are in the plan. The producer runs the full cargo test to confirm."
+    },
+    {
+      "risk": "A cap or job_plan field has a different name or type than expected (JobPlan fields planner_usd and critic_usd are f64 behind Option).",
+      "mitigation": "Edit with Edit on the exact line; fmt is a listed check. The producer runs cargo fmt --all --check and clippy."
+    },
+    {
+      "risk": "The summed-caps assertion is too tight and breaks on an unrelated later change.",
+      "mitigation": "The sum is 9.00 today against 12.00, so there is margin. If a later cap change breaks the relation, the test fails by design."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff. Entry point: the athena.toml file itself.",
+      "command": "git diff -- athena.toml",
+      "observes": "Exactly one changed line in [budget]: `-job_usd = 8.00` and `+job_usd = 12.00`. reader_usd = 0.50, producer_usd = 3.00 and verifier_usd = 2.00 are not in the diff.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the new test in crates/athena-data/src/config.rs and run it. It calls Config::parse(REPO_CONFIG). That constant exists today at config.rs line 706, via include_str!(\"../../../athena.toml\"), so no seam is added.",
+      "command": "cargo test --locked -p athena-data the_repository_budget",
+      "observes": "The test passes. In the source it asserts `budget.job_usd == 12.0` and `2*reader_usd + 2*(planner_usd + critic_usd) + producer_usd + verifier_usd <= job_usd`, with every cap read from the parsed config (job_plan unwrapped).",
+      "fails_without": "Not a behavior criterion. The test is added in step 2 and run here."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the diff.",
+      "command": "git diff -- crates/athena-core/src/run_pin_tests.rs",
+      "observes": "Line 870 changes to `.replace(\"job_usd = 12.00\", \"job_usd = 2.60\")`. Nothing else in the file changes.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new bullet under [Unreleased] (a Changed heading) saying job_usd went from 8.00 to 12.00, and that a second reading or planning round on a hard job exhausted the budget before the producer and verifier could run.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run the whole suite. Production entry points: Config::parse (athena-data) and the run in run_pin_tests.rs through its existing config()/run_with helpers, which exist today.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass, including the new budget test, when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget and the_default_plan_budget_affords_a_read_where_drain_would_need_a_read_and_a_run.",
+      "fails_without": "If athena.toml were left at 8.00 the new test fails on the job_usd == 12.0 assertion. If run_pin_tests.rs kept the 8.00 pattern, when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget would run with job_usd = 12.00 and runs.len() would be 2, so its assert_eq!(runs.len(), 1) fails. If drain.rs line 2855 kept 8.0, the_default_plan_budget_affords_a_read_where_drain_would_need_a_read_and_a_run fails."
+    },
+    {
+      "criterion": 6,
+      "method": "Run clippy, then `cargo fmt --all --check`, both as in the checks Athena will run.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Both exit 0 with no warnings and no formatting diff.",
+      "fails_without": "Not applicable. This is a lint check, so any warning in the new test code fails it."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the test's equality assertion in config.rs against the athena.toml diff. It is an exact equality on the parsed job_usd, not a lower bound.",
+      "command": "cargo test --locked -p athena-data the_repository_budget",
+      "observes": "The assertion compares the parsed job_usd to 12.0 with assert_eq!. It would fail on the old value and on any other value.",
+      "fails_without": "With athena.toml at job_usd = 8.00, the `job_usd == 12.0` assertion fails (8.0 != 12.0). The verifier confirms this by reading the assertion against the diff, and does not edit athena.toml."
+    }
+  ],
+  "open_questions": [
+    "crates/athena-core/src/run/tests.rs is a listed deliverable, but I found no use of job_usd or 8.00 there (it reads athena.toml only for check_timeout_s and appends job_plan). If the producer's test run shows a failure there, adjust it; otherwise leave it alone.",
+    "CHANGELOG.md has an [Unreleased] section starting at line 8 with an Added subsection at line 10. I did not check whether a Changed subsection already exists below it; the producer should reuse one if it does."
+  ],
+  "producer_section_sha256": "c0ff2cdb4da82a498b1b247bdbbfe184ac971399c1fa5fad3f1b2adf507863aa"
+}

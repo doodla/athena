@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-033434-3v30",
+  "round": 1,
+  "at": "2026-10-30T15:13:54.189239545Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The criterion-1 test has no priority record. The fake's mutable priority table sets PlanEntry.priority directly, so the record-to-entry path is a double.",
+      "evidence": "Criterion 1 requires 'a priority record that lowers an urgent-text request to low'. In the plan, the fake 'holds a mutable table of (id, priority, text-urgent) records' and queue() 'returns ... PlanEntrys with the priority currently in the table'. In production the priority comes from store.rs:92 Job::priority() (latest PriorityRecord over the 'Priority: urgent' words) through reading::plan_entry (reading.rs:2177) in RealSteps::entry_of (drain.rs:2385). None of that code runs in the planned test, so the test would pass even if a record were ignored. Fix: Keep the test in drain.rs, but have the fake hold athena_core store Job values whose request text has 'Priority: urgent'. Build each PlanEntry with athena_core::reading::plan_entry(&job, None, &Lookup{..}). The scripted change in `run` should push a PriorityRecord { priority: \"low\", n: 1, .. } onto Y's `priorities`, as the existing test at reading.rs:4369-4382 does. The order then comes from a real record through real plan_entry, prepare and Plan::build_with. Assert [X, Z, Y], and keep the base-fails check.",
+      "location": "Demonstrations, Criterion 1 (and Decision 6)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'Confirm they fail on base' cannot confirm the cause, because the tests are built around the stale-plan mechanism. Static differences between drain and plan are not ruled out in writing.",
+      "evidence": "drain_with differs from plan() in more than staleness: it calls review_passes() before queue() (drain.rs:1928), approves proposals with approve_all and places them (1938-1964), and puts items with no plan entry ahead of every planned batch (1973-1979). plan() does none of these. If 5x4h, 7q3e or 18fc reached drain-24 through one of these paths, re-planning alone would not have put e5sg first. Fix: Have the producer state in the summary why each static difference (review_passes backfill, approve_all ordering, unplanned items first) could not have caused the drain-24 order, or add case 1 of the criterion-2 test with an approvable item and an unplanned item so a static divergence would fail too. If one of them is a cause, fix it in the same schedule step.",
+      "location": "Steps 1 and Open questions (cause confirmation)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Each re-plan calls RealSteps::queue(), which reaps the registry and re-derives interrupted_work. Without care, a job this run just dispatched can come back as an interrupted item.",
+      "evidence": "RealSteps::queue (drain.rs:2472-2480) calls registry().reap() and adds interrupted_work items with interrupted: true. A job of this run whose process just ended but whose record still says Dispatched would be listed again under its job id. That id is the made job's id, not the item id. Fix: Exclude every job id in st.jobs as well as the item ids in st.done/st.begun (the plan mentions this; make sure the made job ids, not only the item ids, are filtered). Add one assertion in the criterion-2 test that no item is worked twice.",
+      "location": "Decision 2 / Step 3 (Drain::schedule)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read drain.rs (drain_with at 1921, prepare at 1414, run_serial at 1703, run_batches at 1739, RealSteps::queue/entry_of at 2360-2494), plan() at 2101, store.rs Job::priority at 92 and reading.rs. The plan's diagnosis holds up against the code. `athena plan` and the drain both go through `steps.queue()` → `Drain::prepare` → `Plan::build_with`. `Job::priority()` (store.rs:92) already prefers the latest priority record, and `reading::plan_entry` sets `entry.priority = job.priority()` (reading.rs:2177). So the reading's suspected cause (entry_of applying the record only to proposals) is not the fault. The real divergence is that drain_with builds batches once and run_serial/run_batches never rebuild them. Re-planning between items through the same prepare/build_with path is a sound fix that comes from one source, and it is the right place to fix it. The log-once-per-passed-over-item design, the State memory that avoids re-reading items, and leaving the read-ahead pump alone are all reasonable and fit one producer run. One major problem: criterion 1 asks for a test \"with a priority record\", but the fake keeps a priority table and hands out PlanEntry priorities directly. The record-to-entry path is replaced by a double, so the test does not show that a priority record changes the drain's order. There is a cheap fix that stays in drain.rs: build the fake's entries with `athena_core::reading::plan_entry` over store Job values whose `priorities` gets a `PriorityRecord` mid-run, the same way reading.rs:4369-4382 already does. One minor point: the step-1 \"confirm on base\" check is circular, because the tests are built to fail for the stale-plan reason. It does not show that the evidence came from a mid-run change. The plan should name the static differences it ruled out."
+}

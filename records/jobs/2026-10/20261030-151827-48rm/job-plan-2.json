@@ -1,0 +1,254 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-151827-48rm",
+  "round": 2,
+  "at": "2026-10-30T15:27:43.048543853Z",
+  "invocation_seq": 5,
+  "approach": "Base facts I read: `drain_with` (drain.rs 1921-2004) already builds a Plan once through `prepare`, which calls `Plan::build_with` at line 1481. The batches are then fixed for the whole run. Nothing re-reads priority records or job ends. Refusals, holds and cycles go only to `d.note` (lines 1986-1997), which is not printed. Nothing says why a planned item was not worked. The fix has three parts. (1) One `Drain::coordinate(entries, history) -> Plan` holds the only `Plan::build_with` call and the priority-contradiction notes; `prepare` calls it. (2) A new `Drain::replan` runs after each ended item (serial) or each finished batch (parallel, `read_ahead` 0). It re-reads `Steps::queue()` and `Steps::job_history()` and rebuilds the plan from the fresh entries. Entries keep the first plan's age order and are restricted to the first view's ids, minus items already worked. One shared `batches_for` function builds the batch list for both the first pass and replans. (3) At the end of `drain_with` the drain writes one `ui.line` per planned item it did not work, with a reason. A new `Plan::wait_reason` in plan.rs supplies the dependency or path-clash part, so drain.rs holds no copy of the overlap rule. Cause: the producer states it from the evidence below and does not assert a timeline. Records and the installed build are absent from the snapshot. Candidates: (a) a stale plan: a priority record or job end that arrived after the first plan was ignored (explains a record added mid-run or a dependency that failed mid-run; does not explain a record present before start, since `prepare` already uses `entry_of`'s priority); (b) an older installed build than commits 9f3946d and d72e755 of 2026-10-30, which changed the dependency rule (explains a plan/drain split by build; does not explain a stale plan under one build); (c) the run ended before a waiting item, with no line (explains a silent skip; says nothing about order); (d) drain_with's own reordering: `approve_all` adds approved jobs' entries, items are partitioned read, approved, unread and `view.plan` is re-sorted by that position only when something was approved (lines 1941-1964), and items with no plan entry go first, one per batch (1971-1979); this changes the age tiebreak only, since Plan orders by effective priority first, so it explains tie-order differences but never a lower-priority item running first; (e) a bare job id in a request becomes `depends_on` in `reading::plan_entry` (2178), so a cited job that failed with no landed retry holds the item, and the hold appears only as an unprinted note (explains e5sg being skipped silently; does not explain a wrong order). The producer runs each test on base and reports which fail.",
+  "decisions": [
+    {
+      "choice": "Re-plan after each ended item (serial) or finished batch (parallel with read_ahead 0) through `replan`, which re-reads queue() and job_history(). The entries keep the age order of the first plan (stored in State as `age`), are restricted to the first view's ids, and exclude done, begun and forced-refusal items. The comment states the cost honestly: a records read plus per-item git lookups (BRIEF.md show, path_exists) with no model call, once per ended item. The unchanged-key check (entries and history equal to the last plan's) only skips rebuilding the batches and repeating notes; it does not limit the read, and history changes after nearly every ended job. Items queued during the run are ignored for this run and wait for the next drain.",
+      "reason": "This is the only point where priority records (via entry_of / plan_entry) and job ends (via job_history) reach the order, and `Plan::build_with` stays the one ordering rule. A fixed age order keeps the first plan and later plans on one tiebreak (finding 1). Ignoring new items is the smallest consistent choice: replan never calls Steps::read, so a request queued mid-run could only appear as refused for want of a reading, which would be worse than waiting. It is stated in the CHANGELOG entry and in a code comment, and a test covers it (finding 5).",
+      "rejected": [
+        {
+          "option": "Re-plan by calling `prepare` again",
+          "why": "It re-reads and re-pays for underspecified requests, and re-reads the queue in RealSteps order, so the tiebreak differs from the first plan."
+        },
+        {
+          "option": "Include requests queued mid-run with a 'queued during the run; not read' refusal",
+          "why": "It logs lines for items the owner never planned, and mixes unplanned items into once-per-run logging."
+        },
+        {
+          "option": "Add a records fingerprint to Steps so the queue read is skipped when nothing changed",
+          "why": "A second definition of 'changed' that can drift from what plan uses, and a new Steps method for a read that is cheap next to a job. Noted as a possible follow-up."
+        },
+        {
+          "option": "Re-plan on every item unconditionally with no comparison",
+          "why": "Repeats the priority-contradiction notes and swaps the batch list when nothing moved."
+        }
+      ]
+    },
+    {
+      "choice": "Keep drain_with's read / approved / unread partition and its re-sort of view.plan only when something was approved. Justify it in a comment: approved-now jobs have no `athena plan` counterpart (`athena plan` approves nothing), so they must enter at a defined age position. When nothing is approved, view.plan keeps queue order, so drain's order equals Plan::build_with over the queue's entries. The same age order is stored for replans. Items with no plan entry keep going first.",
+      "reason": "Removing the partition would change which approved job ties first and is a separate behavior from the reported fault. Priority still decides first because Plan sorts by effective priority before age, so the partition only affects ties. Two criterion-3 tests pin both paths (finding 1).",
+      "rejected": [
+        {
+          "option": "Drop the partition so entries are always in queue order",
+          "why": "Approved-now items have no queue-order position, and the partition is existing, deliberate behavior (the starvation comment at line 1942)."
+        },
+        {
+          "option": "Re-sort entries in replan by RealSteps order",
+          "why": "The tiebreak would differ from the first plan; the stored age order avoids that."
+        }
+      ]
+    },
+    {
+      "choice": "Log passed-over items once, at the end of drain_with, from State: the first view's planned ids minus done and begun; the forced refusals of the first pass; the last Plan's refused, held and cyclic; and the stop reason. Reason order: forced refusal text, then the last plan's refusal or hold text, then 'wait on each other in a loop', then 'run ended: <Stop name>', with ' (<wait_reason>)' appended when Plan::wait_reason gives one, then 'not reached' if there is no stop. Existing notes stay unchanged so current assertions hold.",
+      "reason": "One line per item per run holds by construction, and a replan cannot log twice. Nothing is logged for an item that was worked later. The Stop names (budget spent, job limit, stop requested, repeated failure) already exist.",
+      "rejected": [
+        {
+          "option": "Log as each skip happens",
+          "why": "A replan could log the same item twice."
+        },
+        {
+          "option": "Only extend the notes",
+          "why": "Notes are not printed, which is the 'skipped silently' symptom."
+        }
+      ]
+    },
+    {
+      "choice": "Add `Plan::wait_reason(&self, entries, id) -> Option<String>` in plan.rs. For an item in a later group: 'it waits for <dep>' if a dependency sits in an earlier group, else 'it shares paths with <other>, so it runs after it', found with the private `disjoint`. It returns None for an item in the first group or one not in the order. Priority lowering is not a wait reason: such an item has no extra text.",
+      "reason": "The overlap and dependency rule stays in plan.rs only. A clash alone does not leave an item unworked (with max_in_flight 1 the item still runs in a later group), so the reason appears only combined with a run end (finding 3).",
+      "rejected": [
+        {
+          "option": "Copy the path-overlap rule into drain.rs",
+          "why": "A second copy of the rule is the divergence this job removes."
+        },
+        {
+          "option": "Report 'not ready' for a dependency that fails mid-run",
+          "why": "After a failure replan calls build_with with the new history, which holds the dependent with the plan's own reason ('depends on X, which was failed and has no landed retry'); the expected reason in the test is 'held'."
+        }
+      ]
+    },
+    {
+      "choice": "Tests build each queued entry by calling the public `athena_core::reading::plan_entry` on a `JobRecords` that the fixture owns (request text with 'urgent' and a '- it is done' bullet, a rung hint, and `priorities` holding a PriorityRecord 'low' where the test needs one). The mid-run test pushes a PriorityRecord onto that JobRecords when run(a) is called. The oracle `Plan::build_with(entries, history).order` is computed in the test from the same entries, outside the fixture.",
+      "reason": "The conversion from a record to a priority runs inside the drain test, so a fault in it is seen (finding 2). reading.rs line 4371 shows a record-only unit test; this adds the drain-level one.",
+      "rejected": [
+        {
+          "option": "Fixture hands out PlanEntry values with priority already set",
+          "why": "The record-to-priority step is never exercised."
+        }
+      ]
+    },
+    {
+      "choice": "Leave reading.rs unchanged unless the e5sg-shape test shows `plan_entry` drops a job id that is written without 'Depends on'. In that case fix it there with a reading.rs test.",
+      "reason": "Fix at the origin only with evidence. The code read shows `dependency_ids_in(text)` feeding `depends_on` (reading.rs 2178), so a fault there is not expected.",
+      "rejected": [
+        {
+          "option": "Change the dependency rule speculatively",
+          "why": "No evidence it is at fault."
+        }
+      ]
+    },
+    {
+      "choice": "Skip replan when `Steps::read_ahead()` > 0 with 2 or more workers. Add a comment pointing to the out-of-scope wiring of read-ahead.",
+      "reason": "The read-ahead pump works from a fixed upcoming list; making it follow replans is a larger change and out of scope.",
+      "rejected": [
+        {
+          "option": "Make the pump follow replans",
+          "why": "Out of scope and a bigger change to pump and pick_ahead."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Extract `Drain::coordinate`; add `batches_for` and `replan`; replan after each item (serial) or batch (parallel, read_ahead 0); keep age order, first-pass forced refusals, the last plan and its key in State; log passed-over items once at the end of `drain_with`; comment the partition and the replan cost; add the `Ranked` fixture and the new tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "Add `Plan::wait_reason` (dependency or path-clash reason for an item in a later group) using the private `disjoint`, with a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under Fixed in Unreleased: the drain follows athena plan's order, re-plans on changes, ignores requests queued mid-run, and logs passed-over items with a reason.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Only if the e5sg-shape test shows `plan_entry` drops a job id written without 'Depends on'; then fix there with a unit test. Otherwise unchanged.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Run `cargo test -p athena-cli drain` on base to record green. Write the `Ranked` fixture (queue built from `JobRecords` through `reading::plan_entry`, mutable priorities, history, a run log, queue-call counter, a Ui that captures lines) and the tests for criteria 1-4 first. Run them on base and note which fail. Expected failures: the mid-run test and the log tests. State what the e5sg-shape test does on base.",
+    "In drain.rs, extract `Drain::coordinate(&self, entries, history) -> Plan` with `Plan::build_with` and the priority-violation notes (deduplicated against State.notes). Make `prepare` call it. Move the batch-building code from `drain_with` (lines 1973-1985) into `batches_for(items, plan_entries, plan, done_or_begun)`.",
+    "Add to State: `age` (ids of the first view's planned entries in the order the first plan used), `forced` (the first pass's forced refusals), the last `Plan`, and a key (entries and history) of the last plan. Fill them after the first `prepare` in `drain_with`. Have `prepare` return the forced refusals to the caller, or store them, without changing `plan()`'s behavior.",
+    "Add `Drain::replan(&self) -> Option<Vec<Vec<Item>>>`. It returns None if a stop was requested, the run is stopping, `queue()` fails, or the key is unchanged. Otherwise it builds entries from the fresh `queue().plan` in `age` order, restricted to `age` ids and minus done, begun and forced, calls `coordinate` with `job_history()`, stores the plan and returns `batches_for(...)`. Comment the cost and the choice to ignore requests queued mid-run.",
+    "Change `run_serial` to flatten the batches into a deque, take one item at a time through `take_until_done` on a one-item queue, and call `replan` after each, replacing the deque when it returns Some. Change `run_batches` to take the batches as a deque and call `replan` between batches when `read_ahead` is 0. Leave the read-ahead path unchanged and comment why.",
+    "In plan.rs add `Plan::wait_reason(&self, entries, id) -> Option<String>` (dependency in an earlier group, else path clash via `disjoint`, else None) with a unit test for both cases and for a first-group item.",
+    "At the end of `drain_with`, after the run, compute the planned ids not in State.done or begun and write one `d.ui.line` per id: forced refusal text, else the last plan's refused or held text, else the cycle text, else 'run ended: <Stop name>' plus the `wait_reason`, else 'not reached'. Keep the existing notes unchanged.",
+    "Run `cargo test -p athena-cli drain`, then `cargo test --locked`. If the bare-id test shows the fault in `reading::plan_entry`, fix it there with a unit test. Write the cause in the change description with what each of (a) to (e) explains and does not.",
+    "Add the CHANGELOG entry under the Fixed heading that belongs to Unreleased.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` as separate commands. Use `git status` to check that only the intended files changed."
+  ],
+  "risks": [
+    {
+      "risk": "World::queue() and the real queue() may return items already worked, so replan could re-dispatch them or loop.",
+      "mitigation": "Filter every refreshed view by State.done and begun and by the first view's ids. Run `cargo test -p athena-cli drain` after each edit."
+    },
+    {
+      "risk": "Replan re-reads requests whose reading failed, spending budget again.",
+      "mitigation": "Keep the first pass's forced refusals in State and exclude their ids from the entries. `replan` never calls Steps::read."
+    },
+    {
+      "risk": "Replan notes ('plan order contradicts priority') repeat and break existing note assertions.",
+      "mitigation": "Push a note only if State.notes does not already hold it; existing tests stay unedited."
+    },
+    {
+      "risk": "RealSteps::queue() does a records read plus git show and path_exists per item on every replan, which costs time on a long queue.",
+      "mitigation": "State the cost in a code comment: no model call, once per ended item. The cost is far below one job. A fingerprint to skip the read is left as a named follow-up."
+    },
+    {
+      "risk": "A replan between parallel batches shows a change only after the running batch ends.",
+      "mitigation": "Replan between batches only, and not with read_ahead above 0. The comment says so. A test covers the between-batch case."
+    },
+    {
+      "risk": "Dropping an unplanned (no-entry) item from the batch list during replan would skip it.",
+      "mitigation": "`batches_for` rebuilds the unplanned singles from the first view minus done and begun, ahead of the planned groups, using the same code as the first pass."
+    },
+    {
+      "risk": "A test that passes on base proves nothing for criterion 1.",
+      "mitigation": "Run the pre-drain test on base and report it. The mid-run and log tests are the ones that must fail on base."
+    },
+    {
+      "risk": "The size of the change in a 155 KB file.",
+      "mitigation": "Keep it to coordinate, batches_for, replan, the run_serial and run_batches loops, the end-of-run log and wait_reason. Existing functions keep their signatures; no new Steps method is added."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Test through the production entry point `drain(&steps, limits, &ui)` with a new test-module fixture `Ranked` implementing `Steps`, modelled on the existing `World` (the Steps seam exists today). `Ranked::queue()` returns items u and h (u older). Each PlanEntry comes from `athena_core::reading::plan_entry` on a `JobRecords` the fixture owns: u's request text says urgent and its `priorities` holds a PriorityRecord 'low'; h's text says 'Priority: high'. Both have an acceptance bullet and a rung hint. `Ranked::run` appends the job id to a Mutex log and returns a landed result like `World`. Budget and job limit are large and `max_in_flight` is 1. The fixture holds no ordering logic. The oracle is `Plan::build_with(&entries, &history).order`, computed in the test.",
+      "command": "cargo test -p athena-cli drain::tests::priority_record_before_the_run_lowers_the_urgent_text",
+      "observes": "The dispatched ids are [h, u] and equal the oracle order.",
+      "fails_without": "A drain that ignored the record and ranked by the request text would dispatch u first, so the order assertion fails. On base this test is expected to pass, since `prepare` already plans once before the run, so it is a regression guard. The producer runs it on base and reports the result."
+    },
+    {
+      "criterion": 2,
+      "method": "Test through `drain()` with `Ranked`. Items a, b, c are queued, all normal, in age order. The fixture's `run(a)` pushes a PriorityRecord 'low' onto b's `JobRecords`, as `athena priority b low` would while the drain works. Later `queue()` calls build b's entry again through `reading::plan_entry`, so the real conversion makes it low. The fixture counts `queue()` calls. A second case runs the same shape through `drain_concurrent(&steps, limits, &ui, 2)` with `read_ahead` 0, where a and a stand-alone batch separate the change from b and c, and checks the replan between batches. The ordering code under test is `Drain::replan` (step 4), not in the fixture.",
+      "command": "cargo test -p athena-cli drain::tests::priority_record_added_mid_run_is_followed",
+      "observes": "Dispatched ids are [a, c, b]; the queue() call count is above the one initial read, so a re-read happened after the first item.",
+      "fails_without": "On base the batches are fixed at the start, so the record added during a changes nothing and the order is [a, b, c]; the assertion fails. The producer runs this on base and reports it failing."
+    },
+    {
+      "criterion": 3,
+      "method": "Two tests through `drain()` with `Ranked` and `max_in_flight` 1. (A) No approvals. The queue holds a ready group-1 item e whose request text cites another job id with no 'Depends on' wording. `job_history()` holds that job as failed plus a landed job with `retry_of` pointing at it, so e is not held. The queue also holds a read item younger than an unread one, and a priority-lowered item. The oracle is `Plan::build_with(&entries_in_queue_order, &history).order`. The assertion is dispatched ids == oracle, with e worked first. (B) One `approvable` proposal that `Ranked::approve` turns into a job and `Ranked::plan_entry` returns an entry for. The oracle is `Plan::build_with` over entries in the documented age order read, approved, unread; the test also asserts the approved item is not ahead of a better-priority planned item. The e5sg shape is run on base and the result stated by the producer; the planner did not run it. If e shows `plan_entry` dropping the bare id, a reading.rs unit test is added.",
+      "command": "cargo test -p athena-cli drain::tests::drain_order_equals_plan_order",
+      "observes": "Dispatched ids equal the oracle order in both tests.",
+      "fails_without": "A drain that reordered items by its own rule, kept a stale plan after history changed, or let the approved item or an entry-less item jump ahead of better-ranked items, would give a different sequence from the oracle and the equality assertion would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Table-driven tests through `drain()` with `Ranked`, plus a `Ui` that captures `line` text into a Mutex<Vec<String>> (reuse `Kept` at drain.rs 2918 if it captures lines). Each case has its own fixture. (a) refused: an entry with no acceptance; the line has the plan's 'plan lacks' wording. (b) held: a dependency on a failed job with no landed retry; the line has 'has no landed retry'. (c) cyclic: two items depending on each other; the line says they wait on each other. (d) clash: item y shares a path with x, `max_jobs` 1 so the drain stops after x; the line has 'job limit' and 'shares paths with x' from `Plan::wait_reason`. (e) dependency failing mid-run: `Ranked::run(x)` fails and `job_history()` then reports x failed; replan holds the dependent, so the expected reason is held ('depends on x, which was failed and has no landed retry'), not 'not ready'. (f) over budget: a budget that fits one job; the line has 'budget spent'. (g) job limit 1; the line has 'job limit'. (h) a stop request after the first item (`stop_requested` true once run(first) was called); the line has 'stop requested'. In each case the test counts lines naming each id. A separate case where a replan happened (as in criterion 2) shows the count is still 1. A last case queues a request mid-run and shows it is neither dispatched nor logged.",
+      "command": "cargo test -p athena-cli drain::tests::passed_over_items_are_logged_once_with_a_reason",
+      "observes": "Each passed-over id appears in exactly one captured line, with its reason words. Worked items have no such line.",
+      "fails_without": "On base refused, held, cyclic and unreached items produce only notes, not `ui.line` output, so the per-id line count is 0 and the assertion fails."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff. Search for `Plan::build_with` and `disjoint`/`overlap` in the changed files, and read the comments on `replan` and the age order.",
+      "command": "git diff",
+      "observes": "The only `Plan::build_with` call in drain.rs is inside `Drain::coordinate`, which `prepare` and `replan` both use. The path-clash rule appears only in plan.rs. `replan` has a comment giving the cost as a records read plus git lookups with no model call, once per ended item, and does not present the unchanged-key check as the limit of that cost. The comment on the partition states why approved-now jobs need an age position. The stated cause lists, for each of (a) to (e), what it explains and what it does not.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the full suite. The existing drain tests that use `World`, `Stub` and `Housekeeping` with `max_in_flight` = 1 are not edited. `World::queue()` returns landed items again, so `replan` filters by State.done and begun. Priority-contradiction notes are not repeated, since they are added to State.notes only if absent.",
+      "command": "cargo test --locked",
+      "observes": "Every existing test passes unedited, including single-worker dispatch order and notes assertions.",
+      "fails_without": "If replan changed the single-worker order or the notes, or re-worked landed items that `World::queue()` returns again, an existing drain test would fail or loop."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three Athena checks as separate whole commands in this order: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. The seam is the CI toolchain, which exists today. Each is judged on its exit code.",
+      "command": "cargo fmt --all --check",
+      "observes": "All three exit 0.",
+      "fails_without": "Each check fails on its own fault: unformatted code makes fmt exit non-zero, a lint in new code (too many arguments, needless clone, unused value) makes clippy -D warnings exit non-zero, and any failing test makes cargo test exit non-zero."
+    },
+    {
+      "criterion": 8,
+      "method": "The producer first finds which `### Fixed` heading sits under `## [Unreleased]` (line 281 looks like it; the one near line 344 may belong to a release) and adds the bullet there.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "A new bullet under Fixed in Unreleased says the drain now follows `athena plan`'s order, re-plans when records, priority records or job ends change, ignores requests queued during a run until the next drain, and logs each passed-over item once with a reason.",
+      "fails_without": null
+    },
+    {
+      "criterion": 9,
+      "method": "List changed paths; use `git diff --stat` if needed.",
+      "command": "git status",
+      "observes": "No change to athena.toml, defaults.toml, .github/workflows or records/. Changed files are only drain.rs, plan.rs, CHANGELOG.md and, only if the bare-id test requires it, reading.rs.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Which of candidates (a) to (e) caused the ignored priority record and the silent skip of e5sg? Records and the installed build are absent from the snapshot, so the producer states what each explains and what it could not check.",
+    "Does the pre-drain priority test (criterion 1) already pass on base? Expected yes; the producer runs it and reports.",
+    "How does `work` treat a job that does not fit the budget: does it set Stop::BudgetSpent, or skip the item? This decides the 'over budget' wording in the log. The producer reads `work` and `Budget::fits` and uses the existing Stop name.",
+    "Does `PlanEntry` derive PartialEq for the replan key, and which paths do PriorityRecord, Request and a timestamp take in the athena-cli test module (athena-cli may need a dev-dependency)? Not checked here.",
+    "Does a failed `Run` end an item without stopping the drain (needed for case (e)), and what do the `Run` and `Landing` structs look like for the fixture? The producer reads `World::run` and `work`.",
+    "Which `### Fixed` heading in CHANGELOG.md belongs to Unreleased?"
+  ],
+  "producer_section_sha256": "77a80b1258be8a56c87c045a6c09a1a118cc43af0e933dcabc8634d391b3ccb8"
+}

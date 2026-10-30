@@ -867,7 +867,7 @@ fn when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget() {
     // $2.60 for the job,$0.50 for the producer, and a verifier run that costs $1.00 against a $2.00 cap:
     // the first run is allowed, the rerun is not.
     let tight = config(true)
-        .replace("job_usd = 8.00", "job_usd = 2.60")
+        .replace("job_usd = 12.00", "job_usd = 2.60")
         .replace("producer_usd = 3.00", "producer_usd = 0.50");
     let (finished, runs) = run_with(&tight, |runs| faulty_verifier(runs, 1, 1.0));
     assert_eq!(runs.len(), 1, "no rerun without budget");
