@@ -1,0 +1,243 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-060751-5389",
+  "round": 3,
+  "at": "2026-10-30T17:06:25.777948382Z",
+  "invocation_seq": 8,
+  "approach": "The root cause is at reading acceptance. `check_reading_acceptance` compares a reading's deliverables with the base commit's files, but nothing compares what the reading's prose says already exists with the snapshot. A named earlier job is taken to mean its work landed. Add one pure, model-free `pub fn check_named_dependencies(reading, files, earlier, symbol_found)` beside `check_boundary_and_repo_files`. It has three parts. (1) File-like path tokens in the prose must be in the snapshot, be a Create deliverable, or be named in out_of_scope. (2) Identifier symbols in `Code survey:` assumptions must have a definition in the snapshot's .rs source, be marked new in the survey, be part of a create deliverable, or be named in out_of_scope. (3) For every earlier job the request cites (`referenced_jobs`) and the retried job, the files that job added or planned to create must be in the snapshot or be accounted for. Naming the job id in out_of_scope exempts the job. `read_once` (the real call site, reading.rs ~499-530) chains the check after `check_reading_acceptance`. It loads the .rs blobs in one batched `cat_blobs` call, and only when a survey names a candidate symbol. Symbol existence means a definition (item, field or variant at the start of a line). Comments, strings and doc text do not count. Tests go at two levels: pure-function tests in reading.rs, and reader-level tests in run_pin_tests.rs. The reader-level tests drive `Athena::ask` with the fake reader, so they fail if the call in `read_once` is missing. CHANGELOG.md and D146 name the root cause, the fix location, and the intended higher refusal rate, which is a declared 8% and unmeasured.",
+  "decisions": [
+    {
+      "choice": "Add a separate pub fn `check_named_dependencies(reading, files, earlier: &[&EarlierAttempt], symbol_found: &dyn Fn(&str) -> bool)` and call it in `read_once` right after `check_reading_acceptance`, using `.and_then`. `check_reading_acceptance` keeps its signature.",
+      "reason": "That signature has about 45 call sites, nearly all tests passing None, and replay (`check_reading_text`) has no repository. A new function gives the check its own file-set, earlier-job and symbol seams. The call site is `read_once` (reading.rs ~520). `read_for` runs `read_once` and, on a Refused error, reads once more with the refusal as the correction, so the reader sees the new refusal as its one correction.",
+      "rejected": [
+        {
+          "option": "Add a parameter to `check_reading_acceptance`",
+          "why": "It churns about 45 call sites for no behavior gain; replay would pass None."
+        },
+        {
+          "option": "Check in planner or critic prompts or at admission",
+          "why": "Out of scope. The fault starts where unverified references are first admitted; the planner and critic only find them late."
+        }
+      ]
+    },
+    {
+      "choice": "Cover job ids by the snapshot, not by job end_state. Part 3 applies to every earlier job in `earlier`: the `referenced_jobs` that `read_once` already builds from the request, plus the retried attempt. A job's unlanded artifacts are its `added` changed_files and its `create` reading_deliverables that are absent from `files`. Each must be a Create deliverable or named in out_of_scope. Naming the job id in out_of_scope exempts the whole job. The reading does not need to repeat the id to trigger the check.",
+      "reason": "The request's cause is that a job id named in the request or notes is taken to mean its work landed. Triggering on every request-cited job closes the gap the critic found, where a reading relied on a cited job without repeating its id. The snapshot is the authority on landing. I did not verify which `end_state` strings mean merged, so I do not decide on them. A job whose files landed passes with no entry. The id in out_of_scope is the one-token exemption for jobs cited only as evidence. Plain role words with no id and no path remain unchecked, a narrowing recorded in D146.",
+      "rejected": [
+        {
+          "option": "Trigger only when the reading's own text repeats the job id",
+          "why": "It narrows the stated cause; a reading can depend on a request-cited job without naming it again."
+        },
+        {
+          "option": "Decide 'did not land' from end_state or verdict",
+          "why": "The state names that mean merged were not confirmed in code, and a rejected job can still have landed through a later job. File presence is checkable."
+        }
+      ]
+    },
+    {
+      "choice": "Part 2 checks symbols only in `Code survey:` assumptions. A symbol is exempt when the survey marks it as new: one of new/add/adds/added/create/creates/introduce/introduces in the two words before it. Candidates must have an identifier shape: snake_case needs an underscore; UPPER_SNAKE needs an underscore; CamelCase needs a lowercase-to-uppercase change inside the word; `a::b` segments are split; each must be at least 5 characters. Path-like tokens are dropped first. Plain all-caps words (NEVER, HTTPS) and plain lowercase words are never candidates.",
+      "reason": "A survey is the reader's statement of what it read, so its symbols are existence claims. Surveys also say where new code goes, so the marker exempts new names. A two-word window keeps 'adds X beside Y' from exempting Y. Elsewhere in the prose, new names are normal, so they are not checked. The stricter shapes answer the critic's emphasis-word finding.",
+      "rejected": [
+        {
+          "option": "Exempt any symbol also named in the summary or criteria",
+          "why": "A summary that says 'extend check_code_health' would excuse the exact failure."
+        },
+        {
+          "option": "Check every identifier in every field",
+          "why": "Names of things the change adds would refuse nearly every code reading."
+        },
+        {
+          "option": "Match any 5-character UPPER or CamelCase word",
+          "why": "Emphasis words and brand names would become candidates and be refused."
+        }
+      ]
+    },
+    {
+      "choice": "The symbol corpus is the base commit's .rs blobs only, loaded with one `Git::cat_blobs(&oids)` call (athena-git lib.rs:856, order preserved). A symbol exists only when `defines_symbol(corpus, name)` finds a definition: a line, after leading whitespace and visibility or qualifier words (`pub`, `pub(crate)`, `async`, `unsafe`, `const`, `extern`), that starts with fn/struct/enum/trait/union/type/const/static/mod/`macro_rules!` followed by the name as a whole word. A field line `name:` and an enum variant line beginning with the CamelCase name followed by `,`, `(`, `{`, `=` or end of line also count. Lines starting with `//` and lines starting with a quote or inside a `///` doc do not count. Markdown and TOML are excluded. The tests build symbol fixtures from pieces so the source never holds them whole.",
+      "reason": "A bare whole-word match counts a mention in a comment, a string or a test fixture as existence. A grep of crates/ today finds no check_code_health, but the plan's own fixture would make it count after landing. Matching definitions removes that. One batched call avoids a git process per file. Markdown design docs describe proposed mechanisms, so a name found there may be planned or unbuilt. D146 records the choice.",
+      "rejected": [
+        {
+          "option": "Whole-word match anywhere in .rs/.toml text",
+          "why": "Comments, strings and fixtures would make the motivating name exist; this is the plan's own reason for excluding .md."
+        },
+        {
+          "option": "Strip comments and strings and then word-match",
+          "why": "It needs a Rust lexer for raw strings and nested comments; a line-start definition match is simpler and has the same effect for the cases that matter."
+        },
+        {
+          "option": "Include .md in the corpus",
+          "why": "A name in a design doc for a queued job would count as existing."
+        },
+        {
+          "option": "`cat_blob` or `show_file` per file",
+          "why": "One or two git processes per file; `cat_blobs` is one process."
+        }
+      ]
+    },
+    {
+      "choice": "In `read_once`, find the candidate symbols first with a pure `survey_symbol_candidates(&reading)`. Only when the list is non-empty, load the corpus with `snapshot_corpus(entries, fetch)` (a git error becomes `ReadError::Failed`) and pass an infallible closure `|s| defines_symbol(&corpus, s)`.",
+      "reason": "Most readings load no blobs, and the check function stays infallible and testable with a fixture closure. `snapshot_corpus` takes the entries and a fetch function, so a test shows non-.rs entries are skipped without git.",
+      "rejected": [
+        {
+          "option": "Lazy OnceCell inside a fallible closure",
+          "why": "A closure returning bool cannot report a git error, and a Result closure complicates every test for no gain."
+        }
+      ]
+    },
+    {
+      "choice": "An unfound item is accounted for by a Create deliverable (the path, or for a symbol a path component or file stem of one), or by an out_of_scope item naming it as a whole token via `names_path_token`. A Modify or Delete of a missing path does not account for it. Extract a shared helper from `unaccounted_files` so both use one definition. `unaccounted_files` behavior and tests stay unchanged.",
+      "reason": "This is the accepted reading's rule: list it as a deliverable to create, or put it in out_of_scope. It reuses the existing token matcher.",
+      "rejected": [
+        {
+          "option": "Any mention in assumptions counts",
+          "why": "That is the failure: prose that assumes existence."
+        }
+      ]
+    },
+    {
+      "choice": "Run only when `files` is Some, the reading has a capability and no open question. Replay (`check_reading_text`) does not run it. D146 says plainly that the 8% is a declared expectation, not measured. The tests show the direction: accepted before, refused after.",
+      "reason": "Same guard as `check_boundary_and_repo_files`. Replay has no repository, so it cannot measure the new refusals; the neighbouring checks' doc comments say the same.",
+      "rejected": [
+        {
+          "option": "Run in replay with an invented file set",
+          "why": "It would measure nothing real."
+        }
+      ]
+    },
+    {
+      "choice": "Add reader-level tests in crates/athena-core/src/run_pin_tests.rs, next to `a_reading_naming_a_file_absent_at_head_is_read_again_and_a_corrected_one_is_accepted` (line 1707). They use the existing helpers `repo`, `config`, `athena_with`, `reader_edits` and `refusal_section`.",
+      "reason": "Pure-function tests pass even if `read_once` never calls the check. The fake-driver tests run `Athena::ask` through `read_for`, `read_once`, `ls_tree` and `cat_blobs`, so they fail when the wiring or corpus loading is missing. The seam already exists.",
+      "rejected": [
+        {
+          "option": "Only call the two check functions in tests",
+          "why": "The fix can go unwired with every test green."
+        },
+        {
+          "option": "Add a new seam in read_once",
+          "why": "The fake reader in run_pin_tests.rs already reaches it."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `check_named_dependencies` (path, survey-symbol and earlier-job parts), `survey_symbol_candidates`, `defines_symbol`, `snapshot_corpus`, the path-token extractor and a shared path-accounted helper. Call it in `read_once` after `check_reading_acceptance`. Update doc comments (root cause, intended higher refusal rate). Add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add reader-level tests next to line 1707 that drive `Athena::ask` with the fake reader. They show a missing path or undefined survey symbol is refused, read again with the refusal as the correction, and a corrected or defined one is accepted.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased/Added entry naming the root cause (a named earlier job's deliverable taken as existing without checking the snapshot), the fix location and the intended, unmeasured higher refusal rate.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D146: root cause, three-part check, request-cited jobs, definitions-only .rs corpus, new-symbol marker rule, plain-role-word narrowing, rejected options, and that the 8% is a declared expectation.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `read_for` and `read_once` (reading.rs 313-539), `names_path_token`, `unaccounted_files`, `code_surveys`, `path_exists_in`, `reading_text_fields`, `EarlierAttempt` (athena-context briefs.rs:1437) including the status text of `changed_files` entries, and `Git::cat_blobs` (athena-git lib.rs:856). Read the reader-level tests at run_pin_tests.rs 1533-1760. Run `cargo test -p athena-core reading` for the baseline.",
+    "Extract a shared helper `path_is_accounted(reading, path, creates_only)` from `unaccounted_files`; keep that function's behavior and tests unchanged. Write `check_named_dependencies(reading, files, earlier, symbol_found)` beside `check_boundary_and_repo_files`. Guard: capability Some and question None. Part 1: path tokens from title, summary, departures, assumptions and criteria (not out_of_scope). Split on whitespace and quote or bracket characters; trim trailing punctuation and `:NNN`; keep tokens with '/', a first component that is a top-level directory of `files`, no glob, placeholder or brace characters, and a short alphabetic extension. Accounted if in `files`, equal to or under a Create deliverable, or named in out_of_scope via `names_path_token`. Part 2: from `Code survey:` assumptions drop path-like tokens, then take identifiers of at least 5 characters: snake_case or UPPER_SNAKE with an underscore, CamelCase with an internal lowercase-to-uppercase change, and `::` segments. Exempt a symbol with a marker word (new, add, adds, added, create, creates, introduce, introduces) in the two words before it. Otherwise require `symbol_found`, a create deliverable path component or file stem, or an out_of_scope mention. Part 3: for every `earlier` job whose id (lowercase) is not in out_of_scope, collect `added` changed_files and `create` reading_deliverables absent from `files`; each must be accounted by a Create deliverable or out_of_scope. Collect all problems into one `bail!` starting 'the reading was refused because it names things as existing that are not in the snapshot', each with where it was named, and the repair. The doc comment states the root cause (a named earlier job's deliverable taken as existing 'without checking the snapshot'), the fix location, and the intended higher refusal rate (expected 8% of newly refused readings, unmeasured).",
+    "Add `defines_symbol(corpus, name)` (line-start item, field and variant match, skipping `//` lines, doc lines and quoted lines; whole word), `survey_symbol_candidates(&reading)` (the symbols Part 2 would check, markers applied), and `snapshot_corpus(entries, fetch)` (keeps only .rs entries, joins lossy UTF-8 text). Extend the `check_reading_acceptance` doc comment to say the repository-wide check runs after it in `read_once`.",
+    "In `read_once`, keep the `ls_tree` entries and derive `repo_files` as now. Build `earlier` from `attempt` plus `referenced_jobs`. If `survey_symbol_candidates` is non-empty, collect the .rs blob oids, call `self.git.cat_blobs(&oids)` once (an error is `ReadError::Failed`) and build the corpus through `snapshot_corpus`; pass `&|s| defines_symbol(&corpus, s)`. Chain `check_reading_acceptance(...).and_then(|()| check_named_dependencies(&reading, &repo_files, &earlier, &symbol_found))`.",
+    "Add the unit tests of demonstrations 2 to 4 to the reading.rs test module using `governed_reading`, `code_reading`, `files_at_head`, `scoped_reading`, `earlier()` and `replay_declaration`. Build banned-word or odd text and fixture symbol names from pieces. Add the reader-level tests to run_pin_tests.rs next to the test at line 1707, using `repo`, `config`, `athena_with`, `reader_edits` and `refusal_section`.",
+    "Run `cargo test -p athena-core`. Fix fixture readings in tests (for example run_pin_tests.rs, crates/athena-core/src/run/tests.rs) that name a path absent from their snapshot, only where the fixture is wrong. Do not weaken the check.",
+    "Add the CHANGELOG.md Unreleased/Added entry and D146 in docs/decisions.md. Both state the root cause (a named earlier job's deliverable is taken as existing without checking the snapshot), the fix location (the reading-acceptance check in crates/athena-core/src/reading.rs), and the intended higher refusal rate (expected 8% of newly refused readings, a declared expectation and unmeasured). D146 also records the .rs definitions-only symbol match, the request-cited job rule and the plain-role-word narrowing. Keep the text free of banned boundary words and email-like text.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` (including the budgets test; no prompt changes, so no budget should move)."
+  ],
+  "risks": [
+    {
+      "risk": "False refusals: a survey or summary names a new file or function in prose as part of the change.",
+      "mitigation": "The error says to list the item as a create deliverable, name it in out_of_scope, write 'new' or 'adds' before a new symbol in the survey, or drop it. Globs, placeholders, braces, tokens with no extension and tokens outside the snapshot's top-level directories are ignored. Symbols are checked only in `Code survey:` assumptions. Tests cover each guard."
+    },
+    {
+      "risk": "Ordinary words or emphasis words in surveys are taken for code symbols and refused.",
+      "mitigation": "Candidates need an identifier shape: an underscore for snake_case and UPPER_SNAKE, a lowercase-to-uppercase change for CamelCase, at least 5 characters, and path-like tokens are dropped first. A guard test shows plain all-caps and lowercase words are not checked. out_of_scope exempts a token."
+    },
+    {
+      "risk": "A comment, string or fixture that holds a name makes it count as existing, as the plan's own fixture would.",
+      "mitigation": "The match is definition-only: line-start item keywords, fields and variants, with comments, doc lines and quoted lines skipped. A definition inside a #[cfg(test)] module still counts, which is a known small gap. Test fixtures build names from pieces. D146 records the choice."
+    },
+    {
+      "risk": "A job cited as evidence with unlanded files now forces an out_of_scope or create entry.",
+      "mitigation": "The message names the unlanded files and offers out_of_scope for the file or the job id. This is the intended class; followed-up jobs are already required to do this by `check_prior_result_and_scope`."
+    },
+    {
+      "risk": "Corpus load cost or a git error on a reading.",
+      "mitigation": "Load only when a survey names a candidate symbol, once, with one `cat_blobs` call over .rs entries only. A git error returns `ReadError::Failed`, not a refusal."
+    },
+    {
+      "risk": "Existing `read_once`-level tests with a fake driver build readings with prose paths absent from their snapshot and now fail.",
+      "mitigation": "Run `cargo test -p athena-core` early (step 6). Pure-function tests pass None and are unaffected. Adjust fixture readings only where they name an absent path; never weaken the check."
+    },
+    {
+      "risk": "Replay cannot see the new refusals, so the 10% replay hold gives no measurement.",
+      "mitigation": "Declare the expected 8% in the criteria and document it as an unmeasured expectation, as the neighbouring checks do."
+    },
+    {
+      "risk": "The boundary scan or the personal-data allow-list trips on test or document text.",
+      "mitigation": "Write banned-word or odd text in tests from pieces so the boundary scan does not trip, and keep D146 and the CHANGELOG entry free of banned words and email-like text."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check with Grep over the three files for the root-cause sentence and the fix location.",
+      "command": "grep -n 'without checking the snapshot' CHANGELOG.md docs/decisions.md crates/athena-core/src/reading.rs",
+      "observes": "One matching line in each of the three files. The CHANGELOG Unreleased/Added entry, D146 and the doc comment of `check_named_dependencies` each say a reading took a named earlier job's deliverable as existing without checking the snapshot, and that the fix is the reading-acceptance check in crates/athena-core/src/reading.rs. D146 also records that the symbol match is definitions-only over .rs, that markdown is excluded, that plain role words are not checked, and that the 8% is a declared expectation and unmeasured. The verifier may use the Grep tool for the same pattern.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Two levels of test. Unit test `a_reading_that_assumes_a_missing_dependency_exists_is_refused_unless_it_is_accounted_for` in the reading.rs test module calls `check_reading_acceptance(&reading, request, attempt, &referenced, Some(&files))` and then `check_named_dependencies(&reading, &files, &earlier, &symbol_found)`, the chain `read_once` runs. Guards: capability set, no open question, files Some. Fixture: a `BTreeSet<String>` from the existing `files_at_head()` plus a few paths. The reading comes from the existing helpers `governed_reading`, `code_reading` and `scoped_reading`. `earlier` holds an `EarlierAttempt` (existing struct, built as the `earlier()` helper does) for a queued job with `reading_deliverables: [\"create crates/athena-core/src/code_health.rs\"]` and no changed files. `symbol_found` is a closure over a fixture. The new function and closure seam are added by plan step 2; the helpers exist today. The unit test asserts the following. The summary says it extends `crates/athena-core/src/code_health.rs`: `check_reading_acceptance` is Ok, the full chain is Err naming that path and containing 'was refused'. The same reading is Ok when the path is a Create deliverable, when out_of_scope names it, and when the fixture set contains it. A Modify of the missing path is still refused. A reading that names the queued job's id but no path is refused naming the unlanded file. A reading that does not repeat the id is still refused when the job is in `earlier` (the request-cited case). All of these are Ok when the id is in out_of_scope. Decline, question and `files` None cases pass. Reader-level tests in run_pin_tests.rs: (a) `a_reading_naming_a_missing_path_as_existing_is_read_again_and_a_corrected_one_is_accepted`: `repo(&config(true))` builds the demo repository (athena.toml, defaults.toml, README.md); `athena_with(..., reader_edits(...))` makes the fake reader write a summary that says 'extends docs/missing-design.md' on read 0 and drop it on read 1; it then calls `athena.ask(\"study the demo\", &Quiet)`. It asserts `proposal.reader_error == None`, a reading is accepted, two reads were made, and `refusal_section(&briefs[1])` contains 'docs/missing-design.md' and 'was refused'. (b) The same reader writes the path on both reads. It asserts `proposal.reading` is None, `reader_error` contains the path, and the reader ran twice. The seam (`reader_edits`, `athena_with`, `repo`) exists today. Run: `cargo test -p athena-core reading` (also matches the run_pin_tests names if the verifier uses the second command).",
+      "command": "cargo test -p athena-core reading && cargo test -p athena-core --lib run_pin_tests",
+      "observes": "Refused cases return Err or a reader refusal with 'was refused' and the missing path or job id. Each accounted case and the present-in-snapshot case returns Ok. The accepted-then-refused pair (acceptance alone Ok, full chain Err) shows refusals rise. At the reader level the refusal reaches the second brief as the correction and a corrected reading is accepted.",
+      "fails_without": "Without `check_named_dependencies` the unit tests do not compile. A stub returning Ok(()) fails the refusal asserts. Without the call in `read_once`, the reader-level test gets `proposal.reading` as Some and its refusal asserts fail. Without Part 3, the id-only case is accepted and its assert fails."
+    },
+    {
+      "criterion": 3,
+      "method": "Second unit test `the_missing_dependency_check_covers_paths_symbols_roles_and_job_ids_not_one_job`, table-driven. It calls the production `check_named_dependencies` with an injected file set, an `earlier` slice, and a symbol closure over `defines_symbol` applied to a fixture corpus string (arguments; seam added in plan step 2). Fixture symbol names are built from pieces with `concat()` so the test source never holds a name whole. Cases: (a) missing path `crates/athena-core/src/code_health.rs`. (b) missing role prompt path `crates/athena-context/prompts/context-engineer.md` (prompts are files in this snapshot). (c) a symbol in a `Code survey:` assumption whose definition is absent from the corpus. (d) a symbol defined in the corpus (`fn` line, a struct field line, an enum variant line) passes. (e) a queued job's planned create is absent; the reading names the job's role as existing and the job is in `earlier`, so it is refused with the job's file named. (f) a symbol that the corpus fixture holds only in a `//` comment, a `///` doc line, a quoted string or a markdown-style line is still refused (`defines_symbol` unit table). (g) `snapshot_corpus` over entries including a .md and a .toml keeps only .rs text. Each refused case is accepted once the item is a Create deliverable or in out_of_scope. Survey markers: 'adds X beside Y' passes for X and still refuses an absent Y after 'beside'; 'a new function X' passes. Guard cases produce no refusal: a glob `crates/*/src`, a `<name>` placeholder, a token outside the snapshot's top-level directories, a symbol outside a survey, and plain all-caps words (NEVER, HTTPS) and plain lowercase words inside a survey. Direct token tests call `names_path_token`, the path-token extractor and `survey_symbol_candidates`. Reader-level test `a_survey_naming_an_undefined_symbol_is_refused_through_the_corpus_load` in run_pin_tests.rs makes the fake reader add an assumption starting `Code survey:` that names a missing identifier; the demo repository holds no .rs, so the corpus is empty and the read is refused through the real `ls_tree` and `cat_blobs` path. A second reader-level case commits a .rs file with the definition before `ask` and asserts the reading is accepted (the existing test at line 1707 shows the reader's snapshot is the repository's head). Run: `cargo test -p athena-core reading`.",
+      "command": "cargo test -p athena-core reading && cargo test -p athena-core --lib run_pin_tests",
+      "observes": "At least six distinct dependency kinds are refused separately: path, role prompt path, symbol, job id (request-cited), comment-only symbol, doc-only symbol. Each error names its own item and no other, and each is accepted once accounted for. Guard cases are accepted. The corpus keeps only .rs. The reader-level cases show the refusal and the acceptance through `read_once`.",
+      "fails_without": "Without the symbol part, (c) fails. Without the path part, (a) and (b) fail. Without Part 3, (e) fails. A check keyed to one job's file name fails the other cases. A bare word-match corpus fails (f) and (g). A permissive extractor fails the guard cases."
+    },
+    {
+      "criterion": 4,
+      "method": "Test `the_missing_dependency_refusal_is_a_declared_higher_refusal_rate` in the reading.rs test module. It calls `replay_declaration(&criteria, &[])` (exists, line 3299) on a criterion 'expected 8% of newly refused readings' and asserts `share == Some(8)` and `unsupported_share() == None`. It reuses the criterion-2 fixture to assert that a reading accepted by `check_reading_acceptance` alone is refused by the full chain, and that the refusal text contains 'was refused', 'create' and 'out_of_scope'. The test comment and D146 say the 8% is a declared expectation, not a measured share, because replay has no repository. The reader-level test (a) in criterion 2 shows the same pair through `read_once`: before the change that reading would have been accepted.",
+      "command": "cargo test -p athena-core reading",
+      "observes": "`share == Some(8)`; Ok from acceptance alone and Err from the chain on the same reading; the refusal text names the repair.",
+      "fails_without": "A check that refuses nothing leaves the accepted-then-refused assert failing. Wrong refusal wording fails the text assert. A malformed declaration makes `share` None."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three checks Athena runs on the finished tree. They cover the new tests, any `read_once`-level fixture readings (in run_pin_tests.rs and crates/athena-core/src/run/tests.rs) that name paths absent from their snapshot and were adjusted in step 6, and the budgets test (no prompt changes).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0: no formatting diff, no clippy warning, every test passes, including the new refusal tests and the existing tests that call `check_reading_acceptance` with None.",
+      "fails_without": "A missing check with its tests present fails to compile or fails the refusal asserts. Fixture readings naming absent paths fail on the new refusals until fixed. Unformatted code fails fmt; an unused helper or needless clone fails clippy under -D warnings."
+    }
+  ],
+  "open_questions": [
+    "Plain role words with no job id, path or identifier (for example 'the context-engineer role') cannot be checked; there is no role list in code to check against. D146 records the narrowing.",
+    "The 8% is the brief's expectation. Replay passes no repository or earlier attempts, so the share cannot be measured; it stays a declaration.",
+    "The size of the .rs corpus was not measured; one batched `cat_blobs` call is assumed to be a few MB at most.",
+    "Applying Part 3 to every request-cited job may refuse readings that cite old jobs whose added files were later renamed or deleted; the job id in out_of_scope is the exemption. I did not check how often this happens.",
+    "Symbols that exist only as TOML keys or in markdown are not found, because the corpus is .rs definitions. A survey that names one must list it in out_of_scope or mark it as new.",
+    "I did not confirm the exact form of `EarlierAttempt.changed_files` entries beyond `unaccounted_files` splitting on the first space as `status path`. The plan reuses that form and treats `A`/`added` entries as additions; step 1 confirms the status text.",
+    "The reader-level positive symbol case assumes the reader's snapshot is the repository head the test commits to; the existing test at run_pin_tests.rs:1707 suggests so. If not, the test drops to the refusal case only."
+  ],
+  "producer_section_sha256": "f994a9d597597d0dbecd977cb3655749b0b273a2006c39cef4f6a383824d3810"
+}

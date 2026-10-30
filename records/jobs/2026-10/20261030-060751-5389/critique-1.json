@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060751-5389",
+  "round": 1,
+  "at": "2026-10-30T17:00:49.563408014Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Job ids and plain role names are not checked, though the accepted reading and the request's stated cause are about exactly those.",
+      "evidence": "The reading says it 'confirms each earlier job id, path, role, or symbol the reading relies on exists in the snapshot (landed, with a path found)'. The request says the cause is 'A job id named in the request or notes is taken to mean its work has landed. The earlier job may be queued, unmerged or never produced.' The plan rejects resolving job ids because 'a job cited only as evidence has no recorded artifact'. But reading.rs:402-407 builds `referenced_jobs` from records for every job id in the request, and `EarlierAttempt` (athena-context/src/briefs.rs:1437-1474) carries `end_state`, `verdict`, `changed_files` and `reading_deliverables`. As planned, a reading that says 'builds on the context-engineer role from job 20261026-064950-38jx' with no path passes the check, and the plan itself admits this in its open question. Fix: Add a third part that takes `referenced: &[EarlierAttempt]`, which is already in scope at the call site. For each job id that the reading's non-out_of_scope text names as a basis, refuse the reading when that job did not land, unless the job id or its unlanded files appear in out_of_scope or as create deliverables. Decide 'did not land' from end_state, or from its `added` changed_files being absent from `files`. Then add a criterion-3 case where a queued job is named only by id and role. Or, if this is truly left out, state the narrowing as a departure from the accepted reading rather than an open question.",
+      "location": "Plan Decision 2, second rejected option (\"Resolve job ids…\"); Open questions, first bullet",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A survey that names a new function to be added to a modified file is refused, and the only repair offered is to put the thing being added in out_of_scope.",
+      "evidence": "Surveys often say where new code goes. The accepted reading's own survey reads 'the new check goes beside them'. A survey written as 'check_named_dependencies goes beside check_code_survey' would be refused: reading.rs is a modify, so no create stem matches. The repair text says to list it as a create deliverable or name it in out_of_scope, and neither fits a new function. Fix: Check only symbols the survey presents as already there. One way is to accept a symbol that is also named in the summary or departures as something the change adds. Another is to split each survey on 'new'/'add' clauses. At the least, make the refusal say 'if this is a new symbol the change adds, say so outside the Code survey'. Add a test for this case.",
+      "location": "Plan Decision 3 / Step 2 Part 2 (symbol accounted for only by a create deliverable's path component or file stem)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Matching symbols against markdown lets planned-but-unbuilt names count as existing.",
+      "evidence": "docs/design/*.md and docs/decisions.md describe proposed mechanisms. A function named in a design doc for a queued or failed job would be 'found', which is the failure class this job exists to stop. The behavior the request cares about is code that landed. Fix: Build the symbol corpus from .rs (and .toml for config keys) only. Or require the match in a .rs file. Note this in D146.",
+      "location": "Plan Decision 4 / Step 3 (corpus of .rs/.toml/.md blobs)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`cat_blob` per entry spawns one git process per file, the same cost the plan gives for rejecting `show_file`. A batched API exists.",
+      "evidence": "athena-git/src/lib.rs:465 `cat_blob` runs `git cat-file blob <oid>` once per call. lib.rs:856 has `cat_blobs(&self, oids: &[String]) -> Result<Vec<Vec<u8>>>`. Fix: Load the corpus with one `cat_blobs` call over the filtered oids.",
+      "location": "Plan Decision 4, rejected option; Step 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test shows the 8% declaration parses and the refusal text has repair words. It does not show refusals rising.",
+      "evidence": "`replay_declaration(...).share == Some(8)` checks parsing of the criterion text. The plan admits replay cannot see the new refusals. A test like this would pass even if the check refused nothing in practice. Fix: Keep the declaration test. Also assert that a reading accepted before the change is refused after it, for example by running the same fixture through `check_reading_acceptance` alone (Ok) and then through the full chain (Err). Say plainly in D146 that the 8% is unmeasured, so the higher rate is shown as a direction and not as a measured share.",
+      "location": "Demonstration for criterion 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is grounded in real code. Read in the snapshot: `check_reading_acceptance` (reading.rs:2678), `check_boundary_and_repo_files` (2600), `names_path_token` (2516), `reading_text_fields` (2538), `path_exists_in` (2571), `code_surveys` (2917), `replay_declaration` (3299), the test helpers `scoped_reading`, `governed_reading`, `files_at_head` and `code_reading`, and `Git::ls_tree`, `cat_blob` and `cat_blobs` in athena-git. The call site is in `read_once` (lines 499-530), not `read_for`, but those are the lines the plan cites. The new function is a real seam, and its tests call it directly. The design has gaps, though. (1) The accepted reading says the check covers earlier job ids and roles. The request names the cause as \"a job id … is taken to mean its work has landed\". The plan checks only file-like paths and survey symbols. It drops job ids on the claim that a job cited as evidence has no recorded artifact. That claim is wrong: `read_once` already builds `referenced_jobs`, and each `EarlierAttempt` carries `end_state`, `verdict` and `changed_files`. Plain role names are left as an open question. A reading that relies on \"job X's steward role\" without naming a path still gets through. (2) The symbol rule can only accept a symbol by the file stem of a create deliverable. So a survey that names the function a modify deliverable will add is refused, and the repair offered (put it in out_of_scope) makes no sense. (3) Symbols are matched against .md text as well as code. Design docs and decisions describe work that was planned but not built, so this lets back in the very assumption the check exists to stop. (4) The corpus is loaded with one `cat_blob` process per file, the same cost the plan gives for rejecting `show_file`, even though a batched `cat_blobs` exists. Finding 1 is major. The others are minor and can be fixed within this plan."
+}
