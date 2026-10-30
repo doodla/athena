@@ -1,0 +1,135 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261029-233021-e5sg",
+  "n": 1,
+  "at": "2026-10-30T06:11:51.323818978Z",
+  "invocation_seq": 3,
+  "base_commit": "bf810b4498e30fe9e9e0f3e6469f90ac10e3ad82",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Match each job's landing stage to its own landing evidence",
+  "summary": "Fix the throughput section's landing-and-rebuild stage in status.rs so each landed job ends at its own landing evidence (its landing record, else its merge commit on main that carries the job id, else the job's commit time). When none is found, report no evidence for that job and don't borrow another record. This follows the landed 2270e80 fix, which still reported a 273.8-minute median. It must be validated on this repository's real records.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Fixture test plus fmt, clippy -D warnings and the full test suite."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the five most recent landed jobs on the real records against git log."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix replaces the matching rule rather than patching the one job."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier repeats the athena status check."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is landing durations matching real commit times, not just that code compiles."
+    },
+    {
+      "id": "no-empty-success",
+      "how": "A job with no evidence is reported as such, not counted as success or zero."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/status.rs. landing_record_time (~line 772) filters records.landings for a JobLanding commit with job == this job, taking the newest created_at. landing_end (~788) takes the later of the outcome and that time, else the outcome. It feeds busy_intervals, stage measurement (~859) and the summary text (~976). The fix is in this resolution order: own landing record, then a main-branch merge commit carrying the job id, then the job's commit time, then explicit none. Landing time is measured directly as that evidence's timestamp minus the verifier end or outcome, not via a stand-in. No record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are unaffected.",
+    "Goal and audience: the owner reading `athena status` throughput needs a trustworthy landing stage. The request is urgent because the wrong median reached main.",
+    "The newest-record rule in landing_record_time and any commit-kind matching may pick a record in which the job id appears as a neighbour. The producer must find the actual root cause on the real records, not only assume this one.",
+    "Evidence outside records/ is read through the existing history data (athena_data::history); no new dependency is added. If the merge commit isn't reachable from the loaded data, the fallback is the landed job's commit time.",
+    "Job-level 'no evidence' is shown in the report text, for example 'landing evidence not found for N of M', and that job's landing stage is excluded from the median rather than counted as zero or borrowed.",
+    "Governance files (athena.toml, defaults.toml, workflows) are not needed; CHANGELOG.md is a deliverable per the request."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-core/src/status.rs has a fixture test with three jobs: one with its own landing record (its landing stage equals that record's time minus the outcome), one with no landing record (reported as no evidence, or resolved only by its own merge commit or commit time), and one whose neighbouring job's landing record exists and is not used for it.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo run -- status` (athena status) on this repository's real records. For the five most recent landed jobs the reported landing durations are each within 3 minutes of the time between the job's outcome and its commit on main from `git log`. For job 20261029-130605-mbpm the landing stage is about 3.8 minutes (outcome 20:41:09 to commit 20:44:56 UTC), not hours. The overall median for landing and rebuild is no longer 273.8 minutes. The producer's job report shows this check.",
+      "kind": "behavior"
+    },
+    {
+      "text": "When no landing evidence is found for a job, the status output says so for that job. No other job's record is used, and the code path is covered by a test.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry that names the landing-stage matching fix and the real-records validation.",
+      "kind": "content"
+    },
+    {
+      "text": "Job 20261029-130605-mbpm, a landed job that only supplies the evidence case, is not modified. Its changed files (CHANGELOG.md, crates/athena-core/src/hestia.rs, docs/enforcement.md, docs/spec.toml, xtask/tests/spec.rs) are kept as landed and not touched, and its two minor findings (a stale spec.toml comment and OLY-B-WHO-01 lacking an open-question note) are out of scope here.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    }
+  ],
+  "out_of_scope": [
+    "Fixing the two minor findings of job 20261029-130605-mbpm (stale spec.toml comment about two late headings; OLY-B-WHO-01 open-question note)",
+    "Editing job 20261029-130605-mbpm's landed files: docs/spec.toml, xtask/tests/spec.rs, docs/enforcement.md, crates/athena-core/src/hestia.rs (kept as landed; CHANGELOG.md is edited only to add the new entry)",
+    "Changing athena.toml, defaults.toml, workflow files or records/",
+    "Redesigning other throughput stages or the busy-interval model beyond what landing matching needs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1700.0,
+        "p90": 3400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7198924731182796,
+      "p_verification_passes": 0.6741935483870968,
+      "p_user_intervenes": 0.07701492537313433,
+      "cost_usd": {
+        "p10": 0.5423789983441935,
+        "p50": 1.1977152,
+        "p90": 3.0945352510063784
+      },
+      "wall_time_s": {
+        "p10": 537.4767397421234,
+        "p50": 1702.6442529345954,
+        "p90": 3423.717688613385
+      }
+    }
+  },
+  "departures": "The real-records validation with git log adds some cost and time over the reference.",
+  "urgent_reason": "It cuts wasted time and rework by stopping a wrong landing stage that reached main from misleading throughput decisions."
+}
