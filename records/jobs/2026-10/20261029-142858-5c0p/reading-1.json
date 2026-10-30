@@ -1,0 +1,170 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261029-142858-5c0p",
+  "n": 1,
+  "at": "2026-10-30T01:35:02.239002399Z",
+  "invocation_seq": 1,
+  "base_commit": "03c8774550630c84ec5751bfb5ea7e2aacbd99bc",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add per-job worktree lifecycle and in-flight disk bound (A4)",
+  "summary": "Build job A4 of D145: the run creates a git worktree and its own target directory per job and removes both when the job ends, and disk.rs gains the section 5 bound in_flight = floor((free - reserve - slots*T)/(T+S)). T and S are A1's figures; job 20261029-142844-ynv3 (A1) measured none, so the bound takes T and S as inputs with the design's labeled estimates (6 GB, 0.2 GB) as defaults. With max_in_flight = 1, behavior is unchanged.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Tests for worktree lifecycle and the bound; fmt, clippy, test pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria exercise create/remove and numeric bound outputs."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Checks are cleanup after every end path and the bound's values."
+    },
+    {
+      "id": "small",
+      "how": "Limited to run/mod.rs, disk.rs and CHANGELOG.md."
+    },
+    {
+      "id": "evidence",
+      "how": "T and S labeled as estimates."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/disk.rs (df_free_bytes, sweep_idle_targets, StateDir/format_bytes use), docs/design/async-drain.md section 5 (bound formula, T/S estimates); run/mod.rs and run/producer.rs are the entry points where the work tree is made (job_dir/work). The real entry point is the run of a job through run/mod.rs; the disk bound is a pure function in disk.rs tested directly. No record or data file is added, so check_record_file/AnyRecord are not involved.",
+    "Goal: let a later build job start producers early in their own worktrees; audience is Sri and the drain verifier, who check behavior by cargo test.",
+    "A1 measured nothing, so T and S are parameters with the design's estimates as defaults, labeled estimates in code docs and the CHANGELOG; replacing them with measurements is later work.",
+    "If the work tree already uses a git worktree, the change adds the per-job target directory and guaranteed removal of both on every end path; otherwise it adds both.",
+    "Governance files athena.toml and defaults.toml need no change; none is a deliverable."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test through the run entry point in crates/athena-core/src/run/mod.rs shows a job gets its own worktree and its own target directory under the job dir while it runs, and both are removed after success and after failure; run cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Unit tests in crates/athena-core/src/disk.rs show the bound floor((free_gb - reserve_gb - slots*T)/(T+S)) for numeric cases, including exactly one job, zero when free disk is below the reserve, and no underflow with unsigned or negative inputs; run cargo test -p athena-core disk.",
+      "kind": "behavior"
+    },
+    {
+      "text": "With max_in_flight = 1 the existing drain tests pass unchanged: git diff shows no edits to existing test bodies, and cargo test passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check and cargo clippy --all-targets -- -D warnings are clean and cargo test passes for the workspace.",
+      "kind": "behavior"
+    },
+    {
+      "text": "T and S in disk.rs are marked as estimates (6 GB and 0.2 GB per docs/design/async-drain.md section 5) because A1 (20261029-142844-ynv3) recorded no measurement; no measured number is claimed.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for per-job worktree start and the disk bound, naming build job A4 and stating that T and S are estimates.",
+      "kind": "content"
+    },
+    {
+      "text": "The worktree path used is the live work tree (job_dir/work, per run/producer.rs), not the kept-work directory, addressing the A3 finding (20261029-142853-x4nr).",
+      "kind": "content"
+    },
+    {
+      "text": "athena.toml, defaults.toml and .github/workflows are unchanged (git diff).",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Job 20261029-142844-ynv3 (A1): its candidate changes to CHANGELOG.md, docs/decisions.md and docs/design/async-drain.md are kept as landed or as-is; its missing measurements are not redone here, and no T or S is invented",
+    "Job 20261029-142853-x4nr (A3): its candidate changes to drain.rs, state.rs and CHANGELOG.md are not reworked here; its findings (wrong worktree path in RealSteps::worktree, missing checks stage) are left to a follow-up, except that this job's worktree path must be the live one, job_dir/work",
+    "Running more than one producer at once or raising max_in_flight above 1 (later build jobs)",
+    "Resuming leftover in-flight rows, read-ahead, conflict-return, landing rebase",
+    "Changes to athena.toml, defaults.toml, .github/workflows, or re-enabling sccache",
+    "Changes to crates/athena-cli/src/drain.rs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 3.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 3800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.721832884097035,
+      "p_verification_passes": 0.6699346405228758,
+      "p_user_intervenes": 0.07818181818181819,
+      "cost_usd": {
+        "p10": 0.5352818148394122,
+        "p50": 1.1917796999999997,
+        "p90": 2.9604810194488125
+      },
+      "wall_time_s": {
+        "p10": 540.4818145636394,
+        "p50": 1700.7473915760004,
+        "p90": 3204.4374187330404
+      }
+    }
+  },
+  "departures": "Hard pipeline change touching run/mod.rs, and A1 provided no measured T and S, so verification risk is higher than the reference.",
+  "hard_reason": "Changes the run pipeline (how a job's work tree is created and removed) and adds a disk limit that can hold producer starts.",
+  "producer_effort": "high"
+}
