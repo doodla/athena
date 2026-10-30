@@ -113,6 +113,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Structure pass job R7 (split step 3): `SnapExec` (the struct and its `Exec` impl), `take_baseline` and
+  `baseline_checks` moved from `run/mod.rs` into the new `run/checks.rs` (stages S6 and S7). No behavior
+  changed: the bodies are the same text. Altered beyond a name: `SnapExec` and its fields, and `take_baseline`,
+  are now `pub(super)` so `run/mod.rs` and `run/producer.rs` can reach them, and `take_baseline`'s signature is
+  wrapped over several lines by rustfmt. Early returns: `take_baseline` has one `return baseline` (the nested-run
+  case, old line 1142, new line 68 of `checks.rs`); it returns a value from the moved method itself, not from
+  `produce_and_verify`, so it has no `Flow::Stop` pairing, and the moved text has no other early return except
+  the unchanged `?` uses. Caller check (Grep over all `*.rs`): `take_baseline` is called once, at
+  `run/producer.rs` line 53, as `self.take_baseline(...)`, which resolves unchanged; `baseline_checks` is called
+  only by `take_baseline`; `SnapExec` is constructed once, in `run/mod.rs` (the routed-check step of
+  `produce_and_verify`), through a new `use checks::SnapExec;`. The `check_seam` test module stays in
+  `run/mod.rs` so test paths are unchanged, and `SnapExec::exec` reads it through `use super::*`. No item that
+  was public or used elsewhere moved, so no re-export is needed and `main.rs` and `drain.rs` are untouched. Test
+  code is unchanged.
 - Structure pass job R6 (split step 2): the candidate build (stage S4, from the snapshot's change list through
   the idle-producer failure) and admission (stage S5, blob copy, temporary index, candidate commit, `admit`,
   and the refusal on violations) of `produce_and_verify` moved from `run/mod.rs` into the new
