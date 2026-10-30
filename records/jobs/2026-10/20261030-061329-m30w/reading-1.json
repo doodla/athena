@@ -1,0 +1,168 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-061329-m30w",
+  "n": 1,
+  "at": "2026-10-30T18:15:09.33598907Z",
+  "invocation_seq": 1,
+  "base_commit": "611f6a215741ede27eb4c7c0351b45ea5cbccf5a",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Keep and show the reader's error; re-read once, then skip the item",
+  "summary": "When the reader produces no usable reading (job 20261029-233021-e5sg, commit 21689b7), the error is committed with the failed-reading record and printed on the drain's log line for the item. A Proposed job with no reading is read again once, like a refused reading. If that also fails, the drain skips the item with its reason and moves on, without counting it twice toward the repeated-failure stop. The audience is the person running `athena drain`, who needs to see why an item stalled.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New drain-entry-point tests, with the fmt, clippy -D warnings and test suite criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The criteria check the error text in the log and the committed record, the single re-read and the drain moving on, not that wiring exists."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix covers any unread Proposed job, not only the one that surfaced."
+    },
+    {
+      "id": "thrash-stop",
+      "how": "The skipped item is not double-counted, but a different item that fails twice still stops the drain."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is the drain continuing past an unreadable item with its reason shown."
+    },
+    {
+      "id": "small",
+      "how": "One focused change across reading.rs, drain.rs and the changelog."
+    },
+    {
+      "id": "public",
+      "how": "The committed error text goes through the redactor."
+    },
+    {
+      "id": "rust",
+      "how": "All code and tests are Rust."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-core/src/reading.rs (the read path around lines 840-878 builds the 'Read a request (the reader failed)' commit and returns Proposal.reader_error), crates/athena-core/src/run/mod.rs line 332 (the 'has no reading yet (the reader failed)' error from go), and crates/athena-cli/src/drain.rs (run_job around 1067, attempts around 1248 with ATTEMPTS and ItemEnd::Failed, the read-ahead near 1835, and the real Steps impl at 2512-2625).",
+    "Code survey, drain order: attempts() calls run_job with ReadOf::Queued, which calls steps.read and then steps.run. For a Proposed job with no reading, run returns Err, so the line is 'not run' and the item fails twice (ATTEMPTS), producing the repeated-failure stop. The fix goes in the drain's Steps::read/run path, not the reader.",
+    "Code survey, records: the error text is added to the failed-reading commit's body, or to an existing record already validated by the AnyRecord allow-list. No new record type or data file under crates/ is planned, so check_record_file and the AnyRecord round-trip test are unaffected. If the producer adds a field to a record, it must extend the round-trip test.",
+    "Code survey, measurement: the tests drive the drain entry point with the existing fake-reader setup in crates/athena-cli/tests/drain.rs (a reader returning unparseable output) and read the drain's log text and the committed record directly. They do not check wiring or types.",
+    "The reader error is committed as text in the failed-reading commit body, with the secrets redactor applied. If a field on an existing record is cleaner, the producer may use that instead.",
+    "The re-read is a single extra read call. If it fails again, the item is skipped with the reader's error as its reason. The skip counts as one failure for that item, so a different later item can still be tried and the drain does not stop with 'repeated failure'.",
+    "The fix is generic: it applies to any Proposed job with no reading, not only job 20261029-233021-e5sg. This request does not edit or repair that job's records.",
+    "Job 20261029-233021-e5sg is the evidence job here, not a retry target. Its own rejected change (the landing-stage fix in status.rs, store.rs and athena-git) is not retried or kept by this request. Its findings are not addressed here, and the files it changed are listed as out_of_scope."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-cli --test drain`. A new test drives the drain entry point with a reader that returns unparseable output. It asserts that the reader's error text appears in the drain's log line for the item and in the committed failed-reading record, that the reader was invoked exactly twice for that item (one re-read), and that the drain then went on to the next item and ran it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In that test, the skipped item is reported with its reason, and the drain's stop reason is not 'repeated failure' (the item is not counted twice toward the stop). A second test, or part of the first, shows that a re-read which succeeds lets the item run.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In crates/athena-core/src/reading.rs, the failed-reading commit body or record now includes Proposal.reader_error. A Grep of the diff shows the error used when the commit is built. A test in athena-core checks that the committed record contains the error text.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`. All pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry saying the reader's error is committed and printed by drain, and that a Proposed job with no reading is read once more and then skipped with its reason.",
+      "kind": "content"
+    },
+    {
+      "text": "Governance files (athena.toml, defaults.toml, workflows, records/) are unchanged. The diff touches only crates/athena-core/src/reading.rs, crates/athena-cli/src/drain.rs, tests under crates/, and CHANGELOG.md.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Retrying or keeping job 20261029-233021-e5sg's rejected landing-stage change: crates/athena-core/src/status.rs, crates/athena-core/src/store.rs and crates/athena-git/src/lib.rs are left as they are on main, and its CHANGELOG entry is not touched",
+    "Finding out why the reader produced no reading in the failed job (a reader or prompt fix)",
+    "Changing athena.toml, defaults.toml, workflow files or records/",
+    "Changing the repeated-failure rule for failures that are not unread jobs",
+    "Repairing or re-reading existing job records by hand"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1700.0,
+        "p90": 3300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7198924731182796,
+      "p_verification_passes": 0.675,
+      "p_user_intervenes": 0.07679083094555875,
+      "cost_usd": {
+        "p10": 0.533281766341618,
+        "p50": 1.2013687,
+        "p90": 3.0892898422266817
+      },
+      "wall_time_s": {
+        "p10": 540.1848580345153,
+        "p50": 1708.9543804581442,
+        "p90": 3474.0711504799797
+      }
+    }
+  },
+  "departures": "Slightly lower verification odds: the drain's failure and stop logic is intricate and the test needs a fake reader that returns unparseable output.",
+  "urgent_reason": "Cuts wasted drain time: each later drain attempt on an unread job fails at once and counts twice toward the repeated-failure stop, so the drain stalls with $0 spent.",
+  "hard_reason": "Changes drain's failure handling and its repeated-failure stop rule, which can hold or stop work, and changes what the run pipeline records when a read fails.",
+  "producer_effort": "high"
+}
