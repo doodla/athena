@@ -280,6 +280,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Only a job id on a "Depends on" line, and the retry link of a "try again on <job>" request, are now
+  dependencies in `athena plan`; a job id cited anywhere else in a request no longer holds the item.
+  `reading::plan_entry` took every full job id quoted in the request text as a dependency, so since rejected
+  and failed dependencies hold their dependents, any request that cited a failed or rejected job as evidence
+  was held for good (29 items, among them urgent fixes and the steward's root-cause requests, which cite the
+  failing job by design). `reading::dependency_ids_in` now reads the ids on lines that start with "Depends on"
+  (any case, after an optional `>`, list marker or number) plus the retry link; `after <job>`, follow-up
+  phrases and other mentions are references the reader still sees but that never hold the item. The held
+  reason and the retry rule are unchanged. A request that needs ordering must say `Depends on <job>`.
 - A dependency on a rejected or failed job with no landed retry now holds the dependent item. `athena plan`
   and drain treated every dependency outside the open items as met, so a rejected job and a landed one looked
   alike: on 2026-10-30 job 20261029-142858-5c0p, which names 20261029-142853-x4nr (rejected twice, re-asked as

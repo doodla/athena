@@ -17,7 +17,10 @@
 //!   The job of an approved steward proposal is an item like any other: its priority is normal unless a
 //!   priority record or its raising role says otherwise ([`proposal_priority`]), and it is ordered by the same
 //!   rules, not worked ahead of the plan.
-//! - **Dependencies.** A dependency on another open item is met once that item is ordered. A dependency on a
+//! - **Dependencies.** An item depends only on the jobs named on a "Depends on" line of its request and on the
+//!   job a "try again on <job>" request retries; a job id cited elsewhere in the text is a reference and never
+//!   holds the item (`reading::dependency_ids_in`). A dependency on another open item is met once that item is
+//!   ordered. A dependency on a
 //!   job that is not an open item is met when that job landed, or when a landed job is linked to it as its
 //!   retry ("try again on <job>", also through a chain of retries). A dependency on a job that was rejected,
 //!   failed, timed out or went stale, with no landed retry, is unmet: the item is not ordered and is listed
@@ -134,7 +137,8 @@ pub struct PlanEntry {
     pub acceptance: Vec<String>,
     /// What is still unknown.
     pub open_questions: Vec<String>,
-    /// Ids of the requests that must finish first.
+    /// Ids of the requests that must finish first: those on a "Depends on" line of the request, and the job a
+    /// "try again on <job>" request retries. Job ids cited elsewhere in the text are not listed.
     pub depends_on: Vec<String>,
     /// Repository paths (a directory ends with `/`) the request will change.
     pub touches: Vec<String>,

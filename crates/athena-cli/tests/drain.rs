@@ -2219,7 +2219,7 @@ fn real_steps_with<'a>(
 }
 
 const GONE_REQUEST: &str =
-    "Edit crates/gone/lib.rs and README.md after 20261012-075824-1x28\n- it is edited";
+    "Edit crates/gone/lib.rs and README.md\nDepends on 20261012-075824-1x28\n- it is edited";
 
 fn gone_questions() -> [&'static str; 2] {
     [
@@ -4470,7 +4470,7 @@ fn the_plan_holds_an_item_whose_dependency_was_rejected_until_a_retry_landed() {
     // An item that says it depends on the rejected job.
     let athena = fx.athena(rated_scenario().script());
     let (dependent, _) = athena
-        .queue(&format!("{SECOND}\nThis comes after {dependency}."))
+        .queue(&format!("{SECOND}\nDepends on {dependency}"))
         .unwrap();
     let dependent = dependent.as_str().to_string();
     let lander = RecordingLander::default();
@@ -4520,6 +4520,43 @@ fn the_plan_holds_an_item_whose_dependency_was_rejected_until_a_retry_landed() {
     );
     let report = drain::plan(&steps, 5.0, &Quiet).unwrap();
     assert_eq!(report.plan.order, [dependent.as_str()], "{:?}", report.plan);
+    assert!(report.plan.refused.is_empty(), "{:?}", report.plan.refused);
+    let text = display::plan(&report);
+    assert!(
+        !text.lines().any(|l| l.starts_with("held")) && text.contains("0 held back"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_item_that_only_cites_a_rejected_job_is_planned_not_held() {
+    let fx = Fixture::new();
+    let mut failing = rated_scenario();
+    failing.verdict = rejecting_verdict();
+    let rejecting = fx.athena(failing.script());
+    let (dependency, _) = rejecting.queue(FIRST).unwrap();
+    let dependency = dependency.as_str().to_string();
+    rejecting.go(&dependency, AcceptedBy::Flag, &Quiet).unwrap();
+    rejecting.go(&dependency, AcceptedBy::Flag, &Quiet).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(
+        records.jobs[&dependency].state(),
+        JobState::Closed(OutcomeState::Rejected)
+    );
+
+    // An item that cites the rejected job as evidence, with no 'Depends on' line.
+    let athena = fx.athena(rated_scenario().script());
+    let (citing, _) = athena
+        .queue(&format!(
+            "{SECOND}\nIt cites {dependency} as evidence, and after {dependency} it was rejected."
+        ))
+        .unwrap();
+    let citing = citing.as_str().to_string();
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let report = drain::plan(&steps, 5.0, &Quiet).unwrap();
+    assert_eq!(report.plan.order, [citing.as_str()], "{:?}", report.plan);
     assert!(report.plan.refused.is_empty(), "{:?}", report.plan.refused);
     let text = display::plan(&report);
     assert!(

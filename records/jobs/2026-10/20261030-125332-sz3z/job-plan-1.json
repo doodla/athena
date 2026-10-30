@@ -1,0 +1,175 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-125332-sz3z",
+  "round": 1,
+  "at": "2026-10-30T13:51:53.231763096Z",
+  "invocation_seq": 3,
+  "approach": "Fix the extraction in `reading::plan_entry`, where the fault starts. Add a pub fn `dependency_ids_in(text)` in reading.rs. It returns the full job ids on lines that start (after optional `>`, list marker, or `N.`) with `Depends on`, case-insensitive. It also returns the retry link: the full job id after a leading \"try again on\", read with the existing `retry_reference`. `plan_entry` sets `depends_on` from it, still dropping the job's own id. `job_ids_in` stays, because `referenced_jobs` still uses it to show cited jobs to the reader. `Plan::build_with`, the hold reason and the retry logic are unchanged. Update the `plan_entry` doc comment, the plan.rs module doc on dependencies, the existing reading test that expects `depends_on` from \"after <id>\", and the drain test that queues \"This comes after {dependency}\". Add tests and a CHANGELOG entry under Unreleased/Fixed.",
+  "decisions": [
+    {
+      "choice": "Add `dependency_ids_in` next to `job_ids_in` and call it from `plan_entry`. Reuse `job_ids_in` on the text after 'Depends on' on each line, and `retry_reference` for the retry link.",
+      "reason": "The fault is that `plan_entry` treats every quoted id as a dependency. One small pure function fixes it, is unit-testable, and leaves `referenced_jobs` (reader evidence) alone.",
+      "rejected": [
+        {
+          "option": "Filter in `Plan::build_with` or `unmet_dependency` so only some ids hold",
+          "why": "`build_with` receives only id strings and cannot tell a dependency from a citation. That would fix the symptom, not the cause, and the brief says to fix extraction."
+        },
+        {
+          "option": "Change `job_ids_in` itself",
+          "why": "`referenced_jobs` and the existing `job_ids_are_found_mid_sentence_and_only_when_whole` test rely on it finding every id. Changing it would stop citations from reaching the reader."
+        }
+      ]
+    },
+    {
+      "choice": "A 'Depends on' line is a line that starts with 'Depends on' (case-insensitive) after optional whitespace, `>`, `-`/`*`/`+` and `N.`/`N)`, followed by a non-alphanumeric character (`:` or a space). Every full id on that line is a dependency.",
+      "reason": "This matches the accepted reading. It accepts the usual ways a request is written (plain, quoted, bulleted, 'Depends on: id') and refuses 'depends on' in running prose, so a sentence cannot hold an item.",
+      "rejected": [
+        {
+          "option": "Match 'depends on' anywhere in a line",
+          "why": "A sentence such as 'the fix depends on the evidence in <id>' would hold the item again, which is the bug being fixed."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the 'referenced job is not among the records' open question looping over `entry.depends_on`, with no change.",
+      "reason": "The brief puts changes to that question out of scope beyond what the new rule needs. It now checks only real dependencies, which is the reference check that matters for holding.",
+      "rejected": [
+        {
+          "option": "Also raise the open question for cited ids",
+          "why": "This is extra scope. A cited id missing from the records does not block planning."
+        }
+      ]
+    },
+    {
+      "choice": "Do not make 'after <id>' or follow-up phrases dependencies.",
+      "reason": "The accepted reading treats them as references. The user wants a dependency only where it is written 'Depends on'.",
+      "rejected": [
+        {
+          "option": "Keep 'after <id>' as a dependency",
+          "why": "Requests that cite a failed job after 'after' would still be held forever."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `dependency_ids_in` (Depends-on lines plus the retry link, via `retry_reference`). Use it in `plan_entry` instead of `job_ids_in`. Rewrite the `plan_entry` doc comment line about dependencies. Add the unit tests for criteria 1-3 and update the existing `an_unread_request_is_planned_from_its_own_words...` test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "Update the module doc 'Dependencies' bullet to say what counts as a dependency (a 'Depends on' id or the retry link; cited ids do not). Update the `PlanEntry::depends_on` field doc if it says otherwise. No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Change the existing held-dependency test to queue 'Depends on {dependency}' instead of 'This comes after {dependency}.'. Add a test that an item citing the rejected job without a 'Depends on' line is planned through `drain::plan`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a Fixed entry under Unreleased about Depends-on ids and retry links as the only dependencies.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In reading.rs, next to `job_ids_in`, add `pub fn dependency_ids_in(text: &str) -> Vec<RecordId>`. For each line, trim whitespace, `>`, `-`, `*`, `+` and a leading `N.` or `N)`. If the rest starts with 'depends on' (ASCII case-insensitive) followed by a non-alphanumeric character or the end, take `job_ids_in` of the rest of the line. Before the lines, add the id from `retry_reference(text)` when it parses with `RecordId::parse`. Keep order and drop repeats.",
+    "In `plan_entry`, replace `job_ids_in(text)` with `dependency_ids_in(text)`, keeping the map to strings and the filter against the job's own id. Rewrite the doc comment line 'A request depends on every other job whose full id it names...' to state the new rule, including that other ids are references only.",
+    "Update the existing test `an_unread_request_is_planned_from_its_own_words_and_a_read_one_from_its_reading` (~line 4147). The request still says 'after 20261012-075824-1x28' on the first line; assert that `depends_on` is empty. Then add a 'Depends on 20261012-075824-1x28' line and assert that `depends_on` is `[id]`.",
+    "Add the reading.rs unit tests for criteria 1-3 (the cited-only item is planned, the Depends-on-on-rejected item is held with its reason and released by a landed retry, the retry link and the line-versus-sentence shapes). Use `job_with_checks`, `Lookup`, `crate::plan::{Plan, JobEnd, Ending}`.",
+    "In plan.rs, edit the module doc 'Dependencies' bullet and the `depends_on` field doc to describe the rule. Do not change any logic.",
+    "In crates/athena-cli/tests/drain.rs, change the queued text in `the_plan_holds_an_item_whose_dependency_was_rejected_until_a_retry_landed` from 'This comes after {dependency}.' to 'Depends on {dependency}'. Add `an_item_that_only_cites_a_rejected_job_is_planned`, which follows the same setup but queues '{SECOND}\\nIt cites {dependency} as evidence.' and asserts it is in `report.plan.order` and `refused` is empty.",
+    "Add the CHANGELOG.md bullet under Unreleased / Fixed.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any other test that relied on the old rule. If `cargo run -- plan` can reach the records, record its held list in the job report."
+  ],
+  "risks": [
+    {
+      "risk": "Requests that write 'Depends on' in another shape (for example mid-line or '**Depends on:**') stop being dependencies and lose their ordering.",
+      "mitigation": "Matching is case-insensitive and allows `>`, list markers, numbering and a trailing colon. The producer checks the real held requests' wording if the records are available. A test covers the common shapes."
+    },
+    {
+      "risk": "Markdown bold or other leading characters break the line match.",
+      "mitigation": "Strip leading `*` along with the other marker characters so '**Depends on:** id' still matches. Test that shape."
+    },
+    {
+      "risk": "Another existing test relies on a cited id being a dependency.",
+      "mitigation": "Run the whole suite. Update the reading and drain tests that encode the old rule, and search the other CLI tests for requests that quote an id. The brief names only reading.rs and drain.rs as test deliverables."
+    },
+    {
+      "risk": "Items that were held for a real reason are released.",
+      "mitigation": "The change only narrows `depends_on`, and the hold step is untouched. The tests show that 'Depends on' on a rejected id is still held with the same reason text."
+    },
+    {
+      "risk": "A 'try again on' request loses its retry-link dependency, which would break the `retries` exemption in `build_with`.",
+      "mitigation": "Parse the retry link from `retry_reference` with `RecordId::parse` (full ids only), as the old extraction effectively did, and drop an id equal to the job's own id as before."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New unit test in the reading.rs tests module. It builds a request through the existing `job_with_checks` helper and sets `request.text` to a goal line, a sentence quoting a rejected job id (for example 'job 20261012-075824-1x28 was rejected, see its findings'), no 'Depends on' line, and an acceptance bullet. It calls the production `reading::plan_entry` with `rung_hint = Some(Ladder::Implementation)` and a `Lookup { job_exists: &|_| true, path_exists: &|_| true, brief: &[] }`, which is the struct literal the existing test at ~4149 already uses. It then calls the production `crate::plan::Plan::build_with(&[entry], &[JobEnd { id: cited, ending: Ending::Failed(\"rejected\"), retry_of: None }])`. Guards: `entry.missing()` must be empty, and the cited id differs from the job's own id. The `JobEnd` history is plain data and `Lookup` is an existing seam, so neither is a double of the logic under test.",
+      "command": "cargo test -p athena-core a_request_that_only_cites_a_rejected_job_is_planned_not_held",
+      "observes": "The item id is in `plan.order`, `plan.refused` is empty, and `entry.depends_on` is empty.",
+      "fails_without": "Without the fix, `plan_entry` puts the quoted rejected id in `depends_on`, `Plan::build_with` holds the item, it lands in `Plan::refused`, and the assertions that it is in `order` and not in `refused` fail."
+    },
+    {
+      "criterion": 2,
+      "method": "New unit test in the reading.rs tests module. The request text has a line 'Depends on 20261012-075824-1x28' plus an acceptance bullet. It calls `plan_entry`, then `Plan::build_with` with a history that has that id as `Ending::Failed(\"rejected\")` and no landed job linked by `retry_of`. A second case adds a landed `JobEnd` whose `retry_of` is that id and expects the item to be ordered. Same seam as criterion 1, which exists today.",
+      "command": "cargo test -p athena-core a_depends_on_line_naming_a_rejected_job_with_no_landed_retry_still_holds_the_item",
+      "observes": "`plan.refused` holds one `Refusal` for the item with an empty `missing`, and its `reason` contains 'depends on 20261012-075824-1x28' and 'rejected'. The item is not in `order`. In the second case it is in `order`.",
+      "fails_without": "If the extraction dropped 'Depends on' ids, or `build_with` stopped holding, the item would be in `order` and the `refused` lookup would fail."
+    },
+    {
+      "criterion": 3,
+      "method": "New unit tests in the reading.rs tests module, through the production `plan_entry` and `dependency_ids_in`. (a) Text 'try again on <id>' gives `depends_on == [id]`. (b) Text with the id both in a sentence and on a 'Depends on <id>' line gives it exactly once. (c) Text with id A only in a sentence and id B on a '> - Depends on: B' line gives `depends_on == [B]`. (d) 'after <id>' and 'follows up on <id>' give an empty list. (e) 'depends on' in running prose, and a lowercase 'depends on' line, behave as the line rule says. (f) The job's own id is dropped. The existing `job_ids_are_found_mid_sentence_and_only_when_whole` test stays unchanged.",
+      "command": "cargo test -p athena-core dependencies_are_only_depends_on_ids_and_the_retry_link",
+      "observes": "The `depends_on` vectors above, and that 'try again on <rejected id>' with a history in which that id was rejected is not held, because `retries` links it to that id.",
+      "fails_without": "With the old `job_ids_in` extraction the cited-only id would be in `depends_on` and the equality assertions would fail. If the retry link were dropped, the 'try again on' assertion would fail."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the real `athena plan` binary on this repository's queue, so the production `drain::plan` path (`entry_of` -> `reading::plan_entry` -> `Plan::build_with` with `job_history`) is exercised. It needs the repository's records branch. The producer snapshot has none, so the verifier runs it where records exist, or the job report shows the output. Backing test that needs no records: update the existing `the_plan_holds_an_item_whose_dependency_was_rejected_until_a_retry_landed` in crates/athena-cli/tests/drain.rs so its request says 'Depends on {dependency}' instead of 'This comes after {dependency}.', and add `an_item_that_only_cites_a_rejected_job_is_planned` in the same file. That test queues a request quoting the rejected job's id without a 'Depends on' line and calls `drain::plan(&steps, 5.0, &Quiet)` using the same `Fixture`, `rejecting` athena and `real_steps` the existing test uses. All of these seams exist today. Run with `cargo test -p athena-cli --test drain rejected`.",
+      "command": "cargo run -- plan",
+      "observes": "Held lines in the `athena plan` output (`1 held back` or `N held back`). Each remaining one names an id taken from a 'Depends on' line, and none is held only because of an id elsewhere in its text. The drain test observes that the citing item is in `report.plan.order` and `refused` is empty, and that the 'Depends on' item is still held with a reason naming the dependency and 'rejected'.",
+      "fails_without": "Before the fix, the 29 held items appear as `held` lines naming a rejected or failed id that is only cited in the request text. After it, no such line remains."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three checks Athena runs. Both existing tests that encode the old rule are updated: the reading test (~line 4147, where the request becomes 'Add a greeting to crates/cli/src/main.rs after 20261012-075824-1x28' plus a new line 'Depends on 20261012-075824-1x28', and an added assertion that 'after' alone gives an empty list), and the drain test described under criterion 4. This is a verifier-run command.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The updated tests pass.",
+      "fails_without": "If the existing reading test `an_unread_request_is_planned_from_its_own_words_and_a_read_one_from_its_reading` were not updated, the old assertion `depends_on == [\"20261012-075824-1x28\"]` would fail because 'after <id>' is no longer a dependency. The same holds for the old drain test text."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of CHANGELOG.md. The producer adds one bullet under `## [Unreleased]` / `### Fixed` (the section at ~line 281). It states that only ids on a 'Depends on' line and the retry link of 'try again on <job>' are dependencies, that ids cited elsewhere no longer hold an item, the root cause (`plan_entry` took every quoted id), and the effect (29 held items, including the urgent fixes and the steward's root-cause requests, are released). It names the function `reading::dependency_ids_in`.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The new bullet exists in the Unreleased Fixed section and states the rule.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff for the doc comment of `plan_entry`. The line '- A request depends on every other job whose full id it names (a retry, or \"after <job>\").' becomes a statement of the new rule. It says a dependency is a full job id on a 'Depends on' line, or the retry link of a 'try again on <job>' request. It says other ids are references only: they are shown to the reader but never hold the item. It says the 'not among the records' question covers the dependencies. Then `grep -n 'depends on every other job' crates/athena-core/src/reading.rs` finds nothing, using the Grep tool.",
+      "command": "git diff -- crates/athena-core/src/reading.rs",
+      "observes": "The old sentence is gone and the new rule is in the doc comment.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The producer snapshot has no records, so `cargo run -- plan` cannot show the 29 held items there. Criterion 4 relies on the job report from a run where the records branch exists. The drain integration test is the backing evidence if it does not.",
+    "Other tests in crates/athena-cli/tests (lifecycle.rs, job_plan.rs, steward.rs, ordering tests in drain.rs) may queue requests that cite an id and expect it to be a dependency. I grepped 'after {', 'depends' and 'Depends' in several of them and found no match. The producer must run the whole suite and fix any other test that encodes the old rule.",
+    "Does the steward generate root-cause requests with a 'Depends on' line by design? A grep over crates found no code that writes one. That is fine for the root-cause requests (they should not be held), but any request that really needs ordering must now say 'Depends on'.",
+    "A retry written with a short id ('try again on 5c0p') was never a dependency here, because only full ids parse. That is unchanged.",
+    "The open question 'the referenced job ... is not among the records' no longer fires for cited ids. This is accepted as part of the new rule."
+  ],
+  "producer_section_sha256": "6cb7960bb17f5a15fec362fb1c937c6a3c7f2fd0c4314c4454696bf4f1c8aeeb"
+}
