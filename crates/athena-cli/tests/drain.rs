@@ -4040,6 +4040,294 @@ fn a_study_whose_model_contradicts_itself_fails_the_floor_without_a_model_call()
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// The in-flight table: job id, stage and work tree, written at each stage change and read at drain start
+
+mod in_flight {
+    use super::*;
+    use athena_core::state::{InFlightEntry, InFlightStage, InFlightTable, StateDir};
+
+    /// What the table held at one moment of a run.
+    type Seen = Vec<(String, Vec<InFlightEntry>)>;
+
+    /// A stub world with a real table file. It reads the file as each stage runs.
+    struct Tracked {
+        inner: Stub,
+        table: InFlightTable,
+        seen: RefCell<Seen>,
+    }
+
+    impl Tracked {
+        fn new(inner: Stub, state: &Path) -> Tracked {
+            Tracked {
+                inner,
+                table: StateDir::new(state.to_path_buf()).in_flight(),
+                seen: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn snap(&self, label: String) {
+            let rows = self.table.read().unwrap();
+            self.seen.borrow_mut().push((label, rows));
+        }
+    }
+
+    impl Steps for Tracked {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            self.inner.caps()
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            self.inner.queue()
+        }
+        fn approve(&self, proposal: &str) -> Approval {
+            self.inner.approve(proposal)
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            self.inner.previous_rating()
+        }
+        fn read(&self, what: ReadOf<'_>) -> Read {
+            self.inner.read(what)
+        }
+        fn run(&self, job: &str) -> Run {
+            self.inner.run(job)
+        }
+        fn run_staged(&self, job: &str, stage: &dyn Fn(InFlightStage)) -> Run {
+            self.snap(format!("producer {job}"));
+            stage(InFlightStage::Checks);
+            self.snap(format!("checks {job}"));
+            self.inner.run(job)
+        }
+        fn land(&self, job: &str) -> Landing {
+            self.snap(format!("landing {job}"));
+            self.inner.land(job)
+        }
+        fn rate(&self) -> Rate {
+            self.inner.rate()
+        }
+        fn check_page(&self) -> Check {
+            self.inner.check_page()
+        }
+        fn check_cap(&self) -> f64 {
+            self.inner.check_cap()
+        }
+        fn in_flight_table(&self) -> Option<InFlightTable> {
+            Some(self.table.clone())
+        }
+    }
+
+    fn one_job() -> Stub {
+        Stub {
+            items: vec!["a"],
+            outcomes: passing(),
+            ratings: RefCell::new(vec![1]),
+            ..Stub::default()
+        }
+    }
+
+    fn entry(job: &str, stage: InFlightStage) -> InFlightEntry {
+        InFlightEntry {
+            job: job.into(),
+            stage,
+            worktree: Path::new("/work").join(job),
+        }
+    }
+
+    #[test]
+    fn the_file_holds_job_stage_and_worktree_at_producer_checks_and_landing_and_nothing_after_close()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let steps = Tracked::new(one_job(), temp.path());
+        let report = drain::drain(&steps, limits(5.0), &Quiet).unwrap();
+        assert_eq!(report.landed, 1);
+        assert_eq!(
+            *steps.seen.borrow(),
+            [
+                (
+                    "producer a".to_string(),
+                    vec![entry("a", InFlightStage::Producer)]
+                ),
+                (
+                    "checks a".to_string(),
+                    vec![entry("a", InFlightStage::Checks)]
+                ),
+                (
+                    "landing a".to_string(),
+                    vec![entry("a", InFlightStage::Landing)]
+                ),
+            ]
+        );
+        assert!(steps.table.read().unwrap().is_empty());
+        assert!(report.notes.is_empty(), "{:?}", report.notes);
+    }
+
+    #[test]
+    fn a_run_that_fails_or_a_landing_that_fails_leaves_no_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let rejected = Stub {
+            items: vec!["a"],
+            outcomes: RefCell::new(vec![OutcomeState::Rejected; 4]),
+            ..Stub::default()
+        };
+        let steps = Tracked::new(rejected, temp.path());
+        drain::drain(&steps, limits(5.0), &Quiet).unwrap();
+        assert!(steps.table.read().unwrap().is_empty());
+
+        let unlandable = Stub {
+            unlandable: vec!["a"],
+            ..one_job()
+        };
+        let steps = Tracked::new(unlandable, temp.path());
+        drain::drain(&steps, limits(5.0), &Quiet).unwrap();
+        assert!(steps.seen.borrow().iter().any(|(l, _)| l == "landing a"));
+        assert!(steps.table.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_leftover_entry_is_read_and_reported_at_drain_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let steps = Tracked::new(one_job(), temp.path());
+        steps
+            .table
+            .set(InFlightEntry {
+                job: "20261029-000000-dead".into(),
+                stage: InFlightStage::Checks,
+                worktree: "/state/jobs/20261029-000000-dead/work".into(),
+            })
+            .unwrap();
+        let report = drain::drain(&steps, limits(5.0), &Quiet).unwrap();
+        let note = report
+            .notes
+            .iter()
+            .find(|n| n.contains("20261029-000000-dead"))
+            .unwrap_or_else(|| panic!("{:?}", report.notes));
+        assert!(note.contains("checks") && note.contains("/state/jobs/20261029-000000-dead/work"));
+        // Reporting is all that is done: the row stays until a later run acts on it.
+        assert_eq!(steps.table.read().unwrap().len(), 1);
+        assert_eq!(report.landed, 1);
+    }
+
+    #[test]
+    fn a_missing_file_is_an_empty_table_and_the_drain_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let steps = Tracked::new(one_job(), temp.path());
+        assert!(!steps.table.path().exists());
+        let report = drain::drain(&steps, limits(5.0), &Quiet).unwrap();
+        assert_eq!(report.landed, 1);
+        assert!(report.notes.is_empty(), "{:?}", report.notes);
+    }
+
+    #[test]
+    fn a_corrupt_file_is_a_note_and_is_kept_aside_not_overwritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let steps = Tracked::new(one_job(), temp.path());
+        std::fs::write(steps.table.path(), b"{ not a table").unwrap();
+        let report = drain::drain(&steps, limits(5.0), &Quiet).unwrap();
+        assert_eq!(report.landed, 1);
+        assert!(
+            report.notes.iter().any(|n| n.contains("corrupt")),
+            "{:?}",
+            report.notes
+        );
+        let kept = temp.path().join("in-flight.json.corrupt");
+        assert_eq!(std::fs::read(kept).unwrap(), b"{ not a table");
+        assert!(steps.table.read().unwrap().is_empty());
+    }
+
+    /// What the producer's invocation saw: the table's rows and the directory it was given to work in.
+    type AtProducer = Arc<std::sync::Mutex<Vec<(Vec<InFlightEntry>, std::path::PathBuf)>>>;
+
+    /// A script that records, as each producer starts, the table file and the producer's work directory. The
+    /// first producer is cut short by its deadline when `time_out` is set.
+    fn watching_producer(root: std::path::PathBuf, seen: AtProducer, time_out: bool) -> Script {
+        let base = rated_scenario().script();
+        let runs = Arc::new(std::sync::Mutex::new(0u32));
+        Box::new(move |spec| {
+            let mut turn = base(spec);
+            if spec.role == Role::Producer {
+                let rows = StateDir::new(root.clone()).in_flight().read().unwrap();
+                seen.lock().unwrap().push((rows, spec.workdir.clone()));
+                let mut runs = runs.lock().unwrap();
+                *runs += 1;
+                if time_out && *runs == 1 {
+                    turn.outcome = athena_data::records::InvocationOutcome::TimedOut;
+                    turn.structured = None;
+                    turn.detail = Some("deadline of 1800s reached".into());
+                    turn.edits = vec![("src/partial.rs".into(), Some("// half done\n".into()))];
+                }
+            }
+            turn
+        })
+    }
+
+    #[test]
+    fn the_real_steps_record_the_producers_live_work_tree_and_not_the_kept_one() {
+        let fx = Fixture::new();
+        let root = fx.state.path().join("repo");
+        let seen = AtProducer::default();
+        let athena = fx.athena(watching_producer(root.clone(), seen.clone(), false));
+        assert_eq!(athena.state.root(), root);
+        let job = queue_steward_request(&athena, "Add a greeting to the README.");
+        let lander = RecordingLander::default();
+        let steps = real_steps(&athena, &lander);
+        let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+        assert_eq!(report.landed, 1, "{}", display::drain(&report));
+
+        let id = athena_data::JobId::parse(&job).unwrap();
+        let seen = seen.lock().unwrap();
+        let (rows, workdir) = &seen[0];
+        // The row exists while the producer runs, names the job at the producer stage, and its work tree is the
+        // directory the producer was given: <state>/jobs/<id>/work, the path run/producer.rs creates.
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].job, job);
+        assert_eq!(rows[0].stage, InFlightStage::Producer);
+        assert_eq!(rows[0].worktree, athena.state.job_dir(&id).join("work"));
+        assert_eq!(&rows[0].worktree, workdir);
+        assert_ne!(rows[0].worktree, athena.state.kept_work_dir(&id));
+        assert!(!rows[0].worktree.starts_with(root.join("kept")));
+        // The job closed, so nothing is in flight.
+        assert!(athena.state.in_flight().read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_timed_out_job_records_the_live_work_tree_while_it_runs_and_the_kept_directory_is_never_used()
+     {
+        let fx = Fixture::new();
+        let root = fx.state.path().join("repo");
+        let seen = AtProducer::default();
+        let athena = fx.athena(watching_producer(root.clone(), seen.clone(), true));
+        let job = queue_steward_request(&athena, "Add a greeting to the README.");
+        let lander = RecordingLander::default();
+        let steps = real_steps(&athena, &lander);
+        // One job only, so the retry does not consume the kept work.
+        let one = Limits {
+            max_jobs: 1,
+            ..limits(50.0)
+        };
+        let report = drain::drain(&steps, one, &Quiet).unwrap();
+        assert_eq!(
+            report.jobs[0].outcome,
+            "timed_out",
+            "{}",
+            display::drain(&report)
+        );
+
+        let id = athena_data::JobId::parse(&job).unwrap();
+        let seen = seen.lock().unwrap();
+        let (rows, workdir) = &seen[0];
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].stage, InFlightStage::Producer);
+        assert_eq!(rows[0].worktree, athena.state.job_dir(&id).join("work"));
+        assert_eq!(&rows[0].worktree, workdir);
+        // The work was kept after the timeout, at the kept path, which the table never names.
+        let kept = athena.state.kept_work_dir(&id);
+        assert!(kept.join("src/partial.rs").exists());
+        for (rows, _) in seen.iter() {
+            assert!(rows.iter().all(|r| r.worktree != kept), "{rows:?}");
+        }
+        assert!(athena.state.in_flight().read().unwrap().is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // Parallel drain: `drain_concurrent` with `[parallel] max_concurrency`
 
 mod parallel {

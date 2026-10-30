@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- In-flight table (async drain build job 3, `docs/design/async-drain.md` section 11): `in-flight.json` in the state
+  directory holds one row per job in flight, with the job id, the stage (`producer`, `checks` or `landing`) and the
+  job's live work tree (`<state>/jobs/<id>/work`, from the new `StateDir::work_tree` that the producer snapshot also
+  uses, not the kept-work directory). `athena drain` writes it at each stage change, removes the row when the run
+  fails or landing ends, and reads it at start, reporting leftover rows as notes without acting on them. A missing
+  file is an empty table; a corrupt one is a note and is renamed aside, not overwritten. Behavior at
+  `max_in_flight = 1` is unchanged.
 - `[drain.pipeline]` config table (async drain build job 2, `docs/design/async-drain.md` sections 11 and 12) in
   `athena-data`: `max_in_flight`, `max_check_slots`, `read_ahead`, `reserve_disk_gb` and `max_conflict_returns`,
   defaulting to 1, 1, 1, 10 and 2 when the table or `[drain]` is absent. `max_in_flight` must be 1 to 8,

@@ -53,6 +53,24 @@ impl StateDir {
         self.root.join("jobs").join(job.as_str())
     }
 
+    /// The live work tree of a job: where its producer works, inside the job's own directory.
+    pub fn work_tree(&self, job: &JobId) -> PathBuf {
+        StateDir::work_tree_in(&self.job_dir(job))
+    }
+
+    /// The live work tree inside a job directory `job_dir`. The producer snapshot is created here, and the
+    /// in-flight table records the same path, so the two cannot drift apart.
+    pub fn work_tree_in(job_dir: &Path) -> PathBuf {
+        job_dir.join("work")
+    }
+
+    /// The local in-flight table of this repository's drain.
+    pub fn in_flight(&self) -> InFlightTable {
+        InFlightTable {
+            path: self.root.join(IN_FLIGHT_FILE),
+        }
+    }
+
     /// Where the work tree of a job whose producer hit its deadline is kept. It lies outside the job's own
     /// directory, which closing removes, so a retry can start from it.
     pub fn kept_work_dir(&self, job: &JobId) -> PathBuf {
@@ -278,6 +296,163 @@ pub struct ResumeMark {
     pub left_criteria: Vec<String>,
 }
 
+/// The name of the in-flight table's file in the state directory.
+pub const IN_FLIGHT_FILE: &str = "in-flight.json";
+
+/// Where a job in flight is. The drain writes the stage each time a job moves to the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InFlightStage {
+    /// The job is being planned and built by the producer.
+    Producer,
+    /// The producer has finished and the checks (and the verifier) are running.
+    Checks,
+    /// The job passed and is being landed.
+    Landing,
+}
+
+impl InFlightStage {
+    /// The stage's name as it is written in the table.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InFlightStage::Producer => "producer",
+            InFlightStage::Checks => "checks",
+            InFlightStage::Landing => "landing",
+        }
+    }
+}
+
+/// One job in flight: its id, its stage, and the directory it works in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InFlightEntry {
+    /// The job's id.
+    pub job: String,
+    /// The stage the job has reached.
+    pub stage: InFlightStage,
+    /// The job's live work tree ([`StateDir::work_tree`]), not the directory where a timed-out job's work is
+    /// kept afterwards.
+    pub worktree: PathBuf,
+}
+
+/// Why the in-flight table could not be read.
+#[derive(Debug)]
+pub enum InFlightError {
+    /// The file exists but is not a table. The text says why.
+    Corrupt(String),
+    /// The file could not be read for another reason, so nothing is known about its content.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for InFlightError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InFlightError::Corrupt(why) => write!(f, "the in-flight table is corrupt: {why}"),
+            InFlightError::Io(e) => write!(f, "the in-flight table could not be read: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for InFlightError {}
+
+#[derive(Serialize, Deserialize)]
+struct InFlightFile {
+    entries: Vec<InFlightEntry>,
+}
+
+/// Serialises changes to the table within this process, since drain workers may change it side by side.
+static IN_FLIGHT_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The local table of jobs in flight (`in-flight.json` in the state directory). It is plain local state, not
+/// a record: a later run reads it to find jobs that a dead process left behind. A missing file is an empty
+/// table.
+#[derive(Debug, Clone)]
+pub struct InFlightTable {
+    path: PathBuf,
+}
+
+impl InFlightTable {
+    /// The table's file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Every entry in the table. A missing file is an empty table; a file that is not a table is
+    /// [`InFlightError::Corrupt`], and any other failure to read it is [`InFlightError::Io`].
+    pub fn read(&self) -> std::result::Result<Vec<InFlightEntry>, InFlightError> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(InFlightError::Io(e)),
+        };
+        serde_json::from_slice::<InFlightFile>(&bytes)
+            .map(|f| f.entries)
+            .map_err(|e| InFlightError::Corrupt(e.to_string()))
+    }
+
+    /// Sets the row of `entry.job`: replaces its stage and work tree in place, or appends the row. A corrupt
+    /// file is kept, renamed aside (`in-flight.json.corrupt`, numbered if that name is taken), and a new
+    /// table is started; it is never overwritten. Returns the path the corrupt file was moved to, if any.
+    pub fn set(&self, entry: InFlightEntry) -> Result<Option<PathBuf>> {
+        let _one = IN_FLIGHT_WRITE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut entries, kept) = self.entries_for_write()?;
+        match entries.iter_mut().find(|e| e.job == entry.job) {
+            Some(row) => *row = entry,
+            None => entries.push(entry),
+        }
+        self.write(entries)?;
+        Ok(kept)
+    }
+
+    /// Removes the row of `job`, if there is one. A corrupt file is kept as in [`InFlightTable::set`]. Returns
+    /// the path the corrupt file was moved to, if any.
+    pub fn remove(&self, job: &str) -> Result<Option<PathBuf>> {
+        let _one = IN_FLIGHT_WRITE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut entries, kept) = self.entries_for_write()?;
+        let before = entries.len();
+        entries.retain(|e| e.job != job);
+        if entries.len() != before || kept.is_some() {
+            self.write(entries)?;
+        }
+        Ok(kept)
+    }
+
+    fn entries_for_write(&self) -> Result<(Vec<InFlightEntry>, Option<PathBuf>)> {
+        match self.read() {
+            Ok(entries) => Ok((entries, None)),
+            Err(InFlightError::Corrupt(_)) => {
+                let name = self.path.file_name().unwrap_or_default().to_string_lossy();
+                let mut aside = self.path.with_file_name(format!("{name}.corrupt"));
+                let mut n = 1;
+                while aside.exists() {
+                    aside = self.path.with_file_name(format!("{name}.corrupt.{n}"));
+                    n += 1;
+                }
+                std::fs::rename(&self.path, &aside)
+                    .with_context(|| format!("keeping the corrupt {}", self.path.display()))?;
+                Ok((Vec::new(), Some(aside)))
+            }
+            Err(e @ InFlightError::Io(_)) => Err(e.into()),
+        }
+    }
+
+    /// Writes the table to a temporary file next to it and renames that over the table, so a reader sees the
+    /// old table or the new one and never half of one.
+    fn write(&self, entries: Vec<InFlightEntry>) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&InFlightFile { entries })?)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, &self.path)
+            .with_context(|| format!("replacing {}", self.path.display()))
+    }
+}
+
 /// How a job directory is removed.
 pub type Remover = fn(&Path) -> std::io::Result<()>;
 
@@ -386,6 +561,98 @@ mod tests {
 
     fn blocks(path: &Path) -> u64 {
         std::fs::symlink_metadata(path).unwrap().blocks() * 512
+    }
+
+    fn row(job: &str, stage: InFlightStage) -> InFlightEntry {
+        InFlightEntry {
+            job: job.into(),
+            stage,
+            worktree: PathBuf::from("/w").join(job),
+        }
+    }
+
+    #[test]
+    fn in_flight_table_round_trips_updates_in_place_and_removes() {
+        let temp = tempfile::tempdir().unwrap();
+        let table = StateDir::new(temp.path().to_path_buf()).in_flight();
+        assert!(table.read().unwrap().is_empty(), "a missing file is empty");
+        table.set(row("a", InFlightStage::Producer)).unwrap();
+        table.set(row("b", InFlightStage::Producer)).unwrap();
+        assert_eq!(
+            table.read().unwrap(),
+            [
+                row("a", InFlightStage::Producer),
+                row("b", InFlightStage::Producer)
+            ]
+        );
+        table.set(row("a", InFlightStage::Checks)).unwrap();
+        assert_eq!(
+            table.read().unwrap(),
+            [
+                row("a", InFlightStage::Checks),
+                row("b", InFlightStage::Producer)
+            ],
+            "the stage changes in place and the order is kept"
+        );
+        table.remove("a").unwrap();
+        assert_eq!(table.read().unwrap(), [row("b", InFlightStage::Producer)]);
+        table.remove("missing").unwrap();
+        table.remove("b").unwrap();
+        assert!(table.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn in_flight_table_is_written_through_a_rename() {
+        let temp = tempfile::tempdir().unwrap();
+        let table = StateDir::new(temp.path().to_path_buf()).in_flight();
+        table.set(row("a", InFlightStage::Landing)).unwrap();
+        // A temporary file left by a write that died is not the table, and the next write replaces it.
+        let tmp = temp.path().join("in-flight.json.tmp");
+        std::fs::write(&tmp, b"{ half a tab").unwrap();
+        assert_eq!(table.read().unwrap(), [row("a", InFlightStage::Landing)]);
+        table.set(row("a", InFlightStage::Checks)).unwrap();
+        assert!(
+            !tmp.exists(),
+            "the temporary file is renamed over the table"
+        );
+        assert_eq!(table.read().unwrap(), [row("a", InFlightStage::Checks)]);
+    }
+
+    #[test]
+    fn a_corrupt_in_flight_table_is_kept_not_overwritten() {
+        let temp = tempfile::tempdir().unwrap();
+        let table = StateDir::new(temp.path().to_path_buf()).in_flight();
+        std::fs::write(table.path(), b"not json").unwrap();
+        assert!(matches!(table.read(), Err(InFlightError::Corrupt(_))));
+        let kept = table
+            .set(row("a", InFlightStage::Producer))
+            .unwrap()
+            .expect("the corrupt file is moved aside");
+        assert_eq!(std::fs::read(&kept).unwrap(), b"not json");
+        assert_eq!(table.read().unwrap(), [row("a", InFlightStage::Producer)]);
+        // A second corrupt file does not replace the first kept one.
+        std::fs::write(table.path(), b"also bad").unwrap();
+        let second = table.remove("a").unwrap().unwrap();
+        assert_ne!(kept, second);
+        assert_eq!(std::fs::read(&kept).unwrap(), b"not json");
+        assert_eq!(std::fs::read(&second).unwrap(), b"also bad");
+    }
+
+    #[test]
+    fn an_unreadable_in_flight_table_is_an_error_not_an_empty_table() {
+        let temp = tempfile::tempdir().unwrap();
+        let table = StateDir::new(temp.path().to_path_buf()).in_flight();
+        // A directory where the file belongs cannot be read as a file.
+        std::fs::create_dir(table.path()).unwrap();
+        assert!(matches!(table.read(), Err(InFlightError::Io(_))));
+        assert!(table.set(row("a", InFlightStage::Producer)).is_err());
+    }
+
+    #[test]
+    fn the_work_tree_is_inside_the_job_directory_and_not_the_kept_one() {
+        let state = StateDir::new(PathBuf::from("/s"));
+        assert_eq!(state.work_tree(&job()), state.job_dir(&job()).join("work"));
+        assert_ne!(state.work_tree(&job()), state.kept_work_dir(&job()));
     }
 
     #[test]

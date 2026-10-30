@@ -120,6 +120,7 @@ use athena_core::audience::{LivePage, Page, Target};
 use athena_core::gh::GhCli;
 use athena_core::plan::{Plan, PlanEntry, Refusal};
 use athena_core::pr::LinkState;
+use athena_core::state::{InFlightEntry, InFlightError, InFlightStage, InFlightTable};
 pub use athena_core::status::{BUILD_PATHS, touches_build};
 use athena_core::store::Records;
 use athena_core::{Athena, Ui, steward, work_decisions};
@@ -445,6 +446,23 @@ pub trait Steps {
     /// without stopping the drain. The default runs nothing, as for steps that have no records.
     fn review_passes(&self) -> Vec<String> {
         Vec::new()
+    }
+    /// The local in-flight table the drain keeps: one row per job between the start of its run and the end of
+    /// its landing, with the job's id, stage and work tree. It is read when the drain starts, to report rows a
+    /// dead process left, and written at each stage change. None (the default) keeps no table.
+    fn in_flight_table(&self) -> Option<InFlightTable> {
+        None
+    }
+    /// The live work tree of `job`: the directory its producer works in, the one the table records. The
+    /// default is a fixed path under `/work`, for steps with no real work tree.
+    fn worktree(&self, job: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from("/work").join(job)
+    }
+    /// Runs `job` like [`Steps::run`] and calls `stage` when the job moves from the producer to its checks.
+    /// The drain has recorded the producer stage before it calls this. The default runs the job and reports no
+    /// change, for steps that cannot see inside a run.
+    fn run_staged(&self, job: &str, _stage: &dyn Fn(InFlightStage)) -> Run {
+        self.run(job)
     }
 }
 
@@ -789,7 +807,14 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             self.push(line);
             return RunStep::Budget;
         }
-        let run = self.steps.run(&job);
+        self.track(&job, InFlightStage::Producer);
+        let run = self
+            .steps
+            .run_staged(&job, &|stage| self.track(&job, stage));
+        if run.outcome != Some(OutcomeState::Landed) {
+            // The run failed or was held: nothing is left in flight. A passed job stays until landing is over.
+            self.untrack(&job);
+        }
         {
             let mut st = self.st();
             st.budget.release(self.caps.run);
@@ -844,9 +869,72 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         }
     }
 
+    /// Records that `job` has reached `stage`, with its live work tree. A table that cannot be written is a
+    /// note; it never stops the drain.
+    fn track(&self, job: &str, stage: InFlightStage) {
+        let Some(table) = self.steps.in_flight_table() else {
+            return;
+        };
+        let entry = InFlightEntry {
+            job: job.to_string(),
+            stage,
+            worktree: self.steps.worktree(job),
+        };
+        self.table_result(table.set(entry), job);
+    }
+
+    /// Removes the row of `job`: the job has closed, or its run did not pass.
+    fn untrack(&self, job: &str) {
+        if let Some(table) = self.steps.in_flight_table() {
+            self.table_result(table.remove(job), job);
+        }
+    }
+
+    fn table_result(&self, result: anyhow::Result<Option<std::path::PathBuf>>, job: &str) {
+        match result {
+            Ok(None) => {}
+            Ok(Some(kept)) => self.note(format!(
+                "the in-flight table was corrupt; it is kept at {}",
+                kept.display()
+            )),
+            Err(error) => self.note(format!(
+                "the in-flight table could not be updated for job {job}: {error:#}"
+            )),
+        }
+    }
+
+    /// Reports the rows a process that died left in the in-flight table. They are only reported: acting on
+    /// them is for a later run. A missing file is an empty table; a corrupt one is a note and is not replaced.
+    fn report_leftovers(&self) {
+        let Some(table) = self.steps.in_flight_table() else {
+            return;
+        };
+        match table.read() {
+            Ok(entries) => {
+                for e in entries {
+                    let line = format!(
+                        "job {} was left in flight at the {} stage, work tree {}",
+                        e.job,
+                        e.stage.as_str(),
+                        e.worktree.display()
+                    );
+                    self.ui.line(&format!("drain      {line}"));
+                    self.note(line);
+                }
+            }
+            Err(error @ InFlightError::Corrupt(_)) => self.note(format!(
+                "{error}; it is kept aside the next time the table is written"
+            )),
+            Err(error) => self.note(error.to_string()),
+        }
+    }
+
     fn land(&self, job: &str, at: usize) -> bool {
         let _one_at_a_time = self.landing.lock().unwrap_or_else(PoisonError::into_inner);
-        match self.steps.land(job) {
+        self.track(job, InFlightStage::Landing);
+        let landing = self.steps.land(job);
+        self.untrack(job);
+        match landing {
             Landing::Landed { changed } => {
                 let outcome = changes_outcome(&changed);
                 let build = touches_build(&changed);
@@ -1306,6 +1394,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     run: impl FnOnce(&Drain<'a, S, U>, Vec<Vec<Item>>),
 ) -> anyhow::Result<Report> {
     let limits = d.limits;
+    d.report_leftovers();
     // Before the queue is read, so a request the backfill queues is worked in this drain.
     for line in steps.review_passes() {
         d.ui.line(&line);
@@ -1775,6 +1864,21 @@ impl<'a> RealSteps<'a> {
     }
 }
 
+/// Passes every line to `inner` and reports the checks stage once the run has said the producer finished.
+struct StageWatch<'a> {
+    inner: &'a dyn Ui,
+    stage: &'a dyn Fn(InFlightStage),
+}
+
+impl Ui for StageWatch<'_> {
+    fn line(&self, text: &str) {
+        self.inner.line(text);
+        if text.starts_with("producer   ") {
+            (self.stage)(InFlightStage::Checks);
+        }
+    }
+}
+
 impl Steps for RealSteps<'_> {
     fn review_passes(&self) -> Vec<String> {
         self.athena.review_passes(self.ui)
@@ -1911,9 +2015,32 @@ impl Steps for RealSteps<'_> {
         }
     }
 
+    fn in_flight_table(&self) -> Option<InFlightTable> {
+        Some(self.athena.state.in_flight())
+    }
+
+    /// The producer's live work tree, `<state>/jobs/<id>/work`: the directory `run/producer.rs` creates its
+    /// snapshot in. Not the kept-work directory, which a timed-out job's work moves to only after the run.
+    fn worktree(&self, job: &str) -> std::path::PathBuf {
+        match athena_data::JobId::parse(job) {
+            Ok(id) => self.athena.state.work_tree(&id),
+            // Not a job id, so it has no directory of its own; the name is joined as given.
+            Err(_) => self.athena.state.root().join("jobs").join(job).join("work"),
+        }
+    }
+
     fn run(&self, job: &str) -> Run {
+        self.run_staged(job, &|_| {})
+    }
+
+    fn run_staged(&self, job: &str, stage: &dyn Fn(InFlightStage)) -> Run {
         let before = self.job_cost(job);
-        let result = self.athena.go(job, AcceptedBy::Flag, self.ui);
+        // The run says "producer ..." when the producer has finished; the checks start after that line.
+        let watch = StageWatch {
+            inner: self.ui,
+            stage,
+        };
+        let result = self.athena.go(job, AcceptedBy::Flag, &watch);
         let cost = (self.job_cost(job) - before).max(0.0);
         match result {
             Ok(athena_core::run::GoResult::Finished(f)) => Run {

@@ -207,6 +207,15 @@ Build job 2 implemented this block in `athena-data`'s `Config` (`[drain.pipeline
 `max_conflict_returns` of 0 and any unknown key. `reserve_disk_gb` may be any non-negative whole number. The table is
 left out of a reading's config digest. No drain code reads these values yet.
 
+Build job 3 is implemented: the in-flight table is `in-flight.json` in the state directory (`StateDir::in_flight`,
+`InFlightTable` in `athena-core`'s `state.rs`). It holds one row per job: the job id, the stage (`producer`,
+`checks` or `landing`) and the live work tree, `<state>/jobs/<id>/work` (`StateDir::work_tree`, the path the producer
+snapshot is created at; never the kept-work directory a timed-out job's work moves to afterwards). The drain writes a
+row when a run starts, moves it at each stage change and removes it when the run fails or landing ends. At start the
+drain reads the table and reports leftover rows as notes; it does not act on them (build job 9 does). A missing file is
+an empty table, and a corrupt one is a note and is renamed aside (`in-flight.json.corrupt`), never overwritten. At
+`max_in_flight = 1` the drain behaves as before.
+
 ## 12. Ordered build jobs
 
 Each job is sized for one producer run (about 15 minutes, one focused change, tests included) and lists what must
