@@ -1,0 +1,190 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261026-232443-f4d7",
+  "round": 1,
+  "at": "2026-10-30T11:40:48.47346679Z",
+  "invocation_seq": 2,
+  "approach": "At the base commit `produce_and_verify` (mod.rs 1088-1144, 57 lines) already ends by calling `check_and_verify` (1149-1669), which holds S6-S7 inline and then S8-S10. R7 moved only `SnapExec`, `take_baseline` and `baseline_checks`. So R8 cuts `check_and_verify` at the line `let criteria = ctx.reading.acceptance_criteria.clone();` (1356, just after the replay record is pushed). Everything from there to the closing `Ok(closing)` (1669), plus `verifier_snapshot` (1793-1819), moves unchanged into `run/verification.rs` as `pub(super) fn verification_stage(&self, ctx, accepted, closing: Closing, built: &Built, checked: Checked) -> Result<Closing>`. A small `pub(super) struct Checked` carries the S7 outputs across the seam: `vsnap`, `prepared`, `tool_config_from_base`, `check_runs`, `cleanup`, `replay_record`, `verify_dir`, `capability_env`. `closing` goes in by value and comes back as `Result<Closing>`, so both `return Ok(closing)` and the final `Ok(closing)` keep their text. The stage's opening lines rebind from `ctx` and `built` the locals S7 also uses, with the same text: `id`, `jc`, `p`, `c`, `f`, `seq`, `report_gaps`, `left_criteria`, and `usable_baseline`. `check_and_verify` drops the bindings only S8-S10 used (`f`, `seq`, `report_gaps`, `left_criteria`) and the `mut` on `vsnap`, then ends with `self.verification_stage(...)`. No test module is touched and `mod.rs` keeps its imports; `verification.rs` uses `use super::*` as `checks.rs` does. `produce_and_verify` is not edited except for a short doc comment.",
+  "decisions": [
+    {
+      "choice": "Cut at `let criteria = ...` and move S8-S10 as one method `verification_stage` that takes and returns `Closing` by value.",
+      "reason": "The moved text stays a verbatim block: the one early `return Ok(closing)` (disk gate before the verifier, old line 1446) and the final `Ok(closing)` need no edit. Both ends in the caller already return `closing`, so no `Flow` is needed. Moving `closing` in and back out does not change which statements run.",
+      "rejected": [
+        {
+          "option": "Take `&mut Closing` and return `Flow<()>` or `Result<()>`",
+          "why": "It changes the return statements and every `closing` use in the moved text for no gain: neither exit path continues the driver."
+        },
+        {
+          "option": "Split S8, S9 and S10 into three methods",
+          "why": "S9 mutates `seq`, `vsnap`, `verdict_output`, `verifier_failure` and `system_fault`, and S10 reads all of them. Three methods would need a large carrier struct and changed statements. The brief asks for one move and the doc says to split only if needed."
+        }
+      ]
+    },
+    {
+      "choice": "Bundle the S7 outputs in `Checked` and pass `built: &Built` for the base, candidate, fingerprint, `seq`, `report_gaps` and `left_criteria`.",
+      "reason": "Seven parameters or more would trip clippy::too_many_arguments, which `-D warnings` turns into a failure. The stage takes six counting `self`. `Built` already holds the values and `check_and_verify` keeps its `built` for `write_resume_mark`.",
+      "rejected": [
+        {
+          "option": "Pass each local as its own parameter",
+          "why": "Over 10 parameters; clippy fails."
+        },
+        {
+          "option": "Add the S7 outputs to `Built`",
+          "why": "`Built` is the resume carrier that `write_resume_mark` reads. Adding a `Snapshot` to it would change what a resume mark sees."
+        }
+      ]
+    },
+    {
+      "choice": "Recompute `usable_baseline` inside the stage with the same three-line text, rather than passing it.",
+      "reason": "It borrows `closing.baseline`. A caller holding that borrow cannot also pass `closing` by value. The recomputed text is identical and S7 keeps its own copy for `mark_pre_existing` and `held_for_timeout`. The report lists it as a duplicated statement.",
+      "rejected": [
+        {
+          "option": "Clone the baseline into `Checked`",
+          "why": "It changes a statement and adds an allocation."
+        }
+      ]
+    },
+    {
+      "choice": "Leave `produce_and_verify` as is, apart from a short doc comment; do not touch `producer.rs`, `checks.rs` or `candidate.rs`.",
+      "reason": "It already only drives the stages in order. Moving S8-S10 does not change its body, so nothing in the other files needs an edit. They are listed as deliverables only as possible edits.",
+      "rejected": [
+        {
+          "option": "Extract S6-S7 too so `check_and_verify` also becomes a short driver",
+          "why": "R7 is landed and rewriting it is out of scope. It is a different job."
+        },
+        {
+          "option": "Pad or restructure `produce_and_verify` to reach 80 lines",
+          "why": "It would be a behavior-adjacent edit made to hit a number."
+        }
+      ]
+    },
+    {
+      "choice": "The CHANGELOG entry goes first under `### Changed`, above the R7 entry. It is split into short bullets, each with a Grep caller check giving files before and after.",
+      "reason": "It answers the R7 findings: counts for each name, short bullets, no retro-edit of R7. The producer measures the Grep counts at the base before editing and again after.",
+      "rejected": [
+        {
+          "option": "One dense paragraph like R6 and R7",
+          "why": "R7's review asked for short bullets."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "create",
+      "purpose": "Module doc (stages S8-S10); `use super::*;`; `pub(super) struct Checked`; `impl Athena` with `pub(super) fn verification_stage` (the block from `let criteria` to the closing `Ok(closing)`) and `pub(super) fn verifier_snapshot`.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Add `mod verification;` and `use verification::Checked;`. In `check_and_verify`, remove the moved block and the four bindings only it used (`f`, `seq`, `report_gaps`, `left_criteria`), drop `mut` from `vsnap`, and end with `self.verification_stage(...)`. Remove `verifier_snapshot`. Add a short doc comment to `produce_and_verify`. The test modules are untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the R8 entry first under `### Changed` as short bullets: the move, visibility changes, early-return pairing, caller checks with file counts before and after, the unchanged test list count, and the duplicated bindings.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Before editing, record the base facts. First `cargo test --locked -- --list`: save the test count and a hash of the sorted names. Second Grep `verifier_snapshot`, `produce_and_verify`, `check_and_verify` over `crates/` with files_with_matches, and note each file count. Third the line numbers of the early returns in the block.",
+    "Create `crates/athena-core/src/run/verification.rs`. Write a module doc naming S8-S10. Add `use super::*;`. Define `pub(super) struct Checked { vsnap: Snapshot, prepared: String, tool_config_from_base: Vec<String>, check_runs: Vec<CheckRun>, cleanup: Vec<String>, replay_record: Replay, verify_dir: PathBuf, capability_env: BTreeMap<String,String> }` with `pub(super)` fields (import `BTreeMap` if needed; confirm the field types against `athena_agent::env::build`'s capability env type).",
+    "Add `pub(super) fn verification_stage(&self, ctx: &RunContext<'_>, accepted: &AcceptedReading, mut closing: Closing, built: &Built, checked: Checked) -> Result<Closing>`. Begin with the rebindings in the same text as `check_and_verify`: `let id = ctx.id().clone(); let jc = ctx.jc; let p = built.base.clone(); let c = built.commit.clone(); let f = built.fingerprint.clone(); let mut seq = built.seq; let report_gaps = ...clone(); let left_criteria = ...clone();`, then the destructure of `checked` (with `mut vsnap`) and the `usable_baseline` statement. Then paste the old lines 1356-1668 verbatim, ending with `Ok(closing)`. Let rustfmt wrap.",
+    "Move `verifier_snapshot` (doc comment and body, old lines 1793-1819) to the same `impl Athena` block, changing only `fn` to `pub(super) fn`.",
+    "In `run/mod.rs` add `mod verification;` after `mod send_back;` and `use verification::Checked;` after `use producer::...`. Delete the moved lines from `check_and_verify` and `verifier_snapshot` from the impl. In `check_and_verify`, delete the `f`, `seq`, `report_gaps` and `left_criteria` bindings, change `let (mut vsnap, ...)` to `let (vsnap, ...)`, and replace the removed tail with `self.verification_stage(ctx, accepted, closing, &built, Checked { vsnap, prepared, tool_config_from_base, check_runs, cleanup, replay_record, verify_dir, capability_env })`.",
+    "Add a 2-3 line doc comment above `produce_and_verify` saying it drives the stages in order and hands the built candidate to `check_and_verify`. Do not edit its body.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`. Fix lints by removing only the dead bindings, imports or `mut` the plan lists. Do not use `#[allow]`.",
+    "Run `cargo test --locked`. Rerun `cargo test --locked -- --list` and compare the count and hash with step 1. Run `git diff -U0` on `mod.rs` and confirm that no hunk lies in the test modules.",
+    "Rerun the Grep counts from step 1 after the change, so each name's file count is the same plus `verification.rs` for the moved names. Run `git diff -M --color-moved=zebra --color-moved-ws=ignore-all-space` and list the lines that are not marked moved.",
+    "Write the CHANGELOG entry first under `### Changed`, as short bullets: what moved; visibility (`pub(super)`: `verification_stage`, `verifier_snapshot`, `Checked` and its fields); the early return, old 1446 against its new line in `verification.rs`; the locals that crossed the seam and the `Checked` or `Built` field carrying each; the duplicated statements; the caller checks with counts before and after; the test count before and after; and that tests, `main.rs`, `drain.rs`, `producer.rs`, `checks.rs` and the R7 entry are unchanged. Run `cargo fmt --all --check` once more."
+  ],
+  "risks": [
+    {
+      "risk": "The rerun on a moved snapshot (`vsnap = fresh`, `verifier_runs`) is the highest-risk part, and no run-level test covers it.",
+      "mitigation": "The plan keeps the block verbatim, takes `closing` by value and returns it, and rebinds `p`, `c`, `f`, `seq` and the rest from `built` with the same text. The verifier checks `git diff --color-moved`. The producer reads the old lines 1549-1581 beside the new ones when it finishes."
+    },
+    {
+      "risk": "Leftover bindings in `check_and_verify` (`seq`, `f`, `report_gaps`, `left_criteria`, `mut vsnap`) give unused-variable or unused_mut lints, which fail under `-D warnings`.",
+      "mitigation": "Remove the four bindings and the `mut` as the plan lists. Run clippy early with `cargo clippy --all-targets --locked -- -D warnings`. Do not add `#[allow]`."
+    },
+    {
+      "risk": "An import in `mod.rs` used only by the moved block could become unused.",
+      "mitigation": "The parent's imports are reached by `use super::*` in `verification.rs`, as in `checks.rs` after R7. That counts as a use. If a lint does fire, remove only that import and report it as an import-line edit."
+    },
+    {
+      "risk": "Private-field or private-method access across the new module fails to compile.",
+      "mitigation": "Make `Checked` and its fields `pub(super)`, and make `verification_stage` and `verifier_snapshot` `pub(super)`, as `producer.rs` does with `Reported`."
+    },
+    {
+      "risk": "clippy::too_many_arguments if the stage takes more than seven parameters.",
+      "mitigation": "Pass `built: &Built` and the single `Checked` bundle, so `verification_stage` has 6 parameters counting `self`. Build before writing the CHANGELOG."
+    },
+    {
+      "risk": "The Grep counts in the CHANGELOG are guessed rather than measured.",
+      "mitigation": "The producer runs the Grep for each moved name before editing and again after. The file counts and the test count go in the entry only after both are measured, never estimated."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Run the three Athena check commands as the verifier would. No new fixture is needed.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The `low_disk_before_the_verifier` test exercises the moved early `return Ok(closing)`. The replay tests exercise S8-S10 through the verdict and `Closing.verification`.",
+      "fails_without": "A wrong move shows up as a compile error. Examples: a `verification_stage` or `Checked` field without `pub(super)`, a `closing` used after the move, or a leftover `mut`. It also shows up as an unused-variable or unused-import lint under `-D warnings`, or as a failing run-level test. Those tests drive the production `Athena::go` into `produce_and_verify`, `check_and_verify` and the moved stage with `FakeAgentDriver` and the per-thread `check_seam`. Both seams exist today in `run/mod.rs`. They are `replay_holds_over_threshold_rejects_the_job_and_records_the_list`, `replay_within_threshold_records_the_list_and_lands`, `a_check_killed_at_its_deadline_closes_as_an_environment_stop`, `low_disk_before_the_verifier_resumes_without_planner_or_producer`, `interrupted_job_with_a_candidate_resumes_without_planner_or_producer`, `a_fake_job_takes_its_baseline_before_the_producer_and_numbers_the_invocations_in_order`, and `run_pin_tests.rs`."
+    },
+    {
+      "criterion": 2,
+      "method": "The producer records the test count and a hash of the sorted names from `cargo test --locked -- --list` at the base, before editing, and again after, and writes both in the CHANGELOG entry. The verifier reruns the list after, counts the names, and compares with the recorded base count. The verifier also reads `git diff -U0` of `run/mod.rs`, which cannot be rerun at the base since no checkout command is allowed. Every hunk must lie before the first `#[cfg(test)]` (the `mod`/`use` lines near the top and the cut in `check_and_verify`).",
+      "command": "cargo test --locked -- --list && git diff -U0 -- crates/athena-core/src/run/mod.rs",
+      "observes": "The count equals the recorded base count and no test name contains `verification`. No hunk touches the two test modules or `check_seam`, and `git diff --stat` shows only the three paths.",
+      "fails_without": "If a test were moved, renamed or edited, the list would differ and a hunk in the test modules (from `mod critic_soundness_tests` at about line 1908 to the end) would show in the `-U0` diff. If the verification module accidentally held a `#[test]`, the list would gain names under `run::verification`."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the diff. In the new file, the S8-S10 block and the `verifier_snapshot` body appear as moved lines. The unmoved lines should be: the module doc, `use super::*;`, the `Checked` struct, the `verification_stage` signature, the rebinding lines (`id`, `jc`, `p`, `c`, `f`, `seq`, `report_gaps`, `left_criteria`, `usable_baseline`, the destructure of `checked`), `pub(super)` on `verifier_snapshot`, and rustfmt wrapping. In `mod.rs` the only added lines are `mod verification;`, `use verification::Checked;`, the `Checked { .. }` construction, the call, the dropped bindings and the removal of `mut`.",
+      "command": "git diff -M --color-moved=zebra --color-moved-ws=ignore-all-space -- crates/athena-core/src/run/mod.rs crates/athena-core/src/run/verification.rs",
+      "observes": "Every moved line is marked moved apart from that list, and the producer's CHANGELOG entry or report names each exception.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "The `sed` range counts the lines of `produce_and_verify` after the change. The verifier compares them with 57 at the base (lines 1088-1144) and checks by reading that the body is unchanged: `baseline_stage`, `producer_snapshot`, `producer_loop`, `candidate_stage`, `remove_tree`, `Built`, `write_resume_mark`, `check_and_verify`, in that order. The body is not edited and a 2-3 line doc comment is added above it, so the count is 57 for the body, or about 60 with the doc. `check_and_verify` is not the driver the brief names, and the verifier should read that as the reason for the number.",
+      "command": "git show HEAD:crates/athena-core/src/run/mod.rs | grep -c '' ; grep -n 'fn produce_and_verify' crates/athena-core/src/run/mod.rs; sed -n '/fn produce_and_verify/,/^    }$/p' crates/athena-core/src/run/mod.rs | wc -l",
+      "observes": "A count of 57 to 60 and the stage calls in the original order. The brief's 60-100 range is met only at its lower edge; see open_questions.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Build the workspace and the test targets, then read `git diff --stat`. Search for `pub ` lines added or removed in the diff.",
+      "command": "cargo build --locked && cargo test --locked --no-run && git diff --stat",
+      "observes": "The build succeeds. The diff stat lists only `mod.rs`, `verification.rs` and `CHANGELOG.md`, and no added or removed line has a plain `pub` item. Everything moved is private or `pub(super)`, since nothing moved was public, so no re-export is needed.",
+      "fails_without": "A moved name that stopped resolving would break the build or the test build. A changed `pub` path would break the `athena-cli` build, which uses `athena_core` items from `main.rs` and `drain.rs`."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the new entry. It sits first under `### Changed` and is split into short bullets.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "Bullets cover `verifier_snapshot`, `verification_stage` and `Checked`. Each has its Grep command and file counts before and after (equal, plus `verification.rs`; `verifier_snapshot` also names the unrelated fn of that name in `athena-git/src/snapshot.rs` tests). The entry also gives the visibility changes (`pub(super)` on the moved method, `verifier_snapshot`, `Checked` and its fields) and the early-return pairing: old 1446 `return Ok(closing)` became the same line in `verification.rs` at a line number the producer records, returning to a caller that returns it unchanged. It also states the test count before and after, and says the R7 entry was not edited.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "List the changed paths.",
+      "command": "git status && git diff --stat",
+      "observes": "None of `docs/design/structure-pass.md`, `athena.toml`, `defaults.toml` or `.github/workflows/*` appears, nor do `producer.rs`, `checks.rs`, `candidate.rs`, `main.rs` or `drain.rs`.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The brief says `produce_and_verify` becomes a driver of about 80 lines, but at the base it is already 57 lines. R5 and R6 shrank it, and R7 left S6-S7 and S8-S10 in `check_and_verify` (520 lines). After R8, `check_and_verify` is about 200 lines with S6-S7 inline, and `produce_and_verify` stays at 57. Criterion 4 is met at its lower edge. Should S6-S7 be extracted in a later job so that function also becomes a driver? This plan does not do it, because R7 is landed and rewriting it is out of scope.",
+    "The CHANGELOG entry follows the brief's `verifier_snapshot` caller check. Is the unrelated fn `verifier_snapshot` in `crates/athena-git/src/snapshot.rs` tests to be counted? The plan counts files matching `verifier_snapshot` over `crates/` and notes that one, so before and after stay equal.",
+    "Is the rerun-once path (a verifier that changes its snapshot, old lines 1549-1581) covered by a run-level test? Grep found no run-level test of it, only `verify.rs` tests of `judge`. Its safety rests on the moved text being identical."
+  ],
+  "producer_section_sha256": "eb9e55bc65c2cfc8edb34a08742fd365077cf8fb9c51c3d7e1a9f2778cc614aa"
+}
