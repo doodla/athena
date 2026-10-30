@@ -1,0 +1,162 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-151827-48rm",
+  "n": 1,
+  "at": "2026-10-30T15:19:03.547333666Z",
+  "invocation_seq": 1,
+  "base_commit": "cdd9f914263f92d44a41987345ff744a7c510e5e",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make drain follow athena plan's order and log passed-over items",
+  "summary": "Retry of job 20261030-033434-3v30: find why drain works items in a different order than `athena plan` (priority record ignored, ready item e5sg skipped silently) and fix it so drain uses the Plan order and logs one line (item, reason) per planned item not worked. Audience: the owner running drain. The fix is kept small so planning fits the job budget.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New drain tests plus cargo test and clippy -D warnings criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check dispatch order and log lines by running tests."
+    },
+    {
+      "id": "root-cause",
+      "how": "Requires removing the shared-rule divergence and stating the cause with evidence."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in drain.rs, with plan.rs and reading.rs only if needed."
+    },
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "mechanism",
+      "how": "Order agreement enforced by a test comparing drain order with Plan order."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/drain.rs (Steps::queue at line 440, Plan::build_with call at line 1481 in the plan building that also forces refusals, drain at 1892, drain_concurrent at 1903, entry_of at 2360, RealSteps::queue at 2440) and crates/athena-core/src/plan.rs (Plan::build and Plan::build_with, JobEnd). Resolution order: the queue is loaded, entries are built via entry_of, underspecified items are read, then Plan::build_with orders them. No new record or data file is added, so check_record_file and AnyRecord are not touched. Order is measured directly by comparing the sequence of dispatched ids with Plan::build_with(...).order over the same entries and history.",
+    "Prior job 20261030-033434-3v30 failed in planning (budget $5.50 left vs. $5.75 stage caps), before any code; it has no candidate, so nothing is kept or dropped. Its five findings are addressed: (1) root cause must not be asserted from a guessed timeline; the producer weighs a stale plan mid-run, a drain on an older build than `athena plan` (commits 9f3946d and d72e755 changed the dependency rule on 2026-10-30), and a run ending before reaching a waiting item, and says which evidence each explains; (2) one log line per planned item not worked, once per run, covering refused, held, cyclic, not ready, clash, over budget, job limit, run ended; (3) re-plan only when something changed (records, priority records, job ends) or justify the cost; (4) tests cover a priority record present before drain() and one added mid-run; (5) the budget shortfall itself is not fixed here.",
+    "The typed request, retry the drain-order job, takes precedence over the introspection's proposed budget preflight, which is a separate follow-up and out of scope. athena.toml is not changed; if the budget is still too small the job stops again and the owner must raise [budget] separately.",
+    "Test case for e5sg: a ready group-1 item in the first queue citing another job id without 'Depends on' must be worked first; its expected result on base is stated by the producer from running it, not assumed.",
+    "reading.rs is listed only as a possible change if the dependency rule needs touching; it is kept unchanged unless the cause lies there."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test through drain() or drain_concurrent() in crates/athena-cli/src/drain.rs has a priority record lowering an urgent-text request to low, present before the drain starts, and shows it is worked after a higher-priority item; run `cargo test -p athena-cli drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second new test adds the priority record mid-run and shows the drain re-plans and works the lowered item after the higher-priority one; run `cargo test -p athena-cli drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test shows the drain's dispatch order equals Plan::build_with(entries, history).order for the same queue, including a ready group-1 item that cites another job id without 'Depends on'; run `cargo test -p athena-cli drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test shows every planned item the drain does not work (refused, held, cyclic, not ready, clash, over budget, job limit, run ended) gets exactly one log line naming the item id and the reason, once per run; run `cargo test -p athena-cli drain` and check the captured log.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The diff removes the divergence at its root: drain ordering uses the same Plan code as `athena plan`, not a second copy of the rule, and re-planning happens only when records, priority records or job ends changed (or the cost is justified in a comment). The cause is stated with the evidence it explains and does not explain.",
+      "kind": "content"
+    },
+    {
+      "text": "Existing drain tests with max_in_flight = 1 pass unchanged; run `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry under Fixed saying the drain now follows athena plan's order and logs passed-over items with a reason.",
+      "kind": "content"
+    },
+    {
+      "text": "athena.toml, defaults.toml, .github/workflows and records/ are unchanged.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Budget preflight, held-for-budget state, or any change to athena.toml [budget] (separate follow-up)",
+    "Retrying or fixing jobs 20261029-142858-5c0p, 20261029-233021-e5sg or 20261029-142902-5x4h; named as evidence only",
+    "Changes to athena.toml, defaults.toml, .github/workflows or records/",
+    "Wiring read-ahead or raising max_in_flight",
+    "Changing the priority semantics (urgent/high/normal/low) beyond making drain and plan agree"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.9,
+        "p50": 2.2,
+        "p90": 5.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7198924731182796,
+      "p_verification_passes": 0.675,
+      "p_user_intervenes": 0.07456647398843931,
+      "cost_usd": {
+        "p10": 0.5299694692271771,
+        "p50": 1.194743764052125,
+        "p90": 3.0942509624446877
+      },
+      "wall_time_s": {
+        "p10": 538.2793156890889,
+        "p50": 1716.4426109560002,
+        "p90": 3486.2802469165204
+      }
+    }
+  },
+  "departures": "Hard pipeline-ordering change that already failed once in planning; cost and time are higher than the reference, and the budget cap may stop it again.",
+  "hard_reason": "It changes the run pipeline: how the drain orders, dispatches and passes over queued jobs.",
+  "producer_effort": "high"
+}
