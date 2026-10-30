@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-033434-3v30",
+  "round": 2,
+  "at": "2026-10-30T15:17:52.806150032Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The root cause is a guessed timeline, and the step meant to confirm it cannot fail.",
+      "evidence": "The plan says 5c0p 'was lowered mid-run' and e5sg 'arrived mid-run'. The request says neither. e5sg's id dates it to 2026-10-29 23:30, and it had already run and been rejected, so it was probably in drain-24's first queue. Commit 9f3946d (2026-10-30) changed reading::plan_entry so that only 'Depends on' ids and retry links are dependencies. Before it, every job id cited in a request was a dependency (CHANGELOG.md:283-291). Commit d72e755 (2026-10-30) started holding items whose dependency was rejected. A drain built before these commits would plan e5sg after the jobs its request cites, which would produce the observed 5x4h, 7q3e, 18fc order with no line about e5sg. A later `athena plan` on the new build then shows e5sg in group 1. That is a version mismatch, not a stale plan. Case 2 makes e5sg arrive after the first start on purpose, so it fails on base whatever the real cause was, and step 1's 'stop if all pass on base' cannot trigger. Fix: Rework the cause analysis around the 2026-10-30 dependency-rule commits and e5sg's timeline. Weigh three explanations: a stale plan mid-run, a drain running an older build than `athena plan`, and the run ending before it reached an item that was waiting. Add a test case where e5sg is in the first queue with a cited-but-not-'Depends on' id, and state its expected result on base. If re-planning stays the fix, say which evidence it explains and which it does not, and do not treat a test built to fail on base as confirming the cause.",
+      "location": "Approach / Steps 1 / Demonstrations criterion 2 case 2; CHANGELOG.md:283-293; HISTORY.txt 9f3946d and d72e755 (2026-10-30)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Only refused, held and cyclic items are logged; the accepted reading also requires lines for items skipped over budget, by the job limit or by a clash.",
+      "evidence": "The reading says: 'A planned item that is not worked (held, refused, not ready, a clash with a running batch, over budget) gets one log line naming the item id and the reason.' The plan's open question 3 leaves out items unworked because of a budget stop, the job limit or a clash inside a batch. The request's own evidence ('never read or mentioned e5sg; its log has no line naming it') is most likely an item waiting behind other work when the run ended, which is one of the excluded cases. Fix: Log one line per planned item that is passed over or left unworked, with its reason: refused, held, cyclic, not ready, a clash with a running batch, over budget or the job limit, or the run ended first. Log each item once per run. Extend the criterion-3 test with a case where the job limit or budget leaves a planned item unworked and check that its line appears.",
+      "location": "Open questions item 3; Decisions 6; Demonstrations criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Re-planning after every item reloads all records and runs git lookups for every queued item, and the cost is untimed.",
+      "evidence": "RealSteps::queue (drain.rs:2440-2494) loads the records, reaps the registry, and calls entry_of for every item. entry_of runs git path_exists checks and show_file(BRIEF.md) for each item. Fix: Re-plan only when something changed, for example the count of records, priority records or job ends, or say why the full cost is acceptable.",
+      "location": "Risks, last item; Steps 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 1 only covers a priority record added mid-run; a record that exists before the drain starts is not tested.",
+      "evidence": "The request's acceptance says 'with a priority record that lowers an urgent-text request', which reads naturally as a record present at the start. The plan's test pushes the record only during X's run. Fix: Add a case where the low priority record exists before drain() is called and assert the same order, so both readings of the request are covered.",
+      "location": "Demonstrations criterion 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan's names check out against the code: drain_with builds the plan once (drain.rs:1935-1970), prepare and Plan::build_with are shared with drain::plan, reading::plan_entry applies the latest priority record (reading.rs:2177), entry_of returns an entry for every queued job, and Kept, World and JobLine exist as cited. Re-planning between items through the shared prepare path is a reasonable way to honour priority changes made mid-run. However, the cause is inferred from a guessed timeline. Commits from 2026-10-30 (9f3946d, d72e755) changed which ids count as dependencies and which items are held, and that explains drain-24's order more directly, as a drain running an older build than athena plan. The new tests fail on base by construction, so they cannot confirm the cause. The plan also logs fewer passed-over items than the accepted reading requires: items left over budget, by the job limit or by a clash get no line, and that is likely the e5sg case. Verdict: revise."
+}

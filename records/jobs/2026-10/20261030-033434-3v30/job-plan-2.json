@@ -1,0 +1,207 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-033434-3v30",
+  "round": 2,
+  "at": "2026-10-30T15:16:11.038648798Z",
+  "invocation_seq": 5,
+  "approach": "Cause (read from the code, to be confirmed by the failing tests): `athena plan` (`drain::plan`) and the drain share `Drain::prepare` and `Plan::build_with`, and `reading::plan_entry` already applies the latest priority record (`JobRecords::priority`, store.rs:92). But `drain_with` (drain.rs:1921) builds the plan once, at start, flattens it into batches, and `run_serial` / `run_batches` work those fixed batches. A priority record or a new request that arrives while the drain runs is never seen. That fits both pieces of evidence: 5c0p was lowered mid-run and still went next; e5sg arrived mid-run and was never mentioned. Fix: make planning a reusable `Drain::schedule` step and call it again after every item (serial) and every batch (parallel). It takes a fresh `steps.queue()`, carries the items approved at the start, drops everything this run has worked (item ids AND the made job ids in `st.jobs`), calls `prepare`, builds batches from `plan.groups`, and logs one `drain      passed over <id>: <reason>` line per newly refused, held or cyclic item (each id once per run). plan.rs and reading.rs stay unchanged. Revision answers: (1) all new tests build real `JobRecords` with a real `PriorityRecord` and real `reading::plan_entry` inside drain.rs `order_tests`; the fake supplies only records, so the record-to-entry path is production code. (2) A static-divergence case is added and the summary states why each static difference could not have caused the drain-24 order. (3) Made job ids are filtered as well as item ids, and the criterion-2 test asserts nothing is worked twice.",
+  "decisions": [
+    {
+      "choice": "Re-plan between items (serial) or batches (parallel) through the existing queue, prepare and Plan::build_with path, instead of adding an ordering rule to the drain.",
+      "reason": "One ordering source. The staleness is fixed where it starts, and criterion 4 asks for shared code.",
+      "rejected": [
+        {
+          "option": "Patch RealSteps::entry_of to apply the priority record outside the proposal branch.",
+          "why": "reading::plan_entry already sets entry.priority from the latest record (reading.rs:2177), and the proposal branch only re-ranks proposal jobs. It would not fix the stale plan."
+        },
+        {
+          "option": "Re-sort the remaining batches by priority inside the drain.",
+          "why": "A second copy of the rule that Plan::build_with owns."
+        }
+      ]
+    },
+    {
+      "choice": "Keep a per-run memory in `State`: ids already tried for reading, the entries a reading produced, forced refusals (read failed, no capability), and ids already logged as passed over. `prepare` skips tried ids and starts from the saved refusals; `drain::plan` runs with an empty memory so its behaviour is unchanged.",
+      "reason": "A re-plan must not pay for a second reading, must not forget a 'no capability' refusal, and must log each passed-over item once.",
+      "rejected": [
+        {
+          "option": "Call prepare on every re-plan with no memory.",
+          "why": "It would re-read items whose plan stays incomplete, spend budget again and repeat notes."
+        }
+      ]
+    },
+    {
+      "choice": "Carry the items approved at the start into every re-plan: fill their entries through `steps.plan_entry` and dedupe by id against the fresh queue.",
+      "reason": "Stub queues do not list approved jobs, and existing tests need them worked.",
+      "rejected": [
+        {
+          "option": "Use only the fresh queue after the first round.",
+          "why": "Approved jobs would be dropped and existing tests would break."
+        }
+      ]
+    },
+    {
+      "choice": "Exclude from every fresh view the item ids in st.done and st.begun, and every `JobLine.job` and `JobLine.item` in st.jobs (the made or retry job ids, which RealSteps::queue can list again through interrupted_work after registry().reap()).",
+      "reason": "RealSteps::queue (drain.rs:2459-2480) reaps the registry and adds interrupted_work items under the job's own id. A job this run just dispatched must not come back as a new item.",
+      "rejected": [
+        {
+          "option": "Filter by item id only.",
+          "why": "The re-listed interrupted job has the made job's id, not the item id, so it would be worked twice."
+        }
+      ]
+    },
+    {
+      "choice": "Skip re-planning while the read-ahead pump is active (`read_ahead() > 0` and workers >= 2). Treat a `queue()` error as 'keep the old batches' plus a note.",
+      "reason": "The pump indexes the initial batches; read-ahead is off in production and wiring it is out of scope.",
+      "rejected": [
+        {
+          "option": "Rebuild `upcoming` for the pump after each re-plan.",
+          "why": "Larger, and touches out-of-scope read-ahead."
+        }
+      ]
+    },
+    {
+      "choice": "Log each passed-over item once through `ui.line` and keep the existing `notes` text so Report.notes is unchanged.",
+      "reason": "Criterion 3 checks the captured log; existing tests assert on notes.",
+      "rejected": [
+        {
+          "option": "Replace notes with log lines.",
+          "why": "Risks breaking existing assertions for no gain."
+        }
+      ]
+    },
+    {
+      "choice": "Put the new tests in a new `mod order_tests` in drain.rs. Its fake `Steps` holds athena_core `JobRecords` values (default-constructed, with `id`, `request` text such as 'Priority: urgent\\n<goal> in src/x.rs\\n- it works', and `priorities`). It builds every `PlanEntry` with `athena_core::reading::plan_entry(&job, Some(Ladder::Implementation), &Lookup{job_exists:&|_|false, path_exists:&|_|true, brief:&[]})`. The scripted change in `run` pushes a real `athena_data::records::PriorityRecord{job, n:1, at: jiff::Timestamp::UNIX_EPOCH, priority:\"low\"}` onto the job's `priorities`. `plan_entry` is overridden in the fake the same way.",
+      "reason": "Finding 1: the record-to-entry path (priority record -> JobRecords::priority -> plan_entry -> prepare -> Plan::build_with) is production code in the test, and the order comes from it. athena-cli already depends on athena-core, athena-data and jiff. `JobRecords` derives Default (store.rs:19) and reading.rs:4369-4382 builds the same record. drain.rs is a listed deliverable; tests/drain.rs is not touched.",
+      "rejected": [
+        {
+          "option": "A fake with a mutable priority table that sets PlanEntry.priority directly.",
+          "why": "Finding 1: it would pass even if a record were ignored."
+        },
+        {
+          "option": "Add the tests with Fixture and RealSteps in crates/athena-cli/tests/drain.rs.",
+          "why": "Not a listed deliverable."
+        }
+      ]
+    },
+    {
+      "choice": "Do not change the static differences between `drain_with` and `plan()`: review_passes before queue (drain.rs:1928), approve_all and age-order placement (1938-1964), unplanned items first (1971-1979). Test them instead (criterion 2, case 1b). The summary says why none could cause the drain-24 order.",
+      "reason": "Finding 2. review_passes runs before the single queue read, so a backfilled request is in the first plan like any other. Approved jobs get a plan entry and go through the same Plan::build_with; only the age tiebreak differs. An item with no plan entry cannot arise in production, because `entry_of` returns Some for every job in the records the queue is built from. None of them can drop or reorder a ready group-1 item that is already in the first queue. If case 1b fails on base, a static cause exists and is fixed inside `schedule`.",
+      "rejected": [
+        {
+          "option": "Assume staleness is the only cause without a static test.",
+          "why": "The tests built around staleness cannot rule out a static cause."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Extract `Drain::schedule`; add State fields (tried, read_entries, forced, logged); re-plan after each item (serial) and each batch (parallel, unless the read-ahead pump is active); filter item ids and made job ids; log one passed-over line per item with its reason; update module text and doc comments; add `mod order_tests` with real-record tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet under Unreleased / Fixed.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In drain.rs add `mod order_tests`: a fake `Steps` holding `JobRecords` (real `PriorityRecord`, real `reading::plan_entry`), `late` arrivals added once a `start` is logged, a scripted `run` hook that pushes a low `PriorityRecord`, an approvable proposal, an entry-less Item, a re-listed made-job interrupted Item, and a local `Kept` Ui. Write the three tests. Run `cargo test -p athena-cli --lib drain::order_tests` on the base code. Confirm criterion 1 and criterion 2 case 2 fail for the stale-plan reason (log [X, Y, Z] and [a, b, c, e]), and criterion 3 fails for no line. Note whether case 1 and 1b pass on base; if they fail, a static cause exists and is fixed in step 3. If all pass on base, stop and report.",
+    "Add the State fields (`tried`, `read_entries`, `forced`, `logged`). Change `prepare` to skip tried ids, record the entries a reading produced, and start from and save the forced refusals. `drain::plan` keeps its behaviour with an empty memory.",
+    "Extract `Drain::schedule(&self, view, approved) -> (QueueView, Plan, Vec<Vec<Item>>)`: drop done, begun and worked-job items (item ids and `JobLine.job` / `JobLine.item`), append missing approved items with their `steps.plan_entry`, apply the existing read/approved/unread item order and age sort, overlay read entries, call `prepare`, build the batches (unplanned items first, one per batch, then `plan.groups`), and log each newly passed-over item (refused, held, cyclic) once through `ui.line` as `drain      passed over <id>: <reason>`. Make `drain_with` use it for round one, keeping Report fields (plan_groups, refused, notes) from the first plan and keeping the existing notes text.",
+    "Extract `run_item` (claim, work, mark done, notify, finish) from `take_until_done`. Rewrite `run_serial` as a loop that re-plans after each item (unless stopped) and replaces the remaining items with the fresh plan order. Give `run_batches` the same re-plan after each batch, skipped when the read-ahead pump is active. A `queue()` error keeps the old batches and adds a note.",
+    "Update the module text and doc comments (the 'plan once' wording, re-planning between jobs, the cause of this divergence, why unplanned-first stays). Add the CHANGELOG.md bullet under Unreleased / Fixed.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. Fix any existing test failure by correcting the replan code, not the test. In the summary, name the cause found and why each static difference could not have caused the drain-24 order."
+  ],
+  "risks": [
+    {
+      "risk": "Existing Stub tests count calls or notes, or drop approved jobs when the queue is re-read.",
+      "mitigation": "Re-plan only when the fresh batches differ from the remaining ones; treat a queue() error as 'keep the old batches' with a note; carry the approved items; run the whole existing suite unchanged before relying on the new tests."
+    },
+    {
+      "risk": "A re-plan reads an unread item again, spending budget, or loses a 'no capability' refusal and works the item.",
+      "mitigation": "State records tried reads, produced entries and forced refusals; the criterion-2 test asserts one read per item."
+    },
+    {
+      "risk": "A failed item, or its retry job, or a just-run job re-listed as interrupted, is dispatched twice.",
+      "mitigation": "Exclude ids in st.done, st.begun and both fields of every JobLine in st.jobs from every fresh view; the criterion-2 test re-lists each made job id as an interrupted Item and asserts no id starts twice."
+    },
+    {
+      "risk": "Replacing batches under the read-ahead pump breaks its batch indexes.",
+      "mitigation": "Re-plan only when `Steps::read_ahead()` is 0 or fewer than 2 workers run; the read-ahead tests stay on the old path."
+    },
+    {
+      "risk": "The passed-over line repeats every round.",
+      "mitigation": "Dedupe through the logged-ids set; the criterion-3 test asserts exactly one line after two plans."
+    },
+    {
+      "risk": "A static divergence (review_passes, approve_all, unplanned-first) is the real cause and re-planning does not fix it.",
+      "mitigation": "Case 1 and 1b of the criterion-2 test cover those paths against `drain::plan`; step 1 runs them on base first, and a failure there is fixed inside `schedule`."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in drain.rs `order_tests`, entry point `drain(&fake, limits(50.0), &Quiet)` (the public `drain`, serial; guards: budget 50, max_jobs 20, caps read 0.5 / run 1.0). The seam is a new fake `Steps` (added in step 1; modelled on the existing `read_ahead_tests::World`, drain.rs:3214). It holds real `JobRecords`: X and Y with request text 'Priority: urgent ...', Z normal. `queue()` returns Items plus `PlanEntry`s built by the production `reading::plan_entry`. Its `run` of X pushes a real `PriorityRecord{priority:\"low\", n:1}` onto Y's `priorities`, standing in for `athena priority`. The fake computes no order, only returns records and logs `start <job>`.",
+      "command": "cargo test -p athena-cli --lib drain::order_tests::a_request_lowered_to_low_mid_run_is_worked_after_a_higher_priority_item",
+      "observes": "The fake's `start` log is [X, Z, Y]: Y is worked after the higher-priority Z. The test also calls `drain::plan(&fake2, ..)` on the lowered records and sees Z before Y, so the record reaches the plan as `athena plan` prints it.",
+      "fails_without": "On the base code the plan is fixed at start, so Y (urgent when planned) runs second: the fake's start log is [X, Y, Z], not [X, Z, Y], and the assertion fails. If a priority record were ignored by plan_entry, the post-change order would also stay [X, Y, Z]."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test in drain.rs `order_tests`, same fake, entry point `drain(&fake, limits(50.0), &Quiet)`. Case 1 (static): a, b, c normal, read items and queued. The worked order must equal `drain::plan(&twin, 50.0, &Quiet).plan.order` for a twin fake with the same records, and `Plan::build_with(&entries, &history).order` over the same entries. Case 1b (static differences): the queue also has one approvable proposal (the fake's `approve` returns a job whose records are added) and one Item with no plan entry. The worked order must equal [unplanned items] ++ the plan order of a twin fake in which the approved job is already queued. Case 2 (arrival): after the first `start`, `queue()` also returns an urgent group-1 item e with no dependency. The worked order must equal [a] ++ `drain::plan(&twin_after_a)` order, where the twin holds the queue as it is after a (b, c, e), so e comes first. After each run the fake re-lists the run job's made id (read names `job-of-<item>`) as an `interrupted: true` Item, as RealSteps::queue can; the test asserts every item and every made job is started at most once (finding 3) and that the fake's read count is 1 per item. All orders come from production `prepare` and `Plan::build_with`; the fake only supplies records. New seam (fake) from step 1.",
+      "command": "cargo test -p athena-cli --lib drain::order_tests::the_drains_order_equals_athena_plans_order",
+      "observes": "Case 1 and 1b: worked order equals the plan order. Case 2: start log [a, e, b, c] equals the plan order after a, so the ready group-1 item e is no longer skipped. No id is started twice.",
+      "fails_without": "On the base code, case 2 works [a, b, c, e]: e arrived after the plan was built and is never read until the fixed batches are exhausted, or not at all. That differs from the plan order [a, e, b, c] and the equality assertion fails. Case 1b fails on base only if a static divergence exists, which is the point of it."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test in drain.rs `order_tests` with the same fake and a local `Kept` Ui (`Mutex<Vec<String>>`, the shape of `tests::Kept` at drain.rs:2916, redefined in the module). Entry point `drain(&fake, limits(50.0), &kept)`. The queue holds a runnable item r, an item h whose records have no acceptance (plan_entry gives an empty acceptance, so `prepare`/`Plan::build_with` refuses it; the producer confirms the exact wording by running `drain::plan`), and an item d that depends on a failed job in the fake's `job_history` (a held refusal). A late arrival after r's start forces a second plan in the same run. Preconditions: budget 50, the fake reads cost 0.1.",
+      "command": "cargo test -p athena-cli --lib drain::order_tests::the_drain_logs_one_line_for_each_passed_over_item_with_its_reason",
+      "observes": "For h and for d, exactly one captured line contains the item id and its reason (for example 'acceptance' for h, 'held until a retry' for d), still exactly one after the second plan. r and the late item are worked. `Report.notes` still holds the existing `is not worked` text.",
+      "fails_without": "On the base code the drain only adds `item ... is not worked` to Report.notes and no line naming the item reaches the Ui, so the count of captured lines naming the refused id is 0, not 1, and the assertion fails. A repeat of the line on the second plan would make it 2 and fail too."
+    },
+    {
+      "criterion": 4,
+      "method": "Inspect the diff (`git diff` is a verifier command).",
+      "command": "git diff -- crates/athena-cli/src/drain.rs crates/athena-core/src/plan.rs",
+      "observes": "`drain_with`, `run_serial` and `run_batches` take their order only from `Drain::schedule`, which calls `Drain::prepare` (the function `drain::plan` calls) and `Plan::build_with`. No priority, rung or dependency sort is added to drain.rs, and plan.rs is unchanged. The producer's summary names the cause (a plan built once at start and never rebuilt) and states why review_passes, approve_all and unplanned-first did not cause the drain-24 order.",
+      "fails_without": "If a second sort were added in drain.rs, or `schedule` bypassed `prepare`, the diff would show an ordering rule beside Plan::build_with and the criterion would not hold."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the whole suite with no edit to any existing test. They call `drain` and `drain_concurrent` over fixed-queue stubs, which now re-plan after every item. The tests in crates/athena-cli/tests/drain.rs are not edited.",
+      "command": "cargo test --locked",
+      "observes": "All pre-existing tests pass unchanged, in particular the call logs of `Stub` (for example [\"read Queued(\\\"j1\\\")\", \"run job-a\"]) and the read-ahead tests that stay on the old path.",
+      "fails_without": "If the re-plan changed order or counts for a static queue (lost approved jobs, repeated readings, broke after_read entries), the existing max_in_flight = 1 tests would fail. Those include `items_are_worked_in_plan_order_not_oldest_first`, the approved-job, interrupted and read-ahead tests, and `Stub` call-sequence assertions."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three CI checks. The test leg includes the new tests of criteria 1 to 3.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0 on the result.",
+      "fails_without": "On the base code with only the new tests added, the `cargo test --locked` leg exits non-zero because the criteria 1 to 3 tests fail. Unformatted code fails the fmt leg and any warning fails the clippy leg."
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the diff. A new bullet goes under `### Fixed` of the `## [Unreleased]` heading (CHANGELOG.md:8, first Fixed section at ~281), in the file's existing style.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The bullet says the drain follows `athena plan`'s order, re-plans after each item (each group when several jobs run at once), so a priority record or new request made mid-run is honoured, and logs one line for each passed-over item with its reason.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The cause is read from the code, not reproduced. Step 1 must show criteria 1 and 2 case 2 failing on base with the stale-plan result. If case 1 or 1b fails on base, a static cause exists and the fix belongs in `schedule`. If everything passes on base, stop and report: the cause is elsewhere (check whether `Records::load` sees a priority record written during the run, and whether e5sg's queue entry was ever in the first queue).",
+    "plan.rs and reading.rs are listed as deliverables but this plan changes neither; the producer should say so in the summary unless a shared helper turns out to be needed.",
+    "Planned items left unworked because of a budget stop, the job limit, or a clash inside a batch are not logged as passed over; the existing stop reasons cover those. Should the run's end also name the planned items left?",
+    "The tests drive a fake queue whose records are real, not RealSteps with the Fixture from crates/athena-cli/tests/common, because tests/drain.rs is not a listed deliverable. `RealSteps::queue`/`entry_of` (git lookups, proposal branch) are not run by them.",
+    "Each re-plan reloads records and runs git for every queued item; acceptable between jobs that take minutes, but untimed (estimate)."
+  ],
+  "producer_section_sha256": "1d5169b624934210b5aee76f9a1d435c3d540ce56e8a7ff5d48326881e44f4e3"
+}
