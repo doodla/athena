@@ -1,0 +1,176 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-214204-x2fz",
+  "n": 1,
+  "at": "2026-10-30T21:42:28.598684209Z",
+  "invocation_seq": 1,
+  "base_commit": "80922418914c1e312abc130e8059b7d7b77b7c46",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add one shared budget-reserve preflight covering all planning rounds",
+  "summary": "Retry of job 20261030-151818-2c8g, which failed because its plan's reserve omitted the critic cap and later planning rounds. Add one function in reading.rs computing reader + max_rounds×(planner+critic) + producer + verifier from config, used at admission, retry, drain dispatch and before each planning round, so a job is held with its shortfall before spend.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes in Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Tests added; cargo test and clippy must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "Single shared reserve function at the origin, not per-site patches."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests with a fake driver counting invocations."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Outcome is no job reaching planning without enough budget."
+    },
+    {
+      "id": "mechanism",
+      "how": "Enforced in code at four sites."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal: stop jobs that cannot afford the whole planning-plus-producer-verifier path before money is spent; audience is the person running Athena and the verifier.",
+    "Job 20261030-151818-2c8g failed in plan critique round 1 (no candidate, nothing kept). Its major finding (reserve omitted critic and later rounds) is fixed by counting reader + max_rounds×(planner+critic) + producer + verifier; its minor findings are fixed by making the dispatch test discriminate, testing the real preflight on a real job, recomputing the test numbers, and listing lifecycle.rs and job_plan.rs as deliverables for config-only edits.",
+    "Code survey: read crates/athena-core/src/reading.rs (check_budget at ~287, first_reading ~841, retry ~909), crates/athena-core/src/run/planning.rs (round loop at 41, critic check at ~283), crates/athena-core/src/run/mod.rs (dispatch ~685), crates/athena-cli/src/drain.rs, and tests in crates/athena-cli/tests/lifecycle.rs and job_plan.rs. Admission runs first_reading, then dispatch, then the planning rounds. No new record or data file is added, so check_record_file and AnyRecord are not touched. The property is measured by comparing the preflight verdict with the per-round check at the same budget, with a fake driver counting invocations.",
+    "The reserve reads caps from config (reader, planner_usd, critic_usd, max_rounds, producer, verifier), so changing a cap in athena.toml changes it without a code change; athena.toml itself is not edited.",
+    "Existing tests whose budgets sit near the new reserve get config-only edits to their budget values."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "CHANGELOG.md has an entry naming the root cause: budget checked only per invocation after reading and planning had spent, with a reserve that left out the critic and later rounds; it names jobs 20261028-082151-67fa, 20261030-033434-3v30 and 20261030-151818-2c8g.",
+      "kind": "content"
+    },
+    {
+      "text": "One reserve function in crates/athena-core/src/reading.rs sums reader, max_rounds×(planner+critic), producer and verifier from config; Grep shows it called from admission, retry, drain dispatch and the per-round check in run/planning.rs, with no duplicated arithmetic.",
+      "kind": "content"
+    },
+    {
+      "text": "Core test: with a fake driver and the recorded $8.00 budget against the shipped caps (reserve 10.00), admission refuses with a message naming the shortfall and the config line, and the driver records zero invocations. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Core test: the preflight and the per-round critic check agree at $5.75, at the single-round total and at the full multi-round total; a retry whose recorded spend leaves less than the reserve is refused before planning, and a job with enough budget proceeds. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Core test of the real preflight on a real stored job, with spend chosen so left ≥ producer+verifier but < the full reserve: base reaches the planner, the change records no invocation. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Drain test through the real preflight path: a short job is skipped with its reason on one log line and the next item with enough budget still runs; it fails if the check is removed. Run: cargo test -p athena-cli.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass, with edits to existing tests config-only.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The change refuses more readings at admission and the higher refusal rate is intended: expected 10% of newly refused readings, since the shipped athena.toml budget of 12.00 covers the 10.00 reserve.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    }
+  ],
+  "out_of_scope": [
+    "Changing athena.toml [budget] values, defaults.toml or workflows",
+    "Interrupted-job takeover, disk cleanup and verifier changes from job 20261028-082151-67fa (candidate dropped)",
+    "Drain ordering and plan changes from job 20261030-033434-3v30 (candidate dropped)",
+    "Partial-plan resume for the planner",
+    "Changing producer, verifier or planner prompts",
+    "Letting a retry raise a job's budget"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 1.0,
+        "p50": 2.5,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7206434316353888,
+      "p_verification_passes": 0.6739130434782609,
+      "p_user_intervenes": 0.07613636363636364,
+      "cost_usd": {
+        "p10": 0.5380022647999169,
+        "p50": 1.2131910769135588,
+        "p90": 3.0953882734174645
+      },
+      "wall_time_s": {
+        "p10": 535.076184624823,
+        "p50": 1713.5980252819993,
+        "p90": 3515.852112997646
+      }
+    }
+  },
+  "departures": "Hard multi-site change touching admission, retry, drain and planning with test-number recomputation; higher cost and lower pass chance than the reference.",
+  "urgent_reason": "Cuts repeated failed jobs that stop in planning after spending budget, wasting retries.",
+  "hard_reason": "Adds a refusal rule that holds jobs at admission, retry, dispatch and before planning rounds, changing the run pipeline and drain.",
+  "producer_effort": "high"
+}
