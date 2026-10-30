@@ -901,6 +901,19 @@ fn lines_section(lines: &[athena_core::scope_guard::LineMark]) -> String {
 
 /// The open repeated causes of Hestia's error review: each with how many times and in how many jobs it
 /// occurred, and the request that addresses it.
+/// The `trend` line of `athena status`: the classes of work that improved and the ones that got worse.
+fn trend_section(trend: &athena_core::class_trend::ClassTrend) -> String {
+    let mut out = String::new();
+    for (i, line) in trend.lines().iter().enumerate() {
+        if i == 0 {
+            let _ = writeln!(out, "trend       {line}");
+        } else {
+            let _ = writeln!(out, "           {line}");
+        }
+    }
+    out
+}
+
 fn repeated_causes_section(causes: &[athena_core::hestia::RepeatedCause]) -> String {
     let mut out = String::new();
     for (i, c) in causes.iter().enumerate() {
@@ -1035,6 +1048,9 @@ pub fn status(v: &StatusView) -> String {
     }
     if let Some(throughput) = &v.throughput {
         let _ = writeln!(out, "{}", throughput.text());
+    }
+    if let Some(trend) = &v.class_trend {
+        out.push_str(&trend_section(trend));
     }
     for (i, j) in v.open.iter().enumerate() {
         let label = if i == 0 { "open" } else { "" };
@@ -1676,6 +1692,29 @@ mod tests {
             failing_test: test.map(str::to_string),
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_trend_line_lists_improving_and_worse_classes() {
+        use athena_core::class_trend::{ClassChange, ClassTrend};
+        let change = |class: &str, older, newer, after: Option<&str>| ClassChange {
+            class: class.into(),
+            jobs: 6,
+            older_median: older,
+            newer_median: newer,
+            after_job: after.map(str::to_string),
+        };
+        let text = trend_section(&ClassTrend {
+            compared: 2,
+            improving: vec![change("docs", 20.0, 9.0, None)],
+            worse: vec![change("code", 10.0, 22.0, Some("20261027-080000-aaaa"))],
+        });
+        assert!(text.starts_with("trend       2 class(es)"), "{text}");
+        assert!(text.contains("improving: docs 20.0 to 9.0 min"), "{text}");
+        assert!(
+            text.contains("worse: code 10.0 to 22.0 min over 6 jobs; the rise followed landed job 20261027-080000-aaaa"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -75,6 +75,7 @@ pub mod capability;
 pub mod chain;
 pub mod checks;
 pub mod ci_result;
+pub mod class_trend;
 pub mod code_health;
 pub mod commits;
 pub mod disk;
