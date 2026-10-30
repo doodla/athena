@@ -1,0 +1,181 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-013143-as0j",
+  "n": 1,
+  "at": "2026-10-30T07:02:46.00169923Z",
+  "invocation_seq": 1,
+  "base_commit": "08bfc082cd84ca667c696a24f2f3b870de88341c",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add drain in-flight table with live worktree and real stage hooks",
+  "summary": "Build job A3 (third attempt) adds a local in-flight table (job id, stage, worktree) written at each stage change and read at drain start. It fixes the findings of rejected jobs 20261029-142853-x4nr and 20261030-005008-tf2s: the live work tree is recorded, and stages come from the run pipeline's own entry points. A send-back returns the row to producer. Audience: later crash-recovery jobs and the drain verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Tests added; fmt, clippy -D warnings and the suite must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the worktree path and the send-back stage through the real entry point."
+    },
+    {
+      "id": "verified",
+      "how": "Criteria name commands the verifier can run."
+    },
+    {
+      "id": "small",
+      "how": "One focused change; stage report plus table only."
+    },
+    {
+      "id": "root-cause",
+      "how": "Stage is reported by the pipeline, not inferred from display text; one shared work-tree helper."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the table content, not that the code exists."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/drain.rs (Steps trait ~line 423, RealSteps::run at ~2353 calling Athena::go, RealSteps::land ~2387, Stub/World test steps), crates/athena-core/src/run/mod.rs (Athena::go at 261, PRODUCER_SEND_BACKS = 1 at 1034, Flow::Go handling ~1183 where checks start), crates/athena-core/src/run/producer.rs (work tree is job_dir.join(\"work\")) and crates/athena-core/src/state.rs (StateDir, job_dir, kept_work_dir). The entry point for tests is the drain over RealSteps/Athena::go. No record or data file under crates/ is added to records; the table is a local file in the state root, so check_record_file and AnyRecord are not touched.",
+    "Job 20261029-142849-04d9 (A2, landed): config.rs, CHANGELOG.md and its design-doc note are kept as landed. Its minor findings (design doc line 21 says no [drain.pipeline] table exists; error message lacks range) are not part of this job. If the docs/design/async-drain.md edit touches line 21, fixing it is fine but not required.",
+    "Job 20261029-142853-x4nr (rejected): its wrong-path finding (kept/<id>/work) is fixed by recording the live work tree through one StateDir helper that producer.rs also uses. Its missing-checks-stage finding is fixed by a stage report from the pipeline. Its minor finding about corrupt-table overwrite is addressed by renaming a bad file aside, or noted as left to the recovery job. Its design-doc note finding is addressed by a job 3 implemented note. Its candidate files (drain.rs, state.rs, CHANGELOG.md) are kept as deliverables, redone from scratch.",
+    "Job 20261030-005008-tf2s (rejected retry): its display-string stage matching (StageWatch matching a UI line starting with \"producer   \") is dropped. Stages are reported by Athena::go through a callback or observer called where run/mod.rs enters producer, checks, verifier and landing, so a send-back reports producer again. Its docs wording about 'each stage change' is made to match the behavior. Its files (drain.rs, state.rs, producer.rs, CHANGELOG.md, async-drain.md, tests/drain.rs) are kept as deliverables or excluded in out_of_scope as listed.",
+    "Because the callback is added to Athena::go, existing callers (the single-job go command) pass a no-op and behave as before. The default max_in_flight = 1 keeps the drain's visible behavior unchanged.",
+    "Nothing acts on leftover rows; crash recovery is later work."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-cli drain` (and the athena-core tests). A test through the drain over RealSteps and Athena::go shows the in-flight row's worktree equals the producer's live work tree (<state>/jobs/<id>/work, the path producer.rs uses), not <state>/kept/<id>/work.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test through the real entry point forces a producer send-back after a failed self-check, and another after a verifier send-back. It shows the row's stage goes checks (or verifier) back to producer, and the row reads producer during the second producer invocation. Run with `cargo test`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Grep shows the stage is set from the run pipeline entry points (a callback or observer invoked in crates/athena-core/src/run/mod.rs and producer.rs for producer, checks, verifier and landing). No code in drain.rs matches a UI/display line such as \"producer   \" to choose a stage.",
+      "kind": "content"
+    },
+    {
+      "text": "The table row is written at each stage change and removed when the job finishes or fails. The drain reads the file at start and reports leftover rows without acting on them. A missing file is empty; a corrupt file is noted and the drain continues. Verify with `cargo test` tests for these cases.",
+      "kind": "behavior"
+    },
+    {
+      "text": "With max_in_flight = 1 the existing drain tests in crates/athena-cli/src/drain.rs and tests/drain.rs pass unchanged: `git diff` shows no edits to existing test assertions, and `cargo test` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the in-flight table, and its wording about stage changes matches the behavior (a send-back returns the row to producer). Any wording in docs/design/async-drain.md about stage changes (sections 7 and 11) matches the behavior, and it notes build job 3 is implemented.",
+      "kind": "content"
+    },
+    {
+      "text": "athena.toml, defaults.toml and .github/workflows are unchanged, because the outcome needs no configuration change.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Acting on leftover table rows (producer retry, landing re-check): later build jobs",
+    "Running more than one producer at once, or raising max_in_flight to 3 (build job 10)",
+    "Reading [drain.pipeline] values in the drain runtime",
+    "Changes to crates/athena-data/src/config.rs (A2 job 20261029-142849-04d9 kept as landed)",
+    "Changes to athena.toml, defaults.toml, .github/workflows",
+    "Disk-guard, check-slot, read-ahead, conflict-return behavior"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.7,
+        "p90": 3.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7198924731182796,
+      "p_verification_passes": 0.6698717948717948,
+      "p_user_intervenes": 0.07655786350148368,
+      "cost_usd": {
+        "p10": 0.5282775,
+        "p50": 1.1917796999999997,
+        "p90": 3.0939666999999997
+      },
+      "wall_time_s": {
+        "p10": 529.0420783129066,
+        "p50": 1702.6442529345954,
+        "p90": 3423.382143527633
+      }
+    }
+  },
+  "departures": "Higher cost and lower pass chance than the reference: this is a third attempt, touches the run pipeline, and has two prior rejections for subtle reasons.",
+  "urgent_reason": "Third attempt after two rejections; getting it right now cuts redo-work retries.",
+  "hard_reason": "Changes the run pipeline (Athena::go gains a stage report) and the drain, where a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}

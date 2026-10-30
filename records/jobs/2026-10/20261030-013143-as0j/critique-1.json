@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013143-as0j",
+  "round": 1,
+  "at": "2026-10-30T07:08:38.107490573Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The drain-level send-back check cannot fail if the producer stage is reported only once.",
+      "evidence": "The plan says that if the report fires only at the first producer entry, the second producer read shows a \"stale or missing stage\". It would not: the stale stage is still producer, and checks has not been entered yet, so both reads see producer either way. The test that actually catches this is the lifecycle companion, which records the sink's calls (producer, producer, checks, verifier). Fix: Correct the plan's claim that the drain-level test fails without the behavior. Either name the lifecycle `stage_report` test as the check for per-iteration reporting, or make the drain test assert something only a second report produces, such as the number of table writes or a write timestamp between the two producer invocations.",
+      "location": "Demonstrations, criterion 2 (a); tests/drain.rs send-back test",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say what the moved row's worktree is.",
+      "evidence": "The row moves to the new job id and keeps its stage. Until the retry's producer enters, it would carry either the old job's `jobs/<old>/work`, which mod.rs:1323 has already removed, or a new path the producer has not created yet. The plan picks neither. Fix: Say that `move_row` sets the worktree to `state.work_dir(new)` (or keeps the old one), and have the criterion 2 (b) test assert that value between the read and the retry's producer entry.",
+      "location": "Step 8 / Decision 3: `RealSteps::read(ReadOf::Retry(old))` move_row",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Retrying an interrupted job can move or delete a leftover row, which counts as acting on it.",
+      "evidence": "`work` starts with `retry = item.interrupted` (drain.rs:1061), so an interrupted job goes through `read(Retry(old))`. If a leftover row exists for that job, `move_row` and later `item_over` will rewrite and then remove it. Criterion 4 (b) uses a row with no matching queue item, so the test cannot see this. The plan also does not say what `move_row` does when there is no source row. Fix: Choose and document one rule: either leftover rows read at start are left alone (`move_row` with no live row for that job writes nothing), or an interrupted retry deliberately takes over its leftover row (and say so in the docs, since the recovery job depends on it). Add a test for the chosen rule.",
+      "location": "Step 8 and Criterion 4 (b): retry of an interrupted item",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "During checks and the verifier the row names a work tree that has already been deleted, and the docs should say so.",
+      "evidence": "mod.rs:1323 runs `remove_tree(&work)` before `check_and_verify`. The checks and verifier run in `job_dir/verify` (mod.rs:1386). The design doc at line 153 calls the column \"worktree path\" with no qualification. Fix: In the section 7 text and the CHANGELOG entry, say the worktree column is the producer's work tree, which exists only while the producer runs, and that later stages keep that path for reference.",
+      "location": "Open question 4; CHANGELOG.md and docs/design/async-drain.md wording",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot using Read and Grep. The plan holds up. Every code location it names exists. `producer_snapshot` builds `job_dir.join(\"work\")` at producer.rs:87, and `kept_work_dir` (state.rs:58) is the `kept/` path. `producer_loop` has its send-back loop at producer.rs:154–292. `RunContext` has one constructor at mod.rs:855. `dispatch` has two internal callers (mod.rs:297, 697). `check_and_verify` is the shared checks/verifier path for both the fresh run (mod.rs:1336) and the resume path (mod.rs:514), and it already branches on `recorded_checks`. `retry_landing` is called in `go_job`. `RealSteps::read(Retry)` calls `athena.retry`, and `RealSteps::run` calls `athena.go`. The test seams exist: `Fixture::athena(Script)` in tests/common, `spec.workdir` used in scripts, and `RealSteps` struct literals in tests/drain.rs. The plan says `go` never loops back from checks or the verifier to the producer within one job. The code agrees: the only in-job send-back is the report send-back inside `producer_loop`, and the comment at mod.rs:1516–1517 refers to a later tree-seeded retry. So mapping \"sent back after checks or the verifier\" onto the drain's retry, and carrying the row across it, is a sound reading, not a heuristic. Stages come from the pipeline's own entry points through a per-call sink, and one `work_dir` helper fixes the wrong-path fault where it started. These answer both earlier rejections. The demonstrations run through `drain::drain` over `RealSteps` and the real `go_with_stages`. All findings are minor: one drain-level check cannot fail, two edge cases need defining (the moved row's worktree, interrupted retries touching leftover rows), and the docs should say what the worktree means after the producer stage."
+}

@@ -10,13 +10,14 @@ mod common;
 use athena_agent::fake::Script;
 use athena_cli::display;
 use athena_cli::drain::{
-    self, Approval, Caps, Check, Item, Lander, Landing, Limits, QueueView, Rate, Read, ReadOf,
-    RealSteps, Rebuild, Run, Steps, Stop, Waiting,
+    self, Approval, Caps, Check, InFlight, InFlightRow, Item, Lander, Landing, Limits, QueueView,
+    Rate, Read, ReadOf, RealSteps, Rebuild, Run, Steps, Stop, Waiting,
 };
 use athena_core::audience::Page;
 use athena_core::commits::{Committer, message};
 use athena_core::plan::{PlanEntry, Priority};
 use athena_core::run::GoResult;
+use athena_core::state::Stage;
 use athena_core::steward::{ProposedChange, RequestQueue};
 use athena_core::store::{JobRecords, JobState, Records};
 use athena_core::{Athena, Quiet};
@@ -2335,6 +2336,416 @@ fn work_everything() -> Limits {
         target_rating: 5,
         max_jobs: 10,
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The in-flight table, through the drain over the real steps and the real `Athena::go_with_stages`
+
+/// One look at the in-flight table, taken when an agent starts or a progress line appears. The agent starts
+/// are seen from the fake agent's script; the progress lines only trigger a look (production never reads
+/// them, and the assertions are on the table the look found).
+#[derive(Debug, Clone)]
+struct TableLook {
+    at: &'static str,
+    /// The working directory the agent was started in, for an agent start.
+    workdir: Option<std::path::PathBuf>,
+    workdir_exists: bool,
+    rows: Vec<InFlightRow>,
+}
+
+type Looks = Arc<std::sync::Mutex<Vec<TableLook>>>;
+
+fn look(root: &Path, looks: &Looks, at: &'static str, workdir: Option<&Path>) {
+    let found = TableLook {
+        at,
+        workdir: workdir.map(Path::to_path_buf),
+        workdir_exists: workdir.is_some_and(Path::is_dir),
+        rows: InFlight::at(root).read().rows,
+    };
+    looks.lock().unwrap().push(found);
+}
+
+/// The script, looking at the table at every reader, producer and verifier start.
+fn watching(inner: Script, root: std::path::PathBuf, looks: Looks) -> Script {
+    Box::new(move |spec| {
+        let at = match spec.role {
+            Role::Reader => Some("reader"),
+            Role::Producer => Some("producer"),
+            Role::Verifier => Some("verifier"),
+            _ => None,
+        };
+        if let Some(at) = at {
+            look(&root, &looks, at, Some(&spec.workdir));
+        }
+        inner(spec)
+    })
+}
+
+/// The progress lines that trigger a look: the checks line, and the line that dispatches a job.
+struct TableUi {
+    root: std::path::PathBuf,
+    looks: Looks,
+}
+
+impl athena_core::Ui for TableUi {
+    fn line(&self, text: &str) {
+        let at = if text.starts_with("checks     ") {
+            "checks"
+        } else if text.starts_with("dispatched ") {
+            "dispatched"
+        } else {
+            return;
+        };
+        look(&self.root, &self.looks, at, None);
+    }
+}
+
+/// What a watched drain did.
+struct Watched {
+    report: drain::Report,
+    job: String,
+    root: std::path::PathBuf,
+    looks: Vec<TableLook>,
+    landed: Vec<String>,
+}
+
+impl Watched {
+    fn stages_at(&self, at: &str) -> Vec<Vec<(String, Stage)>> {
+        self.looks
+            .iter()
+            .filter(|l| l.at == at)
+            .map(|l| l.rows.iter().map(|r| (r.job.clone(), r.stage)).collect())
+            .collect()
+    }
+
+    fn rows_left(&self) -> Vec<InFlightRow> {
+        InFlight::at(&self.root).read().rows
+    }
+}
+
+/// Drains one queued request over the real steps, with the table watched. `prepare` runs once the state
+/// directory exists and before the drain starts.
+fn drain_watched(fx: &Fixture, inner: Script, prepare: impl FnOnce(&Path)) -> Watched {
+    let root = fx.state.path().join("repo");
+    let looks: Looks = Looks::default();
+    let athena = fx.athena(watching(inner, root.clone(), looks.clone()));
+    let job = queue_steward_request(&athena, "Add a greeting to the README.");
+    std::fs::create_dir_all(&root).unwrap();
+    prepare(&root);
+    let ui = TableUi {
+        root: root.clone(),
+        looks: looks.clone(),
+    };
+    let lander = RecordingLander::default();
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &ui,
+        page: &StubPage,
+        lander: &lander,
+    };
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let landed = lander
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(job, _)| job.clone())
+        .collect();
+    let looks = looks.lock().unwrap().clone();
+    Watched {
+        report,
+        job,
+        root,
+        looks,
+        landed,
+    }
+}
+
+/// A producer report whose second criterion is unmet, so the producer is sent back once.
+fn unmet_report() -> serde_json::Value {
+    let texts = criteria_texts(&default_reading());
+    let mut report = producer_report("Added a greeting line.", &["cargo test --locked"]);
+    report["criteria_check"] = json!([
+        criterion_check(&texts[0], "met"),
+        criterion_check(&texts[1], "unmet"),
+    ]);
+    report
+}
+
+/// A verdict that rejects the work: the first criterion is unmet.
+fn rejecting_verdict() -> serde_json::Value {
+    json!({
+        "verdict": "fail",
+        "criteria": [
+            { "criterion": "criterion 1", "met": false, "evidence": "missing", "commands": [] },
+            { "criterion": "criterion 2", "met": true, "evidence": "ran", "commands": ["cargo test"] }
+        ],
+        "findings": [{
+            "severity": "major",
+            "summary": "the description lists no callers",
+            "evidence": "the change description is missing",
+            "location": "README.md"
+        }],
+        "request_reading_mismatch": null,
+        "summary": "Rejected."
+    })
+}
+
+/// A script that plays `first` until the second reader call (the retry's reading) and `second` after it.
+fn phased(first: Scenario, second: Scenario) -> Script {
+    let readers = Arc::new(std::sync::Mutex::new(0usize));
+    let (first, second) = (first.script(), second.script());
+    Box::new(move |spec| {
+        if spec.role == Role::Reader {
+            *readers.lock().unwrap() += 1;
+        }
+        if *readers.lock().unwrap() > 1 {
+            second(spec)
+        } else {
+            first(spec)
+        }
+    })
+}
+
+#[test]
+fn in_flight_row_names_the_producers_live_work_tree() {
+    let fx = Fixture::new();
+    let watched = drain_watched(&fx, Scenario::default().script(), |_| {});
+    assert_eq!(
+        watched.report.landed,
+        1,
+        "{}",
+        display::drain(&watched.report)
+    );
+
+    let producer: Vec<&TableLook> = watched
+        .looks
+        .iter()
+        .filter(|l| l.at == "producer")
+        .collect();
+    assert_eq!(producer.len(), 1);
+    let at_producer = producer[0];
+    // One row, for the job under run, at the producer stage.
+    assert_eq!(at_producer.rows.len(), 1, "{:?}", at_producer.rows);
+    let row = &at_producer.rows[0];
+    assert_eq!(row.job, watched.job);
+    assert_eq!(row.stage, Stage::Producer);
+    // The worktree is the producer's live work tree: where its invocation runs, under the job's own
+    // directory, and never the place the work of a timed out job is kept.
+    let live = watched.root.join("jobs").join(&watched.job).join("work");
+    assert_eq!(row.worktree, live);
+    assert_eq!(at_producer.workdir.as_deref(), Some(live.as_path()));
+    assert!(
+        at_producer.workdir_exists,
+        "the row names a directory that exists while the producer runs"
+    );
+    assert!(
+        !row.worktree.starts_with(watched.root.join("kept")),
+        "{}",
+        row.worktree.display()
+    );
+    assert_ne!(
+        row.worktree,
+        watched.root.join("kept").join(&watched.job).join("work")
+    );
+    // Nothing is left behind, and a missing file at the start made no note.
+    assert!(watched.rows_left().is_empty());
+    assert!(!watched.root.join("in-flight.json").exists());
+    assert!(
+        watched
+            .report
+            .notes
+            .iter()
+            .all(|n| !n.contains("in-flight")),
+        "{:?}",
+        watched.report.notes
+    );
+}
+
+#[test]
+fn in_flight_row_goes_producer_checks_verifier_and_is_producer_again_after_a_self_check_send_back()
+{
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    scenario.report = unmet_report();
+    scenario.report_when_sent_back = Some(producer_report(
+        "Added a greeting line.",
+        &["cargo test --locked"],
+    ));
+    let watched = drain_watched(&fx, scenario.script(), |_| {});
+    assert_eq!(
+        watched.report.landed,
+        1,
+        "{}",
+        display::drain(&watched.report)
+    );
+
+    let seen: Vec<(&str, Vec<(String, Stage)>)> = watched
+        .looks
+        .iter()
+        .filter(|l| l.at != "reader" && l.at != "dispatched")
+        .map(|l| {
+            (
+                l.at,
+                l.rows.iter().map(|r| (r.job.clone(), r.stage)).collect(),
+            )
+        })
+        .collect();
+    let job = watched.job.clone();
+    // The producer ran twice (the second time after the send-back) and both times the row said producer,
+    // with the same live work tree; then checks and verifier.
+    assert_eq!(
+        seen,
+        [
+            ("producer", vec![(job.clone(), Stage::Producer)]),
+            ("producer", vec![(job.clone(), Stage::Producer)]),
+            ("checks", vec![(job.clone(), Stage::Checks)]),
+            ("verifier", vec![(job, Stage::Verifier)]),
+        ]
+    );
+    let work: Vec<_> = watched
+        .looks
+        .iter()
+        .filter(|l| l.at == "producer")
+        .map(|l| (l.rows[0].worktree.clone(), l.workdir.clone().unwrap()))
+        .collect();
+    assert_eq!(work[0], work[1]);
+    assert_eq!(work[0].0, work[0].1);
+    assert!(watched.rows_left().is_empty());
+}
+
+#[test]
+fn in_flight_row_moves_from_verifier_back_to_producer_when_the_rejected_job_is_retried() {
+    let fx = Fixture::new();
+    let mut first = Scenario::default();
+    first.verdict = rejecting_verdict();
+    let watched = drain_watched(&fx, phased(first, Scenario::default()), |_| {});
+    assert_eq!(
+        watched.report.landed,
+        1,
+        "{}",
+        display::drain(&watched.report)
+    );
+    let first_job = watched.job.clone();
+    let retry_job = watched.report.jobs[1].job.clone();
+    assert_ne!(retry_job, first_job, "the retry is a new job");
+
+    // First attempt: producer, then checks, then verifier, one row throughout.
+    let producers = watched.stages_at("producer");
+    assert_eq!(producers.len(), 2);
+    assert_eq!(producers[0], [(first_job.clone(), Stage::Producer)]);
+    assert_eq!(
+        watched.stages_at("checks")[0],
+        [(first_job.clone(), Stage::Checks)]
+    );
+    let verifiers = watched.stages_at("verifier");
+    assert_eq!(verifiers[0], [(first_job.clone(), Stage::Verifier)]);
+    // The rejected job's row waits while the retry is read (the reader also runs for the introspection of
+    // the rejection, which sees the same table); there is still one row, still at the verifier.
+    let readers = watched.stages_at("reader");
+    assert_eq!(readers.len(), 3, "{:#?}", watched.looks);
+    assert_eq!(readers[0], []);
+    assert_eq!(readers[1], [(first_job.clone(), Stage::Verifier)]);
+    assert_eq!(readers[2], [(first_job.clone(), Stage::Verifier)]);
+    // When the retry job is dispatched the row belongs to it, with the stage the rejected job reached.
+    let dispatched = watched.stages_at("dispatched");
+    assert_eq!(dispatched.len(), 2);
+    assert_eq!(dispatched[0], []);
+    assert_eq!(dispatched[1], [(retry_job.clone(), Stage::Verifier)]);
+    // The retry's producer sets it to producer again: one row, the retry's, with the retry's work tree.
+    assert_eq!(producers[1], [(retry_job.clone(), Stage::Producer)]);
+    let second_producer = watched
+        .looks
+        .iter()
+        .filter(|l| l.at == "producer")
+        .nth(1)
+        .unwrap();
+    let live = watched.root.join("jobs").join(&retry_job).join("work");
+    assert_eq!(second_producer.rows[0].worktree, live);
+    assert_eq!(second_producer.workdir.as_deref(), Some(live.as_path()));
+    assert!(watched.rows_left().is_empty());
+}
+
+#[test]
+fn in_flight_row_goes_when_an_item_fails_twice() {
+    let fx = Fixture::new();
+    let mut first = Scenario::default();
+    first.verdict = rejecting_verdict();
+    let mut second = Scenario::default();
+    second.verdict = rejecting_verdict();
+    let watched = drain_watched(&fx, phased(first, second), |_| {});
+    assert_eq!(watched.report.landed, 0);
+    assert_eq!(
+        watched.report.failed_item.as_deref(),
+        Some(watched.job.as_str())
+    );
+    assert!(watched.landed.is_empty());
+    assert!(watched.rows_left().is_empty());
+    assert!(!watched.root.join("in-flight.json").exists());
+}
+
+fn leftover_row() -> InFlightRow {
+    InFlightRow {
+        job: "20260101-000000-zzzz".into(),
+        stage: Stage::Verifier,
+        worktree: "/gone/jobs/20260101-000000-zzzz/work".into(),
+    }
+}
+
+#[test]
+fn a_row_left_by_an_earlier_run_is_reported_and_not_acted_on() {
+    let fx = Fixture::new();
+    let watched = drain_watched(&fx, Scenario::default().script(), |root| {
+        InFlight::at(root).set(leftover_row()).unwrap();
+    });
+    let note = watched
+        .report
+        .notes
+        .iter()
+        .find(|n| n.contains("20260101-000000-zzzz"))
+        .unwrap_or_else(|| panic!("{:?}", watched.report.notes));
+    assert!(
+        note.contains("verifier") && note.contains("not acted on"),
+        "{note}"
+    );
+    // Only the queued request ran and landed; the leftover row is untouched.
+    assert_eq!(watched.landed, std::slice::from_ref(&watched.job));
+    assert!(
+        watched
+            .looks
+            .iter()
+            .all(|l| l.at != "reader" || l.rows == [leftover_row()])
+    );
+    assert_eq!(watched.rows_left(), [leftover_row()]);
+}
+
+#[test]
+fn a_table_that_cannot_be_read_is_noted_moved_aside_and_the_drain_goes_on() {
+    let fx = Fixture::new();
+    let watched = drain_watched(&fx, Scenario::default().script(), |root| {
+        std::fs::write(root.join("in-flight.json"), "{ not a table").unwrap();
+    });
+    assert_eq!(
+        watched.report.landed,
+        1,
+        "{}",
+        display::drain(&watched.report)
+    );
+    assert!(
+        watched
+            .report
+            .notes
+            .iter()
+            .any(|n| n.contains("in-flight") && n.contains("in-flight.json.corrupt")),
+        "{:?}",
+        watched.report.notes
+    );
+    assert_eq!(
+        std::fs::read_to_string(watched.root.join("in-flight.json.corrupt")).unwrap(),
+        "{ not a table"
+    );
+    // The drain's own rows were written fresh and are gone again.
+    assert!(watched.rows_left().is_empty());
 }
 
 const FIRST: &str = "Add the demo study to the studies directory.";

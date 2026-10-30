@@ -14,7 +14,7 @@ use crate::reading::{
     resumable_job, retried_job, retry_findings, same_scope, tree_retry_seed,
 };
 use crate::scoring::{self, Happened, score, totals};
-use crate::state::{ResumeMark, ResumeStage};
+use crate::state::{NoStages, ResumeMark, ResumeStage, Stage, StageSink};
 use crate::store::{JobRecords, JobState, Records};
 use crate::verify::{MAP_PATH, VerdictInputs, Verified, judge, mark_pre_existing, verified};
 use crate::{Athena, Ui};
@@ -259,7 +259,19 @@ impl Athena {
     /// A job that ends `rejected` or `failed` is introspected at once, with no request from the user. The
     /// introspection never changes the result and never blocks `go` (`defaults-loop.md` section 3.1).
     pub fn go(&self, job_ref: &str, accepted_by: AcceptedBy, ui: &dyn Ui) -> Result<GoResult> {
-        let result = self.go_job(job_ref, accepted_by, ui)?;
+        self.go_with_stages(job_ref, accepted_by, ui, &NoStages)
+    }
+
+    /// [`go`](Athena::go), reporting each stage the run enters to `stages`: the producer (again on each
+    /// send-back), the checks, the verifier, and the landing of a blocked job.
+    pub fn go_with_stages(
+        &self,
+        job_ref: &str,
+        accepted_by: AcceptedBy,
+        ui: &dyn Ui,
+        stages: &dyn StageSink,
+    ) -> Result<GoResult> {
+        let result = self.go_job(job_ref, accepted_by, ui, stages)?;
         if let GoResult::Finished(finished) = &result {
             if matches!(
                 finished.state,
@@ -275,7 +287,13 @@ impl Athena {
         Ok(result)
     }
 
-    fn go_job(&self, job_ref: &str, accepted_by: AcceptedBy, ui: &dyn Ui) -> Result<GoResult> {
+    fn go_job(
+        &self,
+        job_ref: &str,
+        accepted_by: AcceptedBy,
+        ui: &dyn Ui,
+        stages: &dyn StageSink,
+    ) -> Result<GoResult> {
         self.refuse_if_stopped()?;
         self.state.registry().reap();
         let head = self.head()?;
@@ -289,13 +307,20 @@ impl Athena {
             JobState::Queued => self
                 .read_queued(&job, ui)
                 .map(|p| GoResult::Reread(Box::new(p))),
-            JobState::Blocked => self
-                .retry_landing(&records, &job, ui)
-                .map(|f| GoResult::Finished(Box::new(f))),
+            JobState::Blocked => {
+                stages.enter(&id, Stage::Landing);
+                self.retry_landing(&records, &job, ui)
+                    .map(|f| GoResult::Finished(Box::new(f)))
+            }
             JobState::Proposed => match job.latest_reading() {
-                Some(reading) if reading.capability.is_some() => {
-                    self.dispatch(&head, &records, &job, reading.clone(), accepted_by, ui)
-                }
+                Some(reading) if reading.capability.is_some() => self.dispatch(
+                    &head,
+                    &records,
+                    &job,
+                    reading.clone(),
+                    accepted_by,
+                    Outputs { ui, stages },
+                ),
                 Some(_) => unreachable!("a reading without a capability is declined"),
                 None => bail!(
                     "job {id} has no reading yet (the reader failed); `athena correct {id} \"<line>\"` reads it again"
@@ -657,7 +682,7 @@ impl Athena {
         job: &JobRecords,
         reading: Reading,
         accepted_by: AcceptedBy,
-        ui: &dyn Ui,
+        Outputs { ui, stages }: Outputs<'_>,
     ) -> Result<GoResult> {
         let id = job.id().clone();
         // A paused line gets no new attempt until the owner lifts the pause (`scope_guard`).
@@ -700,7 +725,7 @@ impl Athena {
                 &new_job,
                 new_reading,
                 accepted_by,
-                ui,
+                Outputs { ui, stages },
             );
         }
         // Free disk space, before anything is committed or any agent runs. When it stays low after the idle
@@ -861,6 +886,7 @@ impl Athena {
             prediction: prediction.clone(),
             clock,
             ui,
+            stages,
             pin_dir: pinned.map(|(_, dir)| dir),
             seed_commit: retry_seed.map(|s| s.candidate_commit),
             resume,
@@ -910,6 +936,13 @@ impl Athena {
     }
 }
 
+/// Where a run says what it is doing: progress lines, and the stage it enters.
+#[derive(Clone, Copy)]
+struct Outputs<'a> {
+    ui: &'a dyn Ui,
+    stages: &'a dyn StageSink,
+}
+
 /// What every phase of a dispatched job needs.
 struct RunContext<'a> {
     jc: &'a JobConfig,
@@ -920,6 +953,8 @@ struct RunContext<'a> {
     prediction: String,
     clock: Instant,
     ui: &'a dyn Ui,
+    /// Told when the run enters the producer, the checks and the verifier.
+    stages: &'a dyn StageSink,
     /// The pinned tree's checkout, mounted read-only into both agents' working directories.
     pin_dir: Option<PathBuf>,
     /// The rejected candidate commit the producer's working directory is seeded from, for a tree-seeded retry.
@@ -1170,7 +1205,7 @@ impl Athena {
         let seq = ctx.next_seq(&closing);
 
         self.baseline_stage(ctx, &job_dir, seq, &mut closing);
-        let prepared = self.producer_snapshot(ctx, &job_dir)?;
+        let prepared = self.producer_snapshot(ctx)?;
         let Reported {
             report,
             report_gaps,
@@ -1408,6 +1443,9 @@ impl Athena {
             .map(|c| c.changes.iter().map(|e| e.path.clone()).collect())
             .unwrap_or_default();
         let resumed_checks = recorded_checks.is_some();
+        if !resumed_checks {
+            ctx.stages.enter(&id, Stage::Checks);
+        }
         if let Some(runs) = recorded_checks {
             ctx.ui.line(
                 "resume     the checks passed on this candidate in the job it resumes; they do not run again",
@@ -1645,6 +1683,7 @@ impl Athena {
         // The verifier always runs, so a failed check never leaves the criteria unjudged; the check still
         // fails the final verdict unless it is pre-existing.
         {
+            ctx.stages.enter(&id, Stage::Verifier);
             closing.files.push(NewFile::text(
                 format!("{}/brief-verifier.md", id.dir()),
                 verifier_brief_with_plan(&inputs, verifier_plan.as_ref(), false),

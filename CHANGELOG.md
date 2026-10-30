@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The drain's in-flight table (async drain build job 3, `docs/design/async-drain.md` sections 7 and 12 and decision
+  D145). The real steps keep a local file, `in-flight.json` in the state directory, with a row of job id, stage and
+  worktree for each job being worked. The run reports the stage itself: the new `Athena::go_with_stages` tells a
+  `StageSink` when it enters the producer (again on every send-back after a failed self-check), the checks, the
+  verifier and the landing, so no output text is matched (`Athena::go` passes a sink that ignores them). A
+  rejected job's row waits for its retry, which moves it to the new job, and the retry's producer sets it to
+  producer again. The worktree is the producer's live work tree, the new `StateDir::work_dir`
+  (`jobs/<id>/work`), which the producer's snapshot also uses, and not the kept work of a timed out job. The row
+  is removed when the item's work ends and after a landing. A drain reads the file at its start and notes
+  leftover rows in its report without acting on them; a missing file is empty, and a file that cannot be read is
+  moved to `in-flight.json.corrupt` and noted. A failed write is a warning line, not a job failure. The new
+  `Steps::in_flight` and `Steps::item_over` have defaults that do nothing, so with `max_in_flight = 1` the drain
+  behaves as before.
 - `athena status` prints a `trend` line (requirement OLY-9-10, mechanism `crates/athena-core/src/class_trend.rs`):
   for each class of work with at least four landed jobs, the median minutes per landed job in the older half
   against the newer half, the classes improving, and, for a class that got worse, the earlier landed job after

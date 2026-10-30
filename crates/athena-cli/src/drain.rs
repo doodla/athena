@@ -49,6 +49,18 @@
 //!   channel only ([`athena_core::steward::interrupted_work`]). Its first attempt is `athena retry`, which
 //!   reads the request again as a new job; that job is then run. The interrupted job is left as it is, but a
 //!   job that a retry already names is not listed again. A job whose process is still running is never listed.
+//! - **The in-flight table.** The real steps keep a local file, `in-flight.json` in the state directory, with
+//!   one row per job being worked: job id, stage and worktree ([`InFlight`]). The stage is reported by the run
+//!   itself where it enters a stage (`athena_core::state::StageSink`, called by `Athena::go_with_stages`):
+//!   producer (again on every send-back after a failed self-check), checks, verifier, and landing. The drain
+//!   matches no output text to choose a stage. The worktree is the producer's live work tree
+//!   (`StateDir::work_dir`), not the kept work of a timed out job. A rejected or failed job's row waits for
+//!   its retry: the retry's reading moves the row to the new job and keeps its stage, and the retry's
+//!   producer then sets it to producer again. The row is removed when the item's work ends, and after a
+//!   landing. The drain reads the file at its start and notes any row left by an earlier run
+//!   ([`Report::notes`]); it acts on none (recovery is later work). A missing file is empty. A file that
+//!   cannot be read is moved aside to `in-flight.json.corrupt`, noted, and the drain goes on. A write that
+//!   fails is a warning line, never a job failure.
 //! - **Stop at a job boundary.** [`Steps::stop_requested`] is asked before every job. A job that has started
 //!   is finished (landed and rated) and no further job starts: [`Stop::Requested`]. Nothing is killed.
 //!
@@ -135,12 +147,15 @@ use athena_core::audience::{LivePage, Page, Target};
 use athena_core::gh::GhCli;
 use athena_core::plan::{Plan, PlanEntry, Refusal};
 use athena_core::pr::LinkState;
+use athena_core::state::{Stage, StageSink};
 pub use athena_core::status::{BUILD_PATHS, touches_build};
 use athena_core::store::Records;
 use athena_core::{Athena, Ui, steward, work_decisions};
+use athena_data::JobId;
 use athena_data::records::{AcceptedBy, OutcomeState};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -491,6 +506,166 @@ pub trait Steps {
             cost: 0.0,
             runnable: false,
             error: Some("this Steps cannot read an already-read job again".into()),
+        }
+    }
+    /// What an earlier run left in the in-flight table, one line per leftover row, and a line when the file
+    /// could not be read. Asked once, at the start of a drain. The drain only notes these lines. The default
+    /// has no table.
+    fn in_flight(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Told once when the work on an item ends, with the last job the item had (a retry is a new job), so the
+    /// table row of a job that did not land can be removed. The default does nothing.
+    fn item_over(&self, _job: &str) {}
+}
+
+/// The file name of the in-flight table in the state directory.
+pub const IN_FLIGHT_FILE: &str = "in-flight.json";
+
+/// One row of the in-flight table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InFlightRow {
+    pub job: String,
+    pub stage: Stage,
+    /// The producer's live work tree, `StateDir::work_dir` of the job.
+    pub worktree: PathBuf,
+}
+
+/// What reading the table found.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InFlightRead {
+    pub rows: Vec<InFlightRow>,
+    /// Set when the file could not be read: where it was moved to, and why.
+    pub corrupt: Option<String>,
+}
+
+/// The local in-flight table: a file of job id, stage and worktree, rewritten at each stage change. Every
+/// update takes one process-wide lock, reads the whole file and writes it back through a temporary file and a
+/// rename, so workers of [`drain_concurrent`] do not lose each other's rows.
+#[derive(Debug, Clone)]
+pub struct InFlight {
+    path: PathBuf,
+}
+
+static TABLE_LOCK: Mutex<()> = Mutex::new(());
+
+impl InFlight {
+    /// The table in the state directory `state_root`.
+    pub fn at(state_root: &Path) -> InFlight {
+        InFlight {
+            path: state_root.join(IN_FLIGHT_FILE),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The rows now. A missing file is an empty table. A file that is not a table is moved to
+    /// `in-flight.json.corrupt` and reported in [`InFlightRead::corrupt`]; the rows are then empty.
+    pub fn read(&self) -> InFlightRead {
+        let _guard = TABLE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        self.load()
+    }
+
+    fn load(&self) -> InFlightRead {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return InFlightRead::default(),
+            Err(e) => {
+                return InFlightRead {
+                    rows: Vec::new(),
+                    corrupt: Some(format!("{} could not be read: {e}", self.path.display())),
+                };
+            }
+        };
+        match serde_json::from_slice::<Vec<InFlightRow>>(&bytes) {
+            Ok(rows) => InFlightRead {
+                rows,
+                corrupt: None,
+            },
+            Err(why) => {
+                let aside = self.path.with_extension("json.corrupt");
+                let moved = match std::fs::rename(&self.path, &aside) {
+                    Ok(()) => format!("moved to {}", aside.display()),
+                    Err(e) => format!("could not be moved aside: {e}"),
+                };
+                InFlightRead {
+                    rows: Vec::new(),
+                    corrupt: Some(format!(
+                        "{} is not a table of rows ({why}); {moved}",
+                        self.path.display()
+                    )),
+                }
+            }
+        }
+    }
+
+    fn store(&self, rows: &[InFlightRow]) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return match std::fs::remove_file(&self.path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+                _ => Ok(()),
+            };
+        }
+        let temp = self.path.with_extension("json.tmp");
+        std::fs::write(&temp, serde_json::to_vec_pretty(rows)?)?;
+        std::fs::rename(&temp, &self.path)?;
+        Ok(())
+    }
+
+    fn update(&self, change: impl FnOnce(&mut Vec<InFlightRow>)) -> anyhow::Result<()> {
+        let _guard = TABLE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut rows = self.load().rows;
+        change(&mut rows);
+        self.store(&rows)
+    }
+
+    /// Writes the row of `row.job`, replacing the one it has.
+    pub fn set(&self, row: InFlightRow) -> anyhow::Result<()> {
+        self.update(|rows| {
+            rows.retain(|r| r.job != row.job);
+            rows.push(row);
+        })
+    }
+
+    /// Gives the row of `old`, if there is one, to `new` with `worktree`, keeping its stage.
+    pub fn move_row(&self, old: &str, new: &str, worktree: PathBuf) -> anyhow::Result<()> {
+        self.update(|rows| {
+            if let Some(at) = rows.iter().position(|r| r.job == old) {
+                let mut row = rows.remove(at);
+                rows.retain(|r| r.job != new);
+                row.job = new.to_string();
+                row.worktree = worktree;
+                rows.push(row);
+            }
+        })
+    }
+
+    /// Removes the row of `job`, if there is one.
+    pub fn remove(&self, job: &str) -> anyhow::Result<()> {
+        self.update(|rows| rows.retain(|r| r.job != job))
+    }
+}
+
+/// The sink the real steps give `Athena::go_with_stages`: each stage the run enters becomes the job's row.
+struct TableSink<'a> {
+    table: InFlight,
+    athena: &'a Athena,
+    ui: &'a dyn Ui,
+}
+
+impl StageSink for TableSink<'_> {
+    fn enter(&self, job: &JobId, stage: Stage) {
+        let row = InFlightRow {
+            job: job.as_str().to_string(),
+            stage,
+            worktree: self.athena.state.work_dir(job),
+        };
+        if let Err(e) = self.table.set(row) {
+            self.ui.line(&format!(
+                "warning: could not write the in-flight table: {e:#}"
+            ));
         }
     }
 }
@@ -1052,11 +1227,22 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
     /// Works one item through its attempts: read and run, land, and on a failure try once more.
     ///
     /// `ahead` is the reading the read-ahead made of this item, if it did; it is used by the first attempt.
-    fn work(&self, item: &Item, mut ahead: Option<Ahead>) -> ItemEnd {
+    fn work(&self, item: &Item, ahead: Option<Ahead>) -> ItemEnd {
+        let mut last_job = item.job.clone();
+        let end = self.attempts(item, ahead, &mut last_job);
+        // Whatever the end, the item's table row goes with it: the job it last had, and the item's own.
+        self.steps.item_over(&last_job);
+        if last_job != item.job {
+            self.steps.item_over(&item.job);
+        }
+        end
+    }
+
+    /// The attempts of [`Drain::work`]; `last_job` ends as the last job the item had.
+    fn attempts(&self, item: &Item, mut ahead: Option<Ahead>, last_job: &mut String) -> ItemEnd {
         // Once the job is read, an attempt that is not a retry only runs it.
         let mut item = item.clone();
         let item = &mut item;
-        let mut last_job = item.job.clone();
         // An interrupted job has no finished attempt to run: its first attempt reads it again.
         let mut retry = item.interrupted;
         let mut passed: Option<(String, usize)> = None;
@@ -1068,9 +1254,9 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     return ItemEnd::Stop;
                 }
                 let from = if retry {
-                    ReadOf::Retry(&last_job)
+                    ReadOf::Retry(last_job.as_str())
                 } else {
-                    ReadOf::Queued(&last_job)
+                    ReadOf::Queued(last_job.as_str())
                 };
                 let source = match ahead.take() {
                     Some(made) => self.vet(item, made),
@@ -1093,7 +1279,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                         // An interrupted job whose retry could not be read is still interrupted.
                         retry = again || (item.interrupted && !read);
                         if read {
-                            last_job = job;
+                            *last_job = job;
                             item.read = true;
                         }
                     }
@@ -1736,6 +1922,10 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     for line in steps.review_passes() {
         d.ui.line(&line);
     }
+    // What an earlier run left in the in-flight table is reported and left alone: recovery is later work.
+    for line in steps.in_flight() {
+        d.note(line);
+    }
     let view = steps.queue()?;
     let previous = steps.previous_rating();
     let mut view = view;
@@ -2212,6 +2402,19 @@ impl<'a> RealSteps<'a> {
             .map(|r| r.audience_runs.iter().map(|i| i.cost.best_lower()).sum())
             .unwrap_or(0.0)
     }
+
+    fn table(&self) -> InFlight {
+        InFlight::at(self.athena.state.root())
+    }
+
+    /// A table write that fails is a warning line: the table is bookkeeping and never fails a job.
+    fn table_result(&self, result: anyhow::Result<()>) {
+        if let Err(e) = result {
+            self.ui.line(&format!(
+                "warning: could not write the in-flight table: {e:#}"
+            ));
+        }
+    }
 }
 
 impl Steps for RealSteps<'_> {
@@ -2331,6 +2534,22 @@ impl Steps for RealSteps<'_> {
             ),
             ReadOf::Retry(job) => (self.athena.retry(job, self.ui).map(|(p, _)| p), 0.0),
         };
+        if let ReadOf::Retry(old) = what {
+            // The retry is a new job. A row waiting for it (the checks or verifier the old job reached) goes
+            // to the new job, keeping its stage, until the new job's producer enters; a retry that cannot run
+            // leaves no row.
+            let moved = match &result {
+                Ok(p)
+                    if p.reader_error.is_none()
+                        && p.reading.as_ref().is_some_and(|r| r.capability.is_some()) =>
+                {
+                    self.table()
+                        .move_row(old, p.job.as_str(), self.athena.state.work_dir(&p.job))
+                }
+                _ => self.table().remove(old),
+            };
+            self.table_result(moved);
+        }
         match result {
             Ok(p) => Read {
                 runnable: p.reading.as_ref().is_some_and(|r| r.capability.is_some()),
@@ -2352,7 +2571,15 @@ impl Steps for RealSteps<'_> {
 
     fn run(&self, job: &str) -> Run {
         let before = self.job_cost(job);
-        let result = self.athena.go(job, AcceptedBy::Flag, self.ui);
+        // The run reports each stage it enters; the table holds the latest.
+        let sink = TableSink {
+            table: self.table(),
+            athena: self.athena,
+            ui: self.ui,
+        };
+        let result = self
+            .athena
+            .go_with_stages(job, AcceptedBy::Flag, self.ui, &sink);
         let cost = (self.job_cost(job) - before).max(0.0);
         match result {
             Ok(athena_core::run::GoResult::Finished(f)) => Run {
@@ -2385,7 +2612,16 @@ impl Steps for RealSteps<'_> {
     }
 
     fn land(&self, job: &str) -> Landing {
-        match self.lander.land(self.athena, job, self.ui) {
+        // `go` does not land a verified job; this is where the drain enters the landing stage.
+        if let Ok(id) = JobId::parse(job) {
+            TableSink {
+                table: self.table(),
+                athena: self.athena,
+                ui: self.ui,
+            }
+            .enter(&id, Stage::Landing);
+        }
+        let landing = match self.lander.land(self.athena, job, self.ui) {
             // What the landing changed is what the job's candidate changed; a landing whose candidate cannot be
             // read is taken to have changed nothing the page is built from.
             Landing::Landed { .. } => Landing::Landed {
@@ -2402,7 +2638,35 @@ impl Steps for RealSteps<'_> {
                     .unwrap_or_default(),
             },
             other => other,
-        }
+        };
+        // The landing is over, landed or not: a landing that failed is tried again by the drain's next
+        // attempt, which sets the row again.
+        self.table_result(self.table().remove(job));
+        landing
+    }
+
+    fn in_flight(&self) -> Vec<String> {
+        let found = self.table().read();
+        let mut lines: Vec<String> = found
+            .rows
+            .iter()
+            .map(|r| {
+                format!(
+                    "the in-flight table holds a row left by an earlier run: job {} was at stage {} in {}; it is not acted on",
+                    r.job,
+                    r.stage.as_str(),
+                    r.worktree.display()
+                )
+            })
+            .collect();
+        lines.extend(found.corrupt.map(|why| {
+            format!("the in-flight table was not read and the drain goes on without it: {why}")
+        }));
+        lines
+    }
+
+    fn item_over(&self, job: &str) {
+        self.table_result(self.table().remove(job));
     }
 
     fn rebuild(&self) -> Result<Rebuild, String> {
@@ -2788,6 +3052,113 @@ mod tests {
             assert!(!stop.label().is_empty() && !stop.meaning().is_empty());
         }
         assert!(Stop::QueueEmpty.meaning().contains("not success"));
+    }
+}
+
+/// The in-flight table file: what a missing, a good and a bad file give, and how rows change.
+#[cfg(test)]
+mod in_flight_tests {
+    use super::*;
+
+    fn row(job: &str, stage: Stage) -> InFlightRow {
+        InFlightRow {
+            job: job.into(),
+            stage,
+            worktree: PathBuf::from(format!("/state/jobs/{job}/work")),
+        }
+    }
+
+    #[test]
+    fn a_missing_file_is_an_empty_table_and_stays_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = InFlight::at(dir.path());
+        assert_eq!(table.read(), InFlightRead::default());
+        assert!(!table.path().exists());
+    }
+
+    #[test]
+    fn a_set_row_is_replaced_by_the_next_set_for_the_same_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = InFlight::at(dir.path());
+        table.set(row("a", Stage::Producer)).unwrap();
+        table.set(row("b", Stage::Checks)).unwrap();
+        table.set(row("a", Stage::Verifier)).unwrap();
+        let rows = table.read().rows;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.contains(&row("a", Stage::Verifier)));
+        assert!(rows.contains(&row("b", Stage::Checks)));
+        // The file holds the job, the stage as a word and the worktree.
+        let text = std::fs::read_to_string(table.path()).unwrap();
+        assert!(text.contains("\"stage\": \"verifier\"") && text.contains("\"worktree\""));
+    }
+
+    #[test]
+    fn a_moved_row_keeps_its_stage_and_takes_the_new_job_and_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = InFlight::at(dir.path());
+        table.set(row("old", Stage::Verifier)).unwrap();
+        table.set(row("other", Stage::Producer)).unwrap();
+        table
+            .move_row("old", "new", PathBuf::from("/state/jobs/new/work"))
+            .unwrap();
+        let rows = table.read().rows;
+        assert!(rows.contains(&InFlightRow {
+            job: "new".into(),
+            stage: Stage::Verifier,
+            worktree: PathBuf::from("/state/jobs/new/work"),
+        }));
+        assert!(rows.contains(&row("other", Stage::Producer)));
+        assert_eq!(rows.len(), 2);
+        // Moving a job that has no row changes nothing.
+        table.move_row("absent", "x", PathBuf::from("/x")).unwrap();
+        assert_eq!(table.read().rows.len(), 2);
+    }
+
+    #[test]
+    fn removing_the_last_row_removes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = InFlight::at(dir.path());
+        table.set(row("a", Stage::Landing)).unwrap();
+        table.remove("b").unwrap();
+        assert_eq!(table.read().rows.len(), 1);
+        table.remove("a").unwrap();
+        assert!(table.read().rows.is_empty());
+        assert!(!table.path().exists());
+        // Removing from a missing file is not an error.
+        table.remove("a").unwrap();
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_table_is_moved_aside_and_reported_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = InFlight::at(dir.path());
+        std::fs::write(table.path(), "[{\"job\": 1}").unwrap();
+        let found = table.read();
+        assert!(found.rows.is_empty());
+        let why = found.corrupt.expect("a corrupt note");
+        assert!(why.contains("in-flight.json.corrupt"), "{why}");
+        assert!(!table.path().exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("in-flight.json.corrupt")).unwrap(),
+            "[{\"job\": 1}"
+        );
+        // The next read finds an empty table, and a write starts a fresh one.
+        assert_eq!(table.read(), InFlightRead::default());
+        table.set(row("a", Stage::Producer)).unwrap();
+        assert_eq!(table.read().rows, [row("a", Stage::Producer)]);
+    }
+
+    #[test]
+    fn a_write_into_a_bad_file_keeps_the_bad_file_aside_and_writes_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = InFlight::at(dir.path());
+        std::fs::write(table.path(), "garbage").unwrap();
+        table.set(row("a", Stage::Checks)).unwrap();
+        assert_eq!(table.read().rows, [row("a", Stage::Checks)]);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("in-flight.json.corrupt")).unwrap(),
+            "garbage"
+        );
     }
 }
 

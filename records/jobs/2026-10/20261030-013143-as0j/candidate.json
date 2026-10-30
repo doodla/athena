@@ -1,0 +1,179 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261030-013143-as0j",
+  "base_commit": "8831ae3633ac8ba217c3efe6ac8516087146b38d",
+  "base_fingerprint": "sha256:0d9863b1066bde8e3fd548123435fede9c119250ca3b8d46c0bed0f0caced47e",
+  "previous_job": "20261029-041429-3fdr",
+  "candidate_commit": "8424361a2b400080ed7341857af4fe77883e9acb",
+  "candidate_tree": "f5e92d150d1ca8b482ed44c435fcf708c330b5bc",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 235737
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 154858
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 173354
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 124695
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 151418
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 12025
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23036
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 17905
+    }
+  ],
+  "fingerprint": "sha256:a925faab3d341fafb556056880fb501fad09b4b6c5e0c37831d68cfb945bcb21",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added the drain in-flight table (build job 3). The run now reports its own stages: `Athena::go_with_stages` tells a `StageSink` when it enters the producer, the checks, the verifier and the landing. `Athena::go` passes a no-op sink. The producer is reported at the top of every producer-loop pass, so a self-check send-back reports producer again. Checks are reported only when they actually run, and a resumed job goes straight to the verifier. The worktree comes from one new helper, `StateDir::work_dir` (`jobs/<id>/work`), which `producer_snapshot` also uses, so the row cannot name the kept-work directory. The real drain steps write `in-flight.json` in the state directory: job, stage and worktree rows, written atomically under one lock. A rejected job's row waits for its retry, which moves it to the new job and keeps its stage, and the retry's producer then sets it to producer. The row is removed when the item's work ends and after a landing. The drain reads the file at its start and notes leftover rows without acting on them. A missing file is empty. A file that cannot be read is moved to `in-flight.json.corrupt`, noted, and the drain continues. A failed write is a warning line, never a job failure. The new `Steps::in_flight` and `Steps::item_over` have default bodies, so existing steps and the `max_in_flight = 1` behavior are unchanged. Root cause of both rejected attempts: the stage was inferred outside the pipeline (display text) and the path was built in two places. Both now come from the pipeline and a single helper. Tests: six new integration tests through `drain::drain` over `RealSteps`, six unit tests for the table, one lifecycle test with a recording sink and one `state.rs` test for the helper and stage names. CHANGELOG.md and async-drain.md sections 7 and 12 are updated.",
+    "files": [
+      "crates/athena-core/src/state.rs",
+      "crates/athena-core/src/run/producer.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "CHANGELOG.md",
+      "docs/design/async-drain.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test lifecycle stage_report --locked",
+        "result": "pass",
+        "note": "core-level test with a recording StageSink: producer, producer, checks, verifier"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain --locked in_flight",
+        "result": "pass",
+        "note": "six new tests through drain::drain over RealSteps and Athena::go_with_stages"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked drain",
+        "result": "pass",
+        "note": "29 lib tests including 6 new in_flight_tests, plus matching integration tests"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after cargo fmt --all"
+      },
+      {
+        "command": "cargo clippy --workspace --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "after fixing too_many_arguments in dispatch and cloned_ref_to_slice_refs in a test"
+      },
+      {
+        "command": "cargo test -p xtask --test policy --locked",
+        "result": "pass",
+        "note": "boundary-word scan, 12 tests"
+      },
+      {
+        "command": "cargo test --workspace --locked --quiet",
+        "result": "pass",
+        "note": "run once; every crate passed, including all 106 tests in tests/drain.rs"
+      },
+      {
+        "command": "git diff --numstat",
+        "result": "pass",
+        "note": "tests/drain.rs removed only 2 import lines; no assertion edits"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-cli drain` (and the athena-core tests). A test through the drain over RealSteps and Athena::go shows the in-flight row's worktree equals the producer's live work tree (<state>/jobs/<id>/work, the path producer.rs uses), not <state>/kept/<id>/work.",
+        "status": "met",
+        "evidence": "in_flight_row_names_the_producers_live_work_tree (tests/drain.rs) runs drain::drain over RealSteps. It reads the table inside the producer's script call and asserts one row for the job, stage producer, worktree == <state>/jobs/<id>/work == the producer's spec.workdir, that the directory exists then, and that it is not under kept/. It passes with `cargo test -p athena-cli --test drain in_flight`. The athena-core state tests (work_dir vs kept_work_dir) pass in the workspace run."
+      },
+      {
+        "criterion": "A test through the real entry point forces a producer send-back after a failed self-check, and another after a verifier send-back. It shows the row's stage goes checks (or verifier) back to producer, and the row reads producer during the second producer invocation. Run with `cargo test`.",
+        "status": "met",
+        "evidence": "Two tests in tests/drain.rs through drain::drain over RealSteps. in_flight_row_goes_producer_checks_verifier_and_is_producer_again_after_a_self_check_send_back: the table reads producer, producer, checks, verifier. in_flight_row_moves_from_verifier_back_to_producer_when_the_rejected_job_is_retried: the row reads verifier while the retry is read, then belongs to the retry job at verifier at dispatch, then reads producer with the retry's work tree during the second producer invocation, with one row throughout. Note: Athena::go never re-enters the producer from checks or the verifier within one job; the return to producer after a verifier rejection happens through the drain's retry (a new job), so the row is moved across the retry, as the accepted plan says. The lifecycle test stage_report_names_the_producer_again... asserts the sink sequence producer, producer, checks, verifier."
+      },
+      {
+        "criterion": "Grep shows the stage is set from the run pipeline entry points (a callback or observer invoked in crates/athena-core/src/run/mod.rs and producer.rs for producer, checks, verifier and landing). No code in drain.rs matches a UI/display line such as \"producer   \" to choose a stage.",
+        "status": "met",
+        "evidence": "ctx.stages.enter(&id, Stage::Producer) at the top of the producer_loop iteration in producer.rs. In mod.rs: Stage::Checks (only when checks are not resumed), Stage::Verifier before the verifier loop, and Stage::Landing in the Blocked arm of go_job. RealSteps::land in drain.rs enters Landing. Non-test drain.rs has no match on output lines. Only the test Ui in tests/drain.rs uses \"checks     \" and \"dispatched \" as read triggers."
+      },
+      {
+        "criterion": "The table row is written at each stage change and removed when the job finishes or fails. The drain reads the file at start and reports leftover rows without acting on them. A missing file is empty; a corrupt file is noted and the drain continues. Verify with `cargo test` tests for these cases.",
+        "status": "met",
+        "evidence": "Rows are written by TableSink at every stage entry. They are removed after landing (RealSteps::land) and at the end of each item's work (Steps::item_over from Drain::work, every exit). Tests: in_flight_row_goes_when_an_item_fails_twice (no file after two failures), the rows_left assertions in the pass tests, a_row_left_by_an_earlier_run_is_reported_and_not_acted_on (note with job and stage, file untouched, only the queued job landed), a_table_that_cannot_be_read_is_noted_moved_aside_and_the_drain_goes_on (note, .corrupt file kept, job landed), no in-flight note when the file is missing (in_flight_row_names_the_producers_live_work_tree). Unit tests in drain.rs in_flight_tests cover read, set, move, remove and corrupt. One nuance: a rejected job's row is kept until its retry takes it over or the item ends, so that the send-back shows as one row returning to producer."
+      },
+      {
+        "criterion": "With max_in_flight = 1 the existing drain tests in crates/athena-cli/src/drain.rs and tests/drain.rs pass unchanged: `git diff` shows no edits to existing test assertions, and `cargo test` passes.",
+        "status": "met",
+        "evidence": "git diff --numstat: tests/drain.rs 413 added, 2 removed (the use-line for drain imports only). The new Steps methods have default bodies and RealSteps has no new field, so existing struct literals are untouched. All 106 tests in tests/drain.rs and the 29 lib tests pass in the workspace run."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran cargo fmt --all --check, cargo clippy --workspace --all-targets --locked -- -D warnings and cargo test --workspace --locked once; all passed."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for the in-flight table, and its wording about stage changes matches the behavior (a send-back returns the row to producer). Any wording in docs/design/async-drain.md about stage changes (sections 7 and 11) matches the behavior, and it notes build job 3 is implemented.",
+        "status": "met",
+        "evidence": "CHANGELOG.md Unreleased/Added has a new entry (stages reported by the run at producer, again on every send-back, checks, verifier, landing; a retry takes the row and sets it to producer; live work tree; corrupt-file handling). async-drain.md section 7 crash bullet is reworded to the same behavior. Section 12 job 3 has an Implemented (D145) note. Section 11 has no stage-change wording, so it is unchanged."
+      },
+      {
+        "criterion": "athena.toml, defaults.toml and .github/workflows are unchanged, because the outcome needs no configuration change.",
+        "status": "met",
+        "evidence": "git status --short lists only CHANGELOG.md, drain.rs, tests/drain.rs, tests/lifecycle.rs, run/mod.rs, run/producer.rs, state.rs and async-drain.md."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan's wording: producer_snapshot lost its unused job_dir parameter and now builds the path from state.work_dir(ctx.id()).",
+      "`dispatch` takes a small `Outputs { ui, stages }` struct instead of two arguments, to satisfy clippy's argument limit.",
+      "The row keeps the producer's work path at checks and verifier, though mod.rs removes that directory after the candidate is built. A recovery job may want the verify directory for those stages.",
+      "A corrupt file found mid-run by a table write (not at drain start) is moved aside silently. Only the drain-start read produces a note.",
+      "A leftover row for an interrupted job that the drain then retries is taken over by the retry (bookkeeping only). Nothing recovers a leftover row.",
+      "The 'checks' and 'dispatched' observations in the new drain tests use Ui progress lines as triggers only. The assertions are on the table file."
+    ],
+    "mistakes": [
+      "My first edit of RealSteps::land left a fragment of the old body behind and broke the file. I noticed it on reading back and fixed it before compiling.",
+      "I first expected two reader starts in the retry test. A third comes from introspection, which I found from the failing run and corrected in the test."
+    ],
+    "learnings": [
+      "Athena::go never re-enters the producer from checks or the verifier within one job. The only in-job producer re-entry is the self-check send-back. After a verifier rejection the return to producer is the drain's retry, a new job.",
+      "In tests, Role::Reader is also used by the introspection of a rejected job, so a drain over a rejected job sees three reader starts (read, introspect, retry read).",
+      "clippy's too_many_arguments (limit 7) bit `dispatch`, so ui and stages are bundled in a private `Outputs` struct.",
+      "After the candidate is built, mod.rs removes the producer's work tree before the checks. At the checks and verifier stages the row's worktree therefore names a path that no longer exists."
+    ],
+    "desires": [
+      "A test seam to force a configured check to fail would let the checks-to-producer case be exercised without the verifier rejection route."
+    ]
+  }
+}
