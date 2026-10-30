@@ -1,0 +1,152 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261026-232437-69k1",
+  "n": 1,
+  "at": "2026-10-30T09:46:28.944465438Z",
+  "invocation_seq": 1,
+  "base_commit": "3e5f3ee2b0d77c87c20c7d476775113183ee77dd",
+  "config_sha256": "4686d6918e8a389a515edf47cdcb596e2ae4a147d9ffda0816f171979db719d1",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Move candidate and admission stages S4-S5 into run/candidate.rs",
+  "summary": "Structure pass job R6 (docs/design/structure-pass.md section 4): move stages S4 (candidate build from the snapshot's change list) and S5 (admission) of `produce_and_verify` from run/mod.rs into new run/candidate.rs as stage methods, bodies unchanged, early returns as Stop, with no behavior change. Audience is the maintainer and the verifier judging the section 5 proof. Prior job 20261026-232434-6wfq (R5, rejected on a `cargo test` failure plus minor findings) is addressed below; the landed producer.rs is a given, and R6 builds on it.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The change is Rust only."
+    },
+    {
+      "id": "tested",
+      "how": "Existing tests must pass, clippy must be clean, and no test lines change beyond imports."
+    },
+    {
+      "id": "small",
+      "how": "One focused move of S4-S5 into one file."
+    },
+    {
+      "id": "verified",
+      "how": "fmt, clippy and test are run by the verifier."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the strings, the order and the passing test suite, not just that the files exist."
+    },
+    {
+      "id": "root-cause",
+      "how": "The R5 test failure is addressed by requiring a green cargo test."
+    },
+    {
+      "id": "strangers",
+      "how": "The CHANGELOG entry and module docs are written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-core/src/run/mod.rs read. `produce_and_verify` (about line 1193) now calls `baseline_stage`, `producer_snapshot` and `producer_loop` (from run/producer.rs, returning `Flow::Go(Reported{..})` or `Flow::Stop`). S4 is the code from `snapshot.change_list()` through the idle-producer failure (about 1222-1257). S5 is the blob copy, TempIndex, commit_tree and `admit` through the violations return (about 1258-1356). The tail (`write_resume_mark`, `check_and_verify`) stays. The entry point is `produce_and_verify`; no records or data files are added, so no check_record_file or AnyRecord change. Behavior is measured by the existing test suite via cargo test --locked.",
+    "Job 20261026-232434-6wfq (R5): its candidate is not carried over. The reading assumes the R5 split is present in the tree (producer.rs exists, mod.rs uses Flow). Its findings: (a) the failed `cargo test --locked` is addressed by requiring cargo test to pass here, with no test edits beyond imports; (b) the minor note that the design doc says `Stage::Stop` while the code says `Flow::Stop` is out of scope (docs/design/structure-pass.md is not a deliverable), and R6 uses the existing `Flow` type; (c) the `&mut closing` to `closing` change and (d) seq by value are R5 choices already in place. R6 may make a similar clippy-forced change only if the CHANGELOG states it.",
+    "The new stage methods are pub(super) on `Athena` in run/candidate.rs. Closing goes in as `&mut Closing`, and values flow out through a small struct, as in R5. The idle-producer failure and the admission refusal become `Flow::Stop`, and the driver returns `Ok(closing)` on Stop.",
+    "Public paths stay unchanged, with re-exports in mod.rs if any moved item was public. The report lists the caller check (Grep) for each moved name. The design doc says R6 is high-risk because the idle-producer message depends on `report_gaps` and `report_kept_in`, so they must stay byte-identical in the message."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-core/src/run/candidate.rs exists and holds the S4 and S5 code (candidate construction from `snapshot.change_list()`, the idle-producer failure text, blob copy, TempIndex/commit_tree, `admit`, the violations failure). Moved statements are textually identical apart from the Stop returns and parameter plumbing, as `git diff` shows.",
+      "kind": "content"
+    },
+    {
+      "text": "In crates/athena-core/src/run/mod.rs, `produce_and_verify` calls the candidate stage method(s) and returns `Ok(closing)` on Stop, then continues unchanged to `write_resume_mark` and `check_and_verify`. Grep shows the S4/S5 bodies no longer in mod.rs.",
+      "kind": "content"
+    },
+    {
+      "text": "The idle-producer message strings (\"the producer made no change\", \"its report still had problems when sent back\", \"the report is kept in\") and the \"admission refused the change:\" string appear unchanged in candidate.rs, and the changed_paths take/restore order around `self.failure` is preserved.",
+      "kind": "content"
+    },
+    {
+      "text": "Section 5 proof: the diff to existing test code touches only import lines, the test list is unchanged (no test added, removed or renamed), and public paths are unchanged through re-exports. Grep confirms each moved name's callers, and the CHANGELOG entry lists the caller check per moved name.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry for R6 describing the move, stating no behavior change, and naming any statement altered beyond a name.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; all pass, with the same number of tests as before the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Only crates/athena-core/src/run/mod.rs, crates/athena-core/src/run/candidate.rs and CHANGELOG.md change; `git status` shows no other path. No governance file (athena.toml, defaults.toml, workflows) changes.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/candidate.rs",
+      "action": "create",
+      "p": 0.98
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "docs/design/structure-pass.md",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Moving S6 and later stages (checks, verification, assembly) or jobs R7-R8",
+    "Any behavior change, or test edits beyond import lines",
+    "Editing docs/design/structure-pass.md, including the `Stage::Stop` versus `Flow::Stop` naming from R5",
+    "Re-doing or rewriting the R5 files run/producer.rs, run/send_back.rs or run/close.rs; the R5 candidate itself (CHANGELOG, mod.rs, producer.rs, structure-pass.md) is dropped as such and only its landed state is built on",
+    "Editing athena.toml, defaults.toml, workflows, or callers in main.rs or drain.rs",
+    "Rewriting `produce_and_verify` as a state machine"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.1,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1600.0,
+        "p90": 3200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7198924731182796,
+      "p_verification_passes": 0.6719745222929936,
+      "p_user_intervenes": 0.07610619469026549,
+      "cost_usd": {
+        "p10": 0.5317681251624881,
+        "p50": 1.1977152,
+        "p90": 3.096241530967973
+      },
+      "wall_time_s": {
+        "p10": 532.6863512084717,
+        "p50": 1708.9543804581442,
+        "p90": 3474.0711504799797
+      }
+    }
+  },
+  "departures": "Slightly lower pass probability: the dependency R5 was rejected on a failing cargo test, and this stage has the high-risk idle-producer message."
+}

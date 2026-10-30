@@ -113,6 +113,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Structure pass job R6 (split step 2): the candidate build (stage S4, from the snapshot's change list through
+  the idle-producer failure) and admission (stage S5, blob copy, temporary index, candidate commit, `admit`,
+  and the refusal on violations) of `produce_and_verify` moved from `run/mod.rs` into the new
+  `run/candidate.rs` as one method, `candidate_stage`. No behavior change: the statements are the same text,
+  and the idle-producer and "admission refused the change:" messages, and the take-and-restore of
+  `changed_paths` around `failure`, are unchanged. Altered beyond a name: the two early `return Ok(closing)`
+  became `return Ok(Flow::Stop)` (the driver returns `Ok(closing)` on Stop), `closing` is passed as
+  `&mut Closing`, the report, gaps, kept-in text and snapshot are parameters, and the method returns the
+  candidate commit and fingerprint (`Admitted`); the driver's now unused `jc` binding was removed and the
+  `remove_tree(&work)` line stays in the driver. Caller check (Grep over all `*.rs`): `candidate_stage` and
+  `Admitted` are new, `pub(super)`, and used only in `run/mod.rs`; no item that was public or used elsewhere
+  moved, so no re-export is needed and `main.rs` and `drain.rs` are untouched. Test code is unchanged.
 - The throughput section of `athena status` now measures landing and rebuild from the verifier's end to the
   landing record (`landings/`, matched to the job by its job-landing commit), or to the landing outcome if that
   is later. The outcome is set right after verification, so it alone gave about 0.1 minute and hid the CI wait,
