@@ -446,7 +446,18 @@ fn grouping_paths(entry: &PlanEntry) -> Vec<&str> {
 /// nothing of that they touch overlaps.
 fn disjoint(a: &PlanEntry, b: &PlanEntry) -> bool {
     let (pa, pb) = (grouping_paths(a), grouping_paths(b));
-    !pa.is_empty() && !pb.is_empty() && !pa.iter().any(|x| pb.iter().any(|y| overlap(x, y)))
+    !pa.is_empty() && !pb.is_empty() && shared_path(a, b).is_none()
+}
+
+/// The first path of `a` that overlaps a path of `b`, ignoring the shared append-only files: the clash that
+/// keeps two entries out of one group. None when they share no path. [`disjoint`] is built on it, so the
+/// reason the drain gives for a clash is the rule the plan uses.
+pub fn shared_path(a: &PlanEntry, b: &PlanEntry) -> Option<String> {
+    let pb = grouping_paths(b);
+    grouping_paths(a)
+        .into_iter()
+        .find(|x| pb.iter().any(|y| overlap(x, y)))
+        .map(String::from)
 }
 
 /// Effective priority of each entry, in the entries' order: its own, raised to the best of whatever depends on
@@ -932,6 +943,18 @@ mod tests {
             entry("new", top, &["c/"], &[]),
         ]);
         assert_eq!(plan.order, ["new", "old", "older-peer"]);
+    }
+
+    #[test]
+    fn shared_path_names_the_overlap_and_ignores_append_only_files() {
+        let (_, low) = rungs();
+        let a = entry("a", low, &["crates/core/", "CHANGELOG.md"], &[]);
+        let inside = entry("b", low, &["crates/core/src/x.rs"], &[]);
+        let apart = entry("c", low, &["docs/a.md", "CHANGELOG.md"], &[]);
+        assert_eq!(shared_path(&a, &inside).as_deref(), Some("crates/core/"));
+        assert_eq!(shared_path(&a, &apart), None, "CHANGELOG.md is not a clash");
+        assert!(disjoint(&a, &apart));
+        assert!(!disjoint(&a, &inside));
     }
 
     #[test]
