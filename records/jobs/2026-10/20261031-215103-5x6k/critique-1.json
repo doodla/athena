@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-215103-5x6k",
+  "round": 1,
+  "at": "2026-10-31T21:55:16.540975911Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The guard test for criterion 3 would pass even if the fail-closed rule were missing, so it does not show that no real gh call or git push is attempted.",
+      "evidence": "The guard test installs only `early_seam`, with no `ci_seam`, and checks that no CI push or runs query is logged and that the check counter is 3. Without the fail-closed rule, `push_ci_branch` would build the real `GitCiRemote` and `GhCli`. They log to no fake, so the logs stay empty either way. A real `git push` to https://github.com/example/project.git fails without credentials or network, which gives one warning line and a local fallback, so the counter is 3. A real `gh api` call errors, and `read_ci` turns `Err` into Missing (ci_result.rs:172), which also falls back. So the test passes with or without the behavior. The plan's claim that the test 'would show a push attempt or hang' depends on the network, not on any assertion. Fix: Make a real attempt visible in the guard test without using the network. For example, set a repo-local `url.<local bare repo path>.insteadOf=https://github.com/` in the test repository. Then a real push lands in a local bare repo, and the test asserts that the bare repo has no `refs/heads/athena/ci/*` and that the UI shows no 'warning:' line about the CI push. Or make the non-test constructor go through a function that the test can check was never called. State in 'Fails without the behavior' which assertion breaks when the rule is removed.",
+      "location": "Demonstrations, criterion 3 (guard test `no_real_gh_or_push_is_attempted`); Decision 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Decision 8 and the Risks section disagree about how a mixed set of resumed checks (some from CI, some local or skipped) is rebuilt.",
+      "evidence": "Decision 8 says the record is rebuilt when 'at least one resumed CheckRun' has the CI note, with steps taken from 'the runs' name, passed and duration'. The risk entry says the rebuild returns None otherwise and suggests mixed sets are handled. `routing::run_routed` leaves a skipped check that is green in CI with a skipped note, not the CI note (routing.rs:210), so a normal fresh CI-sourced set can already be mixed. Building `steps` from all runs would label local or skipped results as coming from CI. Recovering the record by parsing a human-readable note is also a fragile, text-based rule. Fix: Say exactly which runs feed the rebuilt steps: only runs whose note has the CI prefix and the candidate SHA, all naming the same run address. Say what a mixed set yields, and make the unit test assert that. Keep the test that pins the note prefix to `runs_from_record` output.",
+      "location": "Decision 8; Risks (rebuilt record mislabels a mixed set); Demonstration criterion 5 (unit test 'a mixed one')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 4 check that the whole `Athena::go` run takes under 5 s can fail on a slow machine for reasons that have nothing to do with the wait.",
+      "evidence": "Each case times a full fake-driver `go`: git snapshots, commits and local checks. The wait being guarded against pauses 20 s per poll and runs up to 25 minutes. A 5 s limit on the whole job is tighter than it needs to be. Fix: Assert that elapsed time is under the 20 s pause. Better, also observe directly that no wait happened, for example through a Runner fake that counts calls (zero) or a test hook that records the chosen `Wait` (polls 1, pause zero).",
+      "location": "Demonstration criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Steps 5 and 7 contain an unused pause override and an unclear '5b/8' cross-reference.",
+      "evidence": "Criterion 4's demonstration installs `ci_seam` with no pause override and expects no wait. That holds only because the no-push path never reads the override, which is fine but not stated. 'record_from_resumed is added in step 5b/8' names a step that does not exist; it is added in step 5 and used in step 7. Fix: State that the no-push path ignores the seam's pause override, and fix the step reference.",
+      "location": "Decision 10 / Step 3; Demonstration criterion 5 ('step 5b/8')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the code the plan names, and almost all of it is where the plan says. `check_and_verify` calls `early_pr` at run/mod.rs:1201 and passes `routing::NoCi` with a one-poll, zero-pause wait at run/mod.rs:1265-1275. `early_pr_to` builds the real `GhCli` and `GitRemote` when no `early_seam` is installed (early.rs:351-361). `https_github_repository` exists at early.rs:305. In `read_ci`, an `Ok(None)` reply makes it keep polling and an `Err` makes it return at once (ci_result.rs:165-189), which supports decisions 1 and 13. `CiBranchSource` queries `head_sha`, `event` and `branch` (client.rs:724), and `pick_ci_run` keeps only push runs (client.rs:524-534). The aggregate job is named \"fmt, clippy, tests\" (client.rs:516). The note text written by `checks::runs_from_record` matches what decision 8 parses (checks.rs:125). The reread path calls `dispatch` again before any context exists (run/mod.rs:737), so a delete placed after the context runs once. `low_once_verifying` holds the job before the verifier, after the checks (test_support.rs:600-616), so the template for criterion 5 fits. The design is sound: source and wait are chosen in one helper, the push is forced, and the delete happens in one place in `dispatch`. One demonstration has a real gap. The guard test for criterion 3 cannot fail when the fail-closed rule is missing, because a real push to a fake github.com URL fails quietly and falls back to the local checks, which is the same thing the test observes when the rule is present. There are also smaller points about the resume rebuild and a timing assertion."
+}
