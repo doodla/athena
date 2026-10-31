@@ -1,0 +1,170 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-094756-8cjd",
+  "n": 1,
+  "at": "2026-10-31T16:55:45.13852815Z",
+  "invocation_seq": 1,
+  "base_commit": "5b728dd47cea92208ae2aa409b7d02351bf67642",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Classify environment stops in one place so the scope guard ignores them",
+  "summary": "Root cause: the scope guard learns why an attempt stopped from a free-text closing-reason prefix, and two lists of \"environment\" reasons disagree (`scope_guard::ENVIRONMENT_PREFIX` vs `disk::is_environment_reason`). A producer stop on an expired login (401, job 20261028-103330-3d47) is closed as a work failure and counted as line spend, and a stored pause is never recomputed. Fix: one classifier of stop reasons that the guard and retry both use, with auth and usage-limit stops as environment, and the pause computed from the attempts on each evaluation.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust in crates/athena-core."
+    },
+    {
+      "id": "tested",
+      "how": "New unit tests; cargo test and clippy must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "The classifier is fixed where the stop reason is derived, for the whole class."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that exercise the guard over attempts."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments explain the classifier for an outside reader."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to stop classification and pause recompute."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that an environment stop does not pause a line, not that the code exists."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-core/src/scope_guard.rs (`attempt_of`, `counted`, `t3_basis`, `line_pause`, `try_watch_line`, `list_lines`), crates/athena-core/src/disk.rs (`LOW_DISK`, `CHECK_TIMEOUT`, `is_environment_reason`, `resumable_stop`) and crates/athena-core/src/run/producer.rs (the 'the producer did not complete' failure). The entry point is `try_watch_line` after each attempt, which writes the pause file, and `line_pause` plus `list_lines`, which read it back. No new record or data file under crates/ is planned, so `check_record_file`, `AnyRecord` and the round-trip test are untouched. The property is measured directly by running `evaluate_before_attempt` and `line_pause` over attempts built from real closing reasons.",
+    "Goal and audience: the person running Athena, whose lines get paused by stops that are not runaway work. Success is that an environment stop (low disk, check timeout, expired producer login, usage limit) never raises a signal, and that a pause that no longer holds under the current rule does not block a retry.",
+    "Previous jobs 20261028-055601-hg0n, 20261028-065911-m6m5 and 20261028-103330-3d47 were requests for a different feature (the reading replay). Their findings were environment stops (low disk, 401), not defects in that work. This request does not retry them and does not fix their findings. Their candidate files (CHANGELOG.md, crates/athena-cli/src/main.rs, crates/athena-context/src/briefs.rs, crates/athena-core/src/lib.rs, reading.rs, store.rs, verify.rs, crates/athena-data/src/records.rs, docs/records.md) are dropped here and listed in out_of_scope; crates/athena-core/src/run/mod.rs is kept as a possible deliverable.",
+    "Most of the line-spend exclusion already exists for 'environment:' prefixed reasons. The remaining gap is classification: a producer that stops on a 401 or an expired OAuth token is closed without that prefix. I assume a small typed `StopCause` (or one shared function) in disk.rs or scope_guard.rs is enough and no new record schema is needed.",
+    "No governance file (athena.toml, defaults.toml, workflows) needs to change; no refusal rule on readings is added, so no replay percentage applies."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description names the root cause: the guard infers the stop reason from free-text closing-reason prefixes and has two disagreeing environment lists, so an auth-expiry stop counted as line spend; the fix is in the shared classifier in crates/athena-core/src/disk.rs and scope_guard.rs, not in one job's data.",
+      "kind": "content"
+    },
+    {
+      "text": "`scope_guard::attempt_of` and `disk::is_environment_reason`/`resumable_stop` use one classifier (no second hard-coded list); Grep shows a single definition of which closing reasons are environment stops.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-core scope_guard`: a new test builds a line of several attempts that all closed with the producer-auth-expired reason (the 'the producer did not complete: ... 401 OAuth access token has expired' text) and asserts T1, T3 and T5 give Level::None; the same test fails when the classifier change is reverted. A second test covers each environment reason kind (low disk, check timeout, auth, usage limit), not one job's text.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core scope_guard`: a test shows a stored pause whose signals no longer hold under the current attempts is not returned by `line_pause` (the pause is recomputed from attempts), while a pause for real repeated rejections still is.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core disk`: a producer stop on an expired login is a resumable stop, so `athena retry` can resume it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`: all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md is not required; no existing reading rule, athena.toml, defaults.toml or workflow changes (git diff shows none).",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing athena.toml, defaults.toml or workflows",
+    "Retrying or completing the reading-replay feature of jobs 20261028-055601-hg0n, 20261028-065911-m6m5 and 20261028-103330-3d47; their candidate changes to crates/athena-cli/src/main.rs, crates/athena-context/src/briefs.rs, crates/athena-core/src/lib.rs, crates/athena-core/src/reading.rs, crates/athena-core/src/store.rs, crates/athena-core/src/verify.rs, crates/athena-data/src/records.rs and docs/records.md are dropped",
+    "Automatic disk cleanup or disk reservation before the verifier",
+    "Automatic re-authentication of the producer's login",
+    "Changing the thresholds T1 to T5 or the reading refusal rules",
+    "Editing or deleting existing pause files in the state directory"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1900.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.718716577540107,
+      "p_verification_passes": 0.6716417910447762,
+      "p_user_intervenes": 0.09159891598915988,
+      "cost_usd": {
+        "p10": 0.5317174889203722,
+        "p50": 1.233313642228902,
+        "p90": 3.3468611238228423
+      },
+      "wall_time_s": {
+        "p10": 532.6863512084717,
+        "p50": 1728.6361728412985,
+        "p90": 3721.205929605226
+      }
+    }
+  },
+  "departures": "A hard change to the scope guard with several test cases and a pause-recompute path, so cost and time are above the reference.",
+  "urgent_reason": "It cuts failed and redone retries: environment stops are counted as spend, so a line is paused and later retries are refused.",
+  "hard_reason": "This changes the scope guard, a rule that can pause and refuse work on a line, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}

@@ -9,9 +9,17 @@
 //! the [`RequestRecord`]s from the committed records, groups them with [`group_lines`], evaluates T1 to T5 with
 //! [`evaluate_before_attempt`] and writes a mark under `<state root>/scope/`: `<first id>.flag.json` for a
 //! flag, `<first id>.pause.json` for a pause, named by the first request id of the line. The p90 passed to
-//! [`t3_cost`] is `forecasts.reader.cost_usd.p90()` of the latest reading of the line's latest job.
+//! [`t3_cost`] is `forecasts.reader.cost_usd.p90()` of the latest reading of the newest request of the line
+//! that has a finished attempt.
 //! `Athena::go` (dispatch) and `Athena::retry` refuse a paused line ([`Athena::line_pause`]). Nothing here
 //! stops or signals a running process, and nothing lifts a pause: the owner deletes the pause file.
+//!
+//! Why an attempt stopped decides whether it counts. The reason comes from one classifier,
+//! [`crate::disk::StopCause`], which also decides what `athena retry` may resume; this module keeps no list of
+//! its own. Before that, the guard read the reason from a free-text prefix in its own list while the retry
+//! path held another, and a producer that died on an expired login counted as spend on the line. The stored
+//! pause is also not the decision: [`Athena::line_pause`] recomputes the signals from the line's attempts under
+//! the current rule and returns the stored pause only while they still reach a pause.
 //!
 //! Every threshold is an **estimate, to be tuned** (section 5); the basis for each is in that section's table.
 
@@ -47,10 +55,6 @@ pub const T4_REJECTIONS: usize = 2;
 pub const T5_FLAG_MINUTES: u32 = 60;
 /// T5 (section 5): pause at this many minutes of agent time with no accepted candidate. Estimate.
 pub const T5_PAUSE_MINUTES: u32 = 120;
-/// The prefix of a closing reason that records a stop of the environment, not of the work. Basis:
-/// [`crate::disk::LOW_DISK`] starts with it, and [`crate::disk::is_environment_reason`] checks that text; a
-/// unit test ties the two. A usage-limit stop is read as an environment stop once it is recorded with this prefix.
-pub const ENVIRONMENT_PREFIX: &str = "environment:";
 /// Share of the reading's `cost_usd` forecast that the producer is expected to use. Estimate, not measured: the
 /// forecast covers the producer and the verifier only (checks cost no agent dollars, and planning is outside it).
 pub const PRODUCER_SHARE: f64 = 0.7;
@@ -68,8 +72,8 @@ pub enum Verdict {
     Rejected,
     /// The attempt ended without a verdict (for example a failed run).
     Failed,
-    /// The attempt stopped for an environment cause (its closing reason starts with [`ENVIRONMENT_PREFIX`], such
-    /// as low disk): the work was not judged and not found wrong. T1, T2 and T5 do not count it, T4 sees only
+    /// The attempt stopped for an environment cause ([`crate::disk::StopCause`]: low disk, a check timeout, an
+    /// expired producer login or a usage limit): the work was not judged and not found wrong. T1, T2 and T5 do not count it, T4 sees only
     /// rejections, and T3 drops its spend when the work was kept (see [`t3_basis`]).
     Environment,
 }
@@ -497,8 +501,23 @@ fn write_mark(path: PathBuf, mark: &LineMark) -> Result<()> {
 
 /// Every mark in the state directory, pauses first. A flag is not listed for a line that is paused.
 pub fn list_lines(state: &StateDir) -> Vec<LineMark> {
+    let (pauses, flags) = stored_marks(state);
+    merge_marks(pauses, flags)
+}
+
+/// Pauses first, then the flags of lines that are not paused, each sorted by line.
+fn merge_marks(mut pauses: Vec<LineMark>, mut flags: Vec<LineMark>) -> Vec<LineMark> {
+    flags.retain(|f| !pauses.iter().any(|p| p.line == f.line));
+    pauses.sort_by(|a, b| a.line.cmp(&b.line));
+    flags.sort_by(|a, b| a.line.cmp(&b.line));
+    pauses.extend(flags);
+    pauses
+}
+
+/// The pause marks and the flag marks stored in the state directory, as written.
+fn stored_marks(state: &StateDir) -> (Vec<LineMark>, Vec<LineMark>) {
     let Ok(dir) = std::fs::read_dir(scope_dir(state)) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut pauses = Vec::new();
     let mut flags = Vec::new();
@@ -512,29 +531,33 @@ pub fn list_lines(state: &StateDir) -> Vec<LineMark> {
             }
         }
     }
-    flags.retain(|f| !pauses.iter().any(|p| p.line == f.line));
-    pauses.sort_by(|a, b| a.line.cmp(&b.line));
-    flags.sort_by(|a, b| a.line.cmp(&b.line));
-    pauses.extend(flags);
-    pauses
+    (pauses, flags)
 }
 
-/// The finished attempt a request's job made, when it has one: it was dispatched and reached a final state.
-/// A job closed `failed` with a reason that starts with [`ENVIRONMENT_PREFIX`] is an environment stop; `resumed`
-/// says whether it resumed a kept candidate (see [`AttemptRecord::resumed`]).
+/// How an attempt ended, from the state of its job and its closing reason; `None` while the job has not
+/// reached a final state. A job closed `failed` whose reason is an environment stop by
+/// [`crate::disk::StopCause`] (the one classifier; this module keeps no list of its own) is
+/// [`Verdict::Environment`]. Only a job closed `failed` can be one: a timed-out producer shares the text
+/// `the producer did not complete` but kept work that ran out of time, which is spend of the work.
+pub(crate) fn verdict_of(state: JobState, reason: Option<&str>) -> Option<Verdict> {
+    match state {
+        JobState::Closed(OutcomeState::Landed) => Some(Verdict::Accepted),
+        JobState::Closed(OutcomeState::Rejected) => Some(Verdict::Rejected),
+        JobState::Closed(OutcomeState::Failed)
+            if reason.is_some_and(crate::disk::is_environment_reason) =>
+        {
+            Some(Verdict::Environment)
+        }
+        JobState::Closed(_) => Some(Verdict::Failed),
+        _ => None,
+    }
+}
+
+/// The finished attempt a request's job made, when it has one: it was dispatched and reached a final state
+/// ([`verdict_of`]); `resumed` says whether it resumed a kept candidate (see [`AttemptRecord::resumed`]).
 fn attempt_of(job: &JobRecords, resumed: bool) -> Option<AttemptRecord> {
     job.job.as_ref()?;
-    let environment = job
-        .outcome
-        .as_ref()
-        .is_some_and(|o| o.reason.starts_with(ENVIRONMENT_PREFIX));
-    let verdict = match job.state() {
-        JobState::Closed(OutcomeState::Landed) => Verdict::Accepted,
-        JobState::Closed(OutcomeState::Rejected) => Verdict::Rejected,
-        JobState::Closed(OutcomeState::Failed) if environment => Verdict::Environment,
-        JobState::Closed(_) => Verdict::Failed,
-        _ => return None,
-    };
+    let verdict = verdict_of(job.state(), job.outcome.as_ref().map(|o| o.reason.as_str()))?;
     let unmet_criterion = if verdict == Verdict::Rejected {
         job.verification
             .as_ref()
@@ -654,6 +677,32 @@ fn forecast_p90_dollars(job: &JobRecords) -> f64 {
     }
 }
 
+/// The forecast p90 T3 compares a line with: that of the newest request of the line that has a finished
+/// attempt, or 0 when none has. It is the request whose reading was in force when the last attempt ended, so a
+/// request that has only just joined the line (no reading, no attempt) does not change it. The watcher that
+/// writes a mark and the check that reads one back both use this, so they agree.
+fn line_forecast_p90(records: &Records, requests: &[RequestRecord], line: &[usize]) -> f64 {
+    line.iter()
+        .rev()
+        .map(|&i| &requests[i])
+        .find(|r| !r.attempts.is_empty())
+        .and_then(|r| records.jobs.get(&r.id))
+        .map_or(0.0, forecast_p90_dollars)
+}
+
+/// A line's finished attempts, the forecast p90 given to T3 and the signals, under the current rule for which
+/// stops count ([`verdict_of`]). The watcher and [`Athena::line_pause`] both call it.
+fn line_state(
+    records: &Records,
+    requests: &[RequestRecord],
+    line: &[usize],
+) -> (Vec<AttemptRecord>, f64, Signals) {
+    let attempts = line_attempts(requests, line);
+    let p90 = line_forecast_p90(records, requests, line);
+    let signals = evaluate_before_attempt(&attempts, p90);
+    (attempts, p90, signals)
+}
+
 fn facts(signals: &Signals, attempts: &[AttemptRecord], numbers: &MarkNumbers) -> Vec<SignalFact> {
     let mut out = Vec::new();
     let mut add = |signal: &str, level: Level, detail: String| {
@@ -725,13 +774,48 @@ fn facts(signals: &Signals, attempts: &[AttemptRecord], numbers: &MarkNumbers) -
 impl Athena {
     /// The pause on the line that `job_id` belongs to, if there is one. Rebuilds the [`RequestRecord`]s from
     /// `records`, groups them with [`group_lines`], and looks the pause file up by the line's first request id.
+    ///
+    /// The stored pause is a record of what the watcher decided, not the decision: it is returned only while
+    /// the line's attempts, read under the current rule for which stops count, still reach a pause. A pause
+    /// written when an environment stop was counted as spend stops blocking the line once the rule no longer
+    /// counts it. The file is left as it is; this never creates a pause.
     pub fn line_pause(&self, records: &Records, job_id: &str) -> Option<LineMark> {
         let requests = request_records(records);
         let at = requests.iter().position(|r| r.id == job_id)?;
         let lines = group_lines(&requests);
         let line = lines.iter().find(|l| l.contains(&at))?;
         let first = &requests[line[0]].id;
-        read_mark(&pause_path(&self.state, first)).filter(LineMark::is_pause)
+        let mark = read_mark(&pause_path(&self.state, first)).filter(LineMark::is_pause)?;
+        (line_state(records, &requests, line).2.overall() == Level::Pause).then_some(mark)
+    }
+
+    /// The marks `athena status` shows: the stored marks ([`list_lines`]) that still hold. A pause is shown
+    /// only while the line's recomputed level is a pause ([`Athena::line_pause`]), a flag while it is a flag or
+    /// a pause. A mark whose line has no finished attempt in `records` cannot be recomputed and is shown as
+    /// stored.
+    pub fn live_marks(&self, records: &Records) -> Vec<LineMark> {
+        let requests = request_records(records);
+        let lines = group_lines(&requests);
+        let holds = |mark: &LineMark| {
+            let Some(line) = lines.iter().find(|l| requests[l[0]].id == mark.line) else {
+                return true;
+            };
+            if line_attempts(&requests, line).is_empty() {
+                return true;
+            }
+            let level = line_state(records, &requests, line).2.overall();
+            if mark.is_pause() {
+                level == Level::Pause
+            } else {
+                level >= Level::Flag
+            }
+        };
+        // Stale pauses go before the merge, so the flag of a line whose pause is stale is still shown.
+        let (pauses, flags) = stored_marks(&self.state);
+        merge_marks(
+            pauses.into_iter().filter(&holds).collect(),
+            flags.into_iter().filter(&holds).collect(),
+        )
     }
 
     /// The refusal text for a paused line: the signal, the reason, what lifts it and which file to delete.
@@ -767,10 +851,7 @@ impl Athena {
             return Ok(());
         };
         let first = requests[line[0]].id.clone();
-        let attempts = line_attempts(&requests, line);
-        let latest = &requests[*line.last().expect("a line has a request")].id;
-        let p90 = records.jobs.get(latest).map_or(0.0, forecast_p90_dollars);
-        let signals = evaluate_before_attempt(&attempts, p90);
+        let (attempts, p90, signals) = line_state(&records, &requests, line);
         // The mark shows the numbers the signals used: environment stops are not counted, and a resumed retry
         // is shown against the forecast of its remaining stages.
         let counted_attempts = counted(&attempts);
@@ -1301,9 +1382,11 @@ mod watcher_tests {
 
     #[test]
     fn retry_refuses_paused_line() {
-        let r = rig(0.8, 0.01, &[Some(0), Some(1)]);
+        // Two rejections of one criterion: the line really is at a pause, so the stored pause holds.
+        let r = rig(0.8, 0.01, &[Some(0), Some(0)]);
         let (a, b) = r.two_rejections();
-        // Control: no pause file, so retry reads the request again.
+        // Control: with the pause file removed, retry reads the request again.
+        std::fs::remove_file(r.pause(&a)).unwrap();
         r.athena
             .retry(b.as_str(), &Quiet)
             .expect("retry without a pause");
@@ -1338,6 +1421,109 @@ mod watcher_tests {
         assert_eq!(r.athena.line_pause(&records, &later), Some(paused));
         let other = r.ask("something unrelated about the licence");
         assert_eq!(r.athena.line_pause(&r.records(), other.as_str()), None);
+    }
+
+    #[test]
+    fn a_stored_pause_that_no_longer_holds_is_not_returned_and_does_not_block_a_retry() {
+        // Two rejections of different criteria: the line is flagged, not at a pause.
+        let r = rig(0.8, 0.01, &[Some(0), Some(1)]);
+        let (a, b) = r.two_rejections();
+        assert!(!r.pause(&a).exists());
+        // A pause written under an earlier rule, such as one that counted an environment stop as spend.
+        write_mark(r.pause(&a), &mark("pause", a.as_str(), "T4")).unwrap();
+        let records = r.records();
+        assert_eq!(r.athena.line_pause(&records, b.as_str()), None);
+        assert_eq!(r.athena.line_pause(&records, a.as_str()), None);
+        assert!(r.pause(&a).exists(), "the stored file is left as it is");
+        r.athena
+            .retry(b.as_str(), &Quiet)
+            .expect("a pause that no longer holds does not refuse the retry");
+
+        // Control: two rejections of one criterion are a real pause, and it is returned and refuses.
+        let r = rig(0.8, 0.01, &[Some(0), Some(0)]);
+        let (a, b) = r.two_rejections();
+        let records = r.records();
+        let held = r.athena.line_pause(&records, b.as_str()).expect("T4 holds");
+        assert!(held.signal_names().contains("T4"), "{held:?}");
+        assert!(r.athena.retry(b.as_str(), &Quiet).is_err());
+        assert!(r.pause(&a).exists());
+    }
+
+    #[test]
+    fn status_shows_only_the_marks_that_still_hold() {
+        let r = rig(0.8, 0.01, &[Some(0), Some(1)]);
+        let (a, _) = r.two_rejections();
+        assert!(r.flag(&a).exists(), "T1 flags the line naturally");
+        // A stale pause on the same line, and a mark for a line the records do not know.
+        write_mark(r.pause(&a), &mark("pause", a.as_str(), "T4")).unwrap();
+        write_mark(
+            pause_path(&r.athena.state, "20261026-000001-aaaa"),
+            &mark("pause", "20261026-000001-aaaa", "T4"),
+        )
+        .unwrap();
+        let shown = |r: &Rig| -> Vec<(String, String)> {
+            r.athena
+                .status()
+                .unwrap()
+                .lines
+                .iter()
+                .map(|l| (l.level.clone(), l.line.clone()))
+                .collect()
+        };
+        assert_eq!(
+            shown(&r),
+            vec![
+                ("pause".into(), "20261026-000001-aaaa".into()),
+                ("flag".into(), a.as_str().to_string()),
+            ],
+            "the stale pause is hidden and the flag that holds is shown"
+        );
+
+        // A flag for a line that has since landed no longer holds.
+        let r = rig(0.8, 0.01, &[None]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Landed);
+        write_mark(r.flag(&a), &mark("flag", a.as_str(), "T1")).unwrap();
+        assert!(shown(&r).is_empty());
+    }
+
+    #[test]
+    fn a_t3_pause_still_holds_after_a_new_request_joins_the_line() {
+        // One attempt costs 1.6 against a p90 of 1.0: a real T3 pause written by the watcher.
+        let r = rig(1.0, 0.8, &[Some(0)]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Rejected);
+        assert_eq!(read_mark(&r.pause(&a)).unwrap().signal_names(), "T3");
+        // A request that joins the line has no reading and no attempt yet. The forecast is that of the last
+        // finished attempt, so the pause is not dropped for lack of one.
+        let b = r.ask(&format!("try again on {a}"));
+        // `retry` checks the line before the new request is read, so its records carry no reading for it.
+        let mut records = r.records();
+        records.jobs.get_mut(b.as_str()).unwrap().readings.clear();
+        assert_eq!(
+            line_forecast_p90(
+                &records,
+                &request_records(&records),
+                &group_lines(&request_records(&records))[0]
+            ),
+            1.0,
+            "the forecast is that of the request with the finished attempt"
+        );
+        let held = r.athena.line_pause(&records, b.as_str()).expect("T3 holds");
+        assert_eq!(held.signal_names(), "T3");
+        let err = r.go(&b).unwrap_err().to_string();
+        assert!(
+            err.contains("T3") && err.contains("1.60") && err.contains("1.00"),
+            "{err}"
+        );
+        let tip = r.athena.head().unwrap();
+        let err = r.athena.retry(a.as_str(), &Quiet).unwrap_err().to_string();
+        assert!(err.contains("T3"), "{err}");
+        assert_eq!(
+            r.athena.head().unwrap(),
+            tip,
+            "a refused retry commits nothing"
+        );
     }
 
     #[test]
@@ -1692,9 +1878,129 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_prefix_is_the_low_disk_prefix() {
-        assert!(crate::disk::LOW_DISK.starts_with(ENVIRONMENT_PREFIX));
+    fn the_shares_of_the_forecast_make_one() {
         assert!((PRODUCER_SHARE + VERIFIER_SHARE - 1.0).abs() < 1e-12);
+    }
+
+    /// The verdict the guard gives a job that closed failed with `reason`.
+    fn failed_with(reason: &str) -> Verdict {
+        verdict_of(JobState::Closed(OutcomeState::Failed), Some(reason)).unwrap()
+    }
+
+    /// The closing reasons of a producer that stopped on an expired login, built three ways: as the producer
+    /// stage writes it now, as an earlier record stored it (no environment prefix), and as a literal copy of
+    /// that stored text. The detail goes through the real stream parser and formatter.
+    fn expired_login_reasons() -> Vec<String> {
+        use crate::disk::{EXPIRED_LOGIN_TEXT, driver_detail, producer_stop_reason, result_line};
+        let detail = driver_detail(&result_line("success", EXPIRED_LOGIN_TEXT));
+        vec![
+            producer_stop_reason(&detail),
+            format!("the producer did not complete: {detail}"),
+            "the producer did not complete: success: Failed to authenticate. API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth access token has expired.\"}}".to_string(),
+        ]
+    }
+
+    /// Four attempts of 40 minutes and 60 cents each, every one closed with `reason`.
+    fn four_attempts_closed_with(reason: &str) -> Vec<AttemptRecord> {
+        (0..4)
+            .map(|_| att(failed_with(reason), None, 0.6, 40))
+            .collect()
+    }
+
+    #[test]
+    fn a_line_of_expired_login_stops_raises_no_signal() {
+        for reason in expired_login_reasons() {
+            let attempts = four_attempts_closed_with(&reason);
+            assert!(
+                attempts.iter().all(|a| a.verdict == Verdict::Environment),
+                "{reason}"
+            );
+            let signals = evaluate_before_attempt(&attempts, 2.0);
+            assert_eq!(signals.t1, Level::None, "{reason}");
+            assert_eq!(signals.t3, Level::None, "{reason}");
+            assert_eq!(signals.t5, Level::None, "{reason}");
+            assert_eq!(signals.overall(), Level::None, "{reason}");
+        }
+    }
+
+    #[test]
+    fn the_same_line_closed_for_a_failure_of_the_work_does_raise_signals() {
+        // Controls: with a reason that is not an environment stop, the same attempts trip T1, T3 and T5.
+        let max_turns = format!(
+            "the producer did not complete: {}",
+            crate::disk::driver_detail(&crate::disk::result_line(
+                "error_max_turns",
+                crate::disk::EXPIRED_LOGIN_TEXT
+            ))
+        );
+        for reason in ["the producer returned no valid report", max_turns.as_str()] {
+            let attempts = four_attempts_closed_with(reason);
+            assert!(
+                attempts.iter().all(|a| a.verdict == Verdict::Failed),
+                "{reason}"
+            );
+            let signals = evaluate_before_attempt(&attempts, 2.0);
+            assert_eq!(signals.t1, Level::Flag, "{reason}");
+            assert_eq!(signals.t3, Level::Flag, "{reason}");
+            assert_eq!(signals.t5, Level::Pause, "{reason}");
+        }
+    }
+
+    #[test]
+    fn every_kind_of_environment_stop_is_an_environment_attempt() {
+        use crate::disk::{LowDisk, check_timeout_reason, producer_stop_reason};
+        let job = JobId::parse("20261026-001000-aaa1").unwrap();
+        let mut reasons = expired_login_reasons();
+        reasons.extend([
+            LowDisk {
+                free: 3_000_000_000,
+                required: 10_000_000_000,
+            }
+            .text(),
+            check_timeout_reason("test", 1805, 1800, &job),
+            producer_stop_reason("success: API Error: 429 {\"type\":\"error\"}"),
+            "environment: something recorded later".to_string(),
+        ]);
+        for reason in &reasons {
+            assert_eq!(failed_with(reason), Verdict::Environment, "{reason}");
+            let attempts = four_attempts_closed_with(reason);
+            assert_eq!(
+                evaluate_before_attempt(&attempts, 2.0).overall(),
+                Level::None,
+                "{reason}"
+            );
+        }
+        for reason in [
+            "the producer returned no valid report",
+            "admission refused the change: x",
+            "the verifier returned no valid verdict",
+        ] {
+            assert_eq!(failed_with(reason), Verdict::Failed, "{reason}");
+        }
+    }
+
+    #[test]
+    fn only_a_job_closed_failed_is_an_environment_attempt() {
+        // A producer that timed out keeps its work and shares the producer's reason text; it is spend of the
+        // work, even when its detail has the form of an API error.
+        let reason = &expired_login_reasons()[1];
+        assert_eq!(
+            verdict_of(JobState::Closed(OutcomeState::TimedOut), Some(reason)),
+            Some(Verdict::Failed)
+        );
+        assert_eq!(
+            verdict_of(JobState::Closed(OutcomeState::Rejected), Some(reason)),
+            Some(Verdict::Rejected)
+        );
+        assert_eq!(
+            verdict_of(JobState::Closed(OutcomeState::Landed), Some(reason)),
+            Some(Verdict::Accepted)
+        );
+        assert_eq!(
+            verdict_of(JobState::Closed(OutcomeState::Failed), None),
+            Some(Verdict::Failed)
+        );
+        assert_eq!(verdict_of(JobState::Dispatched, Some(reason)), None);
     }
 
     #[test]

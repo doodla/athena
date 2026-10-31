@@ -1,0 +1,27 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-094756-8cjd",
+  "round": 2,
+  "at": "2026-10-31T17:03:27.664001522Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Recomputing the pause with the newest request's forecast makes every cost (T3) pause disappear once a new request joins the line.",
+      "evidence": "try_watch_line runs right after an attempt, so the newest request it reads the forecast from is the one just attempted. line_pause is called from reading.rs:1034, before any model runs ('A paused line is refused before any model is called'), and from run/mod.rs:704 at go. Both calls happen for a new request that has joined the line, which is then the newest request. Before its reading exists, forecast_p90_dollars returns 0.0 (latest_reading() is None). t3_cost pauses only when `forecast_p90_dollars > 0.0 && spend >= T3_PAUSE_RATIO * forecast`, so a stored T3 pause recomputes to at most Flag and line_pause drops it. At go, a new reading with a larger forecast drops it too. The plan's risk entry says sharing line_state prevents drift, but sharing it causes this drift: the same code reads a different request at write time and at read time. None of the criterion 4 tests uses a T3 pause. Fix: When recomputing, use the forecast that was in force when the pause was written. Either take p90 from the newest request on the line that has a finished attempt, or use the stored mark's `numbers.forecast_p90_usd`. Re-evaluate only the attempt classification under the current rule. Add a test: a line paused for T3 by real attempts gets a new `ask`/`retry` request, and line_pause still returns the pause at both the reading call site and the go call site.",
+      "location": "Plan decision 4 and 6, step 4 (`line_state` forecast from 'the latest request of the line'); scope_guard.rs:728-735 (line_pause), :771-773 (try_watch_line forecast), :646-655 (forecast_p90_dollars), :298-311 (t3_cost); reading.rs:1034; run/mod.rs:704",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stored-form tests use hand-written detail strings, not text from the driver's real formatter, so a mismatch with the real format would go unseen.",
+      "evidence": "No fixture in crates/ contains 'API Error' or 'OAuth' (Grep). The detail is built only by athena-agent's `output_from_result` (claude.rs:249), which is a pure function of a ResultEvent. The plan admits the real expired-login text was not read from a record. Fix: In at least one test, build the detail with `output_from_result` from a ResultEvent (is_error true, subtype 'success', text 'Failed to authenticate. API Error: 401 {...OAuth access token has expired...}'), pass it through `producer_stop_reason` and `StopCause::of`, and check the result is ProducerAuth. Then the real driver produces the input, not a guessed string.",
+      "location": "Demonstrations for criteria 3 and 5 (hand-written 'the producer did not complete: success: API Error: 401 ...' strings); open question 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code; the plan's claims hold. The two environment lists disagree (scope_guard.rs:53 takes any \"environment:\" reason, disk.rs:260 only low disk and check timeout). The 401 text is written at producer.rs:206. The detail format matches claude.rs:249-281 (`<subtype>: <first 300 chars>`, subtype \"error\" when empty). The test helpers the plan relies on exist (att at scope_guard.rs:1523, rig at :931, mark at :1124, two_rejections at :1115). One shared classifier, the narrow API-error-status parser and the check that a job closed Failed are sound, and the demonstrations call real production code with negative controls. One design flaw blocks acceptance. The plan recomputes a stored pause with the forecast of the line's newest request. When a pause is read, that is the new, not-yet-attempted request, which may have no reading yet. Its forecast is then 0, and T3 cannot pause at 0. So every cost (T3) pause would disappear as soon as a follow-up request is made on the line, whatever the stop reasons were. That widens the change beyond environment stops, and no planned test covers it. The planner can fix this, so the verdict is revise."
+}

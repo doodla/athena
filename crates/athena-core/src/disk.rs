@@ -38,6 +38,10 @@
 //! check timed out` with the measured duration and the limit ([`check_timeout_reason`]), and `athena retry`
 //! resumes it. A check that fails with its own exit code is still a failure of the work.
 //!
+//! A fifth and sixth sit beside them: a producer that stops on an expired login (API error 401) or a usage
+//! limit (API error 429). These say nothing about the work either. [`StopCause`] is the one classifier of all
+//! of them; the scope guard and `athena retry` both use it, so no second list of environment reasons exists.
+//!
 //! Freeing and resuming. The producer's build directory (`target/produce`) is idle once Athena's checks have
 //! passed, since the checks build in their own directory; it is removed then, before the gate that runs
 //! before the verifier, and kept when a check fails (the send-back needs it). A job that stops for an
@@ -255,10 +259,116 @@ pub fn check_timeout_reason(name: &str, took_s: u64, limit_s: u64, job: &JobId) 
     )
 }
 
+/// The prefix every closing reason that records a stop of the environment carries.
+pub const ENVIRONMENT_PREFIX: &str = "environment:";
+
+/// The closing reason of a producer that stopped because its login expired (an API error 401).
+pub const PRODUCER_AUTH: &str = "environment: producer login expired";
+
+/// The closing reason of a producer that stopped on a usage limit (an API error 429).
+pub const USAGE_LIMIT: &str = "environment: usage limit reached";
+
+/// The start of the closing reason of a producer that stopped without a report.
+const PRODUCER_STOPPED: &str = "the producer did not complete: ";
+
+/// The HTTP status of an API error in the detail of a stopped agent, or `None` when the detail is not one.
+///
+/// The detail is built by `athena_agent::claude::output_from_result` as `<subtype>: <first 300 characters of
+/// the result text>`. An API error reads `success: Failed to authenticate. API Error: 401 {...}` or
+/// `success: API Error: 429 ...`: the CLI reports it as an error result whose subtype is `success`. Only that
+/// form counts, with a subtype of `success` or `error`; a model's own closing words under another subtype
+/// (`error_max_turns`, `error_during_execution`) are free prose and are never read. No word list is used.
+fn api_error_status(detail: &str) -> Option<u16> {
+    let rest = ["success: ", "error: "]
+        .iter()
+        .find_map(|subtype| detail.strip_prefix(subtype))
+        .unwrap_or(detail);
+    let rest = rest
+        .strip_prefix("Failed to authenticate. ")
+        .unwrap_or(rest);
+    let digits = rest.strip_prefix("API Error: ")?;
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
+    digits[..end].parse().ok()
+}
+
+/// Why an attempt stopped, as far as Athena can tell from the closing reason of its job.
+///
+/// This is the one place that says which closing reasons are stops of the environment. The scope guard (which
+/// attempts count as spend on a line) and `athena retry` (which stops may be resumed) both ask it. Before it
+/// existed, each kept its own list: the guard looked for the prefix [`ENVIRONMENT_PREFIX`] while
+/// [`is_environment_reason`] listed only low disk and a check timeout, and a producer that died on an expired
+/// login was closed as `the producer did not complete: ...`, which matched neither. It counted as a failure of
+/// the work, raised the retry, cost and time signals and paused the line, and the pause was never checked
+/// again. A new kind of environment stop is now added here once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopCause {
+    /// Free disk space was below the minimum, or the workspace could not be written ([`LOW_DISK`]).
+    LowDisk,
+    /// A check was killed at its deadline ([`CHECK_TIMEOUT`]).
+    CheckTimeout,
+    /// The producer's login expired: an API error 401 ([`PRODUCER_AUTH`]).
+    ProducerAuth,
+    /// A usage limit was reached: an API error 429 ([`USAGE_LIMIT`]).
+    UsageLimit,
+    /// Another reason that starts with [`ENVIRONMENT_PREFIX`].
+    OtherEnvironment,
+    /// Anything else: a failure of the work.
+    Work,
+}
+
+impl StopCause {
+    /// The cause recorded by a closing `reason`. A reason that starts with [`ENVIRONMENT_PREFIX`] is read by
+    /// its text. A producer stop (`the producer did not complete: <detail>`) is an environment stop when its
+    /// detail is an API error 401 or 429 (see [`producer_stop_reason`], which writes such stops with the
+    /// prefix; older records carry the unprefixed form).
+    pub fn of(reason: &str) -> StopCause {
+        if reason.starts_with(ENVIRONMENT_PREFIX) {
+            return if reason.starts_with(LOW_DISK) {
+                StopCause::LowDisk
+            } else if reason.starts_with(CHECK_TIMEOUT) {
+                StopCause::CheckTimeout
+            } else if reason.starts_with(PRODUCER_AUTH) {
+                StopCause::ProducerAuth
+            } else if reason.starts_with(USAGE_LIMIT) {
+                StopCause::UsageLimit
+            } else {
+                StopCause::OtherEnvironment
+            };
+        }
+        match reason
+            .strip_prefix(PRODUCER_STOPPED)
+            .and_then(api_error_status)
+        {
+            Some(401) => StopCause::ProducerAuth,
+            Some(429) => StopCause::UsageLimit,
+            _ => StopCause::Work,
+        }
+    }
+
+    /// Whether the stop says nothing about the work.
+    pub fn is_environment(self) -> bool {
+        self != StopCause::Work
+    }
+}
+
+/// The closing reason for a producer that did not complete, from the detail of its invocation. An API error
+/// 401 (expired login) or 429 (usage limit) is an environment stop and gets the matching reason with the
+/// detail after it; anything else is `the producer did not complete: <detail>`. [`StopCause::of`] reads both.
+pub fn producer_stop_reason(detail: &str) -> String {
+    match api_error_status(detail) {
+        Some(401) => format!("{PRODUCER_AUTH}: {detail}"),
+        Some(429) => format!("{USAGE_LIMIT}: {detail}"),
+        _ => format!("{PRODUCER_STOPPED}{detail}"),
+    }
+}
+
 /// True when a job's closing `reason` records a failure of the environment (low disk, an unwritable
-/// workspace or a check killed at its deadline), not a failure of the work. It holds for any job.
+/// workspace, a check killed at its deadline, an expired producer login or a usage limit), not a failure of
+/// the work. It holds for any job. [`StopCause::of`] decides.
 pub fn is_environment_reason(reason: &str) -> bool {
-    reason.starts_with(LOW_DISK) || reason.starts_with(CHECK_TIMEOUT)
+    StopCause::of(reason).is_environment()
 }
 
 /// Whether a job that stopped is one `athena retry` may resume from its kept candidate: it closed failed
@@ -272,6 +382,36 @@ pub fn resumable_stop(state: JobState, reason: Option<&str>) -> bool {
         JobState::Dispatched => true,
         _ => false,
     }
+}
+
+/// Test helper: one `result` line of the CLI's stream, an error result with the given `subtype` and `text`.
+#[cfg(test)]
+pub(crate) fn result_line(subtype: &str, text: &str) -> String {
+    serde_json::json!({
+        "type": "result",
+        "subtype": subtype,
+        "is_error": true,
+        "result": text,
+    })
+    .to_string()
+}
+
+/// Test helper: the result text of a producer whose login expired.
+#[cfg(test)]
+pub(crate) const EXPIRED_LOGIN_TEXT: &str = "Failed to authenticate. API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth access token has expired. Please obtain a new token or refresh your existing token.\"}}";
+
+/// Test helper: the `detail` the real driver path gives an agent result. `result_json` is one line of the
+/// CLI's stream; it goes through `StreamState::on_line` and `output_from_result`, the code that builds the
+/// detail in production. Nothing is parsed here.
+#[cfg(test)]
+pub(crate) fn driver_detail(result_json: &str) -> String {
+    let mut state = athena_agent::stream::StreamState::default();
+    state.on_line(result_json);
+    let result = state.result.expect("the line is a result event");
+    let at = jiff::Timestamp::UNIX_EPOCH;
+    athena_agent::claude::output_from_result(&result, "model", at, at, 0.0, Vec::new())
+        .detail
+        .expect("an error result has a detail")
 }
 
 /// Checks free disk space against `required_gb`. When low, it removes idle jobs' build directories and
@@ -945,7 +1085,8 @@ mod tests {
         let reason = check_timeout_reason("test", 1805, 1800, &job);
         assert!(is_environment_reason(&reason), "{reason}");
         assert!(is_environment_reason(CHECK_TIMEOUT));
-        assert!(CHECK_TIMEOUT.starts_with(crate::scope_guard::ENVIRONMENT_PREFIX));
+        assert!(CHECK_TIMEOUT.starts_with(ENVIRONMENT_PREFIX));
+        assert!(LOW_DISK.starts_with(ENVIRONMENT_PREFIX));
         assert!(!is_environment_reason(
             "the verifier returned no valid verdict"
         ));
@@ -989,6 +1130,156 @@ mod tests {
             assert!(!resumable_stop(JobState::Closed(state), Some(&low)));
         }
         assert!(!resumable_stop(JobState::Proposed, None));
+    }
+
+    fn expired_login_detail() -> String {
+        driver_detail(&result_line("success", EXPIRED_LOGIN_TEXT))
+    }
+
+    #[test]
+    fn the_real_driver_detail_of_an_expired_login_is_an_api_error_401() {
+        let detail = expired_login_detail();
+        assert!(
+            detail.starts_with("success: Failed to authenticate. API Error: 401"),
+            "{detail}"
+        );
+        assert_eq!(api_error_status(&detail), Some(401));
+        let stored = format!("the producer did not complete: {detail}");
+        assert_eq!(StopCause::of(&stored), StopCause::ProducerAuth);
+        let written = producer_stop_reason(&detail);
+        assert!(written.starts_with(PRODUCER_AUTH), "{written}");
+        assert_eq!(StopCause::of(&written), StopCause::ProducerAuth);
+    }
+
+    #[test]
+    fn every_kind_of_environment_stop_is_classified_by_its_own_text() {
+        let job = id(1);
+        let low = LowDisk {
+            free: GB,
+            required: 10 * GB,
+        }
+        .text();
+        let timeout = check_timeout_reason("test", 1805, 1800, &job);
+        let auth = producer_stop_reason(&expired_login_detail());
+        let limit = producer_stop_reason(&driver_detail(&result_line(
+            "success",
+            "API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+        )));
+        assert_eq!(StopCause::of(&low), StopCause::LowDisk);
+        assert_eq!(StopCause::of(&timeout), StopCause::CheckTimeout);
+        assert_eq!(StopCause::of(&auth), StopCause::ProducerAuth);
+        assert_eq!(StopCause::of(&limit), StopCause::UsageLimit);
+        assert_eq!(
+            StopCause::of("environment: something new"),
+            StopCause::OtherEnvironment
+        );
+        // The unprefixed form of a stored 429 stop is read the same way.
+        let stored = format!(
+            "the producer did not complete: {}",
+            driver_detail(&result_line("success", "API Error: 429 slow down"))
+        );
+        assert_eq!(StopCause::of(&stored), StopCause::UsageLimit);
+    }
+
+    #[test]
+    fn a_failure_of_the_work_is_never_an_environment_stop() {
+        for subtype in ["error_max_turns", "error_during_execution"] {
+            // The model's last words may say anything, including the words of an API error.
+            let detail = driver_detail(&result_line(subtype, EXPIRED_LOGIN_TEXT));
+            assert_eq!(api_error_status(&detail), None, "{detail}");
+            assert_eq!(
+                StopCause::of(&producer_stop_reason(&detail)),
+                StopCause::Work
+            );
+        }
+        for text in [
+            "the token budget is spent; quota and rate limit notes follow, status 401",
+            "API Error: 500 {\"type\":\"error\"}",
+            "error: unauthorized",
+            "I fixed the 401 handler",
+        ] {
+            let detail = driver_detail(&result_line("success", text));
+            assert!(
+                !matches!(api_error_status(&detail), Some(401 | 429)),
+                "{detail}"
+            );
+            assert_eq!(
+                StopCause::of(&producer_stop_reason(&detail)),
+                StopCause::Work
+            );
+        }
+        for reason in [
+            "the producer returned no valid report",
+            "admission refused the change: x",
+            "the verifier returned no valid verdict",
+            "the check failed: error[E0432] 401",
+            "",
+        ] {
+            assert_eq!(StopCause::of(reason), StopCause::Work, "{reason}");
+        }
+    }
+
+    #[test]
+    fn one_classifier_decides_environment_reasons() {
+        let job = id(1);
+        let failed = JobState::Closed(OutcomeState::Failed);
+        let reasons = [
+            LowDisk {
+                free: 0,
+                required: GB,
+            }
+            .text(),
+            check_timeout_reason("test", 5, 4, &job),
+            producer_stop_reason(&expired_login_detail()),
+            format!("the producer did not complete: {}", expired_login_detail()),
+            producer_stop_reason("success: API Error: 429 limit"),
+            "the producer returned no valid report".to_string(),
+            "admission refused the change: x".to_string(),
+        ];
+        for reason in &reasons {
+            let environment = StopCause::of(reason).is_environment();
+            assert_eq!(is_environment_reason(reason), environment, "{reason}");
+            assert_eq!(
+                resumable_stop(failed, Some(reason)),
+                environment,
+                "{reason}"
+            );
+        }
+        assert_eq!(
+            reasons.iter().filter(|r| is_environment_reason(r)).count(),
+            5
+        );
+    }
+
+    #[test]
+    fn a_producer_stop_on_an_expired_login_is_resumable() {
+        let failed = JobState::Closed(OutcomeState::Failed);
+        let detail = expired_login_detail();
+        let stored = format!("the producer did not complete: {detail}");
+        let written = producer_stop_reason(&detail);
+        assert!(resumable_stop(failed, Some(&stored)));
+        assert!(resumable_stop(failed, Some(&written)));
+        assert!(resumable_stop(
+            failed,
+            Some(&producer_stop_reason("success: API Error: 429 limit"))
+        ));
+        let max_turns = format!(
+            "the producer did not complete: {}",
+            driver_detail(&result_line("error_max_turns", EXPIRED_LOGIN_TEXT))
+        );
+        assert!(!resumable_stop(failed, Some(&max_turns)));
+        assert!(!resumable_stop(
+            failed,
+            Some("the producer returned no valid report")
+        ));
+        for state in [
+            OutcomeState::Rejected,
+            OutcomeState::Landed,
+            OutcomeState::TimedOut,
+        ] {
+            assert!(!resumable_stop(JobState::Closed(state), Some(&stored)));
+            assert!(!resumable_stop(JobState::Closed(state), Some(&written)));
+        }
     }
 
     /// A builder that runs no cargo: it checks the worktree it is handed, writes a file of known length into

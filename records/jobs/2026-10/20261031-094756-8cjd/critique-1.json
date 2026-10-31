@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-094756-8cjd",
+  "round": 1,
+  "at": "2026-10-31T17:00:06.022019472Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The auth and usage-limit markers match common words in free model prose, so real work failures can be classed as environment stops and drop out of line spend.",
+      "evidence": "crates/athena-agent/src/claude.rs:257-281 builds detail as `<subtype>: <first 300 chars of result.text>` for every non-success result, including error_max_turns and error_during_execution, where the text is whatever the model last wrote. The proposed markers ('rate limit', 'rate_limit', 'quota', or '401' together with 'token'/'unauthorized'/'authenticat') are ordinary words in code work. The only guard, that the reason starts with 'the producer did not complete: ', applies to every producer failure (producer.rs:206), so it does not narrow anything. The Open questions admit the real usage-limit text is not known, so these markers are a guess. A false positive turns off T1/T3/T5 for that attempt, which is the exact failure the scope guard exists to catch. Fix: Tie the classification to the API-error form, not to words anywhere. (a) Classify only when the detail's body starts with the CLI's API error marker, then match the HTTP status or the error type (e.g. 'API Error: 401' or an 'authentication_error' type; 'API Error: 429' or a 'rate_limit_error' type). Leave out loose words such as 'quota', 'token' and 'rate limit'. (b) Better, have the agent driver read whether the stop was an API error, and its status, from the result event, and pass that class to producer_stop_reason instead of re-parsing prose. In both cases, the old-text rule for stored records should accept only the exact API-error form. Add negative tests where the model's text mentions '401', 'token', 'rate limit' or 'quota' under error_max_turns. If the real usage-limit text cannot be found in the repository, match only the 429 status or error type and drop the word list.",
+      "location": "Plan Risks (first bullet), Step 1 (StopCause::of on old producer text), Open questions (usage-limit markers)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two filter rules are left unexplained: a mark whose line is not in the records is kept, and a flag survives a recompute that reaches Pause.",
+      "evidence": "status_lists_flagged_and_paused_lines (scope_guard.rs:1488) writes marks for line 20261026-000001-aaaa, which is not in the records. The plan keeps unknown lines mainly so that this test still passes. The same plan also argues that stored marks should not be trusted. Fix: Say why an unknown line keeps its mark (for example: no attempts to recompute from, so the stored mark is the only evidence). Also state how a flag and a recomputed Pause interact in status, so the producer does not have to guess.",
+      "location": "Step 4 (`live_marks`: 'an unknown line is kept')",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The timed-out path writes the same 'the producer did not complete: ' prefix, with state TimedOut.",
+      "evidence": "run/mod.rs:688 calls self.failure(ctx, &format!(\"the producer did not complete: {reason}\")) and then sets the state to TimedOut. StopCause::of looks at the reason text only. Fix: State that verdict_of and resumable_stop give Environment only for Closed(Failed), as attempt_of does today. Add one test showing that a TimedOut job whose reason carries the producer prefix still counts as work.",
+      "location": "Decision 5 / run/mod.rs:688",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the request and the accepted reading. The code it names exists: scope_guard::ENVIRONMENT_PREFIX at line 53, attempt_of at 525, line_pause at 728, try_watch_line at 758, list_lines at 499, disk::is_environment_reason and resumable_stop at 260–275, the producer failure text at producer.rs:206, and list_lines(&self.state) at status.rs:1759, where records are already loaded. One shared classifier in disk.rs puts the fix where the fault starts. Computing the pause on read in line_pause also covers its other callers (reading.rs:1034, run/mod.rs:704). Only two tests write hand-made pauses (scope_guard.rs:1312 and 1488), and the plan handles both. The demonstrations run through production code (verdict_of, evaluate_before_attempt, line_pause, retry, status, resumable_stop), and each would fail without the change. One soundness problem needs a revision. The plan decides \"auth\" and \"usage limit\" by matching common words ('token' with '401', 'rate limit', 'quota') anywhere in record.detail. In crates/athena-agent/src/claude.rs:264-281, that detail is the subtype plus the first 300 characters of the result text. For error subtypes such as max-turns, that text is the model's own words. A producer working on rate limiting or token handling that fails for a work reason would be classed as an environment stop. Its spend would then be excluded, and a runaway line would never pause: the opposite of what the guard is for. The match should be tied to the fixed form of the CLI's API error, or the status should come from the driver."
+}
