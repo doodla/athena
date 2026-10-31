@@ -1,0 +1,177 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-184913-2hc1",
+  "round": 1,
+  "at": "2026-10-31T18:56:40.207884699Z",
+  "invocation_seq": 3,
+  "approach": "Add one deterministic check, `check_reading_references`, to crates/athena-core/src/reading.rs and call it last from `check_reading_acceptance`. It scans the summary, assumptions and acceptance-criterion text for repo-path tokens (contain `/`, first segment a top-level directory of the snapshot or one of crates, docs, xtask, studies, .github). It refuses every token that is not a file or directory in `repo_files` (via the existing `path_exists_in`), not a create deliverable (or a directory above one), and not in a sentence that says the path is absent or to be created. With `repo_files` None, or a reading that declines or asks a question, it checks nothing. The error names each path and field and tells the reader to list the artifact as a create deliverable or say it does not exist. No model call. Tests sit beside the existing path-rule tests. CHANGELOG.md gets a Fixed entry and docs/decisions.md gets D147. Nothing keys on a job id. Round 2 change: criterion 5 now has a named seam and a fails_without, and the gate is shown by a regression test that the cargo gate runs.",
+  "decisions": [
+    {
+      "choice": "Put the check in reading acceptance as a new function called last from `check_reading_acceptance`, separate from `check_boundary_and_repo_files`.",
+      "reason": "That is where an unverified reference is first accepted. A separate function leaves the boundary check's error and tests unchanged and lets the doc comment carry the root cause and the three job ids. The reader's one correction path (ReadError::Refused) already carries the message.",
+      "rejected": [
+        {
+          "option": "Fold it into check_boundary_and_repo_files",
+          "why": "Its repair text and path_problems counting are tied to deliverables and banned words; mixing them complicates both."
+        },
+        {
+          "option": "Check job ids against landed state or queue position",
+          "why": "Out of scope. Path presence in the snapshot is the observable fact later stages rely on."
+        },
+        {
+          "option": "Add a prose rule to the reader prompt",
+          "why": "Prompt files are out of scope and prose is not enforced; the defaults ask for a mechanism."
+        }
+      ]
+    },
+    {
+      "choice": "Check only path-shaped tokens that contain `/` and start at a known top-level directory. Skip tokens with wildcard, placeholder or URL characters, absolute paths, and slash-less names such as `reading.rs`.",
+      "reason": "A bare basename is usually shorthand for a file elsewhere in the tree; checking it would refuse ordinary readings. Every full repo path is still covered, so the class is covered.",
+      "rejected": [
+        {
+          "option": "Check bare root file names such as foo.md",
+          "why": "Abbreviations and examples would cause false refusals; the refusal rate must stay near the expected 3%."
+        },
+        {
+          "option": "Match any word containing a dot",
+          "why": "It matches `e.g.`, version numbers and identifiers."
+        }
+      ]
+    },
+    {
+      "choice": "Exempt a path that is a create deliverable, a directory above a create deliverable, or sits in a sentence with an absence or creation phrase (const list: `not exist`, `absent`, `missing`, `no such`, `not yet`, `be created`, `new file`, `creates`). Exempt `CHANGELOG.md`. Sentences split at `. `, newline or `;`.",
+      "reason": "These are the two repairs the brief allows, and the check must accept them. Sentence splitting stops one absence statement from exempting a different path elsewhere.",
+      "rejected": [
+        {
+          "option": "Exempt only create deliverables",
+          "why": "The brief requires accepting text that states the path does not exist."
+        },
+        {
+          "option": "Exempt modify and delete deliverables as well",
+          "why": "Those already exist and are checked by the existing deliverable rule."
+        }
+      ]
+    },
+    {
+      "choice": "Scan summary, assumptions[i] and acceptance_criteria[i].text only; skip a reading with no capability or with a question.",
+      "reason": "This is the scope the brief names, and the existing path rule skips the same cases. out_of_scope text names things not touched and would add noise.",
+      "rejected": [
+        {
+          "option": "Scan every text field including out_of_scope and departures",
+          "why": "More false refusals for little gain."
+        }
+      ]
+    },
+    {
+      "choice": "Show criterion 5 by the real cargo gate commands, run as separate simple commands, with the new tests as the content that makes the gate meaningful: test seam is `cargo test --locked` running the whole workspace, which includes the athena-core tests that call `check_reading_acceptance`.",
+      "reason": "The criterion is that the gate passes with the change; it fails if the change breaks an existing test (for example a reading text in an existing test now naming an absent path) or if the new tests fail.",
+      "rejected": [
+        {
+          "option": "Combine the three commands with &&",
+          "why": "The verifier may run only whole simple commands, so each is listed separately."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `check_reading_references` with a doc comment (root cause, the three job ids), a path-token scanner and absence-phrase const; call it last from `check_reading_acceptance` and update that doc comment; add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a Fixed entry under Unreleased: root cause, the check, and the repair the refusal asks for.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Add D147 after D146: case, root cause, decision, rejected alternatives, tradeoff, reversal cost, provenance.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read reading.rs around `path_exists_in` (line ~2742), `check_boundary_and_repo_files` (~2771), `check_reading_acceptance` (~2849) and the tests near `governed_reading` (~6349) and `files_at_head`/`reading_with_deliverable` (~6640) to reuse them.",
+    "Add private helpers near `path_exists_in`: `path_tokens(text) -> Vec<String>` (maximal run of [A-Za-z0-9_./-]; skip a token whose neighbour is one of `*<>{}$` or is part of `://`, a token that starts with `/`, `.` or `~`, has `..` or an empty segment, or has no `/`; trim trailing `.` and `/`), `sentence_of(text, token)` (split at `. `, newline or `;`), and a const `ABSENCE_PHRASES`.",
+    "Add `pub fn check_reading_references(reading, repo_files) -> Result<()>`. Return Ok when repo_files is None, capability is None or a question is set. Derive top-level directories from `repo_files`, plus crates, docs, xtask, studies and .github. For summary, assumptions[i] and acceptance_criteria[i], find each token that is not in the snapshot (`path_exists_in`), not a Create deliverable (or a directory above one), not CHANGELOG.md, and not in a sentence with an absence phrase. Collect each path with its field label once and bail with a message naming them, saying the snapshot lacks them, and giving the repair: list it as a create deliverable, or say it does not exist. Doc comment names the root cause (reading acceptance never compared the reading's references with the snapshot) and jobs 20261026-042558-5p65, 20261026-064950-38jx and 20261026-065228-02zf.",
+    "Call it last in `check_reading_acceptance` (`check_boundary_and_repo_files(...)?; check_reading_references(reading, repo_files)`) and extend that function's doc comment.",
+    "Add tests: absent-path refusal in summary, assumption and criterion naming path and field (`a_reading_that_relies_on_an_absent_path_is_refused_and_the_path_is_named`); acceptance cases a to g (`the_reference_rule_accepts_*`); repair text (`the_reference_refusal_tells_the_reader_how_to_repair_it`); a `files_with_core()` helper.",
+    "Add the CHANGELOG.md Fixed entry under `## [Unreleased]` (naming `check_reading_references`, root cause, the repair) and D147 in docs/decisions.md after D146.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix findings."
+  ],
+  "risks": [
+    {
+      "risk": "False refusals of good readings: criteria often mention test or output paths the producer creates but does not list as deliverables.",
+      "mitigation": "The refusal names the path and says to list it as a create deliverable or state that it does not exist, so the reader repairs it in its one correction. Globs, placeholders, URLs, absolute paths and slash-less names are skipped, and tests cover each."
+    },
+    {
+      "risk": "The tokenizer takes in trailing punctuation or `path:line` suffixes and refuses a real file.",
+      "mitigation": "Maximal run of [A-Za-z0-9_./-], trailing `.` and `/` trimmed, `:` ends the token. Tests cover trailing dot, backticks, parentheses and `reading.rs:2849`."
+    },
+    {
+      "risk": "An existing test with `Some(&files)` breaks because its reading text holds a path absent from the small files_at_head set.",
+      "mitigation": "The producer greps the tests module for text fields near `Some(&files)` and runs the athena-core tests; the first segment must be a known top-level directory, and the texts seen were generic."
+    },
+    {
+      "risk": "The production call site (`read_for`, ~line 637) now refuses text the old rule accepted, and a refusal loop wastes reader spend.",
+      "mitigation": "The refusal reuses the existing one-correction path, so no new loop is added; the message is specific."
+    },
+    {
+      "risk": "Directory handling: `crates/athena-core/src` must pass, and a name that only shares a prefix must not.",
+      "mitigation": "Use the existing `path_exists_in`, which tests the prefix with a trailing `/`; a test covers both."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in reading.rs. It builds a reading with the existing `governed_reading` helper (a modify of crates/athena-core/src/reading.rs, so the deliverable rule passes) and sets the assumption to a sentence saying crates/athena-core/src/design_review.rs already exists. It calls `check_reading_acceptance(&reading, \"add a greeting\", None, &[], Some(&files))` where `files` is a BTreeSet holding crates/athena-core/src/reading.rs but not design_review.rs. The same sentence is also put in the summary and in an acceptance criterion.",
+      "command": "cargo test -p athena-core a_reading_that_relies_on_an_absent_path_is_refused_and_the_path_is_named",
+      "observes": "The call returns Err; the message contains crates/athena-core/src/design_review.rs and the label `assumptions[0]` (and `summary`, `acceptance_criteria[0]` in the other cases).",
+      "fails_without": "Without check_reading_references, check_reading_acceptance returns Ok for the reading, so the unwrap_err in the test panics and the test fails.",
+      "seam": "Production entry point `check_reading_acceptance` (exists, line ~2849). Fixture `governed_reading` (exists, line ~6349) and a local BTreeSet of paths passed as the `repo_files` argument (the argument exists). A small `files_with_core()` helper is added to the tests module in step 5. No double replaces any logic."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in reading.rs on the same reading as criterion 1: (a) accepted when `files` holds the path; (b) accepted when the path is also a Create deliverable; (c) accepted when the sentence says the path does not exist or is to be created, while a second still-absent path in a different sentence is refused; (d) accepted with repo_files None; (e) a table of different absent paths (docs/design/other.md, xtask/src/new.rs, .github/workflows/x.yml, studies/a/b.md) each refused; (f) glob, URL, bare `reading.rs`, trailing-dot and `path:123` forms handled as stated; (g) a reading with a question or no capability accepted.",
+      "command": "cargo test -p athena-core the_reference_rule_accepts",
+      "observes": "Ok in cases a, b, c (first path), d, f and g; Err naming the path in case e and the second path in case c. No job id appears in any assertion.",
+      "fails_without": "An over-broad check would refuse the accepted cases. A check keyed on one job id or one path would not refuse the different paths in the table, so case e fails; with the check removed, case e and the second path of case c fail.",
+      "seam": "Production entry point `check_reading_acceptance` with `repo_files` as `Some(&files)` or `None` (exists). Inputs from `governed_reading` (exists) and `reading_with_deliverable` (exists, line ~6648). No fake."
+    },
+    {
+      "criterion": 3,
+      "method": "Grep reading.rs for the new function name and the three job ids, then read the lines to see the call inside `check_reading_acceptance` and the doc comment.",
+      "command": "grep -n \"check_reading_references\\|20261026-042558-5p65\\|20261026-064950-38jx\\|20261026-065228-02zf\" crates/athena-core/src/reading.rs",
+      "observes": "A definition of `check_reading_references`, a call to it in the body of `check_reading_acceptance` after `check_boundary_and_repo_files`, and a doc comment naming the root cause (reading acceptance never compared the reading's references with the snapshot) and the three job ids.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Unit test asserts the refusal text contains the path, advice to list it as a create deliverable, and advice to say it does not exist. Then grep CHANGELOG.md for the new entry.",
+      "command": "cargo test -p athena-core the_reference_refusal_tells_the_reader_how_to_repair_it",
+      "observes": "The error tells the reader to list the artifact as a create deliverable or say it does not exist. `grep -n \"check_reading_references\" CHANGELOG.md` finds the entry under `## [Unreleased]`.",
+      "fails_without": "If the message lacks the repair text, the assertions on `create deliverable` and `does not exist` fail.",
+      "seam": "Production entry point `check_reading_acceptance` (exists); same fixtures as criterion 1; the message text is produced by the production check, not the test."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three gate commands, each as its own simple command, on the finished tree. The test run includes every existing athena-core test that calls `check_reading_acceptance` or `read_for` with `Some(&files)`, so a reading text that now names an absent repo path is caught, as are the new tests.",
+      "command": "cargo test --locked",
+      "observes": "Exit 0 for `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, with the new tests listed as passing. The function reads no model and no clock, so results are deterministic.",
+      "fails_without": "If the change were missing or wrong, the new tests from criteria 1, 2 and 4 would fail under `cargo test --locked`; if it breaks an existing test fixture (a text naming an absent path), that test fails; formatting or lint errors in the new code fail the fmt and clippy runs.",
+      "seam": "Production entry points: the workspace test harness running `check_reading_acceptance` through the athena-core unit tests (exists), plus `cargo fmt` and `cargo clippy` over the tree. Fixtures are the existing test helpers `governed_reading`, `files_at_head` and `reading_with_deliverable` (exist); the new tests are added by step 5. No fake."
+    }
+  ],
+  "open_questions": [
+    "Bare root file names (for example Cargo.lock) and slash-less basenames are not checked, because they are often shorthand. Say so if the user wants root files checked; the check could then require that no file in the snapshot has that basename.",
+    "The brief expects about 3% of readings to be newly refused. The code does not settle the real rate; no replay fixture of stored readings with a file set was found.",
+    "The absence-phrase list is a judgment. A reader who words it differently is refused once; the refusal text says how to repair it."
+  ],
+  "producer_section_sha256": "cf975b8df4571dc562b32d9b7bbcf59ec39f6623012c5bbfcb0710e0c35666bf"
+}

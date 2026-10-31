@@ -2839,13 +2839,177 @@ pub fn check_boundary_and_repo_files(
     )
 }
 
+/// Top-level directories a reading may name a repo path under, besides those found in the snapshot.
+const KNOWN_TOP_DIRS: [&str; 5] = ["crates", "docs", "xtask", "studies", ".github"];
+
+/// Lowercase phrases that make a sentence state that a path is absent or is to be created. A path named in
+/// such a sentence is not a claim that the path exists.
+const ABSENCE_PHRASES: [&str; 10] = [
+    "not exist",
+    "n't exist",
+    "absent",
+    "missing",
+    "no such",
+    "not yet",
+    "be created",
+    "new file",
+    "creates",
+    "to create",
+];
+
+/// The sentences of `text`, split at a full stop followed by white space or the end, at a newline and at
+/// a semicolon.
+fn sentences(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let ends = match c {
+            '\n' | ';' => true,
+            '.' => chars.peek().is_none_or(|(_, next)| next.is_whitespace()),
+            _ => false,
+        };
+        if ends {
+            out.push(&text[start..i]);
+            start = i + c.len_utf8();
+        }
+    }
+    out.push(&text[start..]);
+    out
+}
+
+/// The repo-path tokens in `sentence`: each maximal run of letters, digits and `_ . / -` that holds a `/`,
+/// with trailing `.` and `/` trimmed. A run is skipped when it starts with `/` or `./`, holds `..` or an empty
+/// segment (an absolute path, a relative path, an ellipsis), or sits next to a glob or placeholder character.
+/// A `:` ends a run, so `path:12` yields `path`, and a URL yields nothing (its run starts with `//`).
+fn path_tokens(sentence: &str) -> Vec<String> {
+    const NEIGHBOURS: &str = "*<>{}$~%@";
+    let is_path_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-');
+    let chars: Vec<char> = sentence.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if !is_path_char(chars[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && is_path_char(chars[i]) {
+            i += 1;
+        }
+        let before = start.checked_sub(1).map(|j| chars[j]);
+        let after = chars.get(i).copied();
+        if before.is_some_and(|c| NEIGHBOURS.contains(c))
+            || after.is_some_and(|c| NEIGHBOURS.contains(c))
+        {
+            continue;
+        }
+        let run: String = chars[start..i].iter().collect();
+        let token = run.trim_end_matches(['.', '/']);
+        if token.contains('/')
+            && !run.starts_with('/')
+            && !run.starts_with("./")
+            && !run.contains("..")
+            && !run.contains("//")
+        {
+            out.push(token.to_string());
+        }
+    }
+    out
+}
+
+/// Refuses a reading whose summary, assumptions or acceptance criteria rely on a repo path that is not in the
+/// snapshot at the base commit and that the reading neither creates nor says is absent.
+///
+/// Root cause: reading acceptance never compared the reading's references with the snapshot. It checked the
+/// deliverable paths ([`check_boundary_and_repo_files`]) and nothing else, so a reading whose text said an
+/// earlier job's file, role or prompt already exists was accepted as written. The earlier job might be
+/// queued, unmerged or never produced, and the critic or the producer found the gap later. Jobs
+/// 20261026-042558-5p65, 20261026-064950-38jx and 20261026-065228-02zf each planned on a design-review role
+/// or a finding state that was not in the snapshot; the check stops that class for any path, not for those
+/// jobs.
+///
+/// A path token (see [`path_tokens`]) whose first segment is a top-level directory of the snapshot or one of
+/// [`KNOWN_TOP_DIRS`] must be a file or a directory holding files in `repo_files`, a `create` deliverable (or
+/// a directory above one), `CHANGELOG.md` (Athena adds it itself), or be named in a sentence with one of
+/// [`ABSENCE_PHRASES`]. Slash-less names such as `reading.rs` are not checked: they are shorthand for a file
+/// elsewhere. With `repo_files` `None` (a replay with no repository), or a reading that declines or asks a
+/// question, nothing is checked. The check is deterministic and calls no model.
+pub fn check_reading_references(
+    reading: &Reading,
+    repo_files: Option<&BTreeSet<String>>,
+) -> Result<()> {
+    let Some(files) = repo_files else {
+        return Ok(());
+    };
+    if reading.capability.is_none() || reading.question.is_some() {
+        return Ok(());
+    }
+    let mut top_dirs: BTreeSet<&str> = KNOWN_TOP_DIRS.into_iter().collect();
+    top_dirs.extend(
+        files
+            .iter()
+            .filter_map(|f| f.split_once('/').map(|(d, _)| d)),
+    );
+    let created: Vec<&str> = reading
+        .deliverables
+        .iter()
+        .filter(|d| d.action == DeliverableAction::Create)
+        .map(|d| d.path.as_str())
+        .collect();
+    let is_created = |path: &str| {
+        created
+            .iter()
+            .any(|c| *c == path || c.starts_with(&format!("{path}/")))
+    };
+    let mut fields: Vec<(String, &str)> = vec![("summary".into(), reading.summary.as_str())];
+    for (i, text) in reading.assumptions.iter().enumerate() {
+        fields.push((format!("assumptions[{i}]"), text.as_str()));
+    }
+    for (i, c) in reading.acceptance_criteria.iter().enumerate() {
+        fields.push((format!("acceptance_criteria[{i}]"), c.text.as_str()));
+    }
+    let mut missing: Vec<String> = Vec::new();
+    for (label, text) in fields {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for sentence in sentences(text) {
+            let lower = sentence.to_lowercase();
+            if ABSENCE_PHRASES.iter().any(|p| lower.contains(p)) {
+                continue;
+            }
+            for token in path_tokens(sentence) {
+                let top = token.split('/').next().unwrap_or_default();
+                if top_dirs.contains(top)
+                    && token != CHANGELOG_PATH
+                    && !path_exists_in(files, &token)
+                    && !is_created(&token)
+                    && seen.insert(token.clone())
+                {
+                    missing.push(format!("{label}: {token}"));
+                }
+            }
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the reading was refused because its text relies on repo paths that are not in the snapshot at the \
+         base commit: {}; an earlier job's file, role or prompt is not there until that job lands. Repair: \
+         list each missing artifact as a create deliverable if this change adds it, or say in the text that \
+         it does not exist, or name the path that does exist",
+        missing.join("; ")
+    )
+}
+
 /// Every check a built reading must pass before it is accepted: the previous result and change scope of a
 /// retried or followed-up job ([`check_prior_result_and_scope`]), then the evidence each criterion rests on
 /// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
 /// rests on ([`check_code_survey`]), then the governance files the outcome needs
 /// ([`check_governance_coverage`]), then the reading's text against the boundary words and its deliverables
 /// against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
-/// there is no repository to compare with). It applies to a first attempt as well as a retry.
+/// there is no repository to compare with), then the repo paths its text relies on against the same files
+/// ([`check_reading_references`]). It applies to a first attempt as well as a retry.
 pub fn check_reading_acceptance(
     reading: &Reading,
     request: &str,
@@ -2857,7 +3021,8 @@ pub fn check_reading_acceptance(
     check_criteria_evidence(reading)?;
     check_code_survey(reading)?;
     check_governance_coverage(reading, request)?;
-    check_boundary_and_repo_files(reading, repo_files)
+    check_boundary_and_repo_files(reading, repo_files)?;
+    check_reading_references(reading, repo_files)
 }
 
 /// Governance paths a request can name, and the whole-word lowercase phrase that names each. A path ending in
@@ -6830,6 +6995,162 @@ mod tests {
             .to_string();
         assert!(error.contains(&word), "{error}");
         assert!(error.contains("docs/missing.md"), "{error}");
+    }
+
+    // -- The repo paths a reading relies on
+
+    const CORE_FILE: &str = "crates/athena-core/src/reading.rs";
+    const ABSENT_FILE: &str = "crates/athena-core/src/design_review.rs";
+
+    /// A snapshot that holds the core reading file and a few others, but not `ABSENT_FILE`.
+    fn files_with_core() -> BTreeSet<String> {
+        [
+            CORE_FILE,
+            "crates/athena-core/src/lib.rs",
+            "docs/decisions.md",
+        ]
+        .iter()
+        .map(|p| p.to_string())
+        .collect()
+    }
+
+    /// A clean change reading (a modify of the core file) whose assumption holds `text`.
+    fn reading_assuming(text: &str) -> Reading {
+        let mut reading = governed_reading(&[CORE_FILE], &["the greeting prints"], &["the logo"]);
+        reading.assumptions = vec![text.into()];
+        reading
+    }
+
+    fn check_refs(reading: &Reading, files: Option<&BTreeSet<String>>) -> Result<()> {
+        check_reading_acceptance(reading, "add a greeting", None, &[], files)
+    }
+
+    #[test]
+    fn a_reading_that_relies_on_an_absent_path_is_refused_and_the_path_is_named() {
+        let files = files_with_core();
+        let claim = format!("The role in {ABSENT_FILE} already exists and is reused.");
+        // In an assumption, the summary and a criterion: each is refused with the path and field named.
+        type Edit = fn(&mut Reading, String);
+        let edits: [(&str, Edit); 3] = [
+            ("assumptions[0]", |r, t| r.assumptions = vec![t]),
+            ("summary", |r, t| r.summary = t),
+            ("acceptance_criteria[0]", |r, t| {
+                r.acceptance_criteria[0].text = t
+            }),
+        ];
+        for (field, edit) in edits {
+            let mut reading = reading_assuming("none");
+            edit(&mut reading, claim.clone());
+            let error = check_refs(&reading, Some(&files)).unwrap_err().to_string();
+            assert!(error.contains(ABSENT_FILE), "{field}: {error}");
+            assert!(error.contains(field), "{field}: {error}");
+        }
+        // The same reading passes once the path is in the snapshot.
+        let mut with_it = files.clone();
+        with_it.insert(ABSENT_FILE.into());
+        check_refs(&reading_assuming(&claim), Some(&with_it)).unwrap();
+    }
+
+    #[test]
+    fn the_reference_rule_accepts_a_present_created_or_declared_absent_path_and_no_file_set() {
+        let files = files_with_core();
+        let claim = format!("The role in {ABSENT_FILE} already exists and is reused.");
+        // (a) a file in the snapshot, a directory above one, with trailing punctuation, backticks, parentheses
+        // and a line suffix
+        check_refs(
+            &reading_assuming(&format!(
+                "See `{CORE_FILE}`, ({CORE_FILE}:2849), crates/athena-core/src/ and docs/decisions.md."
+            )),
+            Some(&files),
+        )
+        .unwrap();
+        // (b) a create deliverable, and a directory above one
+        let mut created = reading_assuming(&claim);
+        created.deliverables.push(Deliverable {
+            path: ABSENT_FILE.into(),
+            action: DeliverableAction::Create,
+            p: 0.9,
+        });
+        check_refs(&created, Some(&files)).unwrap();
+        let mut dir_created = reading_assuming("Files go under crates/athena-core/src/new_dir.");
+        dir_created.deliverables.push(Deliverable {
+            path: "crates/athena-core/src/new_dir/a.rs".into(),
+            action: DeliverableAction::Create,
+            p: 0.9,
+        });
+        check_refs(&dir_created, Some(&files)).unwrap();
+        // (c) a sentence that says it does not exist; a second absent path in another sentence is refused
+        let says_absent = format!("{ABSENT_FILE} does not exist yet.");
+        check_refs(&reading_assuming(&says_absent), Some(&files)).unwrap();
+        let both = format!("{says_absent} Also xtask/src/other.rs is reused.");
+        let error = check_refs(&reading_assuming(&both), Some(&files))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("xtask/src/other.rs"), "{error}");
+        assert!(!error.contains(ABSENT_FILE), "{error}");
+        // (d) no file set: a replay judges nothing
+        check_refs(&reading_assuming(&claim), None).unwrap();
+        // (f) glob, placeholder, URL, absolute, relative, ellipsis and slash-less forms are not paths
+        for text in [
+            "Every file in crates/*/src is read.",
+            "A file docs/<name>.md is written.",
+            "See https://example.com/docs/guide.md for more.",
+            "The file /etc/docs/x is not ours.",
+            "Run ./docs/run.sh now.",
+            "Paths like crates/athena-core/... are meant.",
+            "The file design_review.rs already exists.",
+            "Use the and/or form.",
+            "CHANGELOG.md gets an entry, and so does docs/decisions.md.",
+        ] {
+            check_refs(&reading_assuming(text), Some(&files))
+                .unwrap_or_else(|e| panic!("{text}: {e}"));
+        }
+        // (g) a reading that asks or declines names no change
+        let mut asking = reading_assuming(&claim);
+        asking.question = Some("which file?".into());
+        check_refs(&asking, Some(&files)).unwrap();
+        let mut declined = reading_assuming(&claim);
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        check_refs(&declined, Some(&files)).unwrap();
+    }
+
+    #[test]
+    fn the_reference_rule_refuses_any_absent_path_not_one_job_or_file() {
+        let files = files_with_core();
+        for path in [
+            "docs/design/other.md",
+            "xtask/src/new.rs",
+            ".github/workflows/x.yml",
+            "studies/a/b.md",
+            "crates/other-crate/src/lib.rs",
+            "crates/athena-core/src",
+            "crates/athena-core/sr",
+            "prompts/reader.md",
+        ] {
+            let text = format!("Job 20261026-000000-abcd added {path}, so it already exists.");
+            let result = check_refs(&reading_assuming(&text), Some(&files));
+            if path == "crates/athena-core/src" {
+                // A directory that holds files is present.
+                result.unwrap();
+            } else if path == "prompts/reader.md" {
+                // Not a top-level directory of the snapshot, so it is not judged.
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains(path), "{path}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_reference_refusal_tells_the_reader_how_to_repair_it() {
+        let files = files_with_core();
+        let reading = reading_assuming(&format!("{ABSENT_FILE} already exists."));
+        let error = check_refs(&reading, Some(&files)).unwrap_err().to_string();
+        assert!(error.contains(ABSENT_FILE), "{error}");
+        assert!(error.contains("create deliverable"), "{error}");
+        assert!(error.contains("does not exist"), "{error}");
     }
 
     // -- The replay of accepted readings

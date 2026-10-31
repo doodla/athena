@@ -1,0 +1,133 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-184913-2hc1",
+  "n": 1,
+  "at": "2026-10-31T18:51:37.674411749Z",
+  "invocation_seq": 1,
+  "base_commit": "0b689708cbb30dc11f21021e7ef8ea8e5a84be6b",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Refuse readings that rely on repo paths absent from the snapshot",
+  "summary": "Root cause: reading acceptance (check_reading_acceptance in crates/athena-core/src/reading.rs) checks only deliverable paths against the base commit, so a reading that says an earlier job's file, role or prompt \"already exists\" is accepted unverified and the critic finds it later (failure class reading-assumes-prior-job-deliverable-exists-unverified, seen in jobs 5p65, 38jx, 02zf and others). Add a deterministic check, for the planner/critic's reader audience, that every repo path the reading's text relies on exists in the base snapshot or is created by this change.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "The check is placed at reading acceptance, where the unverified reference originates."
+    },
+    {
+      "id": "tested",
+      "how": "Tests plus fmt, clippy and test criteria."
+    },
+    {
+      "id": "mechanism",
+      "how": "A deterministic check, not prose."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the tests that show refusal and acceptance."
+    },
+    {
+      "id": "small",
+      "how": "One file of logic plus changelog."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/reading.rs: check_reading_acceptance (line ~2849) runs check_prior_result_and_scope, check_criteria_evidence, check_code_survey, check_governance_coverage, then check_boundary_and_repo_files, which checks only deliverable paths (path_exists_in) and banned words over reading_text_fields; repo_files is None in a replay with no repository. No record or data file is added under crates/, so check_record_file and AnyRecord are untouched.",
+    "Goal and audience: the reader stage and the critic. A reading that relies on a path (file, prompt, role source) that does not exist at the base commit must be repaired by the reader in its one correction, not found by the critic after planning.",
+    "Design: a new check_reading_references in reading.rs, called last from check_reading_acceptance (or folded into check_boundary_and_repo_files). It extracts repo-path tokens (crates/, docs/, xtask/, studies/, .github/ and root files) from the summary, assumptions and acceptance criteria, and refuses any that is not a file or directory in repo_files, not a create deliverable, and not in a sentence that states it is absent or to be created. With repo_files None it checks nothing. It is deterministic and calls no model.",
+    "Earlier jobs 20261026-042558-5p65, 20261026-064950-38jx and 20261026-065228-02zf are the instances that surfaced the class. Their code is not redone here: each was a failed or rejected attempt whose reading assumed a design-review role or a resolved finding state that did not exist. None of their candidate files is kept or changed by this job, and none of their findings is fixed here; a later retry of them would be checked by the new rule.",
+    "Refusing more readings is intended. expected 3% of newly refused readings."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run cargo test -p athena-core: a new unit test in crates/athena-core/src/reading.rs gives a reading whose assumption says a path such as crates/athena-core/src/design_review.rs already exists, with a repo_files set lacking it, and shows check_reading_acceptance refuses it naming the path; the same test fails when the check is removed.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run cargo test -p athena-core: tests show the same reading is accepted when the path is in repo_files, when it is a create deliverable, when the text says it does not exist, and when repo_files is None; the refusal is for the class (any path), not for one job id.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Grep of crates/athena-core/src/reading.rs shows the new check called from check_reading_acceptance, and a doc comment naming the root cause (reading acceptance never compared the reading's references with the snapshot) and jobs 20261026-042558-5p65, 20261026-064950-38jx and 20261026-065228-02zf.",
+      "kind": "content"
+    },
+    {
+      "text": "The refusal message tells the reader how to repair it: list the missing artifact as a create deliverable, or say it does not exist; CHANGELOG.md has an entry for the new check.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test --locked all pass; the verifier runs them.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Redoing the code-health check or the post-mortem field work of jobs 20261026-042558-5p65, 20261026-064950-38jx and 20261026-065228-02zf",
+    "Checking job ids against landed state or queue position",
+    "Changes to athena.toml, defaults.toml or prompt files",
+    "Call-site inventory checks for plans (the other proposals in the failure class)"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1700.0,
+        "p90": 3800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7168,
+      "p_verification_passes": 0.6726190476190477,
+      "p_user_intervenes": 0.09135135135135135,
+      "cost_usd": {
+        "p10": 0.533281766341618,
+        "p50": 1.2334521,
+        "p90": 3.3673669156840162
+      },
+      "wall_time_s": {
+        "p10": 533.4817740075339,
+        "p50": 1735.3693510320006,
+        "p90": 3842.48280306238
+      }
+    }
+  },
+  "departures": null,
+  "urgent_reason": "Cuts wasted time: it stops a bad reading before planning, preventing the planning stops and failed attempts seen in six jobs.",
+  "hard_reason": "It adds a rule that can refuse a reading at the acceptance gate, which judges every job, so a mistake is costly.",
+  "producer_effort": "high"
+}

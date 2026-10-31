@@ -3909,3 +3909,33 @@ should replace those estimates with its figures.
   `crates/athena-cli/src/drain.rs`, `scope_guard.rs`. Measured: `cargo test --locked -p athena-cli --test drain`
   (the hold, the resume on a later pass, and space that stays short), `cargo test --locked -p athena-core`,
   `cargo test --locked -p athena-cli --test binary`, `cargo test --locked -p athena-cli --test backtest`.
+
+## D147 · Reading acceptance checks the repo paths a reading relies on against the snapshot
+
+- **Case:** The failure class `reading-assumes-prior-job-deliverable-exists-unverified` was recorded in 6 jobs.
+  Jobs 20261026-042558-5p65, 20261026-064950-38jx and 20261026-065228-02zf each had a reading that treated a
+  role, a prompt or a finding state of an earlier job as present. It was queued, unmerged or never produced, and
+  the critic found the gap after planning.
+- **Root cause:** Reading acceptance never compared the reading's references with the snapshot. Its only
+  comparison with the base commit's files was for deliverable paths (`check_boundary_and_repo_files`); paths in
+  the summary, assumptions and criteria went unchecked, and a job id in the request was taken to mean its work
+  had landed.
+- **Decision:** `reading::check_reading_references` runs last in `check_reading_acceptance`. Each path token in
+  the summary, assumptions and acceptance criteria (it holds a `/`, and its first segment is a top-level
+  directory of the snapshot or one of `crates`, `docs`, `xtask`, `studies`, `.github`) must be a file or a
+  directory with files in the base commit, a `create` deliverable or a directory above one, `CHANGELOG.md`, or
+  sit in a sentence with an absence phrase (`ABSENCE_PHRASES`). Otherwise the reading is refused once, naming
+  each path and field and saying to list the artifact as a create deliverable or say it does not exist. With no
+  file set, or a reading that declines or asks a question, nothing is checked. No model call, no job id.
+- **Alternatives:** (a) Check job ids against landed state or queue position: out of scope, and the path in
+  the snapshot is the fact later stages rely on. (b) A prose rule in the reader prompt: not enforced. (c) Fold
+  it into `check_boundary_and_repo_files`: its repair text and counting are tied to deliverables and words.
+  (d) Check slash-less names: they are often shorthand for a file elsewhere, so they would refuse good readings.
+- **Tradeoff:** A reading that names a path the producer will create but did not list as a deliverable is
+  refused once and must list it. An absence phrase is a judgment; a sentence that mentions two paths and one
+  absence phrase exempts both.
+- **Reversal cost:** Low. Remove the call in `check_reading_acceptance`.
+- **Provenance:** Read: `crates/athena-core/src/reading.rs` (`check_reading_acceptance`,
+  `check_boundary_and_repo_files`, `path_exists_in`, `read_for`). Measured: `cargo test -p athena-core reading::`
+  (the new tests `a_reading_that_relies_on_an_absent_path_is_refused_and_the_path_is_named` and
+  `the_reference_*`). The share of readings newly refused (expected near 3%) was not measured.
