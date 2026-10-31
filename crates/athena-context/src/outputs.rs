@@ -426,6 +426,10 @@ pub struct DemonstrationOutput {
     pub observes: String,
     /// What would fail if the behavior were missing; required for a behavior criterion.
     pub fails_without: Option<String>,
+    /// The test seam the demonstration drives; required for a behavior criterion. Name the production entry
+    /// point it calls, the fake or fixture it uses and how that is injected, and either "exists" (you read the
+    /// code) or the plan step that adds it.
+    pub seam: Option<String>,
 }
 
 /// The critic's verdict on a plan.
@@ -589,7 +593,7 @@ mod tests {
             "files": [{ "path": "p", "action": "modify", "purpose": "x" }],
             "risks": [{ "risk": "r", "mitigation": "m" }],
             "demonstrations": [{ "criterion": 1, "method": "m", "command": "c",
-                "observes": "o", "fails_without": null }]
+                "observes": "o", "fails_without": null, "seam": null }]
         })
     }
 

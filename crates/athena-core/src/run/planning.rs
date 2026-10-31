@@ -553,6 +553,7 @@ fn plan_record(
                 command: d.command,
                 observes: d.observes,
                 fails_without: d.fails_without,
+                seam: d.seam,
             })
             .collect(),
         open_questions: out.open_questions,

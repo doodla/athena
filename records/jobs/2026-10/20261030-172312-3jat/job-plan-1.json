@@ -1,0 +1,256 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-172312-3jat",
+  "round": 1,
+  "at": "2026-10-31T04:38:12.594798781Z",
+  "invocation_seq": 3,
+  "approach": "Root cause: a plan demonstration (DemonstrationOutput, stored as Demonstration) has method, command, observes and fails_without, and no field for the test seam. Nothing makes the planner name the entry point, the fake or fixture and its injection, or whether the seam exists. Athena's own plan check, `admission::plan_findings`, therefore cannot require it, and the critic sees nothing to confirm, so nonexistent seams surfaced only in round 3 (jobs 20261018-095726-r3bn, 20261018-113512-gvcs, 20261024-115052-bzw6). Fix: add a `seam` field to the planner's output schema (its doc comment is the instruction the planner reads) and to the stored record (optional, serde default, skipped when none, so old records parse and re-serialize byte-identically). `plan_findings` gets a Major finding for a behavior criterion whose demonstration has an empty or missing seam, next to the existing fails_without check. It names the criterion and sends the plan back mechanically with no critic call. `demonstration_lines` in briefs.rs renders \"Test seam:\" under each demonstration, so the critic and verifier read it. The critic checks that the seam exists in the code; Athena does not. Existing test fixtures that give a behavior criterion a fails_without must also give a seam. Add unit and end-to-end tests, a record round-trip test and a CHANGELOG entry.",
+  "decisions": [
+    {
+      "choice": "Put the refusal in `admission::plan_findings`, beside the fails_without check, as a Major finding. It is not a new function in planning.rs. planning.rs gets the field copied through `plan_record` and the new gate takes effect there via the existing `plan_findings` call.",
+      "reason": "plan_findings is the one place for Athena's plan rules (its doc lists them). It already runs after the planner output parses and before the critic. A Major finding there reuses the mechanical-revision loop (2 passes, no critic call, finding text shown to the planner). The planner's next prompt then carries the fix. This is the origin of the gap: the rule list lacked the seam rule.",
+      "rejected": [
+        {
+          "option": "A separate seam check in planning.rs after plan_record",
+          "why": "Splits Athena's plan rules across two files; the next rule would again be added in the wrong place."
+        },
+        {
+          "option": "Only describe the seam in the planner prompt",
+          "why": "Prose-only; the failure repeated five times with prompt text. The user default 'mechanism' requires enforcement by code."
+        },
+        {
+          "option": "Make `seam` a required, non-optional String on every demonstration",
+          "why": "Content criteria have no seam to name, and old stored plans would not parse."
+        }
+      ]
+    },
+    {
+      "choice": "`seam: Option<String>` in DemonstrationOutput (no serde default, like fails_without, so the schema lists the key) and `#[serde(default, skip_serializing_if = \"Option::is_none\")] Option<String>` in the record.",
+      "reason": "Mirrors fails_without, which is required only for behavior criteria. Option keeps content criteria and old records valid. In the record, skip-if-none keeps old plan records round-tripping unchanged (the same approach as `resumed_from`). Serde treats a missing Option key as None, so the existing fixtures that omit `seam` still parse.",
+      "rejected": [
+        {
+          "option": "A structured seam (entry_point, fake, status) with three fields",
+          "why": "More schema and record surface for the same information. A single text field with a doc comment naming the three parts is the smallest design, and the critic reads text anyway."
+        }
+      ]
+    },
+    {
+      "choice": "Athena checks only that the seam is present and non-blank for a behavior criterion. The critic checks that it exists in the code.",
+      "reason": "Matches the out-of-scope line 'Mechanically proving a seam exists'. The brief already gives the critic Read, Grep and Glob.",
+      "rejected": [
+        {
+          "option": "Parse the seam for 'exists' or 'added by step'",
+          "why": "Brittle free-text parsing that rejects good plans; out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Render the seam in the shared `demonstration_lines` as an indented line `  Test seam: ...` after the Run line.",
+      "reason": "One function renders demonstrations for the critic brief, the producer plan section and the verifier brief. All three readers see the seam, and the producer-section hash is computed from the same text.",
+      "rejected": [
+        {
+          "option": "Render only in the critic brief",
+          "why": "The producer and verifier would not see the seam they must build or exercise."
+        }
+      ]
+    },
+    {
+      "choice": "Touch `crates/athena-core/src/admission.rs`, `crates/athena-agent/src/fake.rs` and the three athena-cli test fixtures (job_plan.rs, lifecycle.rs, introspection.rs), though they are not in the expected deliverables. Do not touch run/mod.rs or status.rs unless the compiler requires it.",
+      "reason": "The gate cannot live elsewhere without splitting the rules. Without the fixture and fake-planner updates, the new rule would refuse their behavior-criterion plans (the default reading's criterion 2 is behavior) and break cargo test. The expected deliverables run/mod.rs and status.rs construct no Demonstration literal I could find (status.rs:2350 has `demonstrations: vec![]`; mod.rs only imports the type), so I expect no edit there.",
+      "rejected": [
+        {
+          "option": "Skip the seam rule when the plan comes from the fake planner",
+          "why": "Special-cases the gate and hides the field from end-to-end tests."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "purpose": "Add `seam: Option<String>` to DemonstrationOutput with a doc comment: required for a behavior criterion; names the production entry point, the fake or fixture and how it is injected, and 'exists' or the plan step that adds it. Update the schema test literal near line 592 if it needs the key.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `seam: Option<String>` to Demonstration with `#[serde(default, skip_serializing_if = \"Option::is_none\")]` and the same doc comment. Update the `sample_plan` literal (line 4057). Add a round-trip and check_record_file test for old and new records.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "In `plan_findings`, for a behavior criterion add a Major finding when the demonstration's seam is None or blank, naming the criterion; update the doc list of rules. Add unit tests. Not in the listed deliverables, but it is where the plan rules live.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Copy `seam` from DemonstrationOutput to Demonstration in `plan_record` (line 550). The refusal itself runs through the existing `plan_findings` call at line 214.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the end-to-end seam tests using `repo_with_planning`, `run_planned` and `planning_script`. Reader output is rewritten to a behavior criterion for these tests. Existing content-criterion tests stay unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "In `demonstration_lines` (line 1181) print `  Test seam: <seam>` after the Run line when set. Update the test literals at about line 2672 and add a rendering test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Add `seam: None` (or a value) to the Demonstration literal in its test module (line 536).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "The fake planner's demonstration gets a `seam` string, so planned jobs on a behavior criterion still pass the new rule. Not in the listed deliverables.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "`demo()` fixture adds a `seam` string. Optionally add a case showing a seamless behavior demonstration gets the finding. Not in the listed deliverables.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "`plan_with` fixture (line 2367) adds a `seam` string. Not in the listed deliverables.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "purpose": "Add `seam` to the plan JSON demonstrations near line 739. Not in the listed deliverables.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under `## [Unreleased]` naming the root cause, the three job ids, the new required seam field and the planning refusal.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "outputs.rs: add `seam: Option<String>` with its doc comment to DemonstrationOutput. Run the outputs.rs schema test and fix the literal at about line 592 if it breaks.",
+    "records.rs: add the `seam` field with serde default and skip-if-none to Demonstration, with the doc comment. Fix `sample_plan`. Add the athena-data test: old JSON without the key, none round trip, some round trip, and `check_record_file`.",
+    "planning.rs `plan_record`: copy `seam: d.seam`. Fix the Demonstration literal in store.rs (line 536).",
+    "admission.rs `plan_findings`: after the fails_without check, add a Major athena_finding for a behavior demonstration whose seam is None or blank. Summary: 'The demonstration of behavior criterion N does not name its test seam'. Evidence says to name the production entry point, the fake or fixture and how it is injected, and 'exists' or the plan step that adds it. Update the doc list of rules. Add the unit tests: none, blank and set; content criterion unaffected.",
+    "briefs.rs `demonstration_lines`: print `  Test seam: ...` when set. Fix the test literals (about line 2672). Add a rendering test through `critic_brief` or `render_plan_section`.",
+    "run/tests.rs: add the end-to-end tests, a seamless plan then a plan with a seam, and a seamless plan repeated to the stop. The reader output is rewritten for a behavior criterion. Model them on `a_mechanical_finding_is_revised_before_the_critic...` and `a_plan_that_still_breaks_a_rule_after_two_mechanical_passes...`.",
+    "Update fixtures: athena-agent fake.rs planner JSON, athena-cli job_plan.rs `demo()`, lifecycle.rs `plan_with`, introspection.rs near line 739. Add `seam` strings. Compile and fix any other Demonstration literal the compiler finds, including run/mod.rs or status.rs only if required.",
+    "CHANGELOG.md: add the Unreleased entry (root cause, three job ids, the field, the refusal, old records still load, critic checks existence).",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. Before finishing, check that the new athena-core seam tests fail with the admission.rs rule removed (temporarily comment it out and re-run, then restore)."
+  ],
+  "risks": [
+    {
+      "risk": "Existing planned-job tests (athena-cli job_plan.rs, lifecycle.rs, introspection.rs, and the fake planner) give a behavior criterion a demonstration with no seam and would be refused.",
+      "mitigation": "Update each fixture and the fake planner to supply a seam in the same change. Run the full `cargo test --locked`. job_plan.rs's existing `athena_checks_a_demonstration_for_every_criterion_and_a_fails_without...` test keeps its expectations."
+    },
+    {
+      "risk": "Real planners will have more rounds refused because they omit the seam. This is intended (criterion 6). A planner that always omits it burns the 2 mechanical passes and stops the job.",
+      "mitigation": "The finding text says exactly what to add, the schema doc comment names the three parts, and the mechanical loop does not use up a critic round. The planner brief has token room, but no prompt edit is planned; it can be added if the refusal rate proves high."
+    },
+    {
+      "risk": "The seam is free text, so a planner can write a hollow seam (for example 'exists') and pass the Athena check.",
+      "mitigation": "This is accepted and out of scope. The critic is shown the seam in the brief and can check it with Read/Grep/Glob. A later change can add critic frame text if hollow seams appear."
+    },
+    {
+      "risk": "Adding a field to a stored record type could break old records or the byte-identical round trip.",
+      "mitigation": "Serde default plus skip_serializing_if on the record; a test parses an old record without the key and asserts the re-serialized text equals the original."
+    },
+    {
+      "risk": "The end-to-end test rewrites the reader output to a behavior criterion, and the behavior reading might fail acceptance or verification checks in the fake harness.",
+      "mitigation": "Assert on planning-stage behavior only (planner and critic calls, prompts, stop reason). The unit test in admission.rs carries the core assertion without the harness."
+    },
+    {
+      "risk": "Token budgets: the schema doc comment is part of the planner's output schema, not an always-loaded prompt set, but a `system_facts_budgets_match_computed` test exists.",
+      "mitigation": "No prompt or system-facts file changes. Run `cargo test` to confirm the budget tests still pass."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check of the change description and CHANGELOG: grep for the root-cause wording and the three job ids.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The added CHANGELOG entry says plan demonstrations carried no field for the test seam, so planning never required naming or confirming it, and cites 20261018-095726-r3bn, 20261018-113512-gvcs and 20261024-115052-bzw6. The diff is the evidence; the producer's final summary repeats it.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the diff of outputs.rs and records.rs, then run the record tests so the serde default is exercised.",
+      "command": "git diff -- crates/athena-context/src/outputs.rs crates/athena-data/src/records.rs",
+      "observes": "`DemonstrationOutput.seam` and `Demonstration.seam` exist, each with a doc comment naming the production entry point, how the fake or fixture is injected, and 'exists' or the step that adds it. The records field carries `#[serde(default, skip_serializing_if = \"Option::is_none\")]`. Criterion 5 shows the default at work.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Search briefs.rs for the label, and read it beside the `Demonstrations:` heading. A brief unit test also renders a plan with a seam and asserts the line appears.",
+      "command": "cargo test -p athena-context seam",
+      "observes": "The test calls the production `critic_brief`/`render_plan_section` path (the briefs.rs test module already builds Demonstration literals at about line 2672, so the fixture exists) with a seam set. It asserts the rendered text contains `Test seam: <text>` under the Demonstrations section, and no seam line when the seam is None. Grep for `Test seam:` in briefs.rs shows the label in `demonstration_lines`, the function the `Demonstrations:` heading calls.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Two tests in athena-core. (a) Unit test in admission.rs tests: build a JobPlan literal (the `findings_for_path` helper there shows how) and a `reading()` with one Behavior criterion. Call `plan_findings` with a verifier Policy whose command list allows `cargo test`. (b) End-to-end test in run/tests.rs using `repo_with_planning`, `run_planned` and `planning_script` (all exist today). The reader output is rewritten so criterion 1 is `behavior` and the plan has a `cargo test` demonstration with a fails_without; the producer and verifier stay on the base fake script.",
+      "command": "cargo test -p athena-core seam",
+      "observes": "Unit test: a behavior demonstration with seam None, `\"\"` or `\"   \"` gives a Major Athena finding at location `demonstrations, criterion 1` whose summary names 'criterion 1' and 'seam'. The same plan with a seam gives no seam finding. A content criterion with no seam gives none. End-to-end test: a planner queue of [plan without seam, plan with seam] shows the second planner prompt containing the seam finding and no critic call before it; a queue of only the seamless plan stops with a reason containing 'after 2 mechanical revisions' and the criterion, and never calls the critic, producer or verifier. The end-to-end test asserts planner and critic roles and prompts, not Landed (a behavior reading may not verify with the fake verifier).",
+      "fails_without": "Before the change `plan_findings` has no seam rule. The seamless plan yields no Major seam finding, so the unit assertions fail; in the end-to-end test the critic is called on round 1 (the critic queue is empty or the roles differ) and the stop reason is missing. The `seam` field also does not exist, so the with-seam plan does not compile or parse."
+    },
+    {
+      "criterion": 5,
+      "method": "Record tests in athena-data (records.rs tests, extending `sample_plan` and the `resumed_from` round-trip pattern) and the existing cli lifecycle path that calls `check_record_file`.",
+      "command": "cargo test -p athena-data && cargo test -p athena-cli",
+      "observes": "New athena-data test: the JSON of a plan whose Demonstration has seam None contains no `seam` key, parses via `AnyRecord::parse` to an equal value, and passes `check_record_file` at `<job>/job-plan-<round>.json`. A hand-written old record JSON without the key parses with seam None. A plan with `seam: Some(..)` serializes with the key and round-trips equal. athena-cli tests (lifecycle.rs:71 calls check_record_file; the planned-job tests in job_plan.rs and lifecycle.rs) pass with the updated fixtures, which now carry a seam on their behavior demonstrations.",
+      "fails_without": "Without the serde default and skip-if-none, the old-record JSON fails to parse (`deny_unknown_fields` and a required field) and the none case writes `\"seam\": null`, so the byte-equal assertion fails. Without the fixture updates, the cli planned-job tests stop at the new Major finding."
+    },
+    {
+      "criterion": 6,
+      "method": "The same athena-core test table shows the refusal rate is limited to the intended class. It tests only plans for the three cases. The 10% share is an estimate of how often planners omit a seam, not measured here.",
+      "command": "cargo test -p athena-core seam",
+      "observes": "Table cases: behavior + no seam is refused; behavior + seam is accepted; content + no seam is accepted; behavior + whitespace seam is refused. Only the first and last are refused, so the new refusal is exactly 'behavior criteria with no named seam'. Nothing else in the plan rules changes: the existing athena-core plan tests still pass.",
+      "fails_without": "Without the gate the refused cases are accepted. If the gate were too wide, the content-criterion case would be refused and the test would fail."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the full checks from the repository root.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. Compiling the whole workspace covers every Demonstration literal (records.rs sample_plan, store.rs:536, briefs.rs tests, planning.rs plan_record, admission tests) and the fixtures in athena-agent/src/fake.rs, athena-cli job_plan.rs, lifecycle.rs and introspection.rs. The athena-context outputs.rs schema test (about line 592) and the budget tests still pass.",
+      "fails_without": "Missing the new field in any struct literal fails the build. A fixture without a seam on a behavior criterion fails the planned-job tests."
+    },
+    {
+      "criterion": 8,
+      "method": "Content check of CHANGELOG.md under `## [Unreleased]`.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new entry under Unreleased (a `### Added` or `### Changed` heading, matching the file's Keep a Changelog form) describes the required `seam` field, the planning refusal for a behavior criterion without a seam, the critic seeing it, and that old records still load.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "admission.rs, fake.rs and three cli test files are outside the listed deliverables. The plan check lives in admission.rs, and the fixtures need a seam or the new rule breaks existing tests. Expect a minor 'outside deliverables' finding, or accept that the reading should have listed them.",
+    "The expected deliverables run/mod.rs and status.rs: I found no Demonstration literal that needs a change in either (mod.rs only imports the type; status.rs:2350 uses `vec![]`). If the compiler shows otherwise, the producer edits them; otherwise they stay unchanged.",
+    "Whether the fake verifier lets a behavior-criterion reading reach Landed in the end-to-end test. The plan avoids relying on it by asserting only the planning-stage roles and prompts. The producer should confirm by running the test.",
+    "Whether the athena-cli tests have other plan fixtures with a behavior criterion that I did not find (my search covered 'fails_without' and '\"behavior\"' in crates). A compile-clean `cargo test --locked` will show any."
+  ],
+  "producer_section_sha256": "277fe8fde07374a3da19d8e46ef8e30fcaf3bf3140ae406d145b23b997407284"
+}

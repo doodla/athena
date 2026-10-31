@@ -539,6 +539,7 @@ mod tests {
                 command: "cargo test".into(),
                 observes: "pass".into(),
                 fails_without: None,
+                seam: None,
             }],
             open_questions: vec![],
             producer_section_sha256: "d".repeat(64),

@@ -736,9 +736,11 @@ fn a_job_that_failed_in_planning_is_marked_and_carries_the_context_field() {
         "risks": [],
         "demonstrations": [
             { "criterion": 1, "method": "run the tests", "command": "cargo test --locked",
-              "observes": "criterion 1 holds", "fails_without": "the greeting test fails" },
+              "observes": "criterion 1 holds", "fails_without": "the greeting test fails",
+              "seam": "the fake agents of this test; exists" },
             { "criterion": 2, "method": "run the tests", "command": "cargo test --locked",
-              "observes": "criterion 2 holds", "fails_without": "the suite fails" }
+              "observes": "criterion 2 holds", "fails_without": "the suite fails",
+              "seam": "the fake agents of this test; exists" }
         ],
         "open_questions": []
         })],

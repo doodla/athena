@@ -151,6 +151,9 @@ fn athena_finding(
 /// - every acceptance criterion has exactly one demonstration;
 /// - a demonstration of a behavior criterion names what fails without the behavior and cites a command the
 ///   verifier's grant allows (`verifier` is that grant as a policy; its root must exist);
+/// - a demonstration of a behavior criterion names its test seam (the entry point, the fake or fixture and
+///   its injection, and whether the seam exists or which step adds it); the critic checks that it exists,
+///   Athena only checks that it is named;
 /// - a file to modify or delete exists in the base, and a file to create does not;
 /// - a governance file must be listed by the reading and named in a criterion (`governance_change_is_listed`);
 ///   that is a major finding otherwise;
@@ -200,6 +203,14 @@ pub fn plan_findings(
                     location.clone(),
                     format!("The demonstration of behavior criterion {number} does not say what fails without the behavior"),
                     "A demonstration of a behavior criterion must set fails_without, so that it would fail if the behavior were missing.".into(),
+                ));
+            }
+            if d.seam.as_deref().is_none_or(|s| s.trim().is_empty()) {
+                findings.push(athena_finding(
+                    Severity::Major,
+                    location.clone(),
+                    format!("The demonstration of behavior criterion {number} does not name its test seam"),
+                    "A demonstration of a behavior criterion must set seam: the production entry point it calls, the fake or fixture it uses and how that is injected, and either `exists` (read in the code) or the plan step that adds it.".into(),
                 ));
             }
             if let Decision::Deny(why) = evaluate(
@@ -604,6 +615,73 @@ mod tests {
             hard_reason: None,
             producer_effort: None,
         }
+    }
+
+    /// Athena's findings about the seam of criterion 1's demonstration, where criterion 1 has `kind` and its
+    /// demonstration has `seam`. The demonstration always has a fails_without and an allowed command, so only
+    /// the seam rule can fire.
+    fn seam_findings(kind: CriterionKind, seam: Option<&str>) -> Vec<Finding> {
+        use athena_data::records::Role;
+        let mut r = reading();
+        r.acceptance_criteria = vec![Criterion {
+            text: "planning refuses a plan with no seam".into(),
+            kind,
+        }];
+        let plan = JobPlan {
+            job: JobId::parse("20261012-084936-n1p0").unwrap(),
+            round: 1,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: 2,
+            approach: "Approach.".into(),
+            decisions: vec![],
+            files: vec![],
+            steps: vec![],
+            risks: vec![],
+            demonstrations: vec![Demonstration {
+                criterion: 1,
+                method: "test".into(),
+                command: "cargo test".into(),
+                observes: "the test passes".into(),
+                fails_without: Some("the test fails".into()),
+                seam: seam.map(str::to_string),
+            }],
+            open_questions: vec![],
+            producer_section_sha256: "0".repeat(64),
+            resumed_from: None,
+        };
+        let verifier = Policy {
+            role: Role::Verifier,
+            root: std::path::PathBuf::from("."),
+            commands: [("cargo".to_string(), vec!["test".to_string()])].into(),
+            writes: false,
+        };
+        plan_findings(&plan, &r, &verifier, &|_| false)
+    }
+
+    #[test]
+    fn a_behavior_demonstration_without_a_named_seam_is_a_major_finding() {
+        for seam in [None, Some(""), Some("   \n")] {
+            let found = seam_findings(CriterionKind::Behavior, seam);
+            assert_eq!(found.len(), 1, "{seam:?}: {found:?}");
+            let f = &found[0];
+            assert_eq!(f.severity, Severity::Major, "{seam:?}");
+            assert_eq!(f.source, FindingSource::Athena, "{seam:?}");
+            assert_eq!(
+                f.location.as_deref(),
+                Some("demonstrations, criterion 1"),
+                "{seam:?}"
+            );
+            assert!(f.summary.contains("criterion 1"), "{}", f.summary);
+            assert!(f.summary.contains("seam"), "{}", f.summary);
+        }
+    }
+
+    #[test]
+    fn a_behavior_demonstration_with_a_named_seam_and_a_content_one_without_are_accepted() {
+        let seam = Some("run_planned with a scripted planner; exists");
+        assert!(seam_findings(CriterionKind::Behavior, seam).is_empty());
+        // A content criterion has no seam to name, so none is demanded.
+        assert!(seam_findings(CriterionKind::Content, None).is_empty());
     }
 
     #[test]
