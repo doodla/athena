@@ -1,0 +1,261 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-095235-zq9x",
+  "round": 1,
+  "at": "2026-10-31T09:56:19.277079836Z",
+  "invocation_seq": 2,
+  "approach": "A job whose free disk stays short after the idle-build cleanup, at the gate before the checks and at the gate before the verifier, is no longer closed Failed. The two gates (run/mod.rs `check_and_verify` and run/verification.rs) call one new `Athena::hold_for_disk`, which writes the existing hold marker (`disk::write_hold`), keeps the resume mark that `write_resume_mark` already wrote, prints a `held       environment: low disk: X free, Y required` line and returns `Err(LowDisk)` without closing. The job stays Dispatched, with no closing record, verdict or verifier brief. A closing that never ran leaves no `before the checks` or `before the verifier` text and no `athena retry` advice.\n\nResume reuses the existing interrupted-job path, so the drain needs no new job source. `steward::interrupted_work` already lists a Dispatched job with no process, and the drain's first attempt for it is the retry. `resume_seed` already resumes a Dispatched job from its resume mark with no planner or producer run.\n\nTwo small additions make that path correct for a hold.\n1. `Athena::retry` (reading.rs) gets a hold-aware guard. For a Dispatched job with a hold marker it runs the same `disk_gate`, with the idle cleanup first. If space is still short it refreshes the marker and returns `Err(LowDisk)` before any reader call or new job.\n2. The drain's `Read` step treats `LowDisk` like `BudgetShort`: `held: true`, which already maps to `RunStep::Held` and `ItemEnd::Held`. That path takes no attempt, so a hold does not count as a failure.\n\n`settle_resume_marks` also clears the consumed job's hold marker. Status shows a Dispatched job with a marker as `held`, with the reason. Introspection, failure classes and the scope guard read closed outcomes. A held job has none, so it counts as no work failure. `scope_guard::resumed_candidate` already treats a Dispatched target as resumable. Tests pin all of this.\n\nThe producer should do the work in two commits-worth of steps (hold, then resume) and stop after each with tests green.",
+  "decisions": [
+    {
+      "choice": "Hold by leaving the job Dispatched with a hold marker and the resume mark, returning Err(LowDisk) from go, instead of closing it.",
+      "reason": "No new OutcomeState or record schema is needed (athena-data is not a deliverable). The drain already treats an LowDisk error from `go` as Held with no attempt. An unclosed job has no outcome, so it cannot be counted as a failure. Criterion 1 ('not Failed', no verdict) holds literally.",
+      "rejected": [
+        {
+          "option": "Close the job Failed with an `environment: low disk` reason and have the drain auto-retry it",
+          "why": "The record would still say Failed, which contradicts 'not Failed'. It would also keep a failure built at both gates."
+        },
+        {
+          "option": "Add OutcomeState::Held",
+          "why": "It changes the shared record schema in athena-data, which is outside the deliverables. It would need round-trip and AnyRecord coverage and migration care."
+        }
+      ]
+    },
+    {
+      "choice": "Resume through the existing interrupted-job retry path (new job, kept candidate, no planner or producer), with a disk guard in `Athena::retry` so a still-short pass creates no new job.",
+      "reason": "It reuses `interrupted_work`, `resumable_job`, `resume_seed` and `resume_candidate`, which are tested. The drain's first attempt for such a job is already the retry. The guard stops a chain of one new job per pass.",
+      "rejected": [
+        {
+          "option": "Resume the same job id in place by rebuilding a RunContext in go_job's Dispatched branch",
+          "why": "It duplicates dispatch's setup (config, capability, redactor, prediction commit). It is too large for one producer run and the budget cap that killed b5hm."
+        },
+        {
+          "option": "Add new hold-scanning logic to steward::interrupted_work",
+          "why": "A Dispatched job with no process is already listed, so no change is needed there."
+        }
+      ]
+    },
+    {
+      "choice": "Hold on any gate failure, including the verifier workspace write-probe failure, keeping the gate order (idle cleanup, then free-space probe, then checks or verifier).",
+      "reason": "`verifier_environment_problem` returns one text for both low space and an unwritable workspace, and both are environment states that clear on their own. The cleanup still runs first and lets the job proceed when it frees enough space.",
+      "rejected": [
+        {
+          "option": "Hold only on low space and keep failing for the write probe",
+          "why": "This needs a second return type, and a full disk shows up as a failed write probe as well."
+        }
+      ]
+    },
+    {
+      "choice": "Keep `is_environment_reason` and the `environment: check timed out` path unchanged, and keep the retry handling of old failed environment jobs.",
+      "reason": "The brief's out-of-scope list keeps `athena retry` and its handling of old failed environment jobs. Only the two low-disk closes change.",
+      "rejected": [
+        {
+          "option": "Remove the environment-reason branch of resumable_stop",
+          "why": "Old records and the check-timeout path still need it."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Add a hold-text helper if it is needed. Delete `before_verifier_reason`, or make the verifier gate return `LowDisk` for the hold. Rewrite the module docs from fail-and-retry to hold-and-resume, and update the unit tests at ~889-960 that expect the retry text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "At the gate before the checks, replace the failure with `hold_for_disk` (write marker, line, Err(LowDisk)). `settle_resume_marks` also clears the consumed job's hold marker. The `go_job` Dispatched branch names a held job's reason and says the next drain resumes it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "At the gate before the verifier, hold the same way instead of closing Failed, and remove the verify dir. The resume mark is already at the Verifier stage.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "In the `read` result, set `held` for a `LowDisk` error. `run_job` labels that outcome `environment: low disk` and returns RunStep::Held. Update the module docs for the hold and the interrupted-job bullets.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Show a Dispatched job that has a hold marker and no process as `held`, with the hold text, in the job line and under open work.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "purpose": "A small helper for the hold marker's lifetime next to the resume mark (read, clear with the mark), with a unit test. If the producer needs no helper, this file gets only the test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "In `Athena::retry`, run the disk guard for a Dispatched job with a hold marker and return LowDisk without creating a job while space is short. `resumable_job` and its docs name the held job.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "purpose": "A held job is not a finished attempt or a work failure. Update the docs at ~51 and ~567 and `resumed_candidate`, and add a regression test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the criterion 4 tests (hold at both gates, not counted, cleanup first). Rewrite the existing tests that expect a Failed close for low disk.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the criterion 1-3 tests. Rewrite `low_disk_before_the_checks_fails_the_job_retryably...` (1604) and `low_disk_after_the_checks_fails_the_job_as_the_environment...` (1685) to the new behavior.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/binary.rs",
+      "action": "modify",
+      "purpose": "Add the criterion 5 status test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for hold-and-auto-resume on low disk.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Record the decision: hold as Dispatched plus marker, resume through the interrupted-job retry path, and why no new OutcomeState.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the existing low-disk tests (tests/drain.rs ~1486-1720, run/tests.rs ~1469-1630) and `Athena::retry` (reading.rs ~1030-1120). Grep tests/drain.rs for how `drain(` is called with the real steps.",
+    "In run/mod.rs add `hold_for_disk(&self, ctx, low: &LowDisk) -> anyhow::Error` (or a Result) which calls `disk::write_hold`, prints `held       {low.text()}` and returns `low.into()`. Use it at the gate before the checks in `check_and_verify` instead of building `self.failure(...)`. Return `Err` before the early PR and the verifier snapshot.",
+    "In run/verification.rs, replace the `before_verifier_reason` close with the same hold, after removing `verify_dir`. For a write-probe failure, build a `LowDisk`-carrying error that keeps the probe text, or add a variant field `why: Option<String>` to the hold text. Make sure the Verifier-stage resume mark is written before this gate (run/mod.rs ~1354). Remove `before_verifier_reason` and its unit tests from disk.rs, and rewrite the disk.rs module docs.",
+    "In `settle_resume_marks` (run/mod.rs ~576) clear the consumed job's hold marker. In `go_job`'s Dispatched branch, if `read_hold` is Some, say the job is held for low disk and the next drain resumes it. Do not change the interrupted text otherwise.",
+    "In status.rs `state_name`/`job_line` (~1656-1660), report `held` for Dispatched, no process, hold marker present, and fill `line.hold`. Add 'held' to the open-work states.",
+    "In reading.rs `Athena::retry`, after the preflight and before the reader runs, if the target is Dispatched and `read_hold` is Some, call `disk_gate(min_free_gb, &id, ui)`. When low, refresh the marker with the new amounts, print the held line and return `Err(low.into())`. Otherwise go on. In drain.rs `read` (~2922-2933) set `held` when the error downcasts to `LowDisk`, and label the outcome `environment: low disk` in `run_job` (~1229-1238). Update the drain.rs module docs.",
+    "Add and rewrite the tests: tests/drain.rs (criteria 1-3, rewrite the two old tests), run/tests.rs (criterion 4, rewrite old), tests/binary.rs (criterion 5), a scope_guard.rs regression test, a state.rs test. Update CHANGELOG.md and docs/decisions.md. Run cargo fmt, clippy and test."
+  ],
+  "risks": [
+    {
+      "risk": "A job left Dispatched is shown as 'interrupted' by other readers (status, steward, `go`'s Dispatched message) and a person may close it by hand.",
+      "mitigation": "Status and the `go` message use the hold marker to say `held`. `athena close` still works. A test covers the status text."
+    },
+    {
+      "risk": "The producer's cost and invocation records of the held attempt are not committed until a closing exists, so the budget accounting for that job under-counts.",
+      "mitigation": "Listed as an open question. The producer checks whether the resume job's spend should include the held job's. If persisting the invocations in the resume mark is cheap (Invocation is a record type), do it with a round-trip test. Otherwise note it in docs/decisions.md."
+    },
+    {
+      "risk": "A gate that holds on a transient probe failure makes a drain stall forever on a job whose write probe never succeeds.",
+      "mitigation": "This is unchanged in kind from a failed close, and a held item is reported on every pass with the reason. The write-probe text is kept in the hold line."
+    },
+    {
+      "risk": "Rewriting the old tests (drain.rs 1604 and 1685, disk.rs 889-960, run/tests.rs ~1546-1630) is easy to get wrong.",
+      "mitigation": "Rewrite them to assert the hold. Criteria 1 and 3 each fail on the old code, which proves the new assertions bite."
+    },
+    {
+      "risk": "The plan is large for one producer run and the earlier attempt ran out of budget.",
+      "mitigation": "Do it in two stages. Steps 1-3 (the hold and its status and tests) first, then steps 4-6 (resume and the retry guard). Keep the shared edits small and avoid refactoring gates or `Closing`."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test in tests/drain.rs next to `low_disk_before_the_checks_fails_the_job_retryably...`. It reuses `disk_fixture`, `go_with_disk` and `simulated_free`. The producer hook writes the free-space file to 3000000000 once the producer has run, so dispatch passes and the gate before the checks sees low space. It calls `athena.go(job, AcceptedBy::User, &lines)` and asserts the result is an error that downcasts to `LowDisk`.",
+      "command": "cargo test -p athena-cli --test drain low_disk_after_the_build_holds_the_job",
+      "observes": "The records load with the job in JobState::Dispatched, not Closed(Failed), and with no outcome, verification verdict or brief-verifier file. `read_hold` returns Some with free 3 GB and required 10 GB. The output has a `held       environment: low disk: 3.0 GB free, 10.0 GB required` line. No `checks     ` line is printed and no `athena retry` appears. The producer ran once.",
+      "fails_without": "Before the change the job closes Failed with 'before the checks ... athena retry', `go` returns Ok(Finished), and there is no hold marker, so the downcast and the state assertions fail.",
+      "seam": "Production entry point `Athena::go` -> `check_and_verify`. Fixture: `StateDir::with_free_space(simulated_free)` with a free-space file that the fake producer script rewrites. This exists today: `go_with_disk` and the test at tests/drain.rs:1604 use the same seam. The production change is step 2."
+    },
+    {
+      "criterion": 2,
+      "method": "New test in tests/drain.rs. After the hold of criterion 1, remove the free-space file so space is plentiful, then run the real drain on that channel once. Find the way tests build the real drain steps in tests/drain.rs with a grep for `drain(` and the real `Steps`. The drain lists the Dispatched job as interrupted work, retries it, resumes the kept candidate and finishes it.",
+      "command": "cargo test -p athena-cli --test drain a_later_drain_resumes_the_held_job_without_a_new_producer_run",
+      "observes": "The job finishes (the new job is Landed or Passed). The fake driver counts exactly one Producer invocation across both passes. A `resume     job <old> kept its candidate` line is printed. The old job's hold marker and resume mark are gone. The test never calls `athena.retry` itself.",
+      "fails_without": "Without the resume path and the hold marker cleanup there is either no job to resume (the job was closed Failed and the drain retries it only through failure counting) or a second producer run. With the old behavior the job is Failed and the drain would count a failed attempt, so the assertions on the producer count and on the lack of a failure fail.",
+      "seam": "Production entry points `drain::drain` with the real steps, then `Athena::retry` and `go`. Fixtures: the fake agent driver `Scenario::default().script()` with a producer-call counter, and the free-space file. The fixture exists today (tests/drain.rs lines 1486-1520). The hold-aware guard in `retry` and the drain's LowDisk handling are step 4."
+    },
+    {
+      "criterion": 3,
+      "method": "New test in tests/drain.rs. Keep the free-space file low and run the drain twice (or two passes). The idle build directories are swept first and do not free enough. Then assert the report and the records.",
+      "command": "cargo test -p athena-cli --test drain space_that_stays_short_leaves_the_job_held_and_uses_no_attempt",
+      "observes": "Each pass reports the item as held (outcome `environment: low disk`, ItemEnd::Held, no failure and no `failed` landing). The job is still Dispatched with its marker, and no new job record and no new reader or producer invocation exists after the first pass. Total attempts used are 0, and the Report has no failed item.",
+      "fails_without": "Before the change the first pass closes the job Failed and the second pass consumes a drain attempt on a retry. Without the `retry` guard, each pass would create a new job record, and the job-count assertion fails.",
+      "seam": "Production entry points `drain::drain` with the real steps and `Athena::retry` with the new guard. The seam is the same free-space file fixture as criterion 1. It exists today, and the guard is step 4."
+    },
+    {
+      "criterion": 4,
+      "method": "New tests in crates/athena-core/src/run/tests.rs. One uses the existing gate fixtures near lines 1469 and 1610, with a free-space fn pointer that reads a static flag the fake producer sets. It runs `Athena::go` to a hold at each gate (before the checks and before the verifier). Then it builds `scope_guard::request_records`, the introspection input and the failure-class summary from the records, and asserts the held job adds nothing to failures, classes or the line's failed attempts. A second test lowers free space only until the idle-target sweep has run and asserts the job proceeds to the checks.",
+      "command": "cargo test -p athena-core held_job_is_not_a_work_failure",
+      "observes": "For both gates the job is Dispatched and holds no outcome. The failure counts in introspection, the failure classes and the scope-guard attempt counts are unchanged from the zero-job baseline. `resumed_candidate` is true for the retry of the held job. In the cleanup test, `disk       removed build directory of job <idle>` precedes the checks and the job is not held.",
+      "fails_without": "Before the change the same flows produce a Closed(Failed) record whose `before the checks` reason is counted or ignored only through the old reason-prefix rule, and the state assertions fail. If the cleanup moved after the gate, the cleanup test would hold instead of proceeding.",
+      "seam": "Production entry points `Athena::go`, `scope_guard::request_records` and the introspection and failure-class builders. Fixture: `StateDir::with_free_space(fn)` and the `FakeAgentDriver` script, which exist (run/tests.rs lines ~180 and 1469-1630). New tests are added in step 6."
+    },
+    {
+      "criterion": 5,
+      "method": "New test in tests/binary.rs that builds on the spawned-binary helper used at lines 158-206, which sets ATHENA_FREE_BYTES per command. It prepares a repo with a Dispatched job carrying a hold marker, or reaches the hold by running `athena go` with ATHENA_FREE_BYTES low after the build. Then it runs `athena status`.",
+      "command": "cargo test -p athena-cli --test binary status_shows_a_held_job_with_its_low_disk_reason",
+      "observes": "The status text shows the job as `held` (not `interrupted` and not `failed`) with `environment: low disk: <free> free, <required> required`.",
+      "fails_without": "Before the change status shows the job `interrupted`, or `failed` with the old reason, with no held line.",
+      "seam": "Production entry point is the `athena status` binary, which calls `Athena::status`, `state_name` and `job_line`. The binary helper with ATHENA_FREE_BYTES exists today (tests/binary.rs:158-206). The `held` state and the hold line are step 5. If a binary run cannot reach the post-build state cheaply, the test writes the hold marker with `disk::write_hold` before running status."
+    },
+    {
+      "criterion": 6,
+      "method": "Content check: grep the three files for the removed text.",
+      "command": "git diff --stat",
+      "observes": "A grep for `before the checks; this is the environment` and `before_verifier_reason` (and for `athena retry {id}` / `athena retry {job}` in the low-disk path) finds nothing in run/mod.rs, run/verification.rs or disk.rs. The check-timeout reason, which still says `athena retry`, is the one that remains. Review with `git diff` of the three files.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Content check of the diff.",
+      "command": "git diff -- CHANGELOG.md crates/athena-core/src/disk.rs crates/athena-cli/src/drain.rs",
+      "observes": "CHANGELOG.md has an Unreleased entry naming hold-and-auto-resume. The module docs of disk.rs (items 2 and 3 of the list and the opening) and of drain.rs (the 'Low disk holds a job' bullet and the interrupted-job bullet) describe the hold, the auto-resume and the no-attempt rule, not fail-and-retry.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Run the full gates.",
+      "command": "cargo test",
+      "observes": "All tests pass. Then `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` exit 0. The budgets test `system_facts_budgets_match_computed` still passes, since no prompt text changes.",
+      "fails_without": "A stale test that still expects the old failed-with-retry behavior (tests/drain.rs:1604 and 1685, disk.rs:889-960) fails if it is not rewritten in step 6.",
+      "seam": "The cargo test, clippy and fmt commands. They exist today."
+    },
+    {
+      "criterion": 9,
+      "method": "Check that governance files are untouched.",
+      "command": "git status",
+      "observes": "git status and git diff --stat list none of athena.toml, defaults.toml, .github/workflows, Cargo.toml, Cargo.lock or rust-toolchain.toml.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Does the closing of a resumed job record the held job's producer invocations and cost? A held job never commits its closing, so its planner and producer invocations and spend are not in the records (as with an interrupted job today). Persisting them in the resume mark would fix this but widens the change; the producer should confirm and note it in decisions.md.",
+    "How do tests in tests/drain.rs construct the real drain steps (a grep for `drain(` and the real `Steps` type)? I read only the Athena-level disk tests at 1486-1700, so this is not settled.",
+    "Does `scope_guard::request_records` count a Dispatched job with no outcome as a finished attempt of its line? The criterion 4 test settles it. If it does, `scope_guard.rs` needs a skip for held jobs.",
+    "If a resumed job (the retry job) is itself held at its own gate, the old job's marker and mark stay until the new job closes. Confirm this causes no repeated listing; the old job is already `retried` and so excluded from `interrupted_work`.",
+    "The brief says the kept candidate under target/produce is retained. The candidate is a git commit recorded in the resume mark, and the `JobWorktree` guard drops target/produce when `go` returns. Releasing that directory is wanted, since the job is short of disk, so the plan does not keep it. Confirm this is acceptable."
+  ],
+  "producer_section_sha256": "49748d18595ca713a95e8036d371913b3a02b241b5fe324b2f006a1a935528c4"
+}

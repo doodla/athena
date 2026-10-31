@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-095235-zq9x",
+  "round": 2,
+  "at": "2026-10-31T10:02:40.831437769Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/close.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/close.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 2 checks that the resume mark is gone, but no code or step clears a resume mark.",
+      "evidence": "Grep finds `write_resume` (state.rs:290) and `write_resume_mark` (run/mod.rs:551), but no `clear_resume` or other code that removes a resume mark. No step in the plan adds one. Fix: Add a step that clears the old job's resume mark and say where, or drop that assertion and check only that the hold marker is cleared.",
+      "location": "Demonstrations, criterion 2; crates/athena-core/src/state.rs:290",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Not checked: whether the held job's registry entry is released when `go` returns Err. If it is not, later drain passes in the same process will not list the job as interrupted.",
+      "evidence": "`interrupted_work` skips a Dispatched job when `running(id)` is true (steward.rs:393-395), and `running` reads `registry().entries()` (status.rs:1607). The plan never checks how the entry is released on the Err path. Fix: In step 1, confirm the registry entry is removed when `go` returns Err(LowDisk). If it is not, release it in `hold_for_disk`.",
+      "location": "Demonstrations, criteria 2 and 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A held retry still adds to the drain's `started` count against max_jobs.",
+      "evidence": "`run_job` does `st.started += 1` before the Read step and checks it against `limits.max_jobs`. A LowDisk hold at the Read step still uses one of those slots. Fix: Say what criterion 3's 'no drain attempt' means. If it covers max_jobs, do not count a low-disk hold at the Read step, and assert that in the test.",
+      "location": "crates/athena-cli/src/drain.rs:1181",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The hold marker is cleared before the reader runs. If the reader then fails, the job loses its held label.",
+      "evidence": "`Athena::retry` runs the reader in `self.ask` after the guard point. A reader failure after `clear_hold` leaves the old job shown as plain interrupted. Fix: Clear the marker only after `ask` returns Ok, or note that this fallback is intended.",
+      "location": "Step 6; crates/athena-core/src/reading.rs:1030-1061",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 4 test filter may miss the cleanup-first test.",
+      "evidence": "Three tests are described, (a), (b) and (c), but the one command filters on `held_job_is_not_a_work_failure`, which test (c) about cleanup may not be named to match. Fix: Give all three tests a shared prefix the command matches, or list one command for each.",
+      "location": "Demonstrations, criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The criterion 5 fallback writes the marker by hand.",
+      "evidence": "The fallback uses `write_hold` directly, so the test does not reach the hold through a real run. Criterion 1 already covers the real hold. Fix: Prefer the real `athena go` path with ATHENA_FREE_BYTES.",
+      "location": "Demonstrations, criterion 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan names, and it exists and behaves as the plan says. The hold marker functions are at disk.rs:172-191. The gate before the checks is at run/mod.rs:1181-1198. `go_job` passes Errs up with `?` (run/mod.rs:940), so returning Err(LowDisk) leaves the job Dispatched. The drain's `run` step already treats LowDisk as held (drain.rs:2982), while the Read step and the `read.held` branch handle only BudgetShort (drain.rs:2930, 1229). `interrupted_work` lists Dispatched jobs with no process, and `Athena::retry` reaches the resume path. Status shows a Dispatched job as `interrupted` and fills `line.hold` only for proposed jobs. The design is sound: it reuses the tested resume path, adds no schema change, commits the held attempt's spend, and keeps the unwritable-workspace case failing so a drain is not held forever. Athena's own finding about close.rs is justified by the records-commit decision. The remaining issues are minor: nothing clears a resume mark although criterion 2 checks it is gone; the registry entry on the Err path is not checked; a held retry still counts toward max_jobs; the hold marker is cleared before the reader runs; and the criterion 4 test filter may miss the cleanup test."
+}
