@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The steward's `decisions` source was reported empty (introspection 20261029-135005-vb9w cited decision D84).
+  Root cause: nothing is committed under `records/decision-states` or `records/default-expectations` at the head.
+  `GitView::workspace` (`crates/athena-core/src/steward.rs`) copies every file `RecordSet::load`
+  (`crates/athena-gate/src/records.rs`) reads under `records/` and then makes missing source directories empty,
+  so there is no copy fault; the records are written only on a landing signal or by
+  `record_default_expectations`, and D84 is text in `docs/decisions.md`, not a record. The source is readable
+  whenever such a record is committed; a test in `steward.rs` shows it populated with one and empty without. The
+  cause and what would change it are in `docs/records.md`. No file under `records/` was edited.
 - Refusal and matching rules are now run against a stored corpus of real request and reading shapes before they
   land, and a plan that adds or changes one must map its input forms to that corpus. Root cause: such rules
   (the parts parser, stems, stop lists and the reading checks) were specified by reasoning and hand-checked on

@@ -66,6 +66,19 @@ records/
 Ids are `YYYYMMDD-HHMMSS-xxxx`: UTC time, then four Crockford base32 characters. They sort by time and give
 their month shard. `bootstrap` is reserved.
 
+### When the steward's `decisions` source is empty
+
+The steward's `decisions` source is `records/decision-states` and `records/default-expectations`
+(`crates/athena-core/src/steward.rs`, `SOURCES`). `GitView::workspace` there writes every file that
+`RecordSet::load` (`crates/athena-gate/src/records.rs`) finds under `records/` at the head commit, then creates
+any source directory still missing as an empty one. So an empty `decisions` source means no file is committed
+under those two paths at the head; it is not a copy fault. A decision-state record is written only when the
+watcher sees a landing signal for a decision (`Athena::watch_landing`), and a default-expectations record only by
+`Athena::record_default_expectations`; neither is written for a decision just because it was made. A decision
+such as D84 is design text in `docs/decisions.md`, and the steward does not read that file as the `decisions`
+source (it is in the `code` source). What would change this: a committed decision-state or default-expectations
+record. A test in `steward.rs` shows both cases.
+
 ## The record types
 
 Every record has a `schema` field naming its type and version.

@@ -267,7 +267,9 @@ impl View for GitView<'_> {
             }
             Err(_) => unreadable.extend(["jobs", "events", "introspections", "class-registry"]),
         }
-        // A source with no records yet is an empty directory, not a missing one.
+        // A source with no records yet is an empty directory, not a missing one. `decisions` is empty whenever
+        // nothing is committed under its paths at the head: `RecordSet::load` copies every committed blob, so
+        // an empty directory is never a copy fault.
         for path in SOURCES.iter().flat_map(|s| s.paths) {
             if path.starts_with("records/") {
                 std::fs::create_dir_all(dir.join(path))?;
@@ -2015,6 +2017,72 @@ mod tests {
         assert!(tick(&state, 5).unwrap(), "the fifth");
         assert_eq!(finished_since_run(&state), 0, "and the count starts again");
         assert!(!tick(&state, 5).unwrap());
+    }
+
+    /// A scratch repository with one commit holding `files`; returns it with its directory.
+    fn scratch_repo(files: &[(&str, String)]) -> (tempfile::TempDir, Git) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::isolated(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(dir.path().join("README.md"), "readme\n").unwrap();
+        for (path, text) in files {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        }
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "c0"]).unwrap();
+        (dir, git)
+    }
+
+    fn files_under(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                found.extend(files_under(&path));
+            } else {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_decisions_source_holds_decision_records_when_committed_and_is_an_empty_directory_when_not()
+     {
+        // The source is only a copy of what is committed under its paths: an empty source means no decision
+        // record is committed at the head. Decision D84 is design text in docs/decisions.md, not a record.
+        let state = athena_data::records::DecisionState {
+            id: RecordId::parse("20261013-193000-zzzz").unwrap(),
+            at: "2026-10-13T19:30:00Z".parse().unwrap(),
+            decision: "D84".into(),
+            state: athena_data::records::DecisionStateKind::UnderReview,
+            signal: Some("x".into()),
+            firing_records: vec![],
+            decision_job: None,
+        };
+        let record = athena_data::records::AnyRecord::DecisionState(state);
+        let path = record.canonical_path();
+        let (dir, git) = scratch_repo(&[(path.as_str(), record.to_json())]);
+        let work = tempfile::tempdir().unwrap();
+        let with = work.path().join("with");
+        GitView { git: &git }.workspace(&with).unwrap();
+        assert!(with.join(&path).is_file(), "{path} is in the workspace");
+        assert!(with.join("records/default-expectations").is_dir());
+
+        let (_empty_dir, empty_git) = scratch_repo(&[]);
+        let without = work.path().join("without");
+        GitView { git: &empty_git }.workspace(&without).unwrap();
+        for source_path in SOURCES[4].paths {
+            let source_dir = without.join(source_path);
+            assert!(source_dir.is_dir(), "{source_path} exists");
+            assert!(
+                files_under(&source_dir).is_empty(),
+                "{source_path} is empty"
+            );
+        }
+        drop(dir);
     }
 
     #[test]
