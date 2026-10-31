@@ -615,6 +615,26 @@ pub fn low_once_verifying(state: &Path) -> std::io::Result<u64> {
     }
 }
 
+/// A free-space reader for a job that clears the gate at dispatch and stops at the gate before its checks:
+/// plenty of space until a job's producer has left a build directory (`target/produce`), 3 GB then, unless a
+/// file named `freed` lies in the state root. Pair it with a script whose producer leaves that directory.
+pub fn low_once_built(state: &Path) -> std::io::Result<u64> {
+    if state.join("freed").exists() {
+        return plenty_of_space(state);
+    }
+    let built = std::fs::read_dir(state.join("jobs"))
+        .map(|dirs| {
+            dirs.flatten()
+                .any(|e| e.path().join("target/produce").exists())
+        })
+        .unwrap_or(false);
+    if built {
+        Ok(3_000_000_000)
+    } else {
+        plenty_of_space(state)
+    }
+}
+
 /// What a [`recording_plenty_space`] call saw in the state root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpaceProbe {

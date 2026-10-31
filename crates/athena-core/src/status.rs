@@ -72,7 +72,9 @@ pub struct JobLine {
     /// gave an urgent reason, else normal (`JobRecords::priority`).
     pub priority: crate::plan::Priority,
     /// "environment: low disk: 3.0 GB free, 10.0 GB required" for a proposed job whose dispatch was held for
-    /// lack of disk space; absent otherwise. The job is still queued to run, not rejected.
+    /// lack of disk space, or for an interrupted job held for it after its candidate was built; absent
+    /// otherwise. A proposed job is still queued to run, not rejected; a held interrupted job is resumed from
+    /// its kept candidate by the next drain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold: Option<String>,
 }
@@ -1656,7 +1658,7 @@ impl Athena {
             let state = self.state_name(job);
             *jobs_by_state.entry(state.clone()).or_default() += 1;
             let mut line = job_line(job, &state);
-            if state == "proposed" {
+            if state == "proposed" || state == "interrupted" {
                 line.hold = crate::disk::read_hold(&self.state, job.id()).map(|h| h.text());
             }
             // Queued requests have not run; they show under open work.

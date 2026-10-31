@@ -880,10 +880,13 @@ fn plan_suffix(j: &athena_core::status::JobLine) -> String {
         .plan
         .as_ref()
         .map_or(String::new(), |plan| format!(" · {plan}"));
-    let hold = j
-        .hold
-        .as_ref()
-        .map_or(String::new(), |hold| format!(" · {hold} (still queued)"));
+    let hold = j.hold.as_ref().map_or(String::new(), |hold| {
+        if j.state == "interrupted" {
+            format!(" · {hold} (held; the next drain resumes it from its kept candidate)")
+        } else {
+            format!(" · {hold} (still queued)")
+        }
+    });
     format!("{priority}{plan}{hold}")
 }
 

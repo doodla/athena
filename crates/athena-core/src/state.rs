@@ -315,7 +315,9 @@ impl StateDir {
         }
     }
 
-    /// The local marker that says dispatch of `job` was held for lack of disk space.
+    /// The local marker that says `job` was held for lack of disk space: at dispatch (the job stays queued),
+    /// or later, before its checks or its verifier (the job stays dispatched with no process, and the next
+    /// drain resumes it from its kept candidate). It records the free and required amounts.
     pub fn hold_file(&self, job: &JobId) -> PathBuf {
         self.root
             .join("holds")

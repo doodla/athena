@@ -1602,7 +1602,7 @@ mod produce_and_verify_order_tests {
     }
 
     #[test]
-    fn low_disk_before_the_verifier_resumes_without_planner_or_producer() {
+    fn low_disk_before_the_verifier_holds_the_job_and_a_retry_resumes_it() {
         let repo = repo();
         let state = tempfile::tempdir().unwrap();
         let root = state.path().join("repo");
@@ -1618,35 +1618,48 @@ mod produce_and_verify_order_tests {
         let proposal = athena.ask("describe the demo", &Quiet).unwrap();
         let first = proposal.job.clone();
         let ui = Lines::default();
-        let stopped = finished(athena.go(first.as_str(), AcceptedBy::User, &ui).unwrap());
-        assert_eq!(stopped.state, OutcomeState::Failed, "{}", stopped.reason);
-        assert!(
-            crate::disk::is_environment_reason(&stopped.reason),
-            "{}",
-            stopped.reason
-        );
-        assert!(
-            stopped.reason.contains("before the verifier"),
-            "{}",
-            stopped.reason
-        );
+        let error = athena
+            .go(first.as_str(), AcceptedBy::User, &ui)
+            .expect_err("low space after the checks holds the job");
+        let low = error
+            .downcast_ref::<crate::disk::LowDisk>()
+            .copied()
+            .unwrap_or_else(|| panic!("not a hold: {error:#}"));
+        assert_eq!(low.free, 3_000_000_000);
+        assert!(low.required > low.free);
         let said = ui.0.lock().unwrap().clone();
         assert!(
             said.iter().any(|l| l.starts_with("checks     ")),
             "{said:#?}"
+        );
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("held       environment: low disk: 3.0 GB free")),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.contains("athena retry")),
+            "no person is told to retry: {said:#?}"
         );
         // The producer ran once; no planner, and no verifier.
         let (planner, producer, read_before, verifier) = counts.all();
         assert_eq!((planner, producer, verifier), (0, 1, 0));
         assert!(read_before >= 1);
         let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
-        let candidate_fingerprint = records.jobs[first.as_str()]
+        let held = &records.jobs[first.as_str()];
+        assert_eq!(held.state(), JobState::Dispatched, "held, not closed");
+        assert!(held.outcome.is_none() && held.latest_score().is_none());
+        assert!(held.verification.is_none());
+        assert!(!held.invocations.iter().any(|i| i.role == Role::Verifier));
+        assert!(records.introspections.is_empty());
+        assert_eq!(crate::disk::read_hold(&athena.state, &first), Some(low));
+        let candidate_fingerprint = held
             .candidate
             .as_ref()
             .and_then(|c| c.fingerprint.clone())
-            .expect("the stopped job recorded its candidate");
-        // The job's directory is gone, but its candidate is kept, at the stage that stopped.
-        assert!(!athena.state.job_dir(&first).exists());
+            .expect("the held job recorded its candidate");
+        // Its candidate is kept, at the stage that stopped; the verifier's snapshot is gone.
+        assert!(!athena.state.job_dir(&first).join("verify").exists());
         assert_eq!(
             athena.state.read_resume(&first).map(|m| m.stage),
             Some(crate::state::ResumeStage::Verifier)
@@ -1694,6 +1707,102 @@ mod produce_and_verify_order_tests {
         assert!(readme_at_head(&athena).contains("A demo."));
         assert_eq!(athena.state.read_resume(&first), None, "the mark is spent");
         assert_eq!(athena.state.read_resume(&retry.job), None);
+    }
+
+    #[test]
+    fn low_disk_before_the_checks_holds_after_the_idle_sweep_and_a_retry_resumes_at_the_checks() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("repo");
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::low_once_built,
+            counting(counts.clone(), Some(root.clone())),
+        );
+        // An idle job's build directory is Athena's to remove; a directory that is not a job's, and the
+        // idle job's source, are not.
+        let idle = root.join("jobs/20261026-000100-aaa1");
+        std::fs::create_dir_all(idle.join("target/produce")).unwrap();
+        std::fs::write(idle.join("target/produce/big"), vec![1u8; 4096]).unwrap();
+        std::fs::create_dir_all(idle.join("work")).unwrap();
+        std::fs::write(idle.join("work/source.rs"), b"fn main() {}").unwrap();
+        let foreign = root.join("jobs/scratch");
+        std::fs::create_dir_all(foreign.join("target")).unwrap();
+        std::fs::write(foreign.join("target/keep"), b"x").unwrap();
+        let elsewhere = root.join("elsewhere/target");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("keep"), b"x").unwrap();
+
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let first = proposal.job.clone();
+        let ui = Lines::default();
+        let error = athena
+            .go(first.as_str(), AcceptedBy::User, &ui)
+            .expect_err("low space before the checks holds the job");
+        let low = error
+            .downcast_ref::<crate::disk::LowDisk>()
+            .copied()
+            .unwrap_or_else(|| panic!("not a hold: {error:#}"));
+        let said = ui.0.lock().unwrap().clone();
+        let at = |prefix: &str| said.iter().position(|l| l.starts_with(prefix));
+        let removed = at("disk       removed build directory of job 20261026-000100-aaa1")
+            .unwrap_or_else(|| panic!("the idle sweep ran: {said:#?}"));
+        let held = at("held       environment: low disk").expect("held");
+        assert!(removed < held, "{said:#?}");
+        assert!(
+            !said.iter().any(|l| l.contains("athena retry")),
+            "{said:#?}"
+        );
+        assert!(!idle.join("target").exists());
+        assert!(idle.join("work/source.rs").exists());
+        assert!(foreign.join("target/keep").exists());
+        assert!(elsewhere.join("keep").exists());
+
+        // The checks never ran, and neither did the verifier; the job is held with its records.
+        assert!(!said.iter().any(|l| l.starts_with("checks     ")));
+        let (planner, producer, read_before, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 0));
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = &records.jobs[first.as_str()];
+        assert_eq!(job.state(), JobState::Dispatched);
+        assert!(job.outcome.is_none() && job.latest_score().is_none());
+        assert!(job.candidate.is_some());
+        assert!(records.introspections.is_empty());
+        assert_eq!(crate::disk::read_hold(&athena.state, &first), Some(low));
+        assert_eq!(
+            athena.state.read_resume(&first).map(|m| m.stage),
+            Some(crate::state::ResumeStage::Checks)
+        );
+
+        // Space is back: the retry resumes the kept candidate with no planner or producer run, runs the
+        // checks and lands. The held job's mark and hold are spent.
+        std::fs::write(root.join("freed"), b"").unwrap();
+        let (retry, _) = athena.retry(first.as_str(), &Quiet).unwrap();
+        assert_eq!(retry.reader_error, None);
+        let (_, _, read_after, _) = counts.all();
+        assert!(read_after > read_before);
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(retry.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(counts.all(), (0, 1, read_after, 1));
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter().any(|l| l.starts_with("resume     ")),
+            "{said:#?}"
+        );
+        assert!(
+            said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+        assert_eq!(athena.state.read_resume(&first), None);
+        assert_eq!(crate::disk::read_hold(&athena.state, &first), None);
     }
 
     #[test]

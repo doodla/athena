@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-111730-dyh4",
+  "round": 2,
+  "at": "2026-10-31T11:27:11.307956202Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Every verifier write-probe failure becomes a LowDisk hold with a made-up free = 0, which can loop for errors that are not about disk space.",
+      "evidence": "verifier_environment_problem maps any write_probe error to the low-disk text (disk.rs:224-226). Under the plan, a permission error or read-only workspace becomes a hold that says 0 B free. The next drain pass's dispatch gate reads the real free space, finds enough, runs the retry (one reader call), rebuilds the candidate and runs the checks, then fails the probe and holds again. This repeats every pass until the budget runs out, and no person is ever shown a failure. Fix: Hold only when the probe error means the disk is full (io::ErrorKind::StorageFull, or raw OS errors ENOSPC/EDQUOT). Close any other probe error as a failure that names the probe error, not low disk. Criterion 7 is about the low-disk path, so that path still holds. Otherwise, state the loop risk in the decisions.md entry.",
+      "location": "Plan decision 2; crates/athena-core/src/disk.rs:214-227",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The drain note for a held run says the item 'is left queued', but under the hold design the job is Dispatched (interrupted).",
+      "evidence": "drain.rs:1296 prints 'item {} is left queued: ...' for any held run. The plan's step 8 only says to confirm `Run.held` covers LowDisk. It does not change this text, so after a late-gate hold the maintainer would read 'left queued' for a job that the next pass picks up as interrupted. Fix: In step 8, reword the held note (and the ItemEnd::Held pass_over text at ~1927) for the low-disk case, for example 'is held; the next drain resumes it'. Assert the wording in the criterion 1 drain test.",
+      "location": "Plan step 8; crates/athena-cli/src/drain.rs:1295-1301 and 1927",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The binary status test's seam is left open, and its fallback (write_hold on a Dispatched fixture job) does not run the hold path.",
+      "evidence": "The plan's open question says it is not yet known whether binary.rs can share a repo and state directory with an in-process Athena. The fallback writes the marker directly. With the fallback, the test proves only that status shows a hold marker it is given, not that a real late-gate hold leaves state that status reads correctly. Fix: Prefer making the hold in-process (Athena::go with with_free_space dropping after the producer) in the same state root, then spawn `athena status`. Use the write_hold fallback only if that is impossible, and say so in the change description.",
+      "location": "Demonstration for criterion 5; plan step 11",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "'Job stays held' is shown by a new job B held at dispatch rather than A itself; the test should say so.",
+      "evidence": "In pass 2 the drain retries interrupted A into B (steward.rs:382-396 then leaves A out), and B holds at the dispatch gate. Criterion 3 says 'leaves the job held'. Fix: Have the test assert that the item (A's request) has exactly one live held job after each pass, and name that reading in its doc comment.",
+      "location": "Demonstration for criterion 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's main code claims against the snapshot and they hold. A LowDisk error from `run` is marked held and ends the item without using an attempt (drain.rs:2982, 1289-1303, 1398). `interrupted_work` lists a Dispatched job with no process and leaves out a job that a later request already retries (steward.rs:382-396). The drain retries interrupted items (drain.rs:1373, 2896). `resume_seed` rebuilds the kept candidate only while main has changed nothing outside records/ (run/mod.rs:408-411). The stale scope_guard test is at line 1375 and still asserts Failed and Environment. The `go_with_disk`, `set_free`, `low_once_verifying` and `with_free_space` seams all exist. The plan keeps the earlier job's hold design and adds the two fixes the earlier review asked for: rewriting the scope_guard test and rewording the decisions.md entry so the backtest passes. Reading 'no `athena retry`' as 'no person runs the command' matches the accepted reading ('the retry or next go resumes'), and the plan records that reading in decisions.md. Each behavior demonstration runs production entry points (`drain::drain` over the real steps, `Athena::go` and `Athena::retry`, the spawned binary, and the real decisions.md for the backtest), and each would fail on the old Failed path. Criterion 9 is shown by running the real workspace commands. Four findings remain, none blocking: (1) treating every verifier write-probe failure as a low-disk hold with free = 0 can loop through paid retries for errors that are not about disk space; (2) the drain's 'left queued' note becomes wrong for a held Dispatched job; (3) the binary status test may fall back to writing the hold marker directly instead of producing a real hold; (4) the criterion 3 test should say that the held job after pass 2 is the retry job B. No athena.toml field is added, and the work fits one producer run."
+}
