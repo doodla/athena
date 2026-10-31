@@ -3009,7 +3009,8 @@ pub fn check_reading_references(
 /// ([`check_governance_coverage`]), then the reading's text against the boundary words and its deliverables
 /// against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
 /// there is no repository to compare with), then the repo paths its text relies on against the same files
-/// ([`check_reading_references`]). It applies to a first attempt as well as a retry.
+/// ([`check_reading_references`]). It applies to a first attempt as well as a retry. It runs
+/// [`refusing_check`] and drops the name of the check that refused.
 pub fn check_reading_acceptance(
     reading: &Reading,
     request: &str,
@@ -3017,12 +3018,51 @@ pub fn check_reading_acceptance(
     referenced: &[EarlierAttempt],
     repo_files: Option<&BTreeSet<String>>,
 ) -> Result<()> {
-    check_prior_result_and_scope(reading, &continued_jobs(request, attempt, referenced))?;
-    check_criteria_evidence(reading)?;
-    check_code_survey(reading)?;
-    check_governance_coverage(reading, request)?;
-    check_boundary_and_repo_files(reading, repo_files)?;
-    check_reading_references(reading, repo_files)
+    match refusing_check(reading, request, attempt, referenced, repo_files) {
+        None => Ok(()),
+        Some((_, error)) => Err(error),
+    }
+}
+
+/// Runs the checks of [`check_reading_acceptance`], in its order, and returns the name of the first one that
+/// refuses together with its error; `None` when the reading is accepted.
+///
+/// Root cause this seam serves: refusal and matching rules (the parts parser, stems, stop lists and the
+/// reading checks) were specified by reasoning and hand-checked on a few cases, and nothing executed them
+/// against real request and reading shapes before they were planned or landed, so a gap (numbered `N.` and
+/// `N)` parts, stop-list and stem order, a job cited but not relied on, a brand word read as a symbol) showed
+/// up only in critic rounds. Jobs 20261029-111202-2bpc and 20261030-060751-5389 each failed in planning that
+/// way. The corpus in `crates/athena-core/tests/refusal_corpus.rs` runs real shapes through this function and
+/// asserts which check refuses each one, and it fails when a `step!` line below has no corpus case in which
+/// that check refuses. A new check is added as one `step!(check_name(..))` line here, never as a direct call
+/// in [`check_reading_acceptance`].
+///
+/// The names come from the called functions (`stringify!`), so no second list can drift from the real one.
+/// Order, short-circuit and error text are those of the gate, so this adds no refusal.
+pub fn refusing_check(
+    reading: &Reading,
+    request: &str,
+    attempt: Option<&EarlierAttempt>,
+    referenced: &[EarlierAttempt],
+    repo_files: Option<&BTreeSet<String>>,
+) -> Option<(&'static str, anyhow::Error)> {
+    macro_rules! step {
+        ($name:ident($($arg:expr),*)) => {
+            if let Err(error) = $name($($arg),*) {
+                return Some((stringify!($name), error));
+            }
+        };
+    }
+    step!(check_prior_result_and_scope(
+        reading,
+        &continued_jobs(request, attempt, referenced)
+    ));
+    step!(check_criteria_evidence(reading));
+    step!(check_code_survey(reading));
+    step!(check_governance_coverage(reading, request));
+    step!(check_boundary_and_repo_files(reading, repo_files));
+    step!(check_reading_references(reading, repo_files));
+    None
 }
 
 /// Governance paths a request can name, and the whole-word lowercase phrase that names each. A path ending in

@@ -1278,6 +1278,19 @@ pub struct PlannerInputs {
     pub revision: Option<PlanRevision>,
 }
 
+/// The planner's rule for a plan that adds or changes a refusal or matching rule. The planner has Read, Grep
+/// and Glob only, so it maps input forms to corpus cases it has read and names the run for the producer and
+/// verifier; it cannot run the corpus and must not cite results it did not see.
+///
+/// Root cause: such rules were specified by reasoning and hand-checked on a few cases, and never executed
+/// against real request and reading shapes before they were planned or landed (jobs 20261029-111202-2bpc and
+/// 20261030-060751-5389). The corpus is `crates/athena-core/tests/refusal_corpus.rs`.
+const REFUSAL_CORPUS_RULE: &str = "A plan that adds or changes a refusal or matching rule (a parser, a stem list, a stop list or a reading check) must do three things. \
+First, list the input forms the rule handles, such as dash or star bullets, `1.` / `1)` / `(a)` parts, a request that cites a job without relying on it, a retry complaint, a crate-relative path, a brand word or an environment variable that is not a symbol. \
+Second, read `crates/athena-core/tests/refusal_corpus.rs` and map each input form to a corpus case by id; for a form with no case, list the corpus case a plan step adds, with its source and its expected outcome. \
+Third, make `cargo test -p athena-core --test refusal_corpus` a demonstration that the producer and the verifier run. \
+You cannot run it: cite only the case ids you read, never a result you did not see.";
+
 /// The planner's brief: the request, the reading with each criterion numbered by kind, the checks, the
 /// verifier's commands and the state of the deliverables; a revision also quotes the previous plan and every
 /// finding on it.
@@ -1344,7 +1357,7 @@ pub fn planner_brief(inputs: &PlannerInputs) -> String {
     }
     let _ = writeln!(
         out,
-        "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above. Each names the production entry point it calls, its guards and preconditions, the seam, fake or fixture and how it is injected, and whether that seam exists today (checked by reading the code) or which plan step adds it. Never put the logic under test inside the test double."
+        "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above. Each names the production entry point it calls, its guards and preconditions, the seam, fake or fixture and how it is injected, and whether that seam exists today (checked by reading the code) or which plan step adds it. Never put the logic under test inside the test double.\n\n{REFUSAL_CORPUS_RULE}"
     );
     out
 }
@@ -2097,6 +2110,23 @@ mod tests {
                 .text
                 .contains("major finding when a demonstration names no seam")
         );
+    }
+
+    #[test]
+    fn planner_prompt_and_brief_carry_the_refusal_corpus_rule() {
+        let brief = planner_brief(&planner_inputs(None));
+        let report = brief.split("## Report").nth(1).expect("report section");
+        for needle in [
+            "refusal or matching rule",
+            "list the input forms",
+            "corpus case",
+            "crates/athena-core/tests/refusal_corpus.rs",
+            "cargo test -p athena-core --test refusal_corpus",
+            "You cannot run it",
+        ] {
+            assert!(report.contains(needle), "missing wording: {needle}");
+        }
+        assert!(crate::PLANNER_FRAME.text.contains("refusal_corpus"));
     }
 
     #[test]

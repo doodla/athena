@@ -3939,3 +3939,50 @@ should replace those estimates with its figures.
   `check_boundary_and_repo_files`, `path_exists_in`, `read_for`). Measured: `cargo test -p athena-core reading::`
   (the new tests `a_reading_that_relies_on_an_absent_path_is_refused_and_the_path_is_named` and
   `the_reference_*`). The share of readings newly refused (expected near 3%) was not measured.
+
+## D148 · Refusal and matching rules are run against a stored corpus of real request and reading shapes
+
+- **Case:** The failure class `plan-for-new-refusal-rule-untested-against-real-request-shapes-fails-planning-rounds`
+  was recorded in 2 jobs. Jobs 20261029-111202-2bpc and 20261030-060751-5389 each failed in round 3 of planning.
+  The gaps were found by the critic one round at a time: numbered `N.` and `N)` parts, the order of the stop list
+  and the stems, a job cited but not relied on, and a brand word or an environment variable read as a symbol.
+- **Root cause:** Refusal and matching rules (the parts parser, stems, stop lists and the reading checks) were
+  specified by reasoning and hand-checked on a few cases. Nothing executed them against real request and reading
+  shapes before they were planned or landed, so every gap surfaced in a critic round.
+- **Decision:** (1) `reading::refusing_check` runs the checks of `check_reading_acceptance` in the same order
+  from one `step!` line each and returns the first refusing check's name with its error;
+  `check_reading_acceptance` is a thin wrapper, so outcomes and error text are unchanged. (2)
+  `crates/athena-core/tests/refusal_corpus.rs` stores at least twelve labeled shapes (source job, verbatim or
+  rebuilt from the job brief, form tags, a pinned bullet count, the expected outcome) and runs each through the
+  gate. (3) A mechanism test fails when a `step!(check_*(..))` line has no corpus case in which that check
+  refuses, so a new reading check cannot land without cases; a second test shows it on the real source with one
+  invented step line. (4) The planner prompt carries one short clause and the planner brief's Report section
+  the full rule: a plan that adds or changes a refusal or matching rule lists the input forms, maps each to a
+  corpus case by id (or lists the case a step adds), and makes `cargo test -p athena-core --test refusal_corpus`
+  a demonstration the producer and verifier run. The planner reads and maps; it cannot run the corpus and does
+  not cite results it did not see.
+- **Relation to the replay:** The replay (`replay_cases`) runs accepted readings from `records/` through the base
+  and the candidate checkers at verification, after the code exists. The corpus is its planning-time,
+  refuse-side complement: it lives in the repository, holds refusals as well as acceptances, and is readable by
+  a planner that cannot see `records/`. The replay is unchanged.
+- **Limit:** The mechanism sees `check_*` steps only. A helper added inside a check, or a change to `is_bullet`,
+  `request_text_acceptance`, a stem list or a stop list, adds no step. Every case pins its bullet count and a
+  test fixes the list of input forms, so such a change moves a visible expectation; the rest is the planner rule,
+  which is prose only.
+- **Alternatives:** (a) A hand-kept list of check names beside the function: it can drift, which is the gap this
+  removes. (b) Match error text to find the refusing check: free prose, brittle. (c) A JSON corpus file: needs
+  round-trip coverage and a parser for no gain over Rust cases. (d) Feed the corpus into the replay: it changes
+  the declared-share arithmetic. (e) Tell the planner to run the corpus: it has Read, Grep and Glob only, so
+  the results would be invented.
+- **Tradeoff:** Adding a reading check means adding a refusing case; the cost is a few lines. Fixture request
+  texts are rebuilt from job briefs and labeled so, because `records/` is not in the snapshot; stored text can
+  replace them later. The `N)` and `(a)` cases pin the parser's current behavior (no bullets), a known gap.
+- **Reversal cost:** Low. Delete the test file, the `refusing_check` wrapper split and the planner clause.
+- **Follow-ups:** The parts-coverage check and the prior-job existence check of jobs 20261029-111202-2bpc and
+  20261030-060751-5389 add cases to this corpus when they land. No refusal rule is tightened here (0% newly
+  refused readings).
+- **Provenance:** Read: `crates/athena-core/src/reading.rs` (`check_reading_acceptance`, `is_bullet`,
+  `request_text_acceptance`, `continued_jobs`), `crates/athena-context/src/briefs.rs` (`planner_brief`),
+  `crates/athena-context/prompts/planner.md`. Measured: `cargo test -p athena-core --test refusal_corpus`,
+  `cargo test -p athena-context planner_prompt_and_brief_carry_the_refusal_corpus_rule`,
+  `cargo test -p athena-cli --test budgets`.
