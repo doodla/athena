@@ -7,6 +7,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- `athena drain` works the order `athena plan` prints, and says what it passes over. Cause: the drain built its
+  plan once, before the first job, and worked that frozen list, while `athena plan` builds it fresh on each run.
+  A priority record added while a job ran, a job that ended, or a request queued after the start never reached
+  the drain, so a request lowered with `athena priority` could still be dispatched ahead of urgent ones. Its
+  skips (refused, held, in a loop) went only to the report's notes, and an item the run never reached got no
+  line, so a log could leave out an item that `athena plan` listed first (observed 2026-10-30, where one
+  group-1 request was never mentioned). Two more causes were weighed and cannot be told apart from the
+  records alone, so they are named here: the drain approves in-limit proposals and adds them to its plan, which
+  `athena plan` never does, so the drain can order jobs `athena plan` does not print; and a binary built before
+  the dependency rules (a cited job id counted as a dependency) would hold a request that only cites a job id
+  (found by reading the history, not reproduced). Fix: after each item (each group under `drain_concurrent`)
+  the drain reads the queue again and builds the plan again through the same `Drain::prepare` and
+  `Plan::build_with` that `athena plan` uses; `batches_for` only drops what this run has already tried and never
+  reorders, so the drain has no ordering of its own. The jobs it approved, the readings it made and the items it
+  refused are remembered across plans, so nothing is approved, read or paid for twice. New log line: when a
+  planned item is not worked the drain prints one `plan       <id> passed over: <reason>` line, once per run:
+  refused, held by a failed dependency, in a loop, not ready (needs accepting), held for disk or budget,
+  skipped, over the budget or the job limit, or not reached because the run ended first (naming the path it
+  shares with the last group when that is why it waited). `plan::shared_path` names that path by the rule the
+  plan groups by.
+
 ### Added
 
 - The drain's in-flight table (async drain build job 3, `docs/design/async-drain.md` sections 7 and 12 and decision

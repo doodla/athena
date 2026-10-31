@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-165704-qfqs",
+  "round": 1,
+  "at": "2026-10-30T23:35:52.567919119Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Re-plans lose the items drain approved at the start, which would break existing approval tests (criterion 4).",
+      "evidence": "drain_with adds approved items to view.items and view.plan by hand (approve_all, then steps.plan_entry, at 2012-2038). Neither the Stub's queue() nor any other fake returns those job-of-X items: it rebuilds items from read_items, items and interrupted only. Existing tests assert 'run job-of-…' / 'land job-of-…' (2 occurrences). A second-pass queue() view without them, with approvals not repeated, means they are never started. The real queue lists them through approved_work, so the fake and real paths would also diverge. Fix: Keep per-run state across re-plans: carry the approved items and their plan entries, plus each item's read flag, from the first pass into every fresh view before prepare (merge by job id). Say in the plan how a fresh view is merged with this state, and name the existing approval tests as the regression guard.",
+      "location": "Plan step 4 (re-plan from a fresh steps.queue(), approvals taken only once); crates/athena-cli/tests/drain.rs:109-137; drain.rs:2012-2038",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The criterion 2 test passes on today's code, so it does not show the fix.",
+      "evidence": "For a static queue, plan() and drain_with both call queue() then prepare(), which calls Plan::build_with, and run_serial works the batches in plan.groups order (1777-1781). The plan itself says the cited-id case 'cannot be reproduced' with current reading.rs. Its 'fails without' text is hypothetical ('If drain used a different order…'). Fix: Make the test exercise something the base code gets wrong. For example, change the queue while the first item runs (queue a new request, or add a priority record or job end), call drain::plan at that moment, and assert the drain's later dispatches equal that plan's order. Alternatively, also assert in this test that a held or refused planned item gets its passed-over line (the request pairs these). Label the static-queue part as a regression guard.",
+      "location": "Demonstrations, Criterion 2 (drain_order_equals_plan_order)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A 'clash' line for an item that will be worked in a later wave is a false 'passed over'. The once-per-run set then hides that item's real final reason.",
+      "evidence": "Under the re-plan loop, an item in a later group that shares a path with the current wave is only deferred; the next wave dispatches it. Decision 4 logs passed-over once per id per run (BTreeSet). An item logged for a clash that later stops for budget or job limit, or is never reached, gets no line with its real reason. Fix: Log a passed-over line only when an item finally ends unworked. Either drop the clash reason from pass_over (it is a deferral, which could get its own 'waits for' line), or log the clash only for an item still waiting on a clash when the run ends. Let the end-of-run sweep in step 6 give each unworked planned item exactly one line with its final reason.",
+      "location": "Plan step 5 (later-group clash → pass_over) and Open question 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The weighing of causes leaves out one real difference between drain and plan: drain approves proposals within its rung and adds them to its plan, while plan() does not.",
+      "evidence": "drain_with calls d.approve_all(view.approvable) and adds the approved jobs' entries before prepare. plan() (2175-2186) never approves. So drain's order can include items athena plan does not print. Fix: Name this in the cause analysis and in the CHANGELOG entry. Build the criterion 2 fixture with no approvable proposals, or state that approved jobs join the order as plan would place them once approved.",
+      "location": "Decision 2 / Open questions; drain.rs:2012-2038",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The fallback would keep a second dispatch path that ignores re-planning. Read-ahead is a test-only seam in production.",
+      "evidence": "The default Steps::read_ahead returns 0 (drain.rs:499-501). Only a test fake overrides it (3499). RealSteps does not. Fix: Answer open question 2 from this evidence: production never reads ahead. Either reset the pump flags per wave or rebuild the upcoming list per wave, rather than keeping a single-pass path. If the old path is kept, say that read-ahead mode does not follow the live plan order.",
+      "location": "Risks, read-ahead mitigation ('run the old single-pass path when read_ahead > 0')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The grep looks only for build_with/sort_by_key/fn prepare. A second ordering inside the new batches_for helper (filter/position/sort_by) would not show.",
+      "evidence": "Step 2 introduces batches_for(view, plan, tried), which builds the dispatch batches. Any reorder there escapes a grep for sort_by_key. Fix: Also read batches_for and assert it only filters plan.groups (minus tried) in order. Better, add a unit test showing batches_for(view, plan, ∅) flattened equals plan.order for planned items.",
+      "location": "Demonstrations, Criterion 5",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan memory's no-re-read promise is checked only by an unnamed test.",
+      "evidence": "No demonstration names the test that counts reads across re-plans. Fix: Name it in the criterion 3 or 4 demonstrations. Use an underspecified item in a Stub with several waves, and assert one 'read' log entry and one 'plan … reading it' line.",
+      "location": "Risks, 'A test counts read calls'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the code correctly. drain_with (drain.rs:2009-2078) builds one plan before the first job and works that fixed list. Refused, held and cyclic items reach only Report.notes (2060-2071), and items never reached get nothing. plan() (2175) runs the same prepare/Plan::build_with path. Re-planning through that shared path and adding a once-per-item \"passed over\" UI line is the right root-cause fix, with no second ordering added. Three design gaps would leave a criterion unshown or break the existing tests. (1) Re-plans take a fresh steps.queue() but approvals happen only once. The test Stub's queue() (tests/drain.rs:109-137) never lists the approved job-of-X items, and existing tests expect those jobs to run, so they would be dropped and criterion 4 would fail. (2) The criterion 2 test, by the plan's own analysis, passes on the base code. Static drain order already equals plan order, so the test does not fail without the change. (3) Logging an item as \"passed over\" for a path clash when the re-plan loop will work it in a later wave gives a false line. Because the line is logged once per run, the item's real final reason would also be suppressed. Smaller points: drain approves proposals that plan() does not; read-ahead is a test-only seam; and criterion 5's grep cannot catch a second ordering hidden inside the new batches_for helper."
+}

@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-165704-qfqs",
+  "round": 2,
+  "at": "2026-10-30T23:40:37.105686741Z",
+  "invocation_seq": 9,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Notes written inside `prepare` will repeat on every re-plan",
+      "evidence": "`prepare` itself writes notes on every call: the 'item X was not read to fill its plan: no room…' note (1510) and one 'plan order contradicts priority' note per violation (1556). The plan moves only the refused and cyclic notes to the first pass. Calling `prepare` once per wave will repeat these notes in `Report.notes` once per wave. Existing tests check notes with `.any(..)` (tests/drain.rs 437, 878), so they still pass, but the report the user reads will show duplicates. Fix: Store notes per run without duplicates: skip a note whose text is already in `st.notes`, or have `prepare` take a first-pass flag for its notes. Add an assertion that the 'no room' note appears only once.",
+      "location": "Decision 1 / Step 5 (re-plan loop calling `prepare` every wave); drain.rs:1510-1513 and 1556-1558",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The CHANGELOG should not give the frozen plan as the cause of e5sg's omission",
+      "evidence": "e5sg's id (20261029-233021) shows it was queued before drain-24 ran on 2026-10-30. So a plan frozen at the start cannot explain why e5sg was left out, unless e5sg's state changed during the run. The plan admits the cause cannot be settled, yet its CHANGELOG step lists the frozen plan first among 'the causes'. Fix: In the CHANGELOG, say which cause explains which observation. The frozen plan explains a priority record added mid-run (drain-23 and 5c0p). For e5sg, the cause is unresolved: possibly a binary older than 9f3946d, found by reading. Its omission is now visible through the passed-over line.",
+      "location": "Decision 3 / Step 10 CHANGELOG entry",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Drain now starts requests queued after it began; say so",
+      "evidence": "A fresh `RealSteps::queue` (drain.rs 2514-2568) also brings in `interrupted_work` and requests queued mid-run. So a drain will now start work that did not exist when it began, limited only by `tried`, `max_jobs` and the budget. This is intended for criterion 2, but it changes what a drain run covers. Fix: State this change in the CHANGELOG entry and the drain.rs module text.",
+      "location": "Decision 1 (re-plan from a fresh `steps.queue()`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The criterion 1(a) test is only a regression guard",
+      "evidence": "The plan says the test with the record present before the start already passes on base code. The mid-run test 1(b) is the one that fails without the fix, so the criterion is still shown. Fix: Label 1(a) as a regression guard in its doc comment.",
+      "location": "Demonstration for criterion 1(a)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against drain.rs, plan.rs and tests/drain.rs. Its claims about the code hold. `drain_with` (drain.rs:1995) builds the plan once through `prepare` and `Plan::build_with`, then hands fixed batches to `run_serial`/`run_parallel`. Refused and cyclic items reach only `d.note`. `plan()` (2175) calls the same `prepare` and never approves. `RealSteps::entry_of` takes priority from `plan_entry` and the priority records. The seams the plan names all exist: `Stub` (40, with `stop_when_running` and `drop_landed`), `RecordingLander` (1336), `real_steps` (2448), `commit_records_to` (3575) and the Sync fake (~4145). The fix rebuilds the order after each wave through the same `prepare`, and `batches_for` only filters. A `Carry` keeps approved and already-read items, and a `tried` set that only grows guarantees the loop ends. This removes drift at its source and adds no second ordering, so it is sound. Each criterion has a demonstration that would fail on base code: the mid-run priority test, the mid-run plan-equality test, the passed-over table where base code logs 0 lines, and the `batches_for` unit test against `plan.order`. The remaining issues are minor: notes from `prepare` repeat on every re-plan; the CHANGELOG should not give the frozen plan as the e5sg cause; and drain now picks up requests queued mid-run, which should be stated. No athena.toml field is added. The scope fits one producer run, though it is large."
+}

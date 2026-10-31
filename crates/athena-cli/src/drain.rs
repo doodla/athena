@@ -11,6 +11,18 @@
 //!   parallel ([`Report::plan_groups`]); [`drain_concurrent`] runs the items of one group side by side, up to
 //!   `[parallel] max_concurrency` (default 1, which is [`drain`]'s one job at a time). The pass is
 //!   deterministic code and calls no model of its own; nothing is defaulted into a plan.
+//! - **The drain follows the plan as it stands.** The drain does not keep the plan it built at its start. After
+//!   each item (each group, under [`drain_concurrent`]) it reads the queue again and builds the plan again
+//!   through the same function `athena plan` uses (`Drain::prepare`, which calls
+//!   [`athena_core::plan::Plan::build_with`]), so a priority record, a job end or a request queued meanwhile
+//!   changes what is worked next. [`batches_for`] only filters that plan's groups: it drops what this run has
+//!   already tried and never reorders. Memory kept across these plans: the jobs the drain approved, the
+//!   readings it made, and the items it refused to read, so nothing is approved, read or paid for twice.
+//!   *Passed-over log line.* An item that is planned but not worked gets one line, `plan       <id> passed
+//!   over: <reason>`, once per run: refused, held by a failed dependency, in a loop of dependencies, not
+//!   ready (needs accepting), held for disk or budget, skipped, over the budget, over the job limit, or not
+//!   reached because the run ended first (with the path it shares with the last group when that is why it
+//!   waited).
 //! - **Concurrency.** A group is worked by up to `max_concurrency` workers; the next group starts only when
 //!   the group before it is done, so an item that depends on another starts after it has finished. Landing
 //!   and rating go one at a time (a lock), and every model call's cap is held against the budget while it is
@@ -150,7 +162,7 @@
 
 use athena_core::audience::{LivePage, Page, Target};
 use athena_core::gh::GhCli;
-use athena_core::plan::{JobEnd, Plan, PlanEntry, Refusal};
+use athena_core::plan::{JobEnd, Plan, PlanEntry, Refusal, shared_path};
 use athena_core::pr::LinkState;
 use athena_core::state::{Stage, StageSink};
 pub use athena_core::status::{BUILD_PATHS, touches_build};
@@ -965,6 +977,24 @@ struct State {
     pump_done: bool,
     /// The read-ahead has ended, so no worker waits on a reading that will not finish.
     pump_gone: bool,
+    /// Items this run has handed to a worker; a new plan never offers them again.
+    tried: BTreeSet<String>,
+    /// Items that have a "passed over" line, so none gets two.
+    passed_over: BTreeSet<String>,
+    /// What each new plan of this run needs to remember from the ones before.
+    carry: Carry,
+}
+
+/// What a drain keeps from one plan to the next, merged into each fresh queue view by `Drain::prepare`. A
+/// fresh view may not list a job the drain approved, and must not make it read or pay for an item twice.
+#[derive(Clone, Default)]
+struct Carry {
+    /// Jobs approved in this run, with their plan entries.
+    approved: Vec<(Item, Option<PlanEntry>)>,
+    /// Items already read by the planning pass: whether the item counts as read, and its entry after reading.
+    prepared: BTreeMap<String, (bool, PlanEntry)>,
+    /// Items the planning pass refused after trying to read them.
+    forced: Vec<Refusal>,
 }
 
 /// Sets a flag of the shared state and wakes every waiter when it is dropped, so it happens on every way out
@@ -1081,6 +1111,36 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
 
     fn note(&self, text: String) {
         self.st().notes.push(text);
+    }
+
+    /// A note that a new plan of the same run would only repeat.
+    fn note_once(&self, text: String) {
+        let mut st = self.st();
+        if !st.notes.contains(&text) {
+            st.notes.push(text);
+        }
+    }
+
+    /// Logs that the planned item `id` is not worked, with the reason: one line per item per run.
+    fn pass_over(&self, id: &str, reason: &str) {
+        let first = self.st().passed_over.insert(id.to_string());
+        if first {
+            self.ui.line(&format!(
+                "plan       {id} passed over: {}",
+                one_line(reason)
+            ));
+        }
+    }
+
+    /// The reason on the last job line of `item`, else `default`.
+    fn last_reason(&self, item: &str, default: &str) -> String {
+        let st = self.st();
+        st.jobs
+            .iter()
+            .rev()
+            .find(|l| l.item == item)
+            .and_then(|l| l.reason.clone())
+            .unwrap_or_else(|| default.to_string())
     }
 
     /// Ends the run for `stop`, unless another worker already found a reason.
@@ -1486,13 +1546,55 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
     /// the run cap for `drain`, which goes on to run the item, and the read cap alone for `plan`, which runs
     /// nothing.
     fn prepare(&self, view: &mut QueueView, reserve: f64) -> Plan {
-        let mut forced: Vec<Refusal> = Vec::new();
+        // A view made after this run began is joined with what the run remembers: the jobs it approved (a
+        // queue may not list them), the readings it made and the items it could not read.
+        let carry = self.st().carry.clone();
+        let absent: Vec<Item> = carry
+            .approved
+            .iter()
+            .map(|(item, _)| item)
+            .filter(|item| !view.items.iter().any(|i| i.job == item.job))
+            .cloned()
+            .collect();
+        if !absent.is_empty() {
+            let (read, unread): (Vec<Item>, Vec<Item>) = view.items.drain(..).partition(|i| i.read);
+            view.items = read.into_iter().chain(absent).chain(unread).collect();
+        }
+        let mut entry_added = false;
+        for entry in carry.approved.iter().filter_map(|(_, e)| e.as_ref()) {
+            if !view.plan.iter().any(|p| p.id == entry.id) {
+                view.plan.push(entry.clone());
+                entry_added = true;
+            }
+        }
+        if entry_added {
+            let items = &view.items;
+            let place = |id: &str| items.iter().position(|i| i.job == id).unwrap_or(usize::MAX);
+            view.plan.sort_by_key(|e| place(&e.id));
+        }
+        for item in &mut view.items {
+            if let Some((read, _)) = carry.prepared.get(&item.job) {
+                item.read = *read;
+            }
+        }
+        for entry in &mut view.plan {
+            if let Some((_, stored)) = carry.prepared.get(&entry.id)
+                && !entry.missing().is_empty()
+            {
+                *entry = stored.clone();
+            }
+        }
+        let mut forced: Vec<Refusal> = carry.forced.clone();
         for idx in 0..view.items.len() {
             // An interrupted job was read before it ran; its retry reads the request again.
             if view.items[idx].read || view.items[idx].interrupted {
                 continue;
             }
             let id = view.items[idx].job.clone();
+            // Read by an earlier plan of this run: not read or paid for again.
+            if carry.prepared.contains_key(&id) {
+                continue;
+            }
             let Some(pos) = view.plan.iter().position(|e| e.id == id) else {
                 continue;
             };
@@ -1507,7 +1609,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 st.started < self.limits.max_jobs && st.budget.fits(reserve)
             };
             if !room {
-                self.note(format!(
+                self.note_once(format!(
                     "item {id} was not read to fill its plan: no room in the job limit or the budget"
                 ));
                 continue;
@@ -1530,21 +1632,25 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 let why = read.error.as_deref().unwrap_or("no job was made");
                 let mut r = Refusal::lacking(&id, &title, vec!["reading".into()]);
                 r.reason = format!("the request could not be read: {why}");
+                self.remember_reading(&id, false, &view.plan[pos], Some(&r));
                 forced.push(r);
                 continue;
             }
             view.items[idx].read = read.runnable;
+            let mut refusal = None;
             if !read.runnable && view.plan[pos].missing().is_empty() {
                 let mut r = Refusal::lacking(&id, &title, vec!["capability".into()]);
                 r.reason =
                     "it was read, but no capability fits the request, so there is nothing to run"
                         .into();
+                refusal = Some(r.clone());
                 forced.push(r);
             } else if !view.plan[pos].missing().is_empty() {
                 self.note(format!(
                     "item {id} was read, but its plan is still incomplete; correct or answer it with `athena correct {id}`"
                 ));
             }
+            self.remember_reading(&id, view.items[idx].read, &view.plan[pos], refusal.as_ref());
         }
         let entries: Vec<PlanEntry> = view
             .plan
@@ -1554,10 +1660,72 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             .collect();
         let mut plan = Plan::build_with(&entries, &self.steps.job_history());
         for contradiction in plan.priority_violations(&entries) {
-            self.note(format!("plan order contradicts priority: {contradiction}"));
+            self.note_once(format!("plan order contradicts priority: {contradiction}"));
         }
         plan.refused.extend(forced);
         plan
+    }
+
+    /// Records that the planning pass read `id`, so a later plan of the run neither reads nor pays for it again.
+    fn remember_reading(&self, id: &str, read: bool, entry: &PlanEntry, refusal: Option<&Refusal>) {
+        let mut st = self.st();
+        st.carry
+            .prepared
+            .insert(id.to_string(), (read, entry.clone()));
+        st.carry.forced.extend(refusal.cloned());
+    }
+
+    /// At the end of the run, one "passed over" line for every item of the last plan that was not worked and
+    /// has none yet: the refused (which includes the held and the unreadable), the cyclic, an item of the last
+    /// wave that never started, and the planned items the run ended before reaching. `wave` is the ids of
+    /// the last wave worked. An item is logged only now, not when first seen, because a new plan can make it
+    /// workable.
+    fn sweep(&self, view: &QueueView, plan: &Plan, wave: &[String]) {
+        let tried = self.st().tried.clone();
+        for refusal in &plan.refused {
+            if !tried.contains(&refusal.id) {
+                self.pass_over(&refusal.id, &refusal.reason);
+            }
+        }
+        for id in plan.cyclic.iter().filter(|id| !tried.contains(*id)) {
+            self.pass_over(
+                id,
+                &format!(
+                    "it waits on other items in a loop ({}), so none of them is worked",
+                    plan.cyclic.join(", ")
+                ),
+            );
+        }
+        let why = self
+            .st()
+            .stop
+            .as_ref()
+            .map_or(Stop::QueueEmpty.label(), |(stop, _)| stop.label());
+        let not_started: Vec<&String> = {
+            let st = self.st();
+            wave.iter().filter(|id| !st.done.contains(*id)).collect()
+        };
+        for id in not_started {
+            self.pass_over(id, &format!("run ended first: {why}"));
+        }
+        let entry_of = |id: &str| view.plan.iter().find(|e| e.id == id);
+        let last_wave: Vec<&PlanEntry> = wave.iter().filter_map(|id| entry_of(id)).collect();
+        for batch in batches_for(&view.items, &view.plan, plan, &tried) {
+            for item in batch {
+                let mut reason = format!("run ended first: {why}");
+                let clash = entry_of(&item.job).and_then(|mine| {
+                    last_wave
+                        .iter()
+                        .find_map(|other| shared_path(mine, other).map(|p| (p, other.id.clone())))
+                });
+                if let Some((path, other)) = clash {
+                    reason.push_str(&format!(
+                        "; it shares {path} with {other}, so it was waiting for it"
+                    ));
+                }
+                self.pass_over(&item.job, &reason);
+            }
+        }
     }
 
     /// Rates the page after a landing. Returns the stop reason when the rating ends the run.
@@ -1676,6 +1844,9 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 batch: 0,
                 pump_done: false,
                 pump_gone: false,
+                tried: BTreeSet::new(),
+                passed_over: BTreeSet::new(),
+                carry: Carry::default(),
             }),
             landing: Mutex::new(()),
             wake: Condvar::new(),
@@ -1728,10 +1899,45 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 }
             }
             ItemEnd::Failed => self.set_stop(Stop::RepeatedFailure, Some(item.job.clone())),
-            ItemEnd::Budget => self.set_stop(Stop::BudgetSpent, None),
-            ItemEnd::JobLimit => self.set_stop(Stop::JobLimit, None),
-            ItemEnd::Stop => self.set_stop(Stop::Requested, None),
-            ItemEnd::Idle | ItemEnd::NeedsAccepting | ItemEnd::Held | ItemEnd::Skipped => {}
+            ItemEnd::Budget => {
+                self.pass_over(
+                    &item.job,
+                    &self.last_reason(&item.job, "the budget did not cover its read and run"),
+                );
+                self.set_stop(Stop::BudgetSpent, None);
+            }
+            ItemEnd::JobLimit => {
+                self.pass_over(&item.job, "over the job limit");
+                self.set_stop(Stop::JobLimit, None);
+            }
+            ItemEnd::Stop => {
+                self.pass_over(&item.job, "run ended first: stop requested");
+                self.set_stop(Stop::Requested, None);
+            }
+            ItemEnd::Idle => {
+                self.pass_over(&item.job, "run ended first: another job ended the run")
+            }
+            ItemEnd::NeedsAccepting => self.pass_over(
+                &item.job,
+                &format!(
+                    "not ready: {}",
+                    self.last_reason(&item.job, "its reading needs accepting")
+                ),
+            ),
+            ItemEnd::Held => self.pass_over(
+                &item.job,
+                &format!(
+                    "held: {}",
+                    self.last_reason(&item.job, "free disk space is below the minimum")
+                ),
+            ),
+            ItemEnd::Skipped => self.pass_over(
+                &item.job,
+                &format!(
+                    "skipped: {}",
+                    self.last_reason(&item.job, "the reader gave no reading twice")
+                ),
+            ),
         }
     }
 
@@ -1787,16 +1993,27 @@ impl<S: Steps + Sync + ?Sized, U: Ui + Sync + ?Sized> Drain<'_, S, U> {
     ///
     /// With [`Steps::read_ahead`] above 0, one more thread reads (and plans) the items of the batches to come
     /// while the batch runs; see the module text.
-    fn run_parallel(&self, batches: Vec<Vec<Item>>, workers: usize) {
+    ///
+    /// `batches` is one wave (the drain plans again before the next): the batch to run. `later` is the
+    /// batches of the same plan after it; it only chooses what to read ahead and is never dispatched.
+    fn run_parallel(&self, batches: Vec<Vec<Item>>, later: Vec<Vec<Item>>, workers: usize) {
         let window = self.steps.read_ahead() as usize;
         if window == 0 || workers < 2 {
             return self.run_batches(batches, workers);
         }
         let upcoming: Vec<(usize, Item)> = batches
             .iter()
+            .chain(&later)
             .enumerate()
             .flat_map(|(n, batch)| batch.iter().cloned().map(move |item| (n, item)))
             .collect();
+        {
+            // A new wave: the read-ahead of the last one has ended. Readings it made stay for their jobs.
+            let mut st = self.st();
+            st.pump_done = false;
+            st.pump_gone = false;
+            st.batch = 0;
+        }
         std::thread::scope(|scope| {
             scope.spawn(|| self.read_ahead_pump(&upcoming, window));
             // However the batches end (all run, a reason to stop, a worker's panic), the read-ahead is told to
@@ -1966,7 +2183,7 @@ impl<S: Steps + Sync + ?Sized, U: Ui + Sync + ?Sized> Drain<'_, S, U> {
 pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<Report> {
     let caps = steps.caps()?;
     let d = Drain::new(steps, ui, caps, limits);
-    drain_with(&d, steps, |d, batches| d.run_serial(batches))
+    drain_with(&d, steps, true, |d, wave, _| d.run_serial(wave))
 }
 
 /// Works the queue like [`drain`], running up to `max_concurrency` jobs at once. The jobs of one group of the
@@ -1983,19 +2200,50 @@ pub fn drain_concurrent(
     let caps = steps.caps()?;
     let d = Drain::new(steps, ui, caps, limits);
     let workers = max_concurrency.max(1) as usize;
-    drain_with(&d, steps, move |d, batches| {
+    drain_with(&d, steps, workers == 1, move |d, wave, later| {
         if workers == 1 {
-            d.run_serial(batches);
+            d.run_serial(wave);
         } else {
-            d.run_parallel(batches, workers);
+            d.run_parallel(wave, later, workers);
         }
     })
+}
+
+/// The batches to work from `plan`, in the order to work them: items with no plan entry first, each alone,
+/// then the plan's groups in the plan's own order, without what this run has `tried`. It only filters; the
+/// order is the plan's, built by [`Plan::build_with`] in `Drain::prepare` (the function `athena plan` calls).
+fn batches_for(
+    items: &[Item],
+    entries: &[PlanEntry],
+    plan: &Plan,
+    tried: &BTreeSet<String>,
+) -> Vec<Vec<Item>> {
+    let mut batches: Vec<Vec<Item>> = items
+        .iter()
+        .filter(|i| !tried.contains(&i.job) && !entries.iter().any(|e| e.id == i.job))
+        .cloned()
+        .map(|i| vec![i])
+        .collect();
+    batches.extend(
+        plan.groups
+            .iter()
+            .map(|group| {
+                group
+                    .iter()
+                    .filter(|id| !tried.contains(*id))
+                    .filter_map(|id| items.iter().find(|i| &i.job == id).cloned())
+                    .collect::<Vec<Item>>()
+            })
+            .filter(|group| !group.is_empty()),
+    );
+    batches
 }
 
 fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     d: &Drain<'a, S, U>,
     steps: &S,
-    run: impl FnOnce(&Drain<'a, S, U>, Vec<Vec<Item>>),
+    one_at_a_time: bool,
+    mut run: impl FnMut(&Drain<'a, S, U>, Vec<Vec<Item>>, Vec<Vec<Item>>),
 ) -> anyhow::Result<Report> {
     let limits = d.limits;
     // Before the queue is read, so a request the backfill queues is worked in this drain.
@@ -2017,13 +2265,16 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     // requests: it had no plan entry, so it kept its place ahead of every planned item and used the job slots.
     let any_approved = !approved.is_empty();
     for item in &approved {
-        match steps.plan_entry(&item.job) {
-            Some(entry) => view.plan.push(entry),
+        let entry = steps.plan_entry(&item.job);
+        match &entry {
+            Some(entry) => view.plan.push(entry.clone()),
             None => d.note(format!(
                 "approved job {} has no plan entry, so it cannot be ordered with the rest",
                 item.job
             )),
         }
+        // Every later plan of this run puts the approved job back, as a fresh queue may not list it.
+        d.st().carry.approved.push((item.clone(), entry));
     }
     view.items = read.into_iter().chain(approved).chain(unread).collect();
     if any_approved {
@@ -2042,21 +2293,6 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     // is incomplete, or that wait on each other in a loop, are not worked.
     let reserve = d.caps.read + d.caps.run;
     let plan = d.prepare(&mut view, reserve);
-    // Items with no plan entry keep their place ahead of the planned ones, each alone in its batch. The
-    // planned items follow, one batch per plan group; the groups, flattened, are the plan order.
-    let mut batches: Vec<Vec<Item>> = view
-        .items
-        .iter()
-        .filter(|i| !view.plan.iter().any(|e| e.id == i.job))
-        .cloned()
-        .map(|i| vec![i])
-        .collect();
-    batches.extend(plan.groups.iter().map(|group| {
-        group
-            .iter()
-            .filter_map(|id| view.items.iter().find(|i| &i.job == id).cloned())
-            .collect()
-    }));
     for refusal in &plan.refused {
         d.note(format!(
             "item {} is not worked: {}",
@@ -2069,13 +2305,52 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
             plan.cyclic.join(", ")
         ));
     }
-    {
-        let mut st = d.st();
-        for entry in &view.plan {
-            st.touches.insert(entry.id.clone(), entry.touches.clone());
+    // The plan is built again before each wave (one item, or one group under `drain_concurrent`) from the
+    // queue as it then stands, by the same `prepare` as `athena plan`. `tried` is what this run has already
+    // handed to a worker, so the loop ends.
+    let first_plan = plan.clone();
+    let mut plan = plan;
+    let mut wave: Vec<String> = Vec::new();
+    loop {
+        {
+            let mut st = d.st();
+            for entry in &view.plan {
+                st.touches.insert(entry.id.clone(), entry.touches.clone());
+            }
+        }
+        let mut batches = {
+            let st = d.st();
+            batches_for(&view.items, &view.plan, &plan, &st.tried)
+        };
+        if batches.is_empty() || d.stopped() {
+            break;
+        }
+        let mut now = batches.remove(0);
+        if one_at_a_time {
+            now.truncate(1);
+        }
+        wave = now.iter().map(|i| i.job.clone()).collect();
+        d.st().tried.extend(wave.iter().cloned());
+        run(d, vec![now], batches);
+        if d.stopped() {
+            break;
+        }
+        match steps.queue() {
+            Ok(mut next) => {
+                next.waiting = std::mem::take(&mut view.waiting);
+                view = next;
+                plan = d.prepare(&mut view, reserve);
+            }
+            Err(error) => {
+                d.note(format!(
+                    "the queue could not be read again, so the plan is not rebuilt: {error}"
+                ));
+                break;
+            }
         }
     }
-    run(d, batches);
+    d.sweep(&view, &plan, &wave);
+    let plan = first_plan;
     let mut st = d.st();
     // A reading made ahead that no job used (the run ended first) was paid for; say so.
     for (item, made) in std::mem::take(&mut st.ahead) {
@@ -2863,6 +3138,62 @@ impl Steps for RealSteps<'_> {
                 error: Some(format!("{error:#}")),
             },
         }
+    }
+}
+
+/// `batches_for` takes the drain's order from the plan: it filters and never reorders.
+#[cfg(test)]
+mod batches_tests {
+    use super::*;
+    use athena_data::roles::Ladder;
+
+    fn entry(id: &str, rung: Ladder, priority: athena_core::plan::Priority) -> PlanEntry {
+        PlanEntry {
+            goal: format!("goal of {id}"),
+            rung: Some(rung),
+            acceptance: vec![format!("{id} works")],
+            touches: vec![format!("src/{id}.rs")],
+            priority,
+            ..PlanEntry::bare(id, &format!("title of {id}"))
+        }
+    }
+
+    fn ids(batches: &[Vec<Item>]) -> Vec<String> {
+        batches.iter().flatten().map(|i| i.job.clone()).collect()
+    }
+
+    #[test]
+    fn batches_for_flattened_equal_the_plan_order_and_tried_removes_only_that_item() {
+        use athena_core::plan::Priority::{High, Low, Normal};
+        let mut entries = vec![
+            entry("old", Ladder::Implementation, Normal),
+            entry("low", Ladder::DesignDecisions, Low),
+            entry("new", Ladder::Implementation, High),
+            entry("mid", Ladder::DesignDecisions, Normal),
+        ];
+        entries[3].depends_on = vec!["old".into()];
+        let plan = Plan::build(&entries);
+        let mut items: Vec<Item> = entries
+            .iter()
+            .map(|e| Item::queued(&e.id, &e.title))
+            .collect();
+        // An item with no plan entry comes first, alone.
+        items.push(Item::queued("bare", "a request with no plan entry"));
+        let all = batches_for(&items, &entries, &plan, &BTreeSet::new());
+        assert_eq!(all[0].len(), 1);
+        assert_eq!(all[0][0].job, "bare");
+        let planned: Vec<Vec<String>> = all[1..]
+            .iter()
+            .map(|b| b.iter().map(|i| i.job.clone()).collect())
+            .collect();
+        assert_eq!(planned, plan.groups);
+        assert_eq!(ids(&all[1..]), plan.order);
+        // What is tried drops out and the rest keeps the plan's order.
+        let tried: BTreeSet<String> = [plan.order[1].clone(), "bare".to_string()].into();
+        let rest = batches_for(&items, &entries, &plan, &tried);
+        let mut expected = plan.order.clone();
+        expected.remove(1);
+        assert_eq!(ids(&rest), expected);
     }
 }
 

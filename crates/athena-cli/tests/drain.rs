@@ -15,7 +15,7 @@ use athena_cli::drain::{
 };
 use athena_core::audience::Page;
 use athena_core::commits::{Committer, message};
-use athena_core::plan::{PlanEntry, Priority};
+use athena_core::plan::{Ending, JobEnd, PlanEntry, Priority};
 use athena_core::run::GoResult;
 use athena_core::state::Stage;
 use athena_core::steward::{ProposedChange, RequestQueue};
@@ -82,6 +82,10 @@ struct Stub {
     ran_under: RefCell<Vec<(String, String)>>,
     /// When set, the queue leaves out the requests that have landed.
     drop_landed: bool,
+    /// How earlier jobs ended, for the plan's dependency rule.
+    history: Vec<JobEnd>,
+    /// Jobs whose run ends needing a person to accept a changed reading.
+    needs_accepting: Vec<&'static str>,
 }
 
 impl Stub {
@@ -141,6 +145,9 @@ impl Steps for Stub {
     fn plan_entry(&self, job: &str) -> Option<PlanEntry> {
         self.after_read.iter().find(|e| e.id == job).cloned()
     }
+    fn job_history(&self) -> Vec<JobEnd> {
+        self.history.clone()
+    }
     fn approve(&self, proposal: &str) -> Approval {
         self.log.borrow_mut().push(format!("approve {proposal}"));
         Approval {
@@ -174,6 +181,15 @@ impl Steps for Stub {
             .push((job.to_string(), self.build.borrow().clone()));
         if self.stop_when_running == Some(job) {
             self.stop.set(true);
+        }
+        if self.needs_accepting.contains(&job) {
+            return Run {
+                outcome: None,
+                reason: "the reading changed scope".into(),
+                cost: 0.0,
+                needs_accepting: true,
+                ..Run::default()
+            };
         }
         if self.no_outcome_first && first_run {
             return Run {
@@ -3569,6 +3585,385 @@ fn a_proposal_that_fits_neither_the_job_limit_nor_the_budget_is_not_approved_eve
         stub.log()
     );
     assert_eq!(report.waiting, vec![in_limit_proposal()]);
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The drain works the order `athena plan` prints, and says what it passes over
+
+/// The real queue and plan (so priority records and dependencies count), with every read, run and landing
+/// faked: a job is logged in `started` and lands at once, and the records do not change. `on_run` is called
+/// once, when the first job runs, so a test can change the records while an item runs.
+struct Replay<'a> {
+    real: RealSteps<'a>,
+    started: RefCell<Vec<String>>,
+    on_run: RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+}
+
+impl<'a> Replay<'a> {
+    fn new(real: RealSteps<'a>, on_run: Option<Box<dyn FnOnce() + 'a>>) -> Replay<'a> {
+        Replay {
+            real,
+            started: RefCell::new(Vec::new()),
+            on_run: RefCell::new(on_run),
+        }
+    }
+}
+
+impl Steps for Replay<'_> {
+    fn caps(&self) -> anyhow::Result<Caps> {
+        self.real.caps()
+    }
+    fn queue(&self) -> anyhow::Result<QueueView> {
+        self.real.queue()
+    }
+    fn previous_rating(&self) -> Option<u8> {
+        None
+    }
+    fn read(&self, what: ReadOf<'_>) -> Read {
+        let (ReadOf::Queued(job) | ReadOf::Retry(job)) = what;
+        Read {
+            job: Some(job.to_string()),
+            cost: 0.0,
+            runnable: true,
+            error: None,
+            held: false,
+        }
+    }
+    fn approve(&self, _: &str) -> Approval {
+        unreachable!("these queues have no proposal to approve")
+    }
+    fn run(&self, job: &str) -> Run {
+        self.started.borrow_mut().push(job.to_string());
+        let hook = self.on_run.borrow_mut().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        Run {
+            outcome: Some(OutcomeState::Landed),
+            cost: 0.0,
+            ..Run::default()
+        }
+    }
+    fn land(&self, _: &str) -> Landing {
+        Landing::Landed {
+            changed: Vec::new(),
+        }
+    }
+    fn rate(&self) -> Rate {
+        Rate {
+            rating: Some(1),
+            cost: 0.0,
+            error: None,
+        }
+    }
+    fn check_page(&self) -> Check {
+        Check::pass("replay")
+    }
+    fn check_cap(&self) -> f64 {
+        0.0
+    }
+    fn plan_entry(&self, job: &str) -> Option<PlanEntry> {
+        self.real.plan_entry(job)
+    }
+    fn job_history(&self) -> Vec<JobEnd> {
+        self.real.job_history()
+    }
+}
+
+/// A request that is complete as written (path, acceptance bullet), so planning reads nothing.
+fn complete_request(path: &str, extra: &str) -> String {
+    format!("Edit {path} and README.md\n- {path} is edited{extra}")
+}
+
+fn priority_record(job: &athena_data::JobId, level: &str) -> AnyRecord {
+    AnyRecord::Priority(athena_data::records::PriorityRecord {
+        job: job.clone(),
+        n: 1,
+        at: "2026-10-30T00:00:00Z".parse().unwrap(),
+        priority: level.into(),
+    })
+}
+
+/// Queues two urgent requests and a normal one, lowers the second urgent one with a priority record, and
+/// returns the ids (urgent 1, urgent 2, normal) and the order the drain started them in. With `mid_run` the
+/// record is committed while the first item runs; otherwise before the drain starts.
+fn lowered_urgent_order(mid_run: bool) -> ([String; 3], Vec<String>) {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let urgent = "\nPriority: urgent";
+    let (u1, _) = athena
+        .queue(&complete_request("crates/u1/lib.rs", urgent))
+        .unwrap();
+    let (u2, _) = athena
+        .queue(&complete_request("crates/u2/lib.rs", urgent))
+        .unwrap();
+    let (n, _) = athena
+        .queue(&complete_request("crates/n/lib.rs", ""))
+        .unwrap();
+    let lower = priority_record(&u2, "low");
+    let lander = RecordingLander::default();
+    let hook: Option<Box<dyn FnOnce() + '_>> = if mid_run {
+        Some(Box::new(|| {
+            commit_records_to(
+                &fx,
+                std::slice::from_ref(&lower),
+                "Lower the second request",
+            )
+        }))
+    } else {
+        commit_records_to(
+            &fx,
+            std::slice::from_ref(&lower),
+            "Lower the second request",
+        );
+        None
+    };
+    let steps = Replay::new(real_steps(&athena, &lander), hook);
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    let started = steps.started.borrow().clone();
+    (
+        [
+            u1.as_str().to_string(),
+            u2.as_str().to_string(),
+            n.as_str().to_string(),
+        ],
+        started,
+    )
+}
+
+#[test]
+fn a_priority_record_that_lowers_an_urgent_request_puts_it_after_a_higher_priority_item() {
+    let ([u1, u2, n], started) = lowered_urgent_order(false);
+    assert_eq!(started, [u1, n, u2]);
+}
+
+#[test]
+fn a_priority_record_that_lowers_an_urgent_request_while_an_earlier_item_runs_still_puts_it_after()
+{
+    let ([u1, u2, n], started) = lowered_urgent_order(true);
+    assert_eq!(started, [u1, n, u2]);
+}
+
+#[test]
+fn drain_order_equals_plan_order() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    // Older: a request with no acceptance (refused), and an ordinary one.
+    let (refused, _) = athena.queue("Edit crates/r/lib.rs and README.md").unwrap();
+    athena
+        .queue(&complete_request("crates/p/lib.rs", ""))
+        .unwrap();
+    // The newest request only cites the refused job's id, outside a 'Depends on' line: it is in group 1.
+    let (cites, _) = athena
+        .queue(&complete_request(
+            "crates/e/lib.rs",
+            &format!("\nThis follows up {}.", refused.as_str()),
+        ))
+        .unwrap();
+    athena
+        .queue(&complete_request(
+            "crates/d/lib.rs",
+            &format!("\nDepends on {}\nPriority: high", cites.as_str()),
+        ))
+        .unwrap();
+    let lander = RecordingLander::default();
+    let steps = Replay::new(real_steps(&athena, &lander), None);
+    let planned = drain::plan(&steps, 5.0, &Quiet).unwrap();
+    assert_eq!(
+        planned.plan.groups[0][0],
+        cites.as_str(),
+        "{:?}",
+        planned.plan
+    );
+    assert_eq!(planned.plan.order.len(), 3, "{:?}", planned.plan);
+
+    let ui = Lines::default();
+    drain::drain(&steps, limits(100.0), &ui).unwrap();
+    assert_eq!(*steps.started.borrow(), planned.plan.order);
+    let lines = ui.0.lock().unwrap().clone();
+    let about: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains(refused.as_str()) && l.contains("passed over"))
+        .collect();
+    assert_eq!(about.len(), 1, "{lines:?}");
+    assert!(about[0].starts_with("plan       "), "{about:?}");
+    assert!(about[0].contains("the plan lacks acceptance"), "{about:?}");
+}
+
+#[test]
+fn drain_order_follows_the_plan_as_the_queue_changes() {
+    let fx = Fixture::new();
+    let athena = fx.athena(Scenario::default().script());
+    let (a, _) = athena
+        .queue(&complete_request("crates/a/lib.rs", ""))
+        .unwrap();
+    athena
+        .queue(&complete_request("crates/b/lib.rs", ""))
+        .unwrap();
+    let lander = RecordingLander::default();
+    let printed: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    // While the first item runs, an urgent request is queued and `athena plan` is asked what comes next.
+    let hook: Box<dyn FnOnce() + '_> = Box::new(|| {
+        athena
+            .queue(&complete_request("crates/z/lib.rs", "\nPriority: urgent"))
+            .unwrap();
+        let plan = drain::plan(&real_steps(&athena, &lander), 5.0, &Quiet).unwrap();
+        *printed.borrow_mut() = plan.plan.order;
+    });
+    let steps = Replay::new(real_steps(&athena, &lander), Some(hook));
+    drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    let printed = printed.borrow().clone();
+    assert_eq!(printed.len(), 3, "{printed:?}");
+    let started = steps.started.borrow().clone();
+    assert_eq!(started[0], a.as_str());
+    let rest: Vec<String> = printed.into_iter().filter(|id| id != a.as_str()).collect();
+    assert_eq!(
+        started[1..],
+        rest,
+        "the drain follows the plan printed meanwhile"
+    );
+}
+
+fn lines_about(ui: &Lines, id: &str) -> Vec<String> {
+    ui.0.lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.starts_with(&format!("plan       {id} passed over: ")))
+        .cloned()
+        .collect()
+}
+
+/// Drains `stub` and checks that `id` has exactly one "passed over" line, starting `plan       `, holding
+/// every one of `reasons`.
+fn assert_passed_over(stub: &Stub, limits: Limits, id: &str, reasons: &[&str]) {
+    let ui = Lines::default();
+    drain::drain(stub, limits, &ui).unwrap();
+    let about = lines_about(&ui, id);
+    assert_eq!(about.len(), 1, "{about:?} in {:?}", ui.0.lock().unwrap());
+    assert!(about[0].starts_with("plan       "), "{about:?}");
+    for reason in reasons {
+        assert!(about[0].contains(reason), "{reason} not in {about:?}");
+    }
+}
+
+fn three(ids: [&'static str; 3], touches: [&str; 3]) -> Stub {
+    Stub {
+        items: ids.to_vec(),
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1; 3]),
+        plan: (0..3)
+            .map(|i| planned(ids[i], Ladder::Implementation, &[touches[i]], &[]))
+            .collect(),
+        ..Stub::default()
+    }
+}
+
+#[test]
+fn passed_over_item_is_logged_once_with_its_reason() {
+    let apart = ["src/a.rs", "src/b.rs", "src/c.rs"];
+    // Refused: no acceptance.
+    let mut stub = three(["a", "b", "c"], apart);
+    stub.plan[1].acceptance.clear();
+    assert_passed_over(&stub, limits(9.0), "b", &["the plan lacks acceptance"]);
+    // Held: it depends on a job that was rejected and has no landed retry.
+    let mut stub = three(["a", "b", "c"], apart);
+    stub.plan[1].depends_on = vec!["dead".into()];
+    stub.history = vec![JobEnd {
+        id: "dead".into(),
+        ending: Ending::Failed("rejected".into()),
+        retry_of: None,
+    }];
+    assert_passed_over(&stub, limits(9.0), "b", &["depends on dead", "held"]);
+    // Cyclic: two items wait on each other.
+    let mut stub = three(["a", "b", "c"], apart);
+    stub.plan[0].depends_on = vec!["b".into()];
+    stub.plan[1].depends_on = vec!["a".into()];
+    assert_passed_over(&stub, limits(9.0), "a", &["loop"]);
+    // Not ready: the reading changed scope and needs accepting.
+    let mut stub = three(["a", "b", "c"], apart);
+    stub.needs_accepting = vec!["b"];
+    assert_passed_over(&stub, limits(9.0), "b", &["not ready", "changed scope"]);
+    // Job limit: the item that finds no place is named, and so is the one never reached.
+    let big = Limits {
+        max_jobs: 1,
+        ..limits(9.0)
+    };
+    assert_passed_over(&three(["a", "b", "c"], apart), big, "b", &["job limit"]);
+    assert_passed_over(
+        &three(["a", "b", "c"], apart),
+        big,
+        "c",
+        &["run ended first", "job limit"],
+    );
+    // Budget: a read and a run fit once.
+    assert_passed_over(
+        &three(["a", "b", "c"], apart),
+        limits(1.5),
+        "b",
+        &["budget"],
+    );
+    assert_passed_over(
+        &three(["a", "b", "c"], apart),
+        limits(1.5),
+        "c",
+        &["run ended first", "budget spent"],
+    );
+    // A stop is asked for while the first runs.
+    let mut stub = three(["a", "b", "c"], apart);
+    stub.stop_when_running = Some("a");
+    assert_passed_over(
+        &stub,
+        limits(9.0),
+        "c",
+        &["run ended first", "stop requested"],
+    );
+    // A clash: the item never reached shares a path with the last item worked.
+    let mut stub = three(["a", "b", "c"], ["src/x.rs", "src/x.rs", "src/x.rs"]);
+    stub.stop_when_running = Some("a");
+    assert_passed_over(&stub, limits(9.0), "c", &["shares src/x.rs with b"]);
+    // An item that was worked is not passed over.
+    let ui = Lines::default();
+    let stub = three(["a", "b", "c"], apart);
+    drain::drain(&stub, limits(9.0), &ui).unwrap();
+    assert!(
+        ui.0.lock()
+            .unwrap()
+            .iter()
+            .all(|l| !l.contains("passed over")),
+        "{:?}",
+        ui.0.lock().unwrap()
+    );
+}
+
+#[test]
+fn a_replan_does_not_read_an_underspecified_item_twice() {
+    let mut vague = planned("a", Ladder::Implementation, &["src/a.rs"], &[]);
+    vague.acceptance.clear();
+    let stub = Stub {
+        items: vec!["b", "c", "a"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1; 3]),
+        plan: vec![
+            planned("b", Ladder::Implementation, &["src/b.rs"], &[]),
+            planned("c", Ladder::Implementation, &["src/c.rs"], &[]),
+            vague,
+        ],
+        after_read: vec![planned("a", Ladder::Implementation, &["src/a.rs"], &[])],
+        ..Stub::default()
+    };
+    let ui = Lines::default();
+    let report = drain::drain(&stub, limits(9.0), &ui).unwrap();
+    assert_eq!(report.landed, 3);
+    let reads = stub.log().iter().filter(|l| *l == "read a").count();
+    assert_eq!(reads, 1, "{:?}", stub.log());
+    let said =
+        ui.0.lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("a is underspecified"))
+            .count();
+    assert_eq!(said, 1);
 }
 
 /// Commits `records` to the fixture's repository.
