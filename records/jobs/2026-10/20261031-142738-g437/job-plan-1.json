@@ -1,0 +1,186 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-142738-g437",
+  "round": 1,
+  "at": "2026-10-31T14:31:01.860256938Z",
+  "invocation_seq": 3,
+  "approach": "Fix the fault where it starts, in crates/athena-core/src/gh/client.rs. Add a branch-bound source, `GhClient::ci_source(branch)`, that implements `CiSource`. Remove the unfiltered `impl CiSource for GhClient`, so no path is left that takes the newest `ci` run of any event. The source asks GitHub for `actions/runs?head_sha=<sha>&event=push&branch=<branch>&per_page=20`. A shared helper `pick_ci_run(runs, branch)` keeps only runs with name `ci`, `event == \"push\"` and `head_branch == branch`, then takes the newest by created_at. Both `parse_ci_run` and `fetch` use it, so the run chosen and the run whose jobs are read cannot differ. `parse_ci_run(runs, jobs, branch)` takes the verdict from the aggregate job `fmt, clippy, tests`. A completed, successful aggregate job gives finished=true, conclusion `success` and three `success` steps, which covers a gate-reused pass with skipped check jobs. A completed, failed aggregate job gives three `failure` steps. An incomplete aggregate job gives finished=false. Jobs given but no aggregate job gives conclusion `unusable`, so `resolve` treats it as no result and never trusts a red or green it cannot attribute. With jobs None the parser keeps its current meaning: the run's own status and conclusion, no steps. `fetch` reads `actions/runs/<id>/jobs?filter=latest&per_page=100` for the chosen run on every poll, so a finished aggregate job is seen while `history` still runs. `CI_CHECK_STEP` is removed. The `CiSource` trait, `resolve`, ci_result.rs, run/*, ci.yml, athena.toml and CHANGELOG.md are not touched. Tests go in gh/tests.rs, using a recording `Runner` fake that answers by path, as `FakeRunner` there does.",
+  "decisions": [
+    {
+      "choice": "A wrapper source `GhClient::ci_source(&self, branch) -> CiBranchSource` implements `CiSource`; the `CiSource` impl on `GhClient` itself is removed.",
+      "reason": "The trait signature `fetch(&self, sha)` stays, as the reading says. The branch is bound at construction. Removing the unfiltered impl means nothing can take the newest-run-of-any-event path by accident. I read the code and found no caller of `GhClient` as a `CiSource` (Grep of `.fetch(` and `CiSource` over crates/), so the removal breaks nothing.",
+      "rejected": [
+        {
+          "option": "Keep `impl CiSource for GhClient` and add a `branch` field to `GhClient`",
+          "why": "`GhClient` is built with struct-update syntax in reconcile.rs, landing.rs, early.rs and cli tests/external_calls.rs. A new field touches them all, and an empty branch would silently mean 'no filter'."
+        },
+        {
+          "option": "Change `CiSource::fetch(&self, sha)` to take the branch",
+          "why": "It changes ci_result.rs, the `resolve` call sites and every CiSource fake in routing.rs and ci_result.rs tests, none of which this slice should touch."
+        }
+      ]
+    },
+    {
+      "choice": "Filter twice: `event=push&branch=<branch>` in the query, and `event == \"push\"` plus `head_branch == branch` in `pick_ci_run`.",
+      "reason": "The query keeps GitHub's answer small. The parser filter is the guard that does not depend on the server honoring the query, and tests can show it with a canned reply that holds all runs. Reading only the push run on the job's own branch answers the earlier major finding: a pull_request run's head_sha is the candidate, but its checkout is the merge with main, so its result may not be for the candidate's own tree (my understanding of GitHub behaviour, not shown in this repository).",
+      "rejected": [
+        {
+          "option": "Filter only in the query",
+          "why": "A server that ignored a parameter would let a pull_request run through unseen."
+        },
+        {
+          "option": "Filter only in the parser",
+          "why": "The query would return other runs for the same SHA and page limit could cut off the push run."
+        }
+      ]
+    },
+    {
+      "choice": "Take finished, conclusion and steps from the aggregate job `fmt, clippy, tests` (exact name, a const `CI_AGGREGATE_JOB`), not from the workflow run. A failed aggregate job gives all three steps `failure`; a successful one gives all three `success`.",
+      "reason": "ci.yml (line 397 comment, line 400) says this job is the single check name that says whether a commit is green. It needs only gate, fmt, clippy and test. The run also holds `history`, which is not a check and can fail or run long, so the run's conclusion could reject correct work or delay a result. The brief asks for red and green steps from this job, which is what this does; the old copy of one `cargo fmt --check` step to three names is gone.",
+      "rejected": [
+        {
+          "option": "Keep the run's status and conclusion and take only steps from the job",
+          "why": "A run red only because `history` failed would carry a failure conclusion next to green steps, and a run still running `history` would look unfinished."
+        },
+        {
+          "option": "Attribute a red aggregate job to fmt, clippy or the test shards from the other jobs",
+          "why": "The brief asks only for red steps. Attribution adds name-matching rules and failure cases that need their own tests; it is better done in a later slice with the wiring. The cost: the reason text would name all three checks, as the old parser also did."
+        }
+      ]
+    },
+    {
+      "choice": "When jobs are given but no job is named `fmt, clippy, tests`, return conclusion `unusable` (finished follows the run) and no steps.",
+      "reason": "`read_ci` in ci_result.rs sends any conclusion other than success or failure to Missing, so the local fallback runs. A renamed job costs the speedup, never a wrong verdict.",
+      "rejected": [
+        {
+          "option": "Fall back to the run's own conclusion",
+          "why": "That reintroduces the `history` problem and a verdict with no steps behind it."
+        }
+      ]
+    },
+    {
+      "choice": "Do not edit ci_result.rs or CHANGELOG.md in this slice, although both are in the expected deliverables.",
+      "reason": "Acceptance criterion 5 says the other changed files are gh/tests.rs and, only if needed, ci_result.rs call sites, and that no change appears in CHANGELOG.md. Nothing needs a ci_result.rs change: the branch is a plain string in this slice, and the follow-ups that name `athena/ci/<job id>` can add the helper. The out-of-scope text puts the CHANGELOG entry in follow-up C. This conflict is raised in open_questions.",
+      "rejected": [
+        {
+          "option": "Add `ci_branch(job)` to ci_result.rs now",
+          "why": "Not needed by the fetch, and the criterion limits edits there to call sites."
+        },
+        {
+          "option": "Add a CHANGELOG.md Unreleased entry",
+          "why": "Criterion 5 forbids a change to that file, and the out-of-scope text assigns the entry to follow-up C."
+        }
+      ]
+    },
+    {
+      "choice": "The earlier scope findings (1 to 6: gh/early.rs, run/ci.rs, run/verification.rs, run/ci_tests.rs, run/tests.rs) and the dispatch-recursion finding (8) do not apply to this plan.",
+      "reason": "This slice changes only gh/client.rs and gh/tests.rs. gh/tests.rs is named in the reading because the existing `parse_ci_run` assertions encode the one-step format and must change. The `dispatch` rename is follow-up B work, since this slice does not touch run/mod.rs.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "purpose": "Add `CI_AGGREGATE_JOB`, `pick_ci_run`, `CiBranchSource` and `GhClient::ci_source`. Rewrite `parse_ci_run(runs, jobs, branch)`. Replace `impl CiSource for GhClient` with one for `CiBranchSource`. Remove `CI_CHECK_STEP`. Doc comments say which run is trusted (push run on the job's own branch, verdict from the aggregate job) and why.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Rewrite `the_ci_run_is_read_with_its_sha_address_conclusions_and_duration` for the new signature and fixtures. Add a recording path-keyed `Runner` fake and the `ci_push_run_*` tests below.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In gh/client.rs add `const CI_AGGREGATE_JOB: &str = \"fmt, clippy, tests\"` and `fn pick_ci_run<'v>(runs: &'v Value, branch: &str) -> Option<&'v Value>`: filter name == CI_WORKFLOW, event == \"push\", head_branch == branch, then newest by created_at.",
+    "Rewrite `parse_ci_run(runs, jobs: Option<&Value>, branch: &str)`: run from `pick_ci_run`; sha, address and duration as before. With jobs None: finished/conclusion from the run and no steps. With jobs Some: find the job whose name equals CI_AGGREGATE_JOB. Found: finished = (status == completed); conclusion = the job's conclusion; steps = three `Step`s (`STEPS` names, duration 0) with `success` if the conclusion is success, otherwise `failure`. Not found: conclusion `unusable`, finished from the run, no steps. Remove `CI_CHECK_STEP`. Write the doc comment: only the push run on the job's own branch is trusted, because a pull_request run tests a merge with main; the verdict is the aggregate job, because `history` is not a check.",
+    "Add `pub struct CiBranchSource` (borrowing the client, owning the branch String) and `GhClient::ci_source(&self, branch: &str)`. Remove `impl CiSource for GhClient<'_>`. Implement `CiSource::fetch(&self, sha)` for the new type: GET `actions/runs?head_sha={sha}&event=push&branch={branch}&per_page=20`; `pick_ci_run`; None gives Ok(None); otherwise GET `actions/runs/{id}/jobs?filter=latest&per_page=100` (an error propagates) and return `parse_ci_run(&runs, Some(&jobs), branch)`. No change to gh/mod.rs: the type is reached through `ci_source`, and tests import `crate::ci_result::CiSource`.",
+    "In gh/tests.rs add `CiRunner`, a `Runner` fake that records every args vector and answers by path: a path containing `actions/runs?` returns the canned runs JSON, and `actions/runs/<id>/jobs` returns the canned jobs JSON for that id. Add a tiny `LocalChecks` fake with a call counter. Add helpers that build run and job JSON with `json!`, using the job names from ci.yml (`fmt`, `clippy`, `test (…)`, `fmt, clippy, tests`, `history`).",
+    "Update the old test for the new signature and the new fixture fields (`event`, `head_branch`, a job named `fmt, clippy, tests`). Keep its checks that a run of another workflow gives None and that a run for another SHA keeps its own SHA.",
+    "Add the new tests. `ci_push_run_wins_over_newer_pull_request_run`: a newer pull_request run (failure) and an older push run on `athena/ci/<job id>` (success), same SHA; assert via `parse_ci_run` and via `ci_source(..).fetch(sha)` that only the push run's address and conclusion are returned, and that the jobs request used the push run's id; add the reverse case (newer green pull_request run, red push run gives red). `ci_push_run_ignores_other_events_and_branches`: only a pull_request run, or a push run on another branch, gives Ok(None) from `fetch` and None from `parse_ci_run`; then `resolve` with the `CiBranchSource` and a local fake that fails shows `Source::Local` and a local call, never Ci. `ci_push_run_query_names_event_and_branch`: the recorded runs path contains `head_sha=<sha>`, `event=push` and `branch=athena/ci/<job id>`. `ci_push_run_verdict_comes_from_the_aggregate_job`: a failed aggregate job gives three `failure` steps (including when a `fmt` job succeeded); a successful one gives three `success` steps, also when the check jobs are skipped (gate-reused pass); a run failed only by `history` with a successful aggregate job is green; an aggregate job still in progress is unfinished; no aggregate job gives `unusable` and no steps; the job named `fmt, clippy, tests` is not taken for `fmt`.",
+    "Grep client.rs for `CI_CHECK_STEP` (must be absent) and for `event` and `head_branch` (present). Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix what they report."
+  ],
+  "risks": [
+    {
+      "risk": "The aggregate job is renamed in ci.yml, so the parser finds no job named `fmt, clippy, tests`.",
+      "mitigation": "A missing aggregate job gives conclusion `unusable`, which `read_ci` treats as no result, so the local fallback runs. The cost is a lost speedup, never a wrong verdict. The test fixtures use the name from ci.yml (line 401), and a test covers the missing-job case."
+    },
+    {
+      "risk": "Removing `impl CiSource for GhClient` breaks a caller I did not find.",
+      "mitigation": "Grep of crates/ for `.fetch(`, `CiSource` and `ci_source` found only ci_result.rs, routing.rs and client.rs. `cargo build` and clippy in criterion 6 would fail on any other use."
+    },
+    {
+      "risk": "GitHub does not apply the `event` or `branch` query parameter exactly as expected.",
+      "mitigation": "`pick_ci_run` filters on `event` and `head_branch` again, and a test with a canned reply that ignores the query shows the parser guard alone is enough."
+    },
+    {
+      "risk": "Reading the jobs reply on every poll adds API calls.",
+      "mitigation": "It is one extra read-only call per poll. Nothing polls in this slice; the follow-up that adds the wait can bound it."
+    },
+    {
+      "risk": "A flaky or cancelled aggregate job is read as a failure.",
+      "mitigation": "Only a job conclusion of `failure` becomes a red run. `cancelled`, `skipped` and `timed_out` pass through as the run conclusion, and `read_ci` treats them as no result (local fallback); the steps carry `failure` but are not used in that case."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Fixture test with two runs for one SHA, driven through the production parser and the production source; the Runner fake only returns canned JSON and records the paths.",
+      "command": "cargo test -p athena-core gh",
+      "observes": "`ci_push_run_wins_over_newer_pull_request_run`: the runs reply holds a pull_request run (newer created_at, conclusion failure, head_branch of the pull request) and a push run on `athena/ci/<job id>` (older, success). `parse_ci_run` and `ci_source(branch).fetch(sha)` both return the push run's address, conclusion `success` and three `success` steps. The recorded jobs request names the push run's id. The reverse case (a newer green pull_request run, a red push run) returns the push run's red result.",
+      "fails_without": "With the old newest-`ci`-run selection, the pull_request run (newer created_at) is returned: the address and failure conclusion assertions fail.",
+      "seam": "Production entry points: `GhClient::ci_source(branch)` with `CiSource::fetch` (added by steps 2 to 3 in gh/client.rs), and `parse_ci_run` (exists, signature changed in step 2). Fake: `CiRunner` in gh/tests.rs, an implementation of the existing `Runner` trait (gh/transport.rs), injected through `GhClient::new(&runner, repo)` as `FakeRunner` is today; the fake is added by step 4 and returns canned strings only. The selection logic under test is production code."
+    },
+    {
+      "criterion": 2,
+      "method": "Fixture tests where the only candidates are a pull_request run, or a push run on another branch, checked at the parser, the source and `resolve`.",
+      "command": "cargo test -p athena-core gh",
+      "observes": "`ci_push_run_ignores_other_events_and_branches`: `parse_ci_run` returns None and `fetch` returns Ok(None) for both cases, even though the canned reply (which ignores the query) holds a green run for the right SHA. `resolve(sha, &[], &source, &local, wait)` with a local fake whose steps fail returns `Outcome::Failed` whose record has `Source::Local`, and the local fake is called once. The pull_request run's green result is never used.",
+      "fails_without": "Without the event and head_branch filter, `fetch` returns the green pull_request run, `resolve` returns `Verified` with `Source::Ci`, and the local call count stays 0, so the assertions fail.",
+      "seam": "Production entry points: `GhClient::ci_source(..).fetch` (step 3), `parse_ci_run` (step 2) and `ci_result::resolve` (exists, unchanged, ci_result.rs). Fakes: `CiRunner` as in criterion 1, plus a small `LocalChecks` fake with a call counter in gh/tests.rs (step 4), injected as arguments to `resolve`. The fake canned reply ignores the query on purpose, so the parser-side guard is what is tested."
+    },
+    {
+      "criterion": 3,
+      "method": "A recording Runner fake captures the args of the runs request made by the production source and the test asserts on the path.",
+      "command": "cargo test -p athena-core gh",
+      "observes": "`ci_push_run_query_names_event_and_branch`: the recorded `gh api` args hold a path starting `repos/<repo>/actions/runs?` that contains `head_sha=<sha>`, `event=push` and `branch=athena/ci/<job id>`. The next recorded call, `actions/runs/<id>/jobs?filter=latest&per_page=100`, shows the jobs read for the chosen run.",
+      "fails_without": "If `fetch` still built `actions/runs?head_sha=..&per_page=20`, the `event=push` and `branch=` assertions fail.",
+      "seam": "Production entry point: `CiBranchSource::fetch` through `GhClient::ci_source` (step 3). Fake: `CiRunner` (step 4) records `args` in a `RefCell<Vec<Vec<String>>>`, like `FakeRunner.calls` which exists; it is injected via `GhClient::new`."
+    },
+    {
+      "criterion": 4,
+      "method": "Fixture tests on jobs replies built from the job names in ci.yml, driven through `parse_ci_run` and `fetch`; plus a Grep for the removed constant.",
+      "command": "cargo test -p athena-core gh",
+      "observes": "`ci_push_run_verdict_comes_from_the_aggregate_job`: a failed `fmt, clippy, tests` job gives conclusion `failure` and the steps fmt, clippy and test all `failure` (also when a job named `fmt` succeeded). A successful one gives three `success` steps (also when the check jobs are skipped). A run failed only by `history` with a successful aggregate job gives `success`. An aggregate job in progress gives finished=false. No aggregate job gives `unusable` and no steps. A job named `fmt, clippy, tests` is not read as `fmt`. Then run `Grep CI_CHECK_STEP crates/athena-core/src/gh/client.rs`: no match.",
+      "fails_without": "With the old parser (the step whose name starts with `cargo fmt --check`), the fixtures have no such step, so steps come out empty and the success and failure assertions fail; the `history`-only fixture would give a failure conclusion.",
+      "seam": "Production entry points: `parse_ci_run` and `CiBranchSource::fetch` (steps 2 and 3). Fake: JSON built with `json!` in gh/tests.rs (existing style), served by `CiRunner` for the fetch path (step 4). The fakes return canned values only."
+    },
+    {
+      "criterion": 5,
+      "method": "Content check: Grep the filter in client.rs and list changed files in the diff.",
+      "command": "git diff --stat",
+      "observes": "The diff lists only crates/athena-core/src/gh/client.rs and crates/athena-core/src/gh/tests.rs. `Grep` for `event` and `head_branch` in client.rs finds the filter in `pick_ci_run`. No change in run/mod.rs, ci.yml, athena.toml, CHANGELOG.md or ci_result.rs.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks on the final tree.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The build proves that nothing else used the removed `impl CiSource for GhClient` or `CI_CHECK_STEP`, and that the xtask policy and boundary tests accept the new test text (no banned words, no email-like text).",
+      "fails_without": "A caller left on the old `parse_ci_run(runs, jobs)` signature, an unused import or constant, or an unformatted file would fail the build, clippy or fmt.",
+      "seam": "No injection; the whole workspace."
+    }
+  ],
+  "open_questions": [
+    "The expected deliverables list ci_result.rs and CHANGELOG.md, but criterion 5 says no CHANGELOG.md change and ci_result.rs only for call sites, and the out-of-scope text puts the CHANGELOG entry in follow-up C. This plan follows the criteria and touches neither. If a short Unreleased bullet is wanted, that is a one-line addition and criterion 5 would need to change.",
+    "A red aggregate job marks all three checks red, so `judge` would name all three in its reason even when only one failed. The brief asks only for red steps. Per-check attribution from the `fmt`, `clippy` and `test (…)` jobs is a possible later slice; it is not designed here.",
+    "`fetch` now reads the jobs reply on every poll once a run exists, so a follow-up wait of 25 minutes at 20-second pauses would make up to 75 extra reads. The wiring job should decide whether that rate is acceptable.",
+    "The `branch=` value is put in the query unencoded. Job ids use only digits, lowercase letters and hyphens, and `/` is legal in a query, so no encoding is needed; I did not check GitHub's behavior for other characters.",
+    "The run duration still comes from the run's created_at and updated_at. With `history` still running when the aggregate job finishes, that duration can include `history`. It is informational only; the aggregate job's timestamps could replace it later."
+  ],
+  "producer_section_sha256": "6818faadc0ea277f331f7e739fff74de94090de71980e59dc242a086af7f9e24",
+  "resumed_from": "20261031-001542-anbv"
+}

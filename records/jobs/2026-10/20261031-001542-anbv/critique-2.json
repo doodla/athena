@@ -1,0 +1,83 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-001542-anbv",
+  "round": 2,
+  "at": "2026-10-31T14:23:04.768471351Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/early.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/early.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/ci.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/ci.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/verification.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/verification.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/ci_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/ci_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Fail-all-three on an \"unattributable red\" run is driven by the workflow-run conclusion, which includes the `history` job. That job runs on the new push event and is not marked continue-on-error, so its failures would reject correct work.",
+      "evidence": "In ci.yml, `history` (\"the full history\", `athena check --history`) has no `if:` and no `continue-on-error`, so it runs on the new `athena/ci/**` push and on the pull_request run, and its failure turns the workflow run red. `ci_result::read_ci` (ci_result.rs:179-181) maps run `conclusion == \"failure\"` straight to `Reading::Red`, and `resolve` returns `Outcome::Failed`. Under Decision 3, a history failure with fmt, clippy and test all green rejects the job as three failed checks it did not fail. The run's `status` becomes `completed` only when every job has finished, `history` included (timeout 30 min). So Athena waits on a job that is not a check, and against a 25-min bound may time out and run locally anyway. ci.yml itself names the job that decides green: `ci` (name `fmt, clippy, tests`), which is \"the one check name that says whether a commit is green\" (line 12). The plan's own Risk 2 and Open question 1 admit the false rejection but keep the heuristic. Fix: In `parse_ci_run`, take `finished` and `conclusion` from the `ci` aggregate job (exact name `fmt, clippy, tests`), not from the workflow run. If that job succeeded, the result is green, whatever `history` did. If it failed, attribute per check from the fmt, clippy and `test (…)` jobs. If no check job failed (for example the gate failed), report the run as unusable, with conclusion other than success or failure, so it falls back to local instead of failing all three. Add fixtures: a run that is red only because of `history` (expect green checks), and a red `ci` job with a failed gate (expect fallback). This stays inside parse_ci_run, so the SHA rules in `resolve` are untouched.",
+      "location": "Decision 3 / plan step 4 (gh/client.rs parse_ci_run); .github/workflows/ci.yml lines 438-500",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The run-level tests set an https github.com origin but install only `ci::seam`. `early_pr` would then make a real `git push` and `gh` call to GitHub from inside the tests.",
+      "evidence": "`check_and_verify` calls `self.early_pr(...)` (run/mod.rs:1201) after the planned CI push. `early_pr_to` uses the fake only when `early_seam::current()` is Some (gh/early.rs:351-354). Otherwise it builds `GhCli` and a `GitRemote` over origin and pushes for real. The plan's mitigation (\"push and delete do nothing unless the seam is installed\") covers only the new ci code, not `early_pr`. The brief rules out real network calls in tests. A real push would also add a warning line, or a credential prompt or hang, to the tests that count lines and calls. Fix: In every ci_tests run with an https github origin, also install the existing `early_seam` with an `EarlyFake` (as `early_run` in run_pin_tests.rs does), or build the tests on the `early_run` harness. Add a check that no real remote was contacted, for example the EarlyFake recorded the early push, so the test fails if the early seam is missing.",
+      "location": "Demonstrations for criteria 1, 2, 3 and 5 (run/ci_tests.rs with origin https://github.com/example/project.git); gh/early.rs:321-362",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The CI push is a plain, non-force push. On a resume or retry where the job's candidate SHA differs from the commit already on `athena/ci/<id>`, the push is rejected and the job silently runs locally.",
+      "evidence": "`GitRemote::push` runs `git push origin <commit>:refs/heads/<branch>` with no force option. A branch left over from a crash or an earlier attempt that holds an unrelated commit makes the push fail. Decision 5 turns that into a warning and a local run, so the speedup is lost exactly in the leak case Risk 5 describes. Fix: Before pushing, read `head` from the `CiBranches` trait. If the branch holds a different commit, delete it and then push, since the branch belongs to Athena alone. Add a test for a stale branch.",
+      "location": "Decision 5 (push on resume); gh/remote.rs:47-50",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The extra files are justified one by one in Decision 2 and are small, mostly visibility changes and new test or module files. These scope findings carry little weight.",
+      "evidence": "Decision 2 gives one reason per file. gh/tests.rs has to change because the existing parse_ci_run assertions encode the old one-step format. Fix: No change needed beyond keeping the edits to gh/early.rs and run/tests.rs to the visibility changes the plan describes.",
+      "location": "Athena findings 1-6 (off-deliverable files)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the reading. The functions and files it names exist (`resolve`, `run_routed`, `NoCi` at run/mod.rs:1269, `parse_ci_run`, `https_github_repository`, `GitRemote`, `push_branch`, `reuse_statement`, `Checked`, `producer-report-gaps`). The changes are made where the gaps start, and the demonstrations mostly exercise the real job run through a cfg(test) seam. Two problems need revision. First, the fail-all-three rule reads the workflow-run conclusion, which includes the `history` job; that job runs on the new push event and is not marked continue-on-error. A history failure would therefore reject work whose fmt, clippy and test passed, and the wait also depends on a non-check job finishing. ci.yml already provides the correct signal, the `ci` job named `fmt, clippy, tests`. Second, the run-level tests use an https github.com origin and install only the new ci seam, so the existing `early_pr` would make a real push and `gh` call during tests. A minor issue: the non-force push fails against a stale branch left after a crash. Athena's scope findings are adequately answered by Decision 2."
+}

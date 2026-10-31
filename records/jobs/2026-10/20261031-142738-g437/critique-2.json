@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-142738-g437",
+  "round": 2,
+  "at": "2026-10-31T14:34:26.972195383Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Criterion 4 says a failed aggregate job 'gives red steps'. The plan gives red only when a check job itself failed, takes each step from its own job, and reads other aggregate failures as `unusable`.",
+      "evidence": "Criterion 4: 'a failed aggregate `fmt, clippy, tests` job gives red steps, and a successful one gives green steps for all three check names.' Plan case (a): failed clippy gives clippy `failure` and fmt `success`. Cases (c) and (d) give `unusable` for a failed aggregate. The refinement is justified by ci.yml lines 397-428 (`if: always()`, `exit 1` on any non-success). A verifier reading the criterion literally may still flag it. Fix: In the change description and in the test's doc comment, state that a failed aggregate gives red only through a failed check job, and why (ci.yml lines 397-428). Then a verifier can match case (a) and cases (c)/(d) to criterion 4 as intended.",
+      "location": "Plan Decision 3 / Criterion 4 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`unusable` is a conclusion Athena invents, but `CiRun.conclusion` is documented as the platform's own values.",
+      "evidence": "ci_result.rs:80 documents `conclusion` as '`success`, `failure`, `cancelled`, `skipped`, `timed_out`, ...; meaningful once finished.' `read_ci` maps unknown values to Missing (line 183), so the behaviour is safe. But a later reader of a `CiRun` would see a value GitHub never sends. ci_result.rs is not in the plan's file list. Fix: Make it a named constant in client.rs (e.g. `CI_UNUSABLE`) whose doc comment says it is Athena's marker and that `read_ci` treats it as no result. Alternatively, reuse a platform value with the same effect (e.g. `neutral`) and explain the choice in the comment.",
+      "location": "Plan Decision 3 (`unusable` conclusion); crates/athena-core/src/ci_result.rs line 80",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The brief's deliverables and its changelog default ask for a CHANGELOG.md change, but criterion 5 and the out-of-scope text forbid one. The plan chooses the criterion.",
+      "evidence": "Expected deliverables list 'CHANGELOG.md (modify)' and 'ci_result.rs (modify)'. Criterion 5: 'No change appears in run/mod.rs, ci.yml, athena.toml or CHANGELOG.md.' Out of scope C: 'add the CHANGELOG.md entry'. Fix: Keep following criterion 5, and state the deviation from the deliverable list in the change description so the verifier does not count it as a missing deliverable.",
+      "location": "Plan Decision 5 / Open question 1; brief 'changelog' default vs criterion 5",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The branch value is placed in the query unencoded.",
+      "evidence": "Open question 5. Job ids are made of digits, lowercase letters and hyphens, so `athena/ci/<id>` is safe today. The parser-side `head_branch` guard also protects correctness. Fix: Either percent-encode the value, or note in a comment that the value comes from a job id, so other characters cannot occur.",
+      "location": "Plan step 4 (`branch=` in the query)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the reading and fixes the fault where it starts: `parse_ci_run` and `impl CiSource for GhClient` in gh/client.rs (lines 509-598). Today they pick the newest `ci` run with no event or branch filter, and they copy the step starting with `cargo fmt --check` to all three checks. I checked the plan's facts against the snapshot and they hold. In ci.yml, the check jobs pin their checkout to `github.event.pull_request.head.sha || github.sha` (lines 71, 119, 198, 283). The aggregate job `ci` is named `fmt, clippy, tests`; it needs gate, fmt, clippy and test and runs under `if: always()` (lines 400-428). The test job name has the form `test (shard N)` (line 269). `read_ci` treats any conclusion other than success or failure as Missing, and it skips unfinished runs (ci_result.rs lines 165-188). STEPS is [\"fmt\", \"clippy\", \"test\"]. Apart from gh/client.rs, no code uses `GhClient` as a `CiSource`: the only `CiSource` impls are NoCi and test fakes in routing.rs and ci_result.rs. `FakeRunner`, `Runner` and `GhClient::new(&runner, repo)` exist, so the recording `CiRunner` fake is a real seam. Each demonstration drives production code (`parse_ci_run`, `CiBranchSource::fetch`, `resolve`) through fakes that only return canned replies, and each would fail under the old selection. The plan also treats an aggregate failure with no failed check job as no result, so cancellations and gate failures never become a red verdict. That rule is grounded in ci.yml and is sound. The plan sets aside the CHANGELOG deliverable because criterion 5 forbids a CHANGELOG change, and it raises this as an open question. I found no blocker or major issue. The minor points: the literal wording of criterion 4 differs from the refined rule; the invented `unusable` conclusion should be documented on `CiRun.conclusion`; and the CHANGELOG conflict needs a user decision."
+}

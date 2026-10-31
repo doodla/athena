@@ -209,16 +209,18 @@ fn the_ci_run_is_read_with_its_sha_address_conclusions_and_duration() {
     let sha = "0123456789abcdef0123456789abcdef01234567";
     let runs = json!({"workflow_runs": [
             {"name": "pages", "head_sha": sha, "status": "completed", "conclusion": "failure",
+             "event": "push", "head_branch": CI_BRANCH,
              "html_url": "https://example.test/pages", "created_at": "2026-01-01T00:00:00Z",
              "updated_at": "2026-01-01T00:09:00Z", "id": 1},
             {"name": "ci", "head_sha": sha, "status": "completed", "conclusion": "success",
+             "event": "push", "head_branch": CI_BRANCH,
              "html_url": "https://example.test/ci/2", "created_at": "2026-01-01T00:00:00Z",
              "updated_at": "2026-01-01T00:02:30Z", "id": 2}]});
-    let jobs = json!({"jobs": [{"steps": [
-            {"name": "Set up", "conclusion": "success"},
-            {"name": "cargo fmt --check, cargo clippy -D warnings, cargo test",
-             "conclusion": "success"}]}]});
-    let run = parse_ci_run(&runs, Some(&jobs)).unwrap();
+    let jobs = ci_jobs(&[
+        ("fmt, clippy, tests", "completed", "success"),
+        ("the full history", "completed", "failure"),
+    ]);
+    let run = parse_ci_run(&runs, Some(&jobs), CI_BRANCH).unwrap();
     assert_eq!(run.sha, sha);
     assert_eq!(run.address, "https://example.test/ci/2");
     assert!(run.finished);
@@ -226,13 +228,446 @@ fn the_ci_run_is_read_with_its_sha_address_conclusions_and_duration() {
     assert_eq!(run.steps.len(), 3);
     assert!(run.steps.iter().all(|s| s.passed()));
     // Without the jobs reply, or for a run of another workflow only, there are no step results.
-    assert!(parse_ci_run(&runs, None).unwrap().steps.is_empty());
+    assert!(
+        parse_ci_run(&runs, None, CI_BRANCH)
+            .unwrap()
+            .steps
+            .is_empty()
+    );
     let only_pages = json!({"workflow_runs": [runs["workflow_runs"][0].clone()]});
-    assert!(parse_ci_run(&only_pages, None).is_none());
+    assert!(parse_ci_run(&only_pages, None, CI_BRANCH).is_none());
     // A run for another commit keeps its own SHA, so the SHA check can reject it.
     let other = json!({"workflow_runs": [{"name": "ci", "head_sha": "fedcba",
+            "event": "push", "head_branch": CI_BRANCH,
             "status": "completed", "conclusion": "success", "html_url": "u"}]});
-    assert_eq!(parse_ci_run(&other, None).unwrap().sha, "fedcba");
+    assert_eq!(parse_ci_run(&other, None, CI_BRANCH).unwrap().sha, "fedcba");
+}
+
+/// The CI branch of a job, as the push run is named.
+const CI_BRANCH: &str = "athena/ci/20261031-142738-g437";
+const CI_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// One run of the `ci` workflow for [`CI_SHA`], as the runs reply lists it.
+fn ci_run(
+    id: u64,
+    event: &str,
+    branch: &str,
+    status: &str,
+    conclusion: &str,
+    created: &str,
+) -> Value {
+    json!({"name": "ci", "id": id, "event": event, "head_branch": branch, "head_sha": CI_SHA,
+        "status": status, "conclusion": conclusion,
+        "html_url": format!("https://example.test/ci/{id}"),
+        "created_at": created, "updated_at": "2026-01-01T01:00:00Z"})
+}
+
+/// A jobs reply from `(name, status, conclusion)` triples.
+fn ci_jobs(jobs: &[(&str, &str, &str)]) -> Value {
+    let list: Vec<Value> = jobs
+        .iter()
+        .map(|(name, status, conclusion)| {
+            json!({"name": name, "status": status,
+                "conclusion": if conclusion.is_empty() { Value::Null } else { Value::from(*conclusion) }})
+        })
+        .collect();
+    json!({"jobs": list})
+}
+
+/// The jobs of a green commit, named as `ci.yml` names them.
+fn green_jobs() -> Value {
+    ci_jobs(&[
+        ("gate (reuse of an earlier pass)", "completed", "success"),
+        ("fmt", "completed", "success"),
+        ("clippy", "completed", "success"),
+        ("test (shard 0)", "completed", "success"),
+        ("fmt, clippy, tests", "completed", "success"),
+        ("the full history", "completed", "success"),
+    ])
+}
+
+/// A `Runner` that answers the runs query and the jobs query of the CI source from canned text and records
+/// every call. The runs answer ignores the query on purpose, so the parser's own filter is what is tested.
+struct CiRunner {
+    calls: RefCell<Vec<Vec<String>>>,
+    runs: Value,
+    /// The jobs reply per run id.
+    jobs: BTreeMap<u64, Value>,
+}
+impl CiRunner {
+    fn new(runs: Vec<Value>, jobs: Vec<(u64, Value)>) -> Self {
+        CiRunner {
+            calls: RefCell::new(vec![]),
+            runs: json!({"workflow_runs": runs}),
+            jobs: jobs.into_iter().collect(),
+        }
+    }
+    fn paths(&self) -> Vec<String> {
+        self.calls
+            .borrow()
+            .iter()
+            .map(|a| a.iter().find(|p| p.starts_with("repos/")).unwrap().clone())
+            .collect()
+    }
+}
+impl Runner for CiRunner {
+    fn gh(&self, args: &[String]) -> Result<String> {
+        self.calls.borrow_mut().push(args.to_vec());
+        let path = args.iter().find(|a| a.starts_with("repos/")).unwrap();
+        if path.starts_with("repos/example/project/actions/runs?") {
+            return Ok(self.runs.to_string());
+        }
+        let id = path
+            .strip_prefix("repos/example/project/actions/runs/")
+            .and_then(|rest| rest.split('/').next())
+            .and_then(|id| id.parse::<u64>().ok());
+        match id.and_then(|id| self.jobs.get(&id)) {
+            Some(jobs) if path.contains("/jobs") => Ok(jobs.to_string()),
+            _ => anyhow::bail!("unexpected call {path}"),
+        }
+    }
+}
+
+/// A local fallback that fails every check and counts its calls.
+struct LocalChecks {
+    calls: Cell<u32>,
+}
+impl crate::ci_result::LocalChecks for LocalChecks {
+    fn run(&self, _: &str) -> Result<Vec<crate::ci_result::Step>> {
+        self.calls.set(self.calls.get() + 1);
+        Ok(crate::ci_result::STEPS
+            .iter()
+            .map(|name| crate::ci_result::Step {
+                name: name.to_string(),
+                conclusion: "failure".into(),
+                duration_s: 0.0,
+            })
+            .collect())
+    }
+}
+
+fn one_poll() -> crate::ci_result::Wait {
+    crate::ci_result::Wait {
+        polls: 1,
+        pause: std::time::Duration::ZERO,
+    }
+}
+
+#[test]
+fn ci_push_run_wins_over_newer_pull_request_run() {
+    let pull = ci_run(
+        20,
+        "pull_request",
+        "athena/j",
+        "completed",
+        "failure",
+        "2026-01-01T00:30:00Z",
+    );
+    let push = ci_run(
+        10,
+        "push",
+        CI_BRANCH,
+        "completed",
+        "success",
+        "2026-01-01T00:10:00Z",
+    );
+    let runner = CiRunner::new(
+        vec![pull.clone(), push.clone()],
+        vec![(10, green_jobs()), (20, green_jobs())],
+    );
+    // The parser alone.
+    let runs = runner.runs.clone();
+    let parsed = parse_ci_run(&runs, Some(&green_jobs()), CI_BRANCH).unwrap();
+    assert_eq!(parsed.address, "https://example.test/ci/10");
+    assert_eq!(parsed.conclusion, "success");
+    assert_eq!(parsed.steps.len(), 3);
+    assert!(parsed.steps.iter().all(|s| s.passed()));
+    // The source, end to end: the jobs are read for the push run's id.
+    let client = GhClient::new(&runner, "example/project".into());
+    let run = crate::ci_result::CiSource::fetch(&client.ci_source(CI_BRANCH), CI_SHA)
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.address, "https://example.test/ci/10");
+    assert_eq!(run.conclusion, "success");
+    assert!(run.steps.iter().all(|s| s.passed()));
+    let paths = runner.paths();
+    assert!(paths[1].starts_with("repos/example/project/actions/runs/10/jobs"));
+
+    // The reverse: a newer green pull request run does not hide a red push run.
+    let red_jobs = ci_jobs(&[
+        ("fmt", "completed", "success"),
+        ("clippy", "completed", "failure"),
+        ("test (shard 0)", "completed", "success"),
+        ("fmt, clippy, tests", "completed", "failure"),
+    ]);
+    let green_pull = ci_run(
+        20,
+        "pull_request",
+        "athena/j",
+        "completed",
+        "success",
+        "2026-01-01T00:30:00Z",
+    );
+    let red_push = ci_run(
+        10,
+        "push",
+        CI_BRANCH,
+        "completed",
+        "failure",
+        "2026-01-01T00:10:00Z",
+    );
+    let runner = CiRunner::new(
+        vec![green_pull, red_push],
+        vec![(10, red_jobs), (20, green_jobs())],
+    );
+    let client = GhClient::new(&runner, "example/project".into());
+    let run = crate::ci_result::CiSource::fetch(&client.ci_source(CI_BRANCH), CI_SHA)
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.address, "https://example.test/ci/10");
+    assert_eq!(run.conclusion, "failure");
+}
+
+#[test]
+fn ci_push_run_ignores_other_events_and_branches() {
+    let cases = [
+        // Only a pull request run.
+        ci_run(
+            20,
+            "pull_request",
+            CI_BRANCH,
+            "completed",
+            "success",
+            "2026-01-01T00:30:00Z",
+        ),
+        // A push run on another branch.
+        ci_run(
+            21,
+            "push",
+            "athena/ci/another-job",
+            "completed",
+            "success",
+            "2026-01-01T00:30:00Z",
+        ),
+        // A push run on the default branch.
+        ci_run(
+            22,
+            "push",
+            "main",
+            "completed",
+            "success",
+            "2026-01-01T00:30:00Z",
+        ),
+    ];
+    for case in cases {
+        let id = case["id"].as_u64().unwrap();
+        let runner = CiRunner::new(vec![case.clone()], vec![(id, green_jobs())]);
+        let runs = runner.runs.clone();
+        assert!(parse_ci_run(&runs, Some(&green_jobs()), CI_BRANCH).is_none());
+        assert!(parse_ci_run(&runs, None, CI_BRANCH).is_none());
+        let client = GhClient::new(&runner, "example/project".into());
+        let source = client.ci_source(CI_BRANCH);
+        assert!(
+            crate::ci_result::CiSource::fetch(&source, CI_SHA)
+                .unwrap()
+                .is_none()
+        );
+        // No jobs were read for the run that was not chosen.
+        assert_eq!(runner.paths().len(), 1);
+        // So `resolve` finds no result and runs the checks locally; the green run is never used.
+        let local = LocalChecks {
+            calls: Cell::new(0),
+        };
+        let outcome = crate::ci_result::resolve(CI_SHA, &[], &source, &local, one_poll());
+        match outcome {
+            crate::ci_result::Outcome::Failed(record) => {
+                assert_eq!(record.source, crate::ci_result::Source::Local);
+            }
+            other => panic!("expected a local failure, got {other:?}"),
+        }
+        assert_eq!(local.calls.get(), 1);
+    }
+}
+
+#[test]
+fn ci_push_run_query_names_event_and_branch() {
+    let push = ci_run(
+        10,
+        "push",
+        CI_BRANCH,
+        "completed",
+        "success",
+        "2026-01-01T00:10:00Z",
+    );
+    let runner = CiRunner::new(vec![push], vec![(10, green_jobs())]);
+    let client = GhClient::new(&runner, "example/project".into());
+    crate::ci_result::CiSource::fetch(&client.ci_source(CI_BRANCH), CI_SHA).unwrap();
+    let paths = runner.paths();
+    assert_eq!(paths.len(), 2, "{paths:?}");
+    assert!(
+        paths[0].starts_with("repos/example/project/actions/runs?"),
+        "{paths:?}"
+    );
+    for wanted in [
+        format!("head_sha={CI_SHA}"),
+        "event=push".to_string(),
+        format!("branch={CI_BRANCH}"),
+    ] {
+        assert!(paths[0].contains(&wanted), "{wanted} in {}", paths[0]);
+    }
+    assert_eq!(
+        paths[1],
+        "repos/example/project/actions/runs/10/jobs?filter=latest&per_page=100"
+    );
+}
+
+#[test]
+fn ci_push_run_verdict_comes_from_the_aggregate_job() {
+    let finished = ci_run(
+        10,
+        "push",
+        CI_BRANCH,
+        "completed",
+        "failure",
+        "2026-01-01T00:10:00Z",
+    );
+    let runs = json!({"workflow_runs": [finished.clone()]});
+    let parse = |jobs: Value| parse_ci_run(&runs, Some(&jobs), CI_BRANCH).unwrap();
+    let step = |run: &crate::ci_result::CiRun, name: &str| {
+        run.steps
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap()
+            .conclusion
+            .clone()
+    };
+
+    // (a) A failed clippy job: red, and each step has its own job's result.
+    let run = parse(ci_jobs(&[
+        ("gate (reuse of an earlier pass)", "completed", "success"),
+        ("fmt", "completed", "success"),
+        ("clippy", "completed", "failure"),
+        ("test (shard 0)", "completed", "success"),
+        ("fmt, clippy, tests", "completed", "failure"),
+    ]));
+    assert!(run.finished);
+    assert_eq!(run.conclusion, "failure");
+    assert_eq!(step(&run, "clippy"), "failure");
+    assert_eq!(step(&run, "fmt"), "success");
+    assert_eq!(step(&run, "test"), "success");
+
+    // (b) A failed fmt job.
+    let run = parse(ci_jobs(&[
+        ("fmt", "completed", "failure"),
+        ("clippy", "completed", "success"),
+        ("test (shard 0)", "completed", "success"),
+        ("test (shard 1)", "completed", "success"),
+        ("fmt, clippy, tests", "completed", "failure"),
+    ]));
+    assert_eq!(run.conclusion, "failure");
+    assert_eq!(step(&run, "fmt"), "failure");
+    assert_eq!(step(&run, "test"), "success");
+
+    // A failed shard makes the test step red, and a cancelled check job does not hide it.
+    let run = parse(ci_jobs(&[
+        ("fmt", "completed", "cancelled"),
+        ("clippy", "completed", "success"),
+        ("test (shard 0)", "completed", "success"),
+        ("test (shard 1)", "completed", "failure"),
+        ("fmt, clippy, tests", "completed", "failure"),
+    ]));
+    assert_eq!(run.conclusion, "failure");
+    assert_eq!(step(&run, "test"), "failure");
+    assert_eq!(step(&run, "fmt"), "cancelled");
+
+    // (c) A cancelled check job with a failed aggregate job says nothing about the tree.
+    let cancelled_jobs = ci_jobs(&[
+        ("fmt", "completed", "cancelled"),
+        ("clippy", "completed", "success"),
+        ("test (shard 0)", "completed", "success"),
+        ("fmt, clippy, tests", "completed", "failure"),
+    ]);
+    let run = parse(cancelled_jobs.clone());
+    assert_eq!(run.conclusion, "unusable");
+    assert!(run.steps.is_empty());
+    let runner = CiRunner::new(vec![finished.clone()], vec![(10, cancelled_jobs)]);
+    let client = GhClient::new(&runner, "example/project".into());
+    let source = client.ci_source(CI_BRANCH);
+    let local = LocalChecks {
+        calls: Cell::new(0),
+    };
+    let outcome = crate::ci_result::resolve(CI_SHA, &[], &source, &local, one_poll());
+    match outcome {
+        crate::ci_result::Outcome::Failed(record) => {
+            assert_eq!(record.source, crate::ci_result::Source::Local);
+        }
+        other => panic!("expected the local fallback, got {other:?}"),
+    }
+    assert_eq!(local.calls.get(), 1);
+
+    // (d) A failed gate: the check jobs were skipped.
+    let run = parse(ci_jobs(&[
+        ("gate (reuse of an earlier pass)", "completed", "failure"),
+        ("fmt", "completed", "skipped"),
+        ("clippy", "completed", "skipped"),
+        ("test (shard 0)", "completed", "skipped"),
+        ("fmt, clippy, tests", "completed", "failure"),
+    ]));
+    assert_eq!(run.conclusion, "unusable");
+    assert!(run.steps.is_empty());
+
+    // (e) A successful aggregate job: three green steps, also when the check jobs were skipped.
+    let run = parse(green_jobs());
+    assert_eq!(run.conclusion, "success");
+    assert_eq!(
+        run.steps
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
+        ["fmt", "clippy", "test"]
+    );
+    assert!(run.steps.iter().all(|s| s.passed()));
+    let run = parse(ci_jobs(&[
+        ("gate (reuse of an earlier pass)", "completed", "success"),
+        ("fmt", "completed", "skipped"),
+        ("clippy", "completed", "skipped"),
+        ("test (shard 0)", "completed", "skipped"),
+        ("fmt, clippy, tests", "completed", "success"),
+    ]));
+    assert_eq!(run.conclusion, "success");
+    assert!(run.steps.iter().all(|s| s.passed()));
+
+    // (f) A run failed only by the history job, with a successful aggregate job, is green.
+    let run = parse(ci_jobs(&[
+        ("fmt, clippy, tests", "completed", "success"),
+        ("the full history", "completed", "failure"),
+    ]));
+    assert_eq!(run.conclusion, "success");
+    assert!(run.steps.iter().all(|s| s.passed()));
+
+    // (g) The aggregate job still runs.
+    let run = parse(ci_jobs(&[
+        ("fmt", "completed", "failure"),
+        ("fmt, clippy, tests", "in_progress", ""),
+    ]));
+    assert!(!run.finished);
+    assert!(run.steps.is_empty());
+
+    // (h) A cancelled aggregate job keeps its conclusion and has no steps.
+    let run = parse(ci_jobs(&[("fmt, clippy, tests", "completed", "cancelled")]));
+    assert!(run.finished);
+    assert_eq!(run.conclusion, "cancelled");
+    assert!(run.steps.is_empty());
+
+    // (i) No aggregate job in a finished run.
+    let run = parse(ci_jobs(&[("the full history", "completed", "success")]));
+    assert_eq!(run.conclusion, "unusable");
+    assert!(run.steps.is_empty());
+
+    // (j) A job named `fmt` is not the aggregate job.
+    let run = parse(ci_jobs(&[("fmt", "completed", "success")]));
+    assert_eq!(run.conclusion, "unusable");
+    assert!(run.steps.is_empty());
 }
 
 #[test]

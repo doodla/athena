@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-142738-g437",
+  "round": 1,
+  "at": "2026-10-31T14:32:07.56347595Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The reason the plan gives for trusting only the push run is a guess, and ci.yml contradicts it. It would go into doc comments as fact.",
+      "evidence": "The plan says a pull_request run's \"checkout is the merge with main ... (my understanding of GitHub behaviour, not shown in this repository)\". Step 2 writes into the doc comment: \"a pull_request run tests a merge with main\". But every check job in ci.yml checks out `ref: ${{ github.event.pull_request.head.sha || github.sha }}`, so a pull_request run in this repository tests the candidate's own head tree. The 'strangers' default asks the doc comment to say truthfully which run is trusted and why. A false reason misleads the next maintainer. This is a guess where the code could have been read. Fix: Remove the merge-with-main claim. Give the reason the code supports: the push to `athena/ci/<job id>` is the run Athena starts for this job and candidate, while a pull_request run for the same SHA depends on whether a PR exists and when it was opened, and on the PR's own workflow events. Or say plainly that the push-only rule comes from the earlier job's finding. If the planner thinks the earlier finding no longer holds now that ci.yml pins the head SHA, raise that as an open question for the user.",
+      "location": "Plan Decision 2 and Step 2 (doc comment text); .github/workflows/ci.yml lines 71, 119, 198, 283",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A failed aggregate job does not always mean a check failed. Cancellations, timeouts and a failed gate also make it fail, and the plan turns each of these into a definite red verdict.",
+      "evidence": "The `ci` job (name `fmt, clippy, tests`) has `if: always()`. It runs `exit 1` whenever gate is not `success`, or whenever fmt, clippy or test differs from `success` (or from `skipped` after a reused pass). A cancelled or timed-out check job therefore makes the aggregate job's conclusion `failure`, and so does a gate that failed on a cache lookup. The jobs have 30-minute timeouts. The plan maps aggregate `failure` to run conclusion `failure`. Then `read_ci` returns `Reading::Red` and `resolve` returns `Outcome::Failed` with `Source::Ci`, and the local fallback never runs. The plan's risk note claims that `cancelled` and `timed_out` \"pass through ... and read_ci treats them as no result\". That only holds when the aggregate job itself is cancelled, not when a job it needs is. The plan rejected using the run conclusion because `history` could \"reject correct work\", and this path has the same flaw. Fix: When the aggregate job's conclusion is `failure`, also read the jobs it needs from the same jobs reply: `gate (reuse of an earlier pass)`, `fmt`, `clippy` and `test (shard N)`. Return `failure` only if at least one of them concluded `failure`. If the failure comes only from cancelled, timed-out or missing check jobs, or from a failed gate, return `unusable` so the local fallback runs. Optionally set each step's conclusion from its own job, which also answers the open question on attribution. Add fixture cases to the criterion 4 test: a cancelled `fmt` job plus a failed aggregate gives `unusable` or Missing, not red, and a failed `clippy` job plus a failed aggregate gives red. Correct the risk note.",
+      "location": "Plan Decision 3, Step 2, Risks (\"A flaky or cancelled aggregate job is read as a failure\"); .github/workflows/ci.yml lines 397-428",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "When the aggregate job's conclusion is anything other than success, every step is set to `failure`. That includes `cancelled` and `skipped`, so the record holds steps that disagree with its conclusion.",
+      "evidence": "Step 2 sets each step to `success` if the conclusion is success and to `failure` otherwise. `read_ci` ignores the steps for non-failure conclusions today. But a CiRun that says `cancelled` while listing three `failure` steps misreports the run to anyone who logs or records it. Fix: Copy the aggregate job's own conclusion into the steps, or leave the steps empty for any conclusion other than success or failure.",
+      "location": "Plan Risks, last bullet; Step 2 (\"steps carry failure\")",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Checked by reading the snapshot. The plan fits the accepted reading and one producer run. Everything it names exists: `parse_ci_run` and `impl CiSource for GhClient` in gh/client.rs (lines 519 and 569), `CI_CHECK_STEP` (line 512), the `Runner` trait in gh/transport.rs, `FakeRunner` with a `calls` RefCell in gh/tests.rs, and `resolve` and `read_ci` in ci_result.rs. Grep finds no caller of `GhClient` as a `CiSource`, so removing that impl is safe. The demonstrations drive production code through the existing `Runner` seam, and each would fail under the old newest-run selection. The plan handles the conflict between the deliverables and criterion 5 well and raises it as an open question. Two soundness problems remain. (1) The plan's reason for trusting only the push run, which would be written into doc comments, is a guess, and ci.yml contradicts it: pull_request runs here check out `github.event.pull_request.head.sha`, not a merge with main. (2) The plan reads a failed aggregate `fmt, clippy, tests` job as a red result. In ci.yml that job also fails when a needed job was cancelled or timed out, or when the gate failed. So infrastructure failures would become a definite `Failed` verdict on correct work and skip the local fallback. The plan's own risk note says the opposite. Both are fixable inside this slice."
+}
