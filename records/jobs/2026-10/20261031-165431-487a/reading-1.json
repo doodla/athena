@@ -1,0 +1,151 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-165431-487a",
+  "n": 1,
+  "at": "2026-10-31T18:47:25.956224317Z",
+  "invocation_seq": 1,
+  "base_commit": "99f45bcd8e1e3c600f699f4c7414ef2c859d6dbf",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Refuse readings that cite repo files absent at the base commit",
+  "summary": "Root cause: reading acceptance never compares the files a reading says exist (often from an earlier job such as 20261026-042558-5p65, 20261026-064950-38jx or 20261026-065228-02zf) with the base commit, so a reading built on unlanded work is accepted and only the critic notices. Add a deterministic check, `check_cited_paths_exist`, to `check_reading_acceptance`. It refuses any `crates/...` path named in the reading's assumptions that is not in the base-commit file set and is not a `create` deliverable.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Check and tests are written in Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Tests added; cargo test and clippy must be clean."
+    },
+    {
+      "id": "root-cause",
+      "how": "The check sits at reading acceptance, where the cause originates."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced by a code check, not prose."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the check on readings and see refusal."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is that unverified dependencies are refused."
+    },
+    {
+      "id": "small",
+      "how": "One focused check in one file."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comment explains the cause for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the Athena maintainer wants readings built on unlanded earlier-job work caught at reading acceptance, deterministically and before the planner and critic spend a round. The check fixes the class, not one job.",
+    "Code survey: I read crates/athena-core/src/reading.rs. `check_reading_acceptance` (line 2849) runs check_prior_result_and_scope, check_criteria_evidence, check_code_survey, check_governance_coverage and then check_boundary_and_repo_files. `repo_files` is the `Option<&BTreeSet<String>>` of base-commit paths, and `path_exists_in` (line 2742) tests membership. The new check goes in the same function after the existing checks. It reads assumptions and deliverables only, calls no model, and applies only when `repo_files` is Some, a capability is set and no question is set. The job adds no record or data file, so `check_record_file` and `AnyRecord` are not involved. The property is measured directly by calling the check on a Reading with a fake file set.",
+    "Only `crates/`-prefixed path tokens in assumptions are checked, to avoid false positives on prose. A path passes if it exists in repo_files, is a directory holding files, or is a `create` deliverable of the reading.",
+    "The refusal message names each missing path, says it is not at the base commit, and tells the reader to list the earlier job's work as a create deliverable or drop the dependency. Prior-job landing state is not looked up, because the file set at the base commit is the ground truth.",
+    "Previous jobs: 20261026-042558-5p65 (failed unverified), 20261026-064950-38jx (rejected) and 20261026-065228-02zf (failed unverified) are the referenced jobs. Their findings (design-review role absent, `resolved` state absent, low-disk test failure) are instances of the class. They are not re-done here. No file their candidates changed is touched; the code-health work of 38jx is dropped from this change, and no code_health.rs, status.rs, steward.rs or gh.rs edit belongs to it.",
+    "Governance files (athena.toml, defaults.toml, workflows) are not needed; the check is code only."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-core reading`: a new test builds a reading whose assumption says `crates/athena-core/src/code_health.rs` already exists, with a file set lacking it, and `check_reading_acceptance` returns an error naming that path. The same test passes when the path is in the file set, and when it is a create deliverable.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core reading`: a second test uses a different path and a different earlier job id than the first, and is refused the same way, so the check covers the class and not one job.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core reading`: the check is skipped when repo_files is None, when a question is set and when capability is null, shown by tests that return Ok.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test --locked`: all pass, and the replay tests in reading.rs still pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The change adds a refusal rule, so it refuses more readings and the higher refusal rate is intended: expected 5% of newly refused readings. The replay test over accepted readings stays under the hold limit.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The doc comment on the new `check_cited_paths_exist` in crates/athena-core/src/reading.rs names the root cause (nothing checked a reading's dependencies on earlier jobs against the repo), and CHANGELOG.md has an entry that says the same.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Rebuilding the code-health check from 20261026-042558-5p65 / 20261026-064950-38jx, or its files (code_health.rs, status.rs, steward.rs, gh.rs, display.rs, Cargo.lock, code_health_hooks.rs): dropped here",
+    "Retrying the post-mortem and retry-findings job 20261026-065228-02zf and the files it touched",
+    "Fixing the low-disk guard failure in crates/athena-cli/tests/binary.rs",
+    "Checking queue state or landing state of earlier jobs",
+    "Changing athena.toml, defaults.toml or prompt files"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1700.0,
+        "p90": 3800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.718716577540107,
+      "p_verification_passes": 0.6726190476190477,
+      "p_user_intervenes": 0.09135135135135135,
+      "cost_usd": {
+        "p10": 0.533281766341618,
+        "p50": 1.2334521,
+        "p90": 3.3673669156840162
+      },
+      "wall_time_s": {
+        "p10": 533.4817740075339,
+        "p50": 1735.3693510320006,
+        "p90": 3842.48280306238
+      }
+    }
+  },
+  "departures": "Slightly lower acceptance: the request is vague and the reading picks a path-existence design; the failure class is broader than paths.",
+  "urgent_reason": "Cuts repeated planning stops: the critic has rejected readings six times for this one cause, each costing a failed or redone attempt.",
+  "hard_reason": "It adds a rule that can refuse readings at acceptance, which is part of the run pipeline and the gate on how jobs are read.",
+  "producer_effort": "high"
+}
