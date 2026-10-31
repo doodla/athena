@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-030119-tw3v",
+  "round": 3,
+  "at": "2026-10-31T03:16:26.014309869Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The left-behind rule removes a held-back job's records. This is the deferred drop_landed under another name, and the plan's own rejected option ruled it out.",
+      "evidence": "In close.rs, the landing commit carries the job's closing records. close.rs:1-7 says it 'Commits the closing records of a dispatched job, landing the change when it was verified'. Records::load reads job state from the local branch head (landing.rs:429-431). Under decision 1, `reset_keep(tip)` takes b's landing commit off that branch, so b's closing records and verification disappear from the records a later run reads. Decision 1 rejects 'Take b's landing commit off the local branch at hold-back time' because 'That is the deferred drop_landed. It changes old-job record state, which the reading assigns to A6b.' The chosen rule does the same thing one landing later, without the record handling A6b is meant to add. The reading puts old-job record handling out of scope. Fix: Keep b's records on the rebuilt branch. When an earlier landing commit conflicts, carry it as a records-only commit: take its records/ paths and drop its conflicting code paths. Then nothing about b is lost and only b's code is held back. Add a core test that shows b's job record still loads from the new tip. If that is too much for this half, ask the user for a ruling instead of shipping the drop: either c is held back too in the stacked shape (criterion 2 would then need re-reading), or record loss is accepted. Do not leave this as an open question while the plan rejects the same act elsewhere.",
+      "location": "Plan decision 1 (left-behind rule) and the first open question; crates/athena-core/src/run/close.rs:1-7, 210; crates/athena-core/src/gh/landing.rs:429-431",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`plan_rebase` carries every earlier unlanded commit that replays cleanly. Content from a job that is Blocked or NeedsRecheck therefore reaches main inside the next job's pull request, which contradicts the guarantee the CHANGELOG will state.",
+      "evidence": "Step 2 carries fork..landed and skips only commits that conflict. Suppose b is not landed (NeedsRecheck or Err goes to NotLanded, then Failed) and its landing commit stays under c on the local branch. c's rebased tip then contains b's replayed change, and land_pr squashes it onto main. Decision 1's own reason names this risk ('a clean b would push unlanded content'). Today's path without a rebase already behaves this way, so the behaviour is not new. But the planned CHANGELOG line says such a rebase 'is not landed until the re-check rule (build job 7)'. Fix: Either state in the CHANGELOG and async-drain.md that a not-landed earlier job's change can ride in the next job's pull request, as it does today, or treat known not-landed jobs' code like the left-behind case. Do not claim the NeedsRecheck guarantee covers stacked content.",
+      "location": "Plan decision 1 ('a clean b would push unlanded content') vs the plan_rebase algorithm; criterion 7 CHANGELOG text on NeedsRecheck",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Queue order is the order jobs join, which can differ from the order their landing commits were stacked. The head job could then carry another unlanded job's commit that sits below it.",
+      "evidence": "In drain.rs:1393-1411, the landing commit is stacked during run (close), and the worker joins the queue only after run_job returns Passed. Two workers can close in the order X, Y and still join in the order Y, X. Head Y's fork..landed range then includes X's landing commit, which is not yet landed. The landing mutex has the same race today, so this is not a regression. But the plan presents the queue as giving a defined order. Fix: Say in the async-drain.md note that queue order is pass order, not stacking order, and what that means for content. Or order the queue by position on the local branch.",
+      "location": "Decision 3 (queue join at RunStep::Passed) vs land_or_block stacking order",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan is large for one producer run: about 20 new tests across two crates, a stack-aware replay, bare-origin flows and an Athena wrapper fixture. The earlier job failed partly on size.",
+      "evidence": "Demonstrations list core tests (stacked Moved, Current, NeedsRecheck, Conflict, parentless, governed second commit, tail conflict, held-back skip, resync then Current), bare-origin tests (two jobs, conflict, unreachable, published head), a wrapper test, three LandingQueue unit tests, six rebased_from arm tests, and seven drain integration tests. The plan already allows the wrapper test to be dropped. Fix: Name a cut line in advance, for example: the wrapper test and the second bare-origin test may be reported as read-only checks. This keeps the producer within one run without leaving any criterion unshown.",
+      "location": "Plan as a whole: Files, Steps 2-8, the Demonstrations",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read drain.rs (Drain::land, attempts, the Steps and Lander traits), the Athena::land_pr wrapper in gh/landing.rs, close.rs and athena-git. The functions the plan names exist where it says: landed_commit_for, land_pr, after_merge, resync_tip and resync_onto_merge, Git::replay, merge_tree, reset_keep and fetch_remote_branch. plan_rebase is new code; the reading listed it as though it already existed. The queue design follows from the code. The slot belongs to the item and lasts through the landing retry, matching the two land calls at drain.rs:1428-1437. A conflict ends the item without a retry and without a stop. Criteria 1 to 5 each have a deterministic demonstration that uses production plan_rebase, rebased_from and Drain::land. The threaded test is honestly labelled a smoke test. The one soundness problem is the left-behind rule. When a later job rebases, the held-back job's landing commit leaves the local branch. That commit carries the job's closing records (close.rs:1-7), and Records::load reads job state from that branch (landing.rs:429-431). So the rule quietly does the record-dropping drop_landed that the reading put in A6b, and that decision 1 rejects for that very reason. That is a major finding, so the verdict is revise. Carry the conflicting commit's records without its code, or get a ruling from the user. Smaller points: carrying clean unlanded commits weakens the NeedsRecheck guarantee the CHANGELOG would state; queue order is pass order, not stacking order; and the plan should name a cut line for size. I weighed Athena's gh/mod.rs finding; that one-line re-export is needed and is disclosed, so I did not repeat it."
+}

@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-030119-tw3v",
+  "round": 2,
+  "at": "2026-10-31T03:11:50.776253928Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "A held-back candidate's landing commit stays under later candidates on the local branch, so the next candidate replays it and conflicts too; the QueueWorld double hides this.",
+      "evidence": "Decision 1 says `land_or_block` (run/close.rs) puts each job's landing commit on the current local tip, and `Athena::land_pr` looks for the landing commit inside `self.head()` (landing.rs:429, 476). Decision 6 leaves a held-back job b's landing commit on that local branch. A later candidate c is landed locally on a tip that already contains b's commit. In `plan_rebase`, fork = merge-base(onto, c_landed) lies below b, so `replay(onto, fork, c_landed)` replays b's commit again. It hits the same conflict, so c is held back too. If it did not conflict, c's pushed head would carry b's unverified-on-main content. The `QueueWorld` in the criterion 2 demonstration gives each job its own branch from the old base, a shape production never has, so the test passes while the real flow fails 'the next candidate still lands'. Fix: Make the core and drain doubles use the production branch shape: one local branch with the landing commits stacked, and the held-back job's commit under the next job. Then choose and state how the next candidate gets past it. One option: replay only the job's own landing commit (landed^..landed) onto the latest main, with an explicit rule for unmerged earlier commits between fork and landed^. Another: take the held-back commit off the local branch at hold-back time, which needs a reason why this is not the deferred drop_landed. Add a core test: b held back, then c, stacked on b, rebases cleanly without b's content. Add a drain test with the stacked shape.",
+      "location": "Decision 3 (plan_rebase replays fork..landed) together with decision 6 (a held-back job stays locally landed) and the criterion 2 demonstration (QueueWorld branches cut from the same old base)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The production wiring PrLander::rebase -> Athena::rebase_for_landing is never run by a test.",
+      "evidence": "Every drain test runs through `QueueWorld` or the defaults, and the plan admits that no test runs `Athena::rebase_for_landing`. A wrong job record, branch or default-branch lookup there would ship unseen. Only `rebase_job_branch` is exercised, against a bare origin. Fix: Keep the wrapper as thin as planned. Either add one test that builds an Athena on a temporary repository with a fake gh `Runner` answering `default_branch`, or state in the report that this wiring is checked only by reading.",
+      "location": "Open question 1; criterion 1 'through the real entry point'; PrLander::rebase / Athena::rebase_for_landing",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The drain-level proof of landing order is probabilistic; only the pure struct is proven deterministically.",
+      "evidence": "The plan admits std's Mutex is not fair, so without the queue the c, a, b assertion fails only by chance. The `LandingQueue` unit tests prove the struct but not that `Drain::land` waits on it. Fix: Add one deterministic drain-level check that the head wait is used, for example: the item that joined second reaches `Drain::land` first through gating and is observed not to call `rebase` or `land` until the first item has landed. Otherwise state in the report that the drain-level order is a smoke test only.",
+      "location": "Criterion 1 demonstration (a): the 10-times repeated gated order test",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The gh/mod.rs re-export is outside the deliverables but needed.",
+      "evidence": "gh/mod.rs:37 makes `landing` a private module, so the one-line re-export is needed for athena-cli to name `Rebase` and `plan_rebase`. Fix: Keep the change. Name the widening in the CHANGELOG or the report so the reviewer of the change sees it.",
+      "location": "Files: crates/athena-core/src/gh/mod.rs (Athena's own finding)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read drain.rs (`Drain::land` at 1322, `attempts` at 1368), the gh/landing.rs flow (`land_pr` at 171-220, `Athena::land_pr` at 416-538), early.rs `replace_early`, pr.rs `check_replace` and the async-drain.md section 6 text. The plan's references hold. `check_replace` really does throw away the ancestry answer. The landing commit is looked for on the local HEAD branch. Section 6 defines queue order as the order in which checks and verification passed, which is the order the plan uses. The plan matches the reading: queue plus rebase, with conflict return and the thrash stop deferred. One soundness problem breaks criterion 2 in real use, and the test double hides it. Local landing stacks every job's landing commit on one local branch (decision 1). A held-back job keeps its commit on that branch (decision 6). `plan_rebase` replays fork..landed for the next job, and that range contains the held-back job's commit. So in real use the next candidate either conflicts on the same commit or carries the held-back job's content. The `QueueWorld` double cuts every job from the same old base on its own branch, so the drain test passes while the real flow would not. Other points are minor: `rebase_for_landing` wiring is never run by a test, the drain-level order proof is probabilistic, and Athena's flag on gh/mod.rs. The gh/mod.rs re-export is justified, because `landing` is a private module."
+}
