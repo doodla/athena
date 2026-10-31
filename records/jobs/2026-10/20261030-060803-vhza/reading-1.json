@@ -1,0 +1,147 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-060803-vhza",
+  "n": 1,
+  "at": "2026-10-31T21:39:42.252562818Z",
+  "invocation_seq": 6,
+  "base_commit": "783d021b420fe6a9d62174da610f84eb08eb904c",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Find why the steward's decisions source is empty and fix or document it",
+  "summary": "The steward's `decisions` source (defined in crates/athena-core/src/steward.rs) reported empty. The job finds the cause, writes it down, and makes decisions readable to the steward, or records why it cannot be. Audience: the steward and the maintainer reading its introspections.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Any code change is Rust."
+    },
+    {
+      "id": "tested",
+      "how": "A test covers the decisions source behavior; cargo test and clippy must be clean."
+    },
+    {
+      "id": "root-cause",
+      "how": "The job finds why the source is empty rather than only silencing the message."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The criterion runs a test that shows the decisions source populated, not just a wiring check."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is the steward being able to read decisions, or a recorded reason it cannot."
+    },
+    {
+      "id": "verified",
+      "how": "A verifier runs fmt, clippy and test."
+    },
+    {
+      "id": "small",
+      "how": "One focused change on the decisions source."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-core/src/steward.rs (SOURCES lists `decisions` with two record directories; GitView::workspace writes every file from RecordSet::load, then creates any missing source directory as empty), crates/athena-gate/src/records.rs (RecordSet::load copies every blob under records/ at HEAD after check_record_file), crates/athena-data/src/records.rs (AnyRecord paths for decision-state and default-expectations records; round-trip tests around lines 3372 and 3405), crates/athena-core/src/store.rs (Records::load). Order: load records at HEAD, write files, then mkdir missing source dirs, so an empty source means nothing is committed under those paths at HEAD, not a copy bug.",
+    "Those two record directories do not exist in the snapshot I read (records/ is hidden from readers by design), so I could not confirm directly that no decision records are committed. Working hypothesis: no decision-state or default-expectations records are committed at the base commit (they are written but not landed, or D84 lives in docs/design only). The producer must verify this with git log/show on the record paths and with Grep over crates/ for the writers (Athena::record_default_expectations, decision-state writer) before choosing a fix.",
+    "If the cause is a missing writer or an unlanded record, the fix is in code (steward workspace or the writer). If decisions are legitimately empty, the fix is to make the steward's empty-source message say so and to record that in docs. No new record file is added under crates/, so no AnyRecord change is expected.",
+    "The user's stated outcome is the goal: reading decisions works or the notes say why not. The cause note goes in CHANGELOG.md and, if useful, docs/records.md."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change writes down the cause of the empty `decisions` source in a committed file (CHANGELOG.md or docs/records.md), citing the code path (crates/athena-core/src/steward.rs and crates/athena-gate/src/records.rs) that produces the empty directory. A reader can check this with git diff.",
+      "kind": "content"
+    },
+    {
+      "text": "Either the diff changes crates/athena-core/src/steward.rs (or the record writer) so the steward's workspace holds decision records when they exist at HEAD, with a test in the same crate that builds a view containing a decision-state record and asserts the file appears under the decisions source paths, or the committed notes state why decisions cannot be read and what would change that.",
+      "kind": "content"
+    },
+    {
+      "text": "A test that the decisions source is populated when a decision-state record exists in the view and stays an empty directory when none exists; run `cargo test -p athena-core steward` and it passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets` and `cargo test` all pass on the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No file under records/ is edited, and no governance file (athena.toml, defaults.toml) is changed.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.55
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/steward.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-gate/src/records.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Editing or fabricating files under records/",
+    "Changing athena.toml or defaults.toml",
+    "Redesigning the other steward sources (jobs, events, introspections, class-registry, git-log, code)",
+    "Changing the decision-state or default-expectations record schemas"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.45,
+        "p50": 1.1,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 400.0,
+        "p50": 1700.0,
+        "p90": 3700.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7168,
+      "p_verification_passes": 0.6745562130177515,
+      "p_user_intervenes": 0.09086021505376343,
+      "cost_usd": {
+        "p10": 0.536424140722698,
+        "p50": 1.2459717999999995,
+        "p90": 3.3749839317867845
+      },
+      "wall_time_s": {
+        "p10": 535.076184624823,
+        "p50": 1750.3185505040008,
+        "p90": 3894.2464153380747
+      }
+    }
+  },
+  "departures": "The cause is unconfirmed because records/ is hidden from the reader, so there is more risk that the fix turns out to be notes only and the verifier judges it differently."
+}

@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-150034-17c3",
+  "round": 1,
+  "at": "2026-10-31T21:45:17.986407123Z",
+  "invocation_seq": 17,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The CI source seam replaces the production source wiring with a double. The branch name and the GhClient path are never exercised through Athena::go.",
+      "evidence": "In the plan, `with_ci_source` picks 'the seam source' under cfg(test) in place of `GhClient::new(&GhCli, repository).ci_source(branch)`. Any bug in production code that builds the source would still pass every planned test: the wrong branch (for example the early PR branch instead of `athena/ci/<id>`), the wrong repository, or a mistake building GhClient. `CiBranchSource::fetch` (gh/client.rs:718-739) puts `branch` and `head_sha` into the actions/runs query, and `gh::Runner` is public (gh/transport.rs:13; `pub use transport::{.. Runner ..}` in gh/mod.rs:65). The request says to test 'through the injected platform and git sources that ci_result.rs and gh already use'. The pull_request-only case in criterion 2 also falls back to 'g437 tests already in gh/tests.rs' if Runner is private. It is not private, so that fallback only re-uses tests of another job. Fix: Make `ci_seam` carry `(Rc<dyn CiBranchRemote>, Rc<dyn gh::Runner>)`. Under test, `with_ci_source` should still call `GhClient::new(runner, repository).ci_source(&ci_branch(id))`, with only the Runner faked. The fake Runner should log its args and reply with canned `actions/runs` and `jobs` JSON. In the green test, assert that the logged query has `branch=athena/ci/<job id>` and `head_sha=<candidate>`. Run the pull_request-only case through Athena::go with a runs reply that holds only a pull_request run, and assert the counter is 3. Leave gh/tests.rs alone.",
+      "location": "Decision 1 / Step 3 `ci_seam` carrying `Rc<dyn CiSource>`; Demonstrations for criteria 1, 2 and 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A leftover `athena/ci/<job id>` blocks the next push of a different candidate under the same id. CI reuse then quietly stops working for that job.",
+      "evidence": "`push_branch` (athena-git/src/lib.rs:422) pushes `{commit}:refs/heads/{branch}` with no `+` and no `--force`. The plan's own risk says a job killed before close leaves the branch behind, and that the name is reused on a retry with the same id. A new candidate on a retry is not a fast-forward of the old one, so the push is refused. The job falls back to local checks with only a warning, which contradicts 'a leftover is harmless'. Fix: Push the CI branch with a forced refspec (`+<commit>:refs/heads/athena/ci/<id>`), or delete before pushing. Add a test where the branch already exists at another commit and the push still succeeds.",
+      "location": "Step 1 / Step 5 push via `Git::push_branch`; Risks item 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Open questions that reading the code would answer are left to the producer.",
+      "evidence": "Runner's visibility is plain from gh/mod.rs:65 (it is public). Whether `judge` names the failing check can be read in verify.rs. Step 9 and the verify.rs deliverable are conditional on that answer. Fix: Answer both from the code in the plan. State whether verify.rs changes, and drop the conditional fallback for the pull_request-only test.",
+      "location": "Open questions 1 and 5; Step 9",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Code that builds `Budget` as a struct literal will stop compiling.",
+      "evidence": "`Budget` (athena-data/src/config.rs:288) is a plain struct. Tests or helpers that build it with a literal need the new field added. Fix: Add a step to find `Budget {` literals across the workspace and add `ci_wait_s` to each.",
+      "location": "Step 2 `ci_wait_s` added to `Budget`",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the code I read. `NoCi` is passed at run/mod.rs:1269 inside `check_and_verify`. `run_routed` throws away the `CiRecord`, so a `run_routed_recorded` variant is a sound way to get it out. The reread path in `dispatch` (mod.rs:708-745) calls itself again before any later work, so putting the delete around the dispatch tail runs it exactly once. `Budget` uses deny_unknown_fields, so a serde default is the right choice. `reuse_statement` and `runs_from_record` already produce the CI-named notes and the statement text. `Git::push_branch` exists and a delete operation does not. One design problem needs fixing. The new `ci_seam` injects a whole `Rc<dyn CiSource>` in place of the source the production code would build. So no `Athena::go` test ever runs `GhClient::new(..).ci_source(branch)`, and none checks that the branch passed to it is `athena/ci/<job id>`. The request asks for tests through the platform source gh already uses, which is the public `gh::Runner` trait (gh/transport.rs:13, re-exported in gh/mod.rs:65). Because that trait is public, the plan's fallback of relying on the g437 tests for the pull_request-only case is not needed. Smaller points: a leftover branch makes the non-force push fail on a retry, and `judge` could have been read instead of left as an open question."
+}

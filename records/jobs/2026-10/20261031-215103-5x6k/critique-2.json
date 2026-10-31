@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-215103-5x6k",
+  "round": 2,
+  "at": "2026-10-31T21:58:22.583348705Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The guard test only shows it can fail through a one-time hand mutation.",
+      "evidence": "With the fail-closed rule in place, the guard's assertions (a) and (c) pass. They fail only when the rule is removed, and the plan does that once by hand ('the producer removes the fail-closed `return None` once, sees (a) and (c) fail, and restores it'). Nothing repeatable shows the guard can fail. The positive control proves the pushInsteadOf redirect works, but not that the guard notices when the rule is missing. Fix: Add a repeatable negative case. One option: a cfg(test) switch that turns the fail-closed rule off, plus a second test that runs the same setup with the switch off and asserts the ref lands in the bare repo and `real_clients_built` is 1. Otherwise, keep the hand mutation but require the producer to paste the failing output into its notes.",
+      "location": "Plan decision 4 / Demonstration for criterion 3 (guard test `no_real_gh_or_push_is_attempted`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The `real_clients_built` counter covers only ci.rs clients, not the early pull request's real gh client.",
+      "evidence": "`real_clients_built` counts only the clients built in ci.rs (`GitCiRemote::new` and the `GhCli` path in `with_ci_source`). The early pull request builds its own real `GhCli` and `GitRemote` in early.rs:355-360 when `early_seam::current()` is empty, and the counter does not see that. The guard installs early_seam, so this path is never exercised, and the guard does not cover a real gh call from early_pr. Fix: Say in the plan that the guard covers only the CI client paths and that early_pr is covered because early_seam is installed. Or also bump the counter in `early_pr_to`'s real branch; that is in early.rs, which is a deliverable.",
+      "location": "Plan decision 3 / criterion 3 'a guard test fails if any real gh … is attempted'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Step 5 points to the wrong decision number.",
+      "evidence": "Step 5 says `record_from_resumed` follows 'the exact rule in decision 8'. The resume rule is decision 9; decision 8 is the `ci-source` CheckResultView. Fix: Change the reference to decision 9.",
+      "location": "Plan step 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say how the run address is parsed out of the resumed note.",
+      "evidence": "checks.rs:125 writes `result reused from the {origin} for {sha}`, where origin is `CI run {address}`. To get the address, the code must strip the prefix and then the ` for {sha}` suffix. The plan says 'the address is parsed from the note' but does not say how. The pin test guards the prefix only. Fix: State that the address is the text between the prefix 'result reused from the CI run ' and the suffix ' for <sha>'. Make the pin test check that the prefix, the address and the suffix all round-trip from `checks::runs_from_record` output.",
+      "location": "Plan decision 9 (resume rebuild from note text)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot with Read and Grep; I ran nothing. What the plan says about the code is correct. `check_and_verify` (run/mod.rs:1174) calls `early_pr` at line 1201 and passes `NoCi` with a one-poll, zero-pause `Wait` at lines 1265-1275. `early_pr_to` builds the real `GhCli` and `GitRemote` when `early_seam::current()` is empty (early.rs:351-361). `https_github_repository` is private, at early.rs:305. `read_ci` keeps polling on `Ok(None)`, on an unfinished run and on a run for another SHA, and returns at once on success, failure, other conclusions or an Err (ci_result.rs:165-189). So the plan is right to choose the source and the wait together, and right about which fallback tests need a zero bound. `Git::push_branch` pushes to a remote name, not a forced refspec (athena-git lib.rs:422), so the redirect through `pushInsteadOf` on `origin` should work and a new forced push is needed. `reuse_statement` (verify.rs:60), `runs_from_record` with the note prefix 'result reused from the CI run ' (checks.rs:125), `ci_source(branch)` (client.rs:706), `CI_AGGREGATE_JOB` and `aggregate_verdict` (client.rs:516, 558), and `Budget` with deny_unknown_fields and `check_timeout_s` (config.rs:287-297) all exist as described. The plan answers all four earlier findings: it installs early_seam through one `ci_run` helper and refuses the CI push under test when no ci_seam is installed; it rewrites the ci.yml trigger comment; it rebuilds the record on resume; and the canned jobs replies include a failed history job. Each demonstration goes through `Athena::go`, names seams that exist or that a plan step adds, and would fail without the behavior. The new athena.toml key ships with its schema field and a serde default. The work fits one producer run. Remaining issues are minor: the guard test only shows it can fail through a one-time hand mutation, the build counter does not cover the early pull request's real client, a decision reference is wrong, and the note parsing for the run address is not spelled out. None blocks the plan."
+}
