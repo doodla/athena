@@ -1,0 +1,214 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-095235-zq9x",
+  "n": 1,
+  "at": "2026-10-31T09:53:06.541141275Z",
+  "invocation_seq": 1,
+  "base_commit": "8855e21d531901871c67b7637e49f74e8b74839f",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Retry b5hm: hold and auto-resume a job when disk stays low",
+  "summary": "Retry of job 20261030-185530-b5hm (failed with no candidate; its planner hit the USD cap, so no code was written). Same goal as the accepted reading: when free disk stays short after idle-build cleanup, before the checks or before the verifier, hold the job resumable, not failed. A later drain resumes it with no `athena retry`. Audience: the maintainer running drains and the verifier running cargo test.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests for hold, resume and no-failure counting; cargo test and clippy are clean."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name the cargo commands the verifier runs."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check end state, status output and resume, not wiring."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is that a drain never ends a job failed for low disk."
+    },
+    {
+      "id": "mechanism",
+      "how": "The hold is enforced in the run pipeline and tested."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fixes the guard that closes jobs failed, in both places it does so."
+    },
+    {
+      "id": "small",
+      "how": "Scope is kept to the disk hold; the plan is split into hold and resume steps."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261030-185530-b5hm failed only because its planner hit error_max_budget_usd. It left no candidate, no findings and no verdict, so there is nothing to fix or keep from it. This retry restarts from the base with the same scope.",
+    "The typed request (retry b5hm) takes precedence over the introspection's proposed budget-cap-hold request, which is a separate job and out of scope here. To keep planning inside the cap, the plan should be split into a hold-state step and an auto-resume step, and should reuse existing state and retry paths.",
+    "Code survey: read crates/athena-core/src/run/mod.rs (disk gate near line 1181 builds a failure with 'before the checks; ... `athena retry {id}`'), crates/athena-core/src/run/verification.rs (gate near line 124), crates/athena-core/src/disk.rs (before-the-verifier gate near line 211, message ending in `athena retry {job}`), and crates/athena-core/src/run/tests.rs (existing gate tests near lines 1469 and 1610). Entry point is the run pipeline's second half. Order: idle-build cleanup, free-space probe (ATHENA_FREE_BYTES override), then the checks and the verifier. The change adds no record or data file under crates/, so check_record_file and AnyRecord need no new coverage unless a new state variant is serialized. If one is, the existing round-trip test must cover it. The property is measured directly through the job's end state and the status output, not through a stand-in.",
+    "No refusal rule is added. A held job is a new outcome and is not a reading refusal.",
+    "The job's kept candidate (target/produce) is retained on hold so the resume does not rerun the producer."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-cli --test drain`. A new test with simulated low space (ATHENA_FREE_BYTES) after the build shows the job ends held and not Failed. No `athena retry` is needed, no verifier or producer verdict is recorded, and the outcome text names `environment: low disk` with the free and required amounts.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli --test drain`. A new test shows a later drain pass, once the simulated free space is raised, resumes the held job from its kept candidate with no new producer run and no `athena retry`, and the job finishes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli --test drain`. A new test shows space that stays short across passes leaves the job held and uses up no drain attempt. Each of these tests fails on the pre-change code.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`. A test shows a low-disk hold before the checks and before the verifier is not counted as a work failure in introspection, failure classes or the scope guard. The idle-build cleanup still runs first and lets the job proceed when it frees enough space.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli --test binary`. `athena status` shows the held job with its low-disk reason and the amounts.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Grep of crates/athena-core/src/run/mod.rs, crates/athena-core/src/run/verification.rs and crates/athena-core/src/disk.rs shows the low-disk path no longer builds a failure with a `before the checks` or `before the verifier` message telling the person to run `athena retry`.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the hold-and-auto-resume behavior. The module docs in crates/athena-core/src/disk.rs and crates/athena-cli/src/drain.rs describe it instead of fail-and-retry.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`. All pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Governance files are unchanged: athena.toml, defaults.toml, .github/workflows, Cargo.toml, Cargo.lock and rust-toolchain.toml are not in the diff.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/tests/binary.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.5
+    }
+  ],
+  "out_of_scope": [
+    "Automatic proposing after introspection (job 20261025-033738-yz2d): main.rs, introspect.rs, proposals.rs, tests/introspection.rs, tests/proposals.rs and its edits to drain.rs and tests/drain.rs; that job is rerun separately",
+    "The budget-cap hold for planner, producer and verifier stages (the introspection's proposed next request); a separate job",
+    "The test-suite speedup and other work of job 20261025-202447-xgk9",
+    "Guarding combined disk use of parallel jobs, or planning around disk",
+    "Changing the [disk] min_free_gb default or config schema, or editing athena.toml, defaults.toml or workflows",
+    "Deleting committed records or touching a running job's files in the cleanup",
+    "Removing `athena retry` or its handling of old failed environment jobs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.15,
+      "cost_usd": {
+        "p10": 1.2,
+        "p50": 2.8,
+        "p90": 6.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.718716577540107,
+      "p_verification_passes": 0.6717325227963525,
+      "p_user_intervenes": 0.0850828729281768,
+      "cost_usd": {
+        "p10": 0.536424140722698,
+        "p50": 1.2255636,
+        "p90": 3.2880041383518974
+      },
+      "wall_time_s": {
+        "p10": 515.0193380461162,
+        "p50": 1716.4426109560002,
+        "p90": 3620.4269763560833
+      }
+    }
+  },
+  "departures": "Higher cost and lower pass chance than the reference. The previous attempt's planner exceeded its USD cap on this multi-flow change (disk guard, job states, resume, drain), and the hard-job pipeline adds a planner and critic.",
+  "urgent_reason": "Cuts failed attempts and manual retries: low disk currently ends jobs failed and needs hand cleanup.",
+  "hard_reason": "Changes how the run pipeline closes a job (the disk gate, job states, retry and resume) and the drain, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}

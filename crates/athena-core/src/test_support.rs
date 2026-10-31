@@ -615,6 +615,40 @@ pub fn low_once_verifying(state: &Path) -> std::io::Result<u64> {
     }
 }
 
+/// A free-space reader for a job that clears dispatch and stops at the gate before its checks: plenty of space
+/// until some job has a `target/produce` directory (the producer's build, which the fake producer makes), 3 GB
+/// then, unless a file named `freed` lies in the state root. Install it with [`StateDir::with_free_space`].
+pub fn low_once_built(state: &Path) -> std::io::Result<u64> {
+    let built = std::fs::read_dir(state.join("jobs"))
+        .map(|dirs| {
+            dirs.flatten()
+                .any(|e| e.path().join("target/produce").exists())
+        })
+        .unwrap_or(false);
+    if built && !state.join("freed").exists() {
+        Ok(3_000_000_000)
+    } else {
+        plenty_of_space(state)
+    }
+}
+
+/// A free-space reader that reports 3 GB for as long as a job directory holds `target/idle-build` (an idle
+/// job's build directory) and plenty once it is removed. It shows that the idle-build cleanup runs before the
+/// gate decides. Install it with [`StateDir::with_free_space`].
+pub fn low_while_an_idle_build_exists(state: &Path) -> std::io::Result<u64> {
+    let idle = std::fs::read_dir(state.join("jobs"))
+        .map(|dirs| {
+            dirs.flatten()
+                .any(|e| e.path().join("target/idle-build").exists())
+        })
+        .unwrap_or(false);
+    if idle {
+        Ok(3_000_000_000)
+    } else {
+        plenty_of_space(state)
+    }
+}
+
 /// What a [`recording_plenty_space`] call saw in the state root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpaceProbe {

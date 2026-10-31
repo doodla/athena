@@ -3869,3 +3869,42 @@ should replace those estimates with its figures.
   cause. D84's "not reproduced" outcome stands until a record with `sccache` figures exists.
 - **Effect on D145:** none yet. Alternative e (re-enable a compiler cache) stays uncosted until a record shows the
   cache figures. No `athena.toml` change was made.
+
+## D146 · Low disk after the build holds the job and a later drain resumes it; it is never closed failed
+
+This supersedes the closing half of D142: low space at the gate before the checks or before the verifier no
+longer closes the job failed with a `before the checks` or `before the verifier` reason. The write probe and the
+cleanup in D142 stay.
+
+- **Case:** The failure class `low-disk-ends-job-failed-no-automatic-cleanup` was recorded in 8 cases in 8 jobs.
+  Each job was built, then failed `environment: low disk` at a gate, and a person had to run `athena retry`.
+- **Root cause:** Both gates closed the job with a failed outcome and a reason telling the person to run `athena
+  retry`. A failed outcome is a closed job: the drain counted it as a failure, introspection and the scope guard
+  read it, and nothing resumed it. Space that comes back by itself could not reopen it.
+- **Decision:** `Athena::hold_for_disk` (`crates/athena-core/src/run/mod.rs`) replaces both closes. The job stays
+  dispatched with no outcome, no verdict and no verifier brief. It keeps its resume mark and gets a hold marker
+  (`disk::write_hold`). The attempt's records (invocations, plans, critiques, baseline, candidate) are committed
+  with no score and no outcome, so the held attempt's spend reaches the drain and line budgets; the commit
+  helper `push_closing_records` is shared with the closing path. The job's own directory is removed after that
+  commit, so the producer's build directory (`target/produce`) is not kept: the kept candidate is the commit in
+  the resume mark. `go` returns `LowDisk`, which the drain already reports as held and counts no attempt for.
+  A later drain lists the dispatched job with no process as interrupted work and calls `Athena::retry`, which
+  first runs the gate for a job with a hold marker: still short means a held error before the reader runs and
+  before any job record is made; enough space clears the marker and resumes from the candidate with no planner
+  or producer run. `athena status` shows such a job as `held` with the amounts and does not advise `athena
+  retry`. No new outcome state and no schema change.
+- **Alternatives:** (a) Close failed and have the drain retry it: the record still says failed and the failure
+  is counted. (b) A new `held` outcome state: a shared schema change with its own round-trip coverage, for no
+  gain over the absence of an outcome. (c) Keep `target/produce` on hold: it holds the space that is short, and
+  other jobs' idle sweeps remove it anyway. (d) Resume the same job id in place: duplicates dispatch's setup;
+  the existing retry path is already tested.
+- **Unwritable workspace:** A write probe that fails although space is enough (a read-only or broken mount)
+  still closes the job failed with an `environment: low disk` reason that `athena retry` resumes. Waiting does not
+  cure it, so holding would stall a drain forever.
+- **Tradeoff:** A held job shows as interrupted to a reader that does not know the marker, and a records-only
+  commit is made while the disk is short (a few small files; if it fails, a warning is printed and the hold
+  still happens).
+- **Reversal cost:** Low. Restore the two closes and delete the guard in `Athena::retry`.
+- **Provenance:** Read: `crates/athena-core/src/run/mod.rs`, `verification.rs`, `disk.rs`, `reading.rs`,
+  `crates/athena-cli/src/drain.rs`. Measured: `cargo test -p athena-cli --test drain` (the hold, resume and
+  still-short tests), `cargo test -p athena-core held_job`, `cargo test -p athena-cli --test binary status_shows`.

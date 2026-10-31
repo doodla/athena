@@ -181,6 +181,74 @@ fn the_simulated_free_space_reaches_the_nested_run_when_a_minimum_is_set() {
     );
 }
 
+/// Free space that is ample until the fake producer has run (it leaves `low` in the state root), 3 GB after.
+fn low_after_the_build(state: &std::path::Path) -> std::io::Result<u64> {
+    Ok(if state.join("low").exists() {
+        3_000_000_000
+    } else {
+        500_000_000_000
+    })
+}
+
+#[test]
+fn status_shows_a_held_job_with_its_low_disk_reason() {
+    // The disk fills during the build, so the gate before the checks holds the job (a run in this process).
+    // Then the real `athena status` binary reads the repository and its state directory.
+    let fx = Fixture::with_config(&with_min_free_gb(&test_config(), 10));
+    let inner = Scenario::default().script();
+    // The binary keeps its state for this repository under `$ATHENA_STATE_DIR/<name>-<key>`.
+    let repo_dir = athena_data::paths::repo_state_dir(&fx.root().join(".git"));
+    let state_root = fx.state.path().join(repo_dir.file_name().unwrap());
+    let low = state_root.join("low");
+    let script: athena_agent::fake::Script = Box::new(move |spec| {
+        if spec.role == athena_data::records::Role::Producer {
+            std::fs::create_dir_all(low.parent().unwrap()).unwrap();
+            std::fs::write(&low, "").unwrap();
+        }
+        inner(spec)
+    });
+    let mut in_process = fx.athena(script);
+    in_process.state =
+        athena_core::state::StateDir::new(state_root).with_free_space(low_after_the_build);
+    let lines = Lines::default();
+    let job = in_process
+        .ask("add a greeting to the readme", &lines)
+        .unwrap()
+        .job;
+    let held = in_process
+        .go(job.as_str(), athena_data::records::AcceptedBy::User, &lines)
+        .expect_err("held");
+    assert!(held.downcast_ref::<athena_core::disk::LowDisk>().is_some());
+
+    let out = athena()
+        .current_dir(fx.root())
+        .env("ATHENA_STATE_DIR", fx.state.path())
+        .arg("status")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let shown = String::from_utf8_lossy(&out.stdout);
+    let line = shown
+        .lines()
+        .find(|l| l.contains(job.as_str()) && l.contains("held"))
+        .unwrap_or_else(|| panic!("no held line for {job}:\n{shown}"));
+    assert!(
+        line.contains("environment: low disk: 3.0 GB free, 10.0 GB required"),
+        "{line}"
+    );
+    assert!(!shown.contains("interrupted"), "{shown}");
+    assert!(!line.contains("failed"), "{line}");
+    assert!(
+        !shown.contains(&format!("athena retry {job}")),
+        "no retry is advised:\n{shown}"
+    );
+    assert!(shown.contains("athena drain"), "{shown}");
+}
+
 fn job_id_of(stdout: &str) -> String {
     stdout
         .lines()

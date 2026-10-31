@@ -1043,6 +1043,17 @@ impl Athena {
         self.preflight(&jc, 0.0, ReserveStage::Admission)?;
         // `ask` refuses a job that is not rejected, failed or interrupted before any model is called.
         self.state.registry().reap();
+        // A job held for low disk after its candidate was built waits for space. While it stays short, the
+        // retry is held again before the reader runs and before any job record is made, so a drain that
+        // finds it still short spends nothing and takes no attempt.
+        let held_for_disk = job.state() == JobState::Dispatched
+            && !self.running(id.as_str())
+            && crate::disk::read_hold(&self.state, &id).is_some();
+        if held_for_disk && let Some(low) = self.disk_gate(jc.config.min_free_gb(), &id, ui) {
+            crate::disk::write_hold(&self.state, &id, &low);
+            ui.line(&format!("held       {}", low.text()));
+            return Err(low.into());
+        }
         // A job that stopped for the environment, or was interrupted, after its candidate was built resumes
         // from that candidate: `go` runs no planner or producer. The reader still runs below.
         let request = format!("{RETRY_PREFIX}{id}");
@@ -1058,6 +1069,11 @@ impl Athena {
             ));
         }
         let proposal = self.ask(&request, ui)?;
+        if held_for_disk {
+            // Space is back and the retry job exists: the old job is interrupted work that was retried, no
+            // longer held, so status does not list two held jobs.
+            crate::disk::clear_hold(&self.state, &id);
+        }
         Ok((proposal, seeded))
     }
 
@@ -1464,7 +1480,8 @@ pub fn job_history(records: &Records) -> Vec<JobEnd> {
 }
 
 /// The job a request of the form "try again on <job>" may resume from its kept candidate: one that failed for
-/// an environment cause, or was interrupted (dispatched, and `running` says no process works on it). See
+/// an environment cause, or was interrupted (dispatched, and `running` says no process works on it; a job held
+/// for low disk is such a job, and `Athena::retry` holds it again while space is short). See
 /// [`crate::disk::resumable_stop`]. Whether a candidate was kept is for the caller to find out.
 pub fn resumable_job(
     records: &Records,

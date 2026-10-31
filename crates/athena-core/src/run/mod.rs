@@ -343,6 +343,12 @@ impl Athena {
                 if self.running(id.as_str()) {
                     bail!("job {id} is running");
                 }
+                if let Some(low) = crate::disk::read_hold(&self.state, &id) {
+                    bail!(
+                        "job {id} is held: {}. Its candidate is kept; the next drain resumes it once disk space is free, with no new planner or producer run. Or `athena close {id} --why \"...\"` records what happened",
+                        low.text()
+                    )
+                }
                 bail!(
                     "job {id} was interrupted: its process died before it closed. `athena retry {id}` reads it again to resume, or `athena close {id} --why \"...\"` records what happened"
                 )
@@ -1179,22 +1185,13 @@ impl Athena {
         let recorded_checks = built.recorded_checks.take();
 
         // Free disk space, before the checks. Low space makes builds fail in ways that look like faults in the
-        // work, so after the idle build directories are removed, space that is still low fails the job with a
-        // retryable environment reason. Nothing is held: the job closes, and `athena retry` reads it again.
+        // work, so after the idle build directories are removed, space that is still low holds the job: it
+        // stays dispatched with its resume mark, is not closed, and a later drain resumes it from the
+        // candidate.
         if recorded_checks.is_none()
             && let Some(low) = self.disk_gate(jc.config.min_free_gb(), &id, ctx.ui)
         {
-            let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
-            closing.happened = self.failure(
-                ctx,
-                &format!(
-                    "{} before the checks; this is the environment, not the work. Free disk space, then `athena retry {id}`",
-                    low.text()
-                ),
-            );
-            closing.happened.changed_paths = changed_paths;
-            closing.happened.verification_passed = None;
-            return Ok(closing);
+            return Err(self.hold_for_disk(ctx, closing, low));
         }
 
         // Verification starts: open or update the job's pull request now, so the host's checks run on the
@@ -1504,6 +1501,39 @@ impl Athena {
         let candidate_checker = checkers.pop().expect("two checkers");
         let base_checker = checkers.pop().expect("two checkers");
         Ok((base_checker, candidate_checker))
+    }
+
+    /// Holds a built job for lack of disk space: the job stays dispatched, with no outcome, no verdict and no
+    /// verifier brief, so it is not a failure of any kind. The attempt's records (invocations, plans,
+    /// critiques, baseline, candidate) are committed with no score and no outcome, so their spend counts
+    /// against the budgets. The resume mark stays, and the hold marker records the amounts. A later drain
+    /// resumes the job from its candidate commit, with no planner and no producer run. The error is
+    /// [`LowDisk`](crate::disk::LowDisk), which a drain reports as held and counts no attempt for.
+    fn hold_for_disk(
+        &self,
+        ctx: &RunContext<'_>,
+        mut closing: Closing,
+        low: crate::disk::LowDisk,
+    ) -> anyhow::Error {
+        let id = ctx.id().clone();
+        close::push_closing_records(&mut closing);
+        let files = closing.files.clone();
+        let trailers = [("Athena-Job", id.as_str().to_string())];
+        let committed = self.commit_records_with(
+            &|_head: &str| Ok(files.clone()),
+            &message("held: low disk", &low.text(), &trailers),
+        );
+        match committed {
+            // The records are in the repository: the job's own directory (snapshots, build directories) is
+            // not needed to resume, and the disk is short, so it goes.
+            Ok(_) => crate::state::report_clean(ctx.ui, &self.state.clean_job(&id)),
+            Err(e) => ctx.ui.line(&format!(
+                "warning: could not commit the records of the held attempt: {e:#}"
+            )),
+        }
+        crate::disk::write_hold(&self.state, &id, &low);
+        ctx.ui.line(&format!("held       {}", low.text()));
+        low.into()
     }
 
     /// Marks a failure before verification.

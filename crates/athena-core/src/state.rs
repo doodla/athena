@@ -699,6 +699,33 @@ mod tests {
         assert!(!temp.path().join("kept").exists(), "nothing else is kept");
     }
 
+    #[test]
+    fn a_hold_marker_sits_beside_the_resume_mark_and_outlives_cleaning_the_job() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        state
+            .write_resume(&job(), &mark(ResumeStage::Checks))
+            .unwrap();
+        // A marker as an earlier build wrote it still parses.
+        std::fs::create_dir_all(state.hold_file(&job()).parent().unwrap()).unwrap();
+        std::fs::write(
+            state.hold_file(&job()),
+            r#"{"free":3000000000,"required":10000000000}"#,
+        )
+        .unwrap();
+        let hold = crate::disk::read_hold(&state, &job()).expect("an old marker parses");
+        assert_eq!((hold.free, hold.required), (3_000_000_000, 10_000_000_000));
+        // Cleaning the job's directory, as a hold does after its records are committed, keeps both.
+        std::fs::create_dir_all(state.job_dir(&job())).unwrap();
+        assert_eq!(state.clean_job(&job()).error, None);
+        assert!(state.read_resume(&job()).is_some());
+        assert_eq!(crate::disk::read_hold(&state, &job()), Some(hold));
+        // Clearing one leaves the other.
+        crate::disk::clear_hold(&state, &job());
+        assert!(state.read_resume(&job()).is_some());
+        assert_eq!(crate::disk::read_hold(&state, &job()), None);
+    }
+
     fn plant(state: &StateDir, id: &JobId, subdirs: &[&str]) {
         for sub in subdirs {
             let dir = state.job_dir(id).join(sub);
