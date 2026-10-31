@@ -1,0 +1,33 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261031-082628-x9h8",
+  "at": "2026-10-31T08:26:28.537339088Z",
+  "trigger": "intervention",
+  "job": "20261031-001537-0rz6",
+  "intervention": "20261031-082622-mn33",
+  "class_of_work": "build",
+  "category": "fixed-environment",
+  "what_happened": "While job 20261031-001537-0rz6's producer had finished, free disk was 9.8 GB, under the 10 GB guard that runs before the checks. The person running Athena deleted the job's finished producer build folder (8.7 GB) by hand. Without that, the job would have ended failed on low disk before its checks ran. No criterion or check had failed. The fix that removes the producer build before the checks (hs8s) has not landed.",
+  "failure_class": "20261026-140223-4xmw",
+  "new_class": false,
+  "earlier_cases": [
+    "20261031-042200-bnc1",
+    "20261030-225609-4p4x"
+  ],
+  "decisions_matched": [],
+  "cause": "Athena owns no disk lifecycle. A finished producer's build folder is a regenerable artifact, but nothing reclaims it or counts it against a disk budget before the checks stage. The 10 GB guard only reports failure and frees nothing. Fixes for this gap (hs8s, and the earlier b5hm) sit in the queue without urgency. Every job that finishes near the threshold therefore depends on the person running Athena noticing in time. This is the third such hand cleanup in two days.",
+  "prevention_kind": "code-check",
+  "prevention": "Make Athena own disk reclamation. When a producer finishes, it deletes that job's producer build folder, since the checks rebuild from cold anyway. Before the checks it also removes regenerable caches and finished baseline build folders. If free space is still under the guard, the job is held (not failed) with an environment message and resumes once space is available. This should be one landed change covering producer build, verify build, caches and workspace targets, with a test that a job starting at 9.8 GB free with an 8.7 GB producer build passes the guard. It should also be made urgent in the queue so it stops being a manual duty.",
+  "proposed_request": "Make Athena reclaim disk itself so jobs no longer end failed on the free-disk guard. Outcome: when a job's producer finishes, Athena deletes that job's producer build folder before the checks stage starts, and before the checks it also removes regenerable space (finished baseline build folders, uv and npm caches, workspace target directories) until free disk is above the 10 GB guard or nothing more can be removed. If free disk is still under the guard after that, the job is held with a clear environment message, not marked failed, and it resumes when space is available; the hold does not count as progress-less spend against the scope guard. Acceptance: (1) a test with a job whose producer build is 8.7 GB and free disk at 9.8 GB shows the build folder removed and the checks run; (2) a test with no reclaimable space shows the job held, not failed, and resumed after space is freed; (3) the checks still rebuild from cold and pass after the reclaim; (4) each reclaim is logged with what was removed and how much space it freed. This covers and replaces the queued requests hs8s and b5hm; close them as duplicates once it lands. Mark it urgent.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.0831881,
+    "input_tokens": 2,
+    "output_tokens": 1142
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}

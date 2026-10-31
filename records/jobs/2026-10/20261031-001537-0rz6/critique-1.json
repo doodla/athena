@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-001537-0rz6",
+  "round": 1,
+  "at": "2026-10-31T07:31:18.488987298Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "xtask/tests/policy.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, xtask/tests/policy.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The partition test's negative cases never reach the disjoint/union comparison; only the shard-list shape rule is shown to fail.",
+      "evidence": "`check_partition` first requires the matrix list to be exactly 0..n and the command to appear once. All three planned mutations (list `[0, 1, 2, 3, 4]` with n=6, a duplicated shard, n changed to 5) break that shape rule, so they are rejected before the comparison runs. If the comparison always returned Ok, every planned negative test would still pass. Fix: Split the comparison into a pure function, e.g. `check_cover(shards, oracle) -> Result<(), String>`, and call it from check_partition. Add negative cases that pass the shape rule but break the partition: one unit removed, one unit copied into a second shard, and an oracle with one extra unit. Assert each returns Err naming the unit.",
+      "location": "Plan Decision 5, step 6 and the Criterion 3 demonstration (check_partition negative cases)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The oracle uses the same target rule as shard.rs, so a shared mistake about what cargo test runs would go unnoticed.",
+      "evidence": "Both select targets with `test: true` of kind lib/bin/test, plus `--doc` for each lib with doctest. The workspace is a virtual manifest with no default-members (Cargo.toml lines 2-16), and no Cargo.toml sets test/doctest/harness overrides (grep), so the risk is small today. Fix: Add a comment saying the oracle encodes cargo's documented target rules and why `cargo test --workspace --no-run` inside a test was rejected. Or also check that every `src/lib.rs`, every `tests/*.rs` file and every declared bin appears in the oracle.",
+      "location": "Plan Decision 5 and the Criterion 3 oracle in ci_shards.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Running `cargo test -p <pkg>` once per unit can resolve dependency features differently from `cargo test --workspace`, and the plan's risks do not mention it.",
+      "evidence": "Resolver 3 (Cargo.toml line 3) unifies features over the selected packages. Separate `-p` runs can therefore compile extra copies of shared dependencies, and tests run against a slightly different build than the workspace run. Fix: Add this to the Risks section and to the shard.rs comment as something for the throughput review to watch. Optionally group a shard's units by package.",
+      "location": "Plan Decision 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "With EARLY_RUN_JOB stale, land's early wait ends at once, so the landing run misses the cached pass. Even after a rename to `ci`, the wait would race the `pass` job.",
+      "evidence": "gh/early.rs:23-25 says the constant must match the CI job name. A missing check run ends the wait (line 73). `ci` does not need `pass`, so `ci` can finish before the marker is saved. Fix: In the follow-up note, say the constant should name the job that writes the marker (`pass`), or that `ci` should wait for it. Put the regression in the CHANGELOG entry as a known effect.",
+      "location": "Plan Decision 8 / Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The policy.rs change is required, not scope creep.",
+      "evidence": "policy.rs:523-529 finds the job by `    name: fmt, clippy, tests` and ends at `\\n  history:`. Both break once `checks` is replaced, and the file is under `xtask/`, which the request lists. Fix: Name this reason in the files list.",
+      "location": "Files: xtask/tests/policy.rs (Athena finding 1)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read ci.yml, xtask/tests/policy.rs, xtask/src/main.rs, the workspace Cargo.toml and gh/early.rs. The plan matches the request and the accepted reading. The fingerprint, lookup and decide steps run once in a gate job. fmt, clippy and a 6-shard test matrix run in parallel and are skipped on a reused pass. A `pass` job with no status override writes the marker only when every check job succeeded. A final `ci` job with `if: always()` treats a skip as success only on a legitimate reuse. SHA pins and default-branch-only saves are kept, and every job gets a timeout. The code the plan names exists as described. Changing policy.rs is required, so Athena's scope finding is a nit. One finding is major: the shard-list shape rule rejects all three negative mutations, so the disjoint/union comparison is never shown to fail. The minor findings: the oracle uses the same target rule as shard.rs; separate `-p` runs can resolve features differently; and the stale `EARLY_RUN_JOB` drops the landing wait, with a race against the `pass` job even after a rename. Verdict: revise."
+}

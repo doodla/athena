@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-001537-0rz6",
+  "round": 2,
+  "at": "2026-10-31T07:33:37.522408655Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "xtask/tests/policy.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, xtask/tests/policy.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The filesystem cross-check assumes no target-name overrides, but athena-cli renames its binary, so `oracle_matches_files_on_disk` as designed fails on the real repository.",
+      "evidence": "The plan says `src/main.rs` implies `--bin <package name>` and that the check \"covers the case where the workspace has no overrides today\". But crates/athena-cli/Cargo.toml lines 10-12 declare `[[bin]] name = \"athena\" path = \"src/main.rs\"`. The rule would expect `athena-cli --bin athena-cli`, while cargo metadata (and so the oracle and `cargo test --workspace`) has `--bin athena`. The test would fail on the base commit. This is a guess where the code could have been read. Fix: Cross-check by path, not by derived name. Map every `src/lib.rs`, `src/main.rs`, `src/bin/*.rs` and `tests/*.rs` (also `tests/*/main.rs`) under each member to a target whose metadata `src_path` equals that file, and require that target to appear in the oracle as a unit. This stays independent of the test and doctest flags and handles `[[bin]]`/`[[test]]` renames. Remove the claim that no overrides exist.",
+      "location": "Decision 6; Demonstration for criterion 4 (`oracle_matches_files_on_disk`); Step 6",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Only shard 0 saves the shared `target-test-` cache, so the entry holds only shard 0's packages and the other shards get a partial cache.",
+      "evidence": "Each shard runs `cargo test -p <pkg> <selector>` only for its own units, so `target/` after shard 0 holds only the test artifacts and feature variants for shard 0's packages. The units are spread over about 10 packages (athena-cli alone has 27 test files), so other shards compile their own packages from cold. The plan's reason, \"dependency artifacts, the bulk of the cache, are identical across shards\", is only partly true: the athena-core feature variants differ by the package selected (test-support is enabled through athena-cli's dev-dependency). Fix: State this as a known effect for the throughput review. Or have the saving shard first run `cargo test --workspace --no-run --locked` on the default branch only, so the saved entry covers every shard. Keep the single key.",
+      "location": "Decision 7; Step 5 (test job saves only on shard 0)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "xtask's reused-pass report string still names the old 'fmt, clippy, tests' job.",
+      "evidence": "`\"fmt, clippy, tests: reused an earlier pass; setup, build and checks skipped\"` is printed by the gate job after this change, but that job no longer exists under that name. Fix: Reword the string and docs to name the `gate` job and the D121 layout (both are under xtask/, which is in scope). Or note it as a follow-up.",
+      "location": "xtask/src/ci_cache.rs:55, module doc line 1; xtask/tests/fingerprint.rs:1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read .github/workflows/ci.yml, xtask/tests/policy.rs, the workspace Cargo.toml files and the test target layout, and searched the repository for the old job name. The round-2 plan is mostly sound and fits the request. I confirmed that policy.rs (lines 523-529) has to change: it finds the job by `name: fmt, clippy, tests` and ends the slice at `\\n  history:`, so leaving it alone would break `cargo test`. The plan states that reason, which answers Athena's minor finding. The gate, compute, pass and ci split keeps the D121 marker safe: `pass` runs under the default success() condition and needs every check job. The `ci` job reads `needs.*.result` and handles the reused-pass case without treating every skip as success. The partition test now has a pure `check_cover` with negative cases that reach it past the shape rule. The feature caveat (athena-cli enables athena-core's `test-support` feature) does not change which tests run, because the only gated item is `#[cfg(any(test, feature = \"test-support\"))]`. One soundness problem needs revising: the filesystem cross-check of the oracle assumes no target renames. But athena-cli declares `[[bin]] name = \"athena\"`, so the `oracle_matches_files_on_disk` test as specified fails on the real repository. Matching targets by `src_path` fixes it. The other findings are a partial test cache, since only shard 0 saves it, and a stale report string in ci_cache.rs."
+}

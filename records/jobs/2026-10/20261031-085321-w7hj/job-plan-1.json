@@ -1,0 +1,182 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-085321-w7hj",
+  "round": 1,
+  "at": "2026-10-31T08:56:00.099071982Z",
+  "invocation_seq": 3,
+  "approach": "Change line 401 of .github/workflows/ci.yml from `    name: ci` to `    name: fmt, clippy, tests` (job id `ci`, needs, `if: always()` and steps untouched). In xtask/tests/ci_shards.rs add a helper `check_required_name(text)` that counts job blocks carrying the line `    name: fmt, clippy, tests`, requires exactly one, requires it to be the job with id `ci`, and requires it to need gate, fmt, clippy and test. Replace the `name: ci` assertion in check_jobs with a call to it. Add a test on the real file plus mutation cases (rename back to `ci`, duplicate the name onto another job, drop a need). The new test fails on the current file because no job has that name. Amend the 0rz6 CHANGELOG entry, add a new Fixed entry for the rename (reason: PR #314 HTTP 405, required check \"fmt, clippy, tests\" expected), and update ci-routing.md section 4.2. policy.rs line 350 is a negative sample string for the stray-script scan, not a lookup by job name, so it stays unchanged.",
+  "decisions": [
+    {
+      "choice": "Add a dedicated helper and test for the required check name in ci_shards.rs, and make check_jobs call it in place of the `name: ci` line check.",
+      "reason": "The required name is what branch protection matches on, so a test on the real ci.yml enforces it by mechanism. It reuses the file's existing `jobs()` parser and mutation-test style, and check_jobs keeps covering it.",
+      "rejected": [
+        {
+          "option": "Only edit the `name: ci` literal in check_jobs to the new name",
+          "why": "That would not assert that exactly one job carries the name, or that no other job takes it."
+        },
+        {
+          "option": "Put the test in policy.rs",
+          "why": "The job parser (`jobs()`) and `ci_yml()` live in ci_shards.rs; policy.rs has no such parser."
+        }
+      ]
+    },
+    {
+      "choice": "Leave xtask/tests/policy.rs unchanged.",
+      "reason": "Line 350 passes the sample `name: ci\\n` to `flagged` to show ci.yml is an allowed workflow file. It does not look up a job by name; the other `ci` hits are the `ci-pass` and `ci-cache` strings.",
+      "rejected": [
+        {
+          "option": "Edit the sample to the new name for appearance",
+          "why": "Churn with no behavior change; the brief asks for one focused rename."
+        }
+      ]
+    },
+    {
+      "choice": "Require the named job to need gate, fmt, clippy and test, and not `pass`.",
+      "reason": "The ci job does not need `pass`, and criterion 2 lists these four. The existing check_jobs asserts the same four needs.",
+      "rejected": [
+        {
+          "option": "Also require `pass`",
+          "why": "Changing needs is outside this change and would fail on the current wiring."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the comments in ci.yml and the early.rs constant as they are.",
+      "reason": "Criterion 6 asks for a name-only diff, and early.rs already names `fmt, clippy, tests`.",
+      "rejected": [
+        {
+          "option": "Reword the ci.yml comments",
+          "why": "This widens the diff beyond the display name."
+        }
+      ]
+    },
+    {
+      "choice": "In the docs and CHANGELOG, keep the caveat that `ci` can finish before the `pass` marker is saved; mark only the name mismatch as resolved.",
+      "reason": "The rename does not change the marker timing concern.",
+      "rejected": [
+        {
+          "option": "Delete known effect 1 entirely",
+          "why": "That would drop a true residual caveat."
+        }
+      ]
+    },
+    {
+      "choice": "Demonstrate criterion 4 by running clippy and fmt over the whole workspace with --all-targets, so the new xtask test code is linted and format-checked.",
+      "reason": "The new code lives in an xtask integration test target; only --all-targets compiles and lints it, and the brief names these two commands.",
+      "rejected": [
+        {
+          "option": "Run clippy without --all-targets",
+          "why": "Integration test targets would be skipped, so warnings in the new test would go unseen."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Line 401: job `ci` display name `ci` becomes `fmt, clippy, tests`. Nothing else changes.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "xtask/tests/ci_shards.rs",
+      "action": "modify",
+      "purpose": "Add check_required_name and the test workflow_required_check_name_is_on_exactly_one_job_that_needs_every_check with mutation cases; replace the `name: ci` assertion in check_jobs (line 467) with a call to the helper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Amend the 0rz6 Added entry (final job named `fmt, clippy, tests`, id `ci`, branch protection needs no change, name mismatch resolved) and add a Fixed entry for the rename with reason and root cause.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/ci-routing.md",
+      "action": "modify",
+      "purpose": "Section 4.2: the `ci` bullet and known effect 1 state the id is `ci`, the display name is `fmt, clippy, tests` which branch protection requires, and EARLY_RUN_JOB matches again.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In .github/workflows/ci.yml change line 401 `    name: ci` to `    name: fmt, clippy, tests`. Leave line 37, the comments, needs, `if: always()` and the steps alone.",
+    "In xtask/tests/ci_shards.rs add `fn check_required_name(text: &str) -> Result<(), String>` after check_jobs. It uses `jobs(text)`, collects ids of jobs containing exactly `    name: fmt, clippy, tests`, and returns Err unless that is exactly one and its id is `ci`. It parses that job's `needs: [..]` list as check_jobs does and requires gate, fmt, clippy and test. In check_jobs, replace the `name: ci` block (around lines 466-469) with `check_required_name(text)?;`, keeping the `if: always()` and needs checks.",
+    "Add the test `workflow_required_check_name_is_on_exactly_one_job_that_needs_every_check`, asserting `check_required_name(&ci_yml())` is Ok. Add mutation cases, each `assert_ne!` against the original and `is_err()`: (a) replace the required name line with `    name: ci`; (b) give the `pass` job the required name line (read its name line first; insert one if absent); (c) drop `fmt` from the `needs: [gate, fmt, clippy, test]` list.",
+    "Fix any other xtask literal that expects the old name (Grep showed only line 467; the `ci_script` helper looks up by id `ci`). Leave policy.rs unchanged.",
+    "Amend CHANGELOG.md: in the 0rz6 Added entry say the final job has id `ci` and display name `fmt, clippy, tests`, replace the 'Branch protection must now require the check `ci`' text with 'Branch protection needs no change', and mark known effect (1) resolved for the name while keeping the marker timing caveat. Add under Fixed a bullet: the final CI job is named `fmt, clippy, tests` again; cause: 0rz6 named it `ci`, so the required check was never reported and PR #314 was refused with HTTP 405; fix: display name only, with a test on ci.yml.",
+    "Update docs/design/ci-routing.md section 4.2 (the `ci` bullet and known effect 1) to match.",
+    "Run `cargo fmt --all`, then `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all --check` and `cargo test -p xtask`; check the ci.yml diff is one line."
+  ],
+  "risks": [
+    {
+      "risk": "The renamed job's check run could differ from what branch protection matches, for example through a matrix suffix.",
+      "mitigation": "Only the display name changes; job id, needs and `if: always()` stay. The `ci` job has no matrix, and the `pass` job is untouched."
+    },
+    {
+      "risk": "The workflow-level `name: ci` could be confused with the job name in the test.",
+      "mitigation": "The helper counts job blocks by the exact line `    name: fmt, clippy, tests` inside `jobs:`, so the workflow-level name on line 37 is not counted; `jobs()` stops at the next top-level key."
+    },
+    {
+      "risk": "Clippy -D warnings or fmt flags the new test code.",
+      "mitigation": "Match neighboring test style, run cargo fmt --all, and run clippy with --all-targets before finishing."
+    },
+    {
+      "risk": "Editing the long CHANGELOG entry could break a format or policy check on CHANGELOG.md.",
+      "mitigation": "Edit only the `ci` bullet and known effect 1, keeping surrounding numbering; run cargo test -p xtask."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "The new test reads the real ci.yml and requires the job with id `ci` to carry `    name: fmt, clippy, tests` and exactly one job block to have that name. The verifier also reads the diff of ci.yml.",
+      "command": "cargo test -p xtask --test ci_shards -- workflow_required_check_name",
+      "observes": "The test passes and `git diff -- .github/workflows/ci.yml` shows `name: ci` replaced by `name: fmt, clippy, tests` on the `ci` job; the workflow-level `name: ci` on line 37 is unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Run the new test, which parses the real ci.yml with `jobs()`. Its mutation cases feed altered text to `check_required_name`: name reverted to `ci`, name copied onto the `pass` job, `fmt` dropped from needs. Each must return Err.",
+      "command": "cargo test -p xtask --test ci_shards -- workflow_required_check_name",
+      "observes": "On the real file the test passes: exactly one job has the name, its id is `ci`, and its needs include gate, fmt, clippy and test. Each mutated text is rejected. Run against the base ci.yml, the same test fails.",
+      "fails_without": "If ci.yml still had `name: ci`, the helper finds zero jobs named `fmt, clippy, tests` and the test fails. If another job took the name, the count is 2 and the duplicate mutation case fails.",
+      "seam": "Production entry points: ci_shards.rs `jobs(&ci_yml())` and the new `check_required_name(text: &str) -> Result<(), String>`. Fixture: the real .github/workflows/ci.yml read via CARGO_MANIFEST_DIR; mutations are string replacements on that text in the test. `jobs()` and `ci_yml()` exist today (read); `check_required_name` is added in step 2."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the whole xtask test package against the edited ci.yml.",
+      "command": "cargo test -p xtask",
+      "observes": "All ci_shards, policy and fingerprint tests pass, including workflow_jobs_reject_a_missing_gate_condition_need_or_timeout (drop `if: always()`, drop a need, drop a timeout).",
+      "fails_without": "If the rename broke check_jobs, or the helper were wrongly strict (for example requiring `pass`), workflow_jobs_are_separate_sharded_and_gated_by_ci would fail. If a dropped `if: always()` or need were no longer rejected, the mutation test would fail.",
+      "seam": "Entry point is check_jobs(text) in xtask/tests/ci_shards.rs, called on ci_yml() and on mutated copies. Fixture: the real ci.yml, with string-replacement mutations in the test. Both exist today; step 2 only changes the name assertion inside check_jobs."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the lint and format checks over the whole workspace including test targets, so the new helper and test in xtask/tests/ci_shards.rs are compiled and linted. Then run `cargo fmt --all --check` as a second invocation.",
+      "command": "cargo clippy --workspace --all-targets --locked -- -D warnings",
+      "observes": "Clippy exits 0 with no warnings in the xtask ci_shards test target; `cargo fmt --all --check` exits 0 with no diff.",
+      "fails_without": "If the new test code had a clippy warning (an unused helper, a needless borrow, a redundant clone), `-D warnings` turns it into a non-zero exit; if the code were not rustfmt-formatted, `cargo fmt --all --check` prints a diff and exits non-zero.",
+      "seam": "Production entry points are the cargo clippy and cargo fmt commands Athena itself runs on the result. The fixture is the edited source tree, with xtask/tests/ci_shards.rs as the changed target; there is no injected double. The seam exists today (commands and the xtask test target are present); the code it checks is added in steps 2 and 3."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff. The 0rz6 entry under Added says the final job is named `fmt, clippy, tests` (job id `ci`) and that branch protection needs no change. Known effect (1) is marked resolved for the name, with the `ci`-before-`pass` marker caveat kept. A new Fixed entry names the rename and the reason, PR #314 refused with HTTP 405 for the missing check.",
+      "command": "git diff -- CHANGELOG.md docs/design/ci-routing.md",
+      "observes": "The diff has the amended Added bullet and the new Fixed bullet, and ci-routing.md section 4.2 says branch protection requires `fmt, clippy, tests` (job id `ci`).",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the git diff of ci.yml.",
+      "command": "git diff -- .github/workflows/ci.yml",
+      "observes": "Exactly one changed line, the name line of the `ci` job. The job id, `needs: [gate, fmt, clippy, test]`, `if: always()`, the steps and every other job are untouched.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Is the name the only reason PR #314 is blocked? That depends on branch protection settings and on the check run appearing under the new name on the PR head; the repository cannot show either."
+  ],
+  "producer_section_sha256": "52fdb288b13392ab6f9543e2f421e3bfd8bc4b4a17df19e26faa5fe1da3da626"
+}

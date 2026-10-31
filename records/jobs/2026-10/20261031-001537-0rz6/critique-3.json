@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-001537-0rz6",
+  "round": 3,
+  "at": "2026-10-31T07:37:17.325812239Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "xtask/src/ci_cache.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, xtask/src/ci_cache.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "xtask/tests/fingerprint.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, xtask/tests/fingerprint.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "xtask/tests/policy.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, xtask/tests/policy.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Dealing units round-robin over a list sorted by package spreads every package across all six shards, so each shard compiles the most code.",
+      "evidence": "In the snapshot, crates/athena-cli/tests/ has about 29 integration test files. Most of the workspace's units are there. Sorted by (package, selector) and dealt by i % 6, athena-cli's tests and every crate's --lib/--doc units are interleaved across all six shards, so each shard builds test harnesses for nearly every package. The request's goal is run time. Contiguous blocks are just as simple and deterministic: shard k takes units [k*len/n, (k+1)*len/n). They keep a package's units together on fewer shards. athena-cli depends on most crates, so the saving may be modest, but round-robin is the choice that works against the goal. Fix: Use contiguous index ranges instead of index modulo n. Or record why round-robin was chosen (balance) over contiguous (less compiling) in the shard.rs comment for the throughput review. The partition test is unchanged either way.",
+      "location": "Decision 3 (unit i goes to shard i % n); xtask/src/shard.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The cross-check turns a valid Cargo setting into a test failure. That is a rule with a built-in false positive, beyond what the request asks.",
+      "evidence": "The request asks that the shards together equal `cargo test --workspace`. A target with `test = false` is legitimately not run by `cargo test --workspace`, so it should simply be absent from the oracle. My grep of every Cargo.toml in the snapshot finds no `test = false` today, so nothing fails now. A later opt-out (for example a helper bin) would break ci_shards even though the partition is correct. Fix: In the by-path check, require each autodiscovered source file to map to some metadata target by src_path (this catches renames and mismatches). Then require it in the oracle only when that target has test=true. Do not fail on test=false.",
+      "location": "Decision 6 (filesystem cross-check: 'a file ... whose target has test=false, fails with the path named')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read ci.yml, the D121 tests in policy.rs, every Cargo.toml in the workspace, the uses of the name 'fmt, clippy, tests', and the test files under crates/*/tests and xtask/tests. The plan holds up against the request and the reading. It splits the job into gate, fmt, clippy, a 6-shard test matrix, pass and ci. The D121 marker is written only by a job that needs every check to succeed. The ci job uses if: always() and treats skipped jobs as success only when the gate reused a pass. Every action keeps its 40-hex SHA pin, and every job gets a timeout. The test-shard design is sound. Units are cargo metadata targets plus one doctest unit per lib with doctest true. Each unit runs as its own `cargo test -p` command, so no target runs twice. There is no blocker or major problem. The partition test has a separate pure check_cover function with negatives that are already well-formed, and its oracle is built independently and checked against files on disk by src_path, which handles athena-cli's renamed bin `athena` (crates/athena-cli/Cargo.toml has [[bin]]). Each demonstration runs the real xtask binary against the real ci.yml, and the shard unit tests inject the metadata JSON as a fixture. The plan edits policy.rs, ci_cache.rs and fingerprint.rs. These edits are forced by the layout change: policy.rs:523-526 finds the job by the name 'fmt, clippy, tests', so its tests would fail on the new ci.yml. All three files are under xtask/, which the request lists. EARLY_RUN_JOB in crates/athena-core/src/gh/early.rs:25 stops matching any check run, so land's early wait ends at once. The plan records this as a known effect and keeps the fix out of scope, which is reasonable. Two minor soundness notes: round-robin assignment interleaves each package across all shards, where contiguous blocks would compile less, and the filesystem cross-check fails on a legitimate `test = false` target."
+}

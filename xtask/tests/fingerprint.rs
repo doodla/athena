@@ -1,4 +1,4 @@
-//! The 'fmt, clippy, tests' job's reuse of its own earlier pass (docs/decisions.md D121): the fingerprint
+//! The CI gate job's reuse of an earlier pass (docs/decisions.md D121): the fingerprint
 //! command, and the decisions behind the workflow's lookup, mark and report steps. Every test runs the built
 //! `xtask` binary, as the workflow does.
 

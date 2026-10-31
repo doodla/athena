@@ -1,0 +1,30 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261031-072456-7qta",
+  "at": "2026-10-31T07:24:56.425473264Z",
+  "trigger": "failure",
+  "job": "20261030-060759-7x7m",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "failed",
+  "what_happened": "Job 20261030-060759-7x7m (recompute scope-guard pauses and classify auth stops as environment) failed because the producer could not run. Its call was refused with a 401: the OAuth access token had expired. The job ended failed with no work produced or judged. No acceptance criteria were reported unmet and no checks ran. Ironically, the job was meant to make auth stops count as environment stops.",
+  "failure_class": "20261028-112757-sygc",
+  "new_class": false,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "Athena treats the agent credential as always valid. It does not check the token's validity or expiry before dispatching a job, and it cannot refresh it. A long-lived queue drain can outlast the token, so the failure shows up only when the producer is refused. The failure is not classified as an environment stop, so it reads like a job failure. The scope guard and retry logic then treat the spend and the failure as job progress. The job that would fix this classification is itself exposed to the fault, as is any job dispatched after the token expires.",
+  "prevention_kind": "code-check",
+  "prevention": "Add a credential preflight before every stage dispatch and at drain start. It checks that the OAuth token is valid and has enough time left for the stage deadline. If the token is expired or about to expire, it tries a refresh. If that fails, it holds the queue and the job with an environment-stop message that says to re-authenticate, instead of dispatching and failing the job. Also classify any 401 or auth error from an agent call as an environment stop: it does not count as line spend, does not consume a retry, and leaves the job resumable.",
+  "proposed_request": "Add a credential preflight to Athena. Before the drain starts and before each agent stage (reader, planner, critic, producer, verifier) is dispatched, check that the agent's OAuth token is valid and will not expire before the stage deadline. If it is not valid, try to refresh it once. If that fails, hold the job and stop the drain with a clear message that the person running Athena must re-authenticate. Do not mark the job failed, and do not count any spend against the scope guard. Also classify any 401 or authentication error returned during a stage as an environment stop with the same hold behaviour, so `athena retry` resumes the job without cost to the retry budget. Acceptance: (1) a test with an expired token shows no stage is dispatched and the job is held, not failed; (2) a test where a stage returns a 401 shows an environment stop, no line spend, and a successful retry after re-authentication; (3) a valid token shows no behaviour change; (4) the scope-guard pause recomputation from job 20261030-060759-7x7m is included, so past auth stops no longer count as line spend. Add a changelog entry.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.091266,
+    "input_tokens": 2,
+    "output_tokens": 1069
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}

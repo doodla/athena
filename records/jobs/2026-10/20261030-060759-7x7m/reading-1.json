@@ -1,0 +1,160 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-060759-7x7m",
+  "n": 1,
+  "at": "2026-10-31T06:11:51.879374367Z",
+  "invocation_seq": 1,
+  "base_commit": "c8e0f210a7bf1573bb6946f48683ed535f534217",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Recompute scope-guard pauses and classify auth stops as environment",
+  "summary": "Root cause: the guard stores a pause as a file and classifies a stop only by the closing-reason prefix. A pause therefore outlives rule changes or environment-only spend, and auth/usage stops (401, 20261028-103330-3d47) count as work failures. Fix: derive the pause from per-attempt stop reasons on every check, and classify auth/usage stops as environment. Jobs 20261028-055601-hg0n, 20261028-065911-m6m5 and 20261028-103330-3d47 are addressed as described in the assumptions.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust in crates/athena-core."
+    },
+    {
+      "id": "tested",
+      "how": "New unit tests; cargo test, clippy and fmt must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix classification and pause derivation in the guard, not one job's pause."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that fail on base and pass with the change."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that environment-only spend no longer pauses a line."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the scope guard and the stop-reason classification."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-core/src/scope_guard.rs (attempt_of classifies Verdict::Environment only by ENVIRONMENT_PREFIX on the closing reason; try_watch_line writes the pause file and, when no signal fires, removes only the flag file; line_pause reads the stored pause file; t3_basis and counted already exclude environment stops), crates/athena-core/src/disk.rs (is_environment_reason accepts only LOW_DISK and CHECK_TIMEOUT; resumable_stop), crates/athena-core/src/run/mod.rs line 680 and run/producer.rs line 206 (the 'the producer did not complete' closing reasons with no environment prefix; run/mod.rs line 695 refuses a paused line). Entry points are Athena::go and Athena::retry via line_pause. Tests are the unit tests in scope_guard.rs, measured directly on AttemptRecord/request_records output and on line_pause results. No record or data file is added, so check_record_file and AnyRecord are not touched.",
+    "Goal and audience: the person running Athena must not see a line paused because of spend caused by the environment (low disk, expired login, usage limit). Audience is the owner who lifts pauses and the verifier running cargo test.",
+    "Job 20261028-055601-hg0n, 20261028-065911-m6m5 and 20261028-103330-3d47: their replay-feature candidates (check-reading, athena.replay/1) are a different task whose jobs were stopped by the environment. That work is dropped here: the files they changed (CHANGELOG.md, crates/athena-cli/src/main.rs, crates/athena-context/src/briefs.rs, crates/athena-core/src/lib.rs, crates/athena-core/src/reading.rs, crates/athena-core/src/run/mod.rs, crates/athena-core/src/store.rs, crates/athena-core/src/verify.rs, crates/athena-data/src/records.rs, docs/records.md) are excluded in out_of_scope, except run/mod.rs and CHANGELOG.md, which this change may touch. Their low-disk and 401 findings are the failure class fixed here, not re-run. Job 20261028-103330-3d47 had no candidate.",
+    "The existing environment-stop handling for low disk is kept; the change extends the classification and makes pauses derived, not stored. A pause file whose recomputation no longer fires is removed or ignored.",
+    "Only changed behaviour is the guard; no reading or refusal rule for readings is added, so the replay-percent criterion does not apply."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description (CHANGELOG.md entry) names the root cause: the guard stores a pause and classifies attempts only by a closing-reason prefix, so environment stops and stale pauses count as line spend; and it cites the jobs 20261028-055601-hg0n, 20261028-065911-m6m5, 20261028-103330-3d47.",
+      "kind": "content"
+    },
+    {
+      "text": "In crates/athena-core/src/scope_guard.rs or disk.rs, a single classification function maps a closing reason (low disk, check timeout, expired login/401, usage limit) to Verdict::Environment; Grep shows attempt_of uses it and the producer-failure reasons in crates/athena-core/src/run/producer.rs and run/mod.rs carry the environment prefix for these causes.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-core scope_guard`: a new test builds a line whose attempts all ended on environment stops (low disk, and a 401 auth stop) with spend above the T3 pause ratio, and asserts no pause; the same test fails on the base commit.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core scope_guard`: a new test writes a stale pause file for a line whose recomputed signals are none (or only environment stops) and asserts line_pause returns None and the stored pause is cleared, while a line with real runaway spend or two same-criterion rejections stays paused.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: the whole workspace test suite passes, including the existing scope_guard tests.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`: both are clean.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "docs/design/scope-guard.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "The reading replay feature (athena check-reading, athena.replay/1 record, replay hold) from jobs 20261028-055601-hg0n, 20261028-065911-m6m5 and 20261028-103330-3d47; their changes to crates/athena-cli/src/main.rs, crates/athena-context/src/briefs.rs, crates/athena-core/src/lib.rs, crates/athena-core/src/reading.rs, crates/athena-core/src/store.rs, crates/athena-core/src/verify.rs, crates/athena-data/src/records.rs and docs/records.md are dropped",
+    "Changing athena.toml, defaults.toml or workflows",
+    "Changing the T1 to T5 thresholds",
+    "Automatic disk cleanup or reservation, and token refresh",
+    "Lifting existing pauses by hand"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1700.0,
+        "p90": 3600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.718716577540107,
+      "p_verification_passes": 0.6737804878048781,
+      "p_user_intervenes": 0.08555555555555555,
+      "cost_usd": {
+        "p10": 0.533281766341618,
+        "p50": 1.2255636,
+        "p90": 3.251774925699366
+      },
+      "wall_time_s": {
+        "p10": 533.4817740075339,
+        "p50": 1716.4426109560002,
+        "p90": 3598.4233220661313
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass probability than the reference because the change touches the guard's pause logic and several modules, and three earlier jobs on this line failed.",
+  "hard_reason": "It changes the scope guard, a rule that can refuse or hold work (paused lines), and how pauses are decided and lifted.",
+  "producer_effort": "high"
+}

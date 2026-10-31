@@ -1,14 +1,39 @@
-# Athena's CI (docs/design/athena-v0.md §11.2): a thin call into Rust. Both jobs check out the full
-# history and start with `./setup.sh --ci`. Actions are pinned by commit SHA, the token is read-only, and
-# nothing is deployed. Tests that call real models are opt-in and never run here.
+# Athena's CI (docs/design/athena-v0.md §11.2): a thin call into Rust. Every job that builds starts with
+# `./setup.sh --ci`. Actions are pinned by commit SHA, the token is read-only, and nothing is deployed. Tests
+# that call real models are opt-in and never run here.
+#
+# Layout (docs/design/ci-routing.md §4.2). The old single `fmt, clippy, tests` job ran everything in sequence on
+# one runner (about 16 minutes on a cold cache, docs/decisions.md D125; that earlier measurement is the only
+# run time quoted here). The checks now run at the same time on separate runners:
+#
+#   gate ──► fmt ───────┐
+#        ├─► clippy ────┼─► pass   (writes the D121 marker only if all three succeeded)
+#        └─► test (6 shards, `xtask test-shard <k> 6`)
+#   ci     needs gate, fmt, clippy, test; `if: always()`; the one check name that says whether a commit is green.
+#
+# The run time of this layout is NOT measured here; the throughput review measures it later. The
+# `timeout-minutes` values are ceilings that stop a hung job, not measurements.
+#
+# Shards: `xtask test-shard <k> <n>` gives each workspace test target (every lib, bin, integration-test file,
+# and one doctest unit per library) to exactly one shard. The test in xtask/tests/ci_shards.rs reads the
+# matrix and the command below and fails unless the shards together cover every target exactly once. To
+# change the shard count, change the matrix list and the `6` in the test command together.
 #
 # Cache layers (docs/design/ci-routing.md §4.1): toolchain, registry and target, keyed on the content of
 # rust-toolchain.toml and Cargo.lock. Every run restores them; only a push to the default branch saves them, so
 # an unreviewed branch cannot fill or poison the shared entries. Each job reports exact, restore key or miss.
+# Each of fmt, clippy and test has its own target key (target-fmt-, target-clippy-, target-test-) because they
+# build different artifacts and would overwrite one another under one key. KNOWN EFFECT: the six test shards
+# share one key and only shard 0 saves it, so the saved entry holds what shard 0 built; the other shards
+# compile some of their packages cold. New keys also start cold, so the first runs after this change are
+# slower. Both are for the throughput review to judge.
 #
-# The 'fmt, clippy, tests' job also reuses its own earlier pass (docs/decisions.md D121): before setup it looks up
-# `ci-pass-<governed fingerprint>`; a marker naming that fingerprint skips setup and the checks. The marker is
-# saved only after the checks pass, on pull-request branches too (entries stay on the branch that saved them).
+# Reuse of an earlier pass (docs/decisions.md D121): the `gate` job looks up `ci-pass-<governed fingerprint>`; a
+# marker naming that fingerprint makes fmt, clippy and test skip (their `if`), and `ci` accepts that. The
+# `pass` job needs all three, has no status override, and so runs only if every one succeeded; it alone writes
+# and saves the marker, on pull-request branches too (entries stay on the branch that saved them). A failed
+# shard therefore leaves no marker. KNOWN EFFECT: `ci` does not wait for `pass`, so a commit can show green a
+# moment before its marker is saved.
 name: ci
 
 on:
@@ -28,9 +53,15 @@ permissions:
   contents: read
 
 jobs:
-  checks:
-    name: fmt, clippy, tests
+  # Decides whether the earlier pass can be reused (D121). Runs once, so the fingerprint is built once.
+  gate:
+    name: gate (reuse of an earlier pass)
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+      fingerprint: ${{ steps.fingerprint.outputs.fingerprint }}
+      key: ${{ steps.fingerprint.outputs.key }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,9 +69,9 @@ jobs:
           persist-credentials: false
           # For pull requests, check the commits that would land, not GitHub's merge commit.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      # Reuse of an earlier pass (docs/decisions.md D121). The fingerprint is the governed content of the checked-out
-      # tree (records/ and owner paths left out). xtask is built with the runner's own stable cargo, into a
-      # separate target directory, so this step needs neither the pinned toolchain nor setup.
+      # The fingerprint is the governed content of the checked-out tree (records/ and owner paths left out).
+      # xtask is built with the runner's own stable cargo, into a separate target directory, so this step needs
+      # neither the pinned toolchain nor setup.
       - name: Fingerprint the governed content
         id: fingerprint
         env:
@@ -73,15 +104,26 @@ jobs:
           FINGERPRINT: ${{ steps.fingerprint.outputs.fingerprint }}
           MATCHED_KEY: ${{ steps.ci-pass.outputs.cache-matched-key }}
         run: '"$XTASK" ci-cache report "$FINGERPRINT" "$MATCHED_KEY" --summary "$GITHUB_STEP_SUMMARY"'
+
+  fmt:
+    name: fmt
+    needs: gate
+    if: needs.gate.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Restore the toolchain cache
-        if: steps.gate.outputs.skip != 'true'
         id: cache-toolchain
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.rustup/toolchains
           key: rustup-${{ hashFiles('rust-toolchain.toml') }}
       - name: Restore the registry cache
-        if: steps.gate.outputs.skip != 'true'
         id: cache-registry
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
@@ -91,15 +133,13 @@ jobs:
           key: registry-${{ hashFiles('Cargo.lock') }}
           restore-keys: registry-
       - name: Restore the target cache
-        if: steps.gate.outputs.skip != 'true'
         id: cache-target
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: target
-          key: target-checks-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: target-checks-${{ hashFiles('rust-toolchain.toml') }}-
+          key: target-fmt-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: target-fmt-${{ hashFiles('rust-toolchain.toml') }}-
       - name: Report the cache outcome (exact, restore key, miss)
-        if: steps.gate.outputs.skip != 'true'
         env:
           TOOLCHAIN_HIT: ${{ steps.cache-toolchain.outputs.cache-hit }}
           TOOLCHAIN_KEY: ${{ steps.cache-toolchain.outputs.cache-matched-key }}
@@ -114,41 +154,23 @@ jobs:
             else echo "miss"; fi
           }
           {
-            echo "cache outcome (job checks):"
+            echo "cache outcome (job fmt):"
             echo "- toolchain: $(outcome "$TOOLCHAIN_HIT" "$TOOLCHAIN_KEY")"
             echo "- registry: $(outcome "$REGISTRY_HIT" "$REGISTRY_KEY")"
             echo "- target: $(outcome "$TARGET_HIT" "$TARGET_KEY")"
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Set up (pinned toolchain, gitleaks, athena)
-        if: steps.gate.outputs.skip != 'true'
         run: ./setup.sh --ci
-      - name: cargo fmt --check, cargo clippy -D warnings, cargo test
-        id: checks
-        if: steps.gate.outputs.skip != 'true'
-        run: cargo run --locked -p xtask -- ci
-      # Written only after the checks step succeeded (a step after a failed one does not run); a failed run
-      # writes no marker, so it leaves nothing to reuse. `mark` also writes only for the outcome `success`.
-      - name: Mark the pass
-        if: steps.gate.outputs.skip != 'true'
-        env:
-          FINGERPRINT: ${{ steps.fingerprint.outputs.fingerprint }}
-          OUTCOME: ${{ steps.checks.outcome }}
-        run: '"$XTASK" ci-cache mark ci-pass "$FINGERPRINT" --outcome "$OUTCOME"'
-      # On pull requests too: the key holds the fingerprint, and GitHub keeps the entry on this branch only.
-      - name: Save the pass under the fingerprint
-        if: steps.gate.outputs.skip != 'true'
-        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: ci-pass
-          key: ${{ steps.fingerprint.outputs.key }}
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Save the toolchain cache (default branch only)
-        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-toolchain.outputs.cache-hit != 'true'
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-toolchain.outputs.cache-hit != 'true'
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.rustup/toolchains
           key: rustup-${{ hashFiles('rust-toolchain.toml') }}
       - name: Save the registry cache (default branch only)
-        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-registry.outputs.cache-hit != 'true'
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-registry.outputs.cache-hit != 'true'
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: |
@@ -156,11 +178,255 @@ jobs:
             ~/.cargo/git
           key: registry-${{ hashFiles('Cargo.lock') }}
       - name: Save the target cache (default branch only)
-        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-target.outputs.cache-hit != 'true'
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-target.outputs.cache-hit != 'true'
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: target
-          key: target-checks-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          key: target-fmt-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+
+  clippy:
+    name: clippy
+    needs: gate
+    if: needs.gate.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Restore the toolchain cache
+        id: cache-toolchain
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.rustup/toolchains
+          key: rustup-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Restore the registry cache
+        id: cache-registry
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: registry-
+      - name: Restore the target cache
+        id: cache-target
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target
+          key: target-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: target-clippy-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Report the cache outcome (exact, restore key, miss)
+        env:
+          TOOLCHAIN_HIT: ${{ steps.cache-toolchain.outputs.cache-hit }}
+          TOOLCHAIN_KEY: ${{ steps.cache-toolchain.outputs.cache-matched-key }}
+          REGISTRY_HIT: ${{ steps.cache-registry.outputs.cache-hit }}
+          REGISTRY_KEY: ${{ steps.cache-registry.outputs.cache-matched-key }}
+          TARGET_HIT: ${{ steps.cache-target.outputs.cache-hit }}
+          TARGET_KEY: ${{ steps.cache-target.outputs.cache-matched-key }}
+        run: |
+          outcome() {
+            if [ "$1" = "true" ]; then echo "exact"
+            elif [ -n "$2" ]; then echo "restore key"
+            else echo "miss"; fi
+          }
+          {
+            echo "cache outcome (job clippy):"
+            echo "- toolchain: $(outcome "$TOOLCHAIN_HIT" "$TOOLCHAIN_KEY")"
+            echo "- registry: $(outcome "$REGISTRY_HIT" "$REGISTRY_KEY")"
+            echo "- target: $(outcome "$TARGET_HIT" "$TARGET_KEY")"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Set up (pinned toolchain, gitleaks, athena)
+        run: ./setup.sh --ci
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Save the toolchain cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.rustup/toolchains
+          key: rustup-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Save the registry cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-registry.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: registry-${{ hashFiles('Cargo.lock') }}
+      - name: Save the target cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-target.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target
+          key: target-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+
+  # The tests, split into shards that together run every workspace test target exactly once (see the header).
+  # fail-fast is off so one failing shard does not hide what the others found.
+  test:
+    name: test (shard ${{ matrix.shard }})
+    needs: gate
+    if: needs.gate.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Restore the toolchain cache
+        id: cache-toolchain
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.rustup/toolchains
+          key: rustup-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Restore the registry cache
+        id: cache-registry
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: registry-
+      - name: Restore the target cache
+        id: cache-target
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target
+          key: target-test-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: target-test-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Report the cache outcome (exact, restore key, miss)
+        env:
+          TOOLCHAIN_HIT: ${{ steps.cache-toolchain.outputs.cache-hit }}
+          TOOLCHAIN_KEY: ${{ steps.cache-toolchain.outputs.cache-matched-key }}
+          REGISTRY_HIT: ${{ steps.cache-registry.outputs.cache-hit }}
+          REGISTRY_KEY: ${{ steps.cache-registry.outputs.cache-matched-key }}
+          TARGET_HIT: ${{ steps.cache-target.outputs.cache-hit }}
+          TARGET_KEY: ${{ steps.cache-target.outputs.cache-matched-key }}
+        run: |
+          outcome() {
+            if [ "$1" = "true" ]; then echo "exact"
+            elif [ -n "$2" ]; then echo "restore key"
+            else echo "miss"; fi
+          }
+          {
+            echo "cache outcome (job test, shard ${{ matrix.shard }}):"
+            echo "- toolchain: $(outcome "$TOOLCHAIN_HIT" "$TOOLCHAIN_KEY")"
+            echo "- registry: $(outcome "$REGISTRY_HIT" "$REGISTRY_KEY")"
+            echo "- target: $(outcome "$TARGET_HIT" "$TARGET_KEY")"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Set up (pinned toolchain, gitleaks, athena)
+        run: ./setup.sh --ci
+      - name: cargo test, this shard's targets
+        run: cargo run --locked -p xtask -- test-shard ${{ matrix.shard }} 6
+      # The six shards share these keys; the toolchain and registry entries are identical in every shard, and
+      # only shard 0 saves the target entry, so the shards do not race to write the same key.
+      - name: Save the toolchain cache (default branch only)
+        if: matrix.shard == 0 && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.rustup/toolchains
+          key: rustup-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Save the registry cache (default branch only)
+        if: matrix.shard == 0 && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-registry.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: registry-${{ hashFiles('Cargo.lock') }}
+      - name: Save the target cache (default branch only)
+        if: matrix.shard == 0 && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-target.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target
+          key: target-test-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+
+  # Writes the D121 marker. It has the default `success()` condition and needs fmt, clippy and test, so it runs
+  # only when all three succeeded; when the gate reused a pass they are skipped and so is this job. `mark` also
+  # writes only for the outcome `success`.
+  pass:
+    name: pass (save the earlier-pass marker)
+    needs: [gate, fmt, clippy, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Build xtask
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/xtask-target
+        run: |
+          cargo +stable build --locked -q -p xtask
+          echo "XTASK=$CARGO_TARGET_DIR/debug/xtask" >> "$GITHUB_ENV"
+      - name: Combine the results of fmt, clippy and test
+        id: results
+        env:
+          FMT: ${{ needs.fmt.result }}
+          CLIPPY: ${{ needs.clippy.result }}
+          TEST: ${{ needs.test.result }}
+        run: |
+          if [ "$FMT" = success ] && [ "$CLIPPY" = success ] && [ "$TEST" = success ]; then
+            echo "outcome=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "outcome=failure" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Mark the pass
+        env:
+          FINGERPRINT: ${{ needs.gate.outputs.fingerprint }}
+          OUTCOME: ${{ steps.results.outputs.outcome }}
+        run: '"$XTASK" ci-cache mark ci-pass "$FINGERPRINT" --outcome "$OUTCOME"'
+      # On pull requests too: the key holds the fingerprint, and GitHub keeps the entry on this branch only.
+      - name: Save the pass under the fingerprint
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ci-pass
+          key: ${{ needs.gate.outputs.key }}
+
+  # The single check name that says whether a commit is green. `if: always()` makes it run (and fail) when a
+  # needed job failed or was cancelled, instead of being skipped. When the gate reused a pass, fmt, clippy and
+  # test are skipped on purpose and count as green; in every other case each must have succeeded.
+  ci:
+    name: fmt, clippy, tests
+    needs: [gate, fmt, clippy, test]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fail unless every check succeeded (or the gate reused a pass)
+        env:
+          GATE: ${{ needs.gate.result }}
+          SKIP: ${{ needs.gate.outputs.skip }}
+          FMT: ${{ needs.fmt.result }}
+          CLIPPY: ${{ needs.clippy.result }}
+          TEST: ${{ needs.test.result }}
+        run: |
+          failed=0
+          if [ "$GATE" != success ]; then
+            echo "gate: $GATE (needs success)"
+            failed=1
+          fi
+          want=success
+          if [ "$SKIP" = true ]; then want=skipped; fi
+          for pair in "fmt:$FMT" "clippy:$CLIPPY" "test:$TEST"; do
+            if [ "${pair#*:}" != "$want" ]; then
+              echo "${pair%%:*}: ${pair#*:} (needs $want)"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then exit 1; fi
+          echo "ci: green (the gate reported skip=${SKIP:-false})"
 
   # The history check reads the records branch once the cutover is shown on it (docs/design/records-history.md
   # §4 and §10, D111): commits up to the cutover commit C0 are judged by the old rules and later ones by the
@@ -172,6 +438,7 @@ jobs:
   history:
     name: the full history
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -260,6 +527,7 @@ jobs:
     if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     continue-on-error: true
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -291,6 +559,7 @@ jobs:
     if: github.event_name == 'pull_request'
     continue-on-error: true
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

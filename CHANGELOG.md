@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The final CI job is named `fmt, clippy, tests` again (its id stays `ci`), the check name branch protection
+  requires. Cause: the CI split gave the final job the display name `ci`, so no check named `fmt, clippy, tests`
+  was reported and pull request #314 could not merge (HTTP 405, `Required status check "fmt, clippy, tests" is
+  expected`). Fix: the display name only; the job id, `needs`, `if: always()` and steps are unchanged, and branch
+  protection is not edited. `xtask/tests/ci_shards.rs` now fails unless exactly one job carries that name, it is
+  the `ci` job, and it needs `gate`, `fmt`, `clippy` and `test`.
 - `athena drain` works the order `athena plan` prints, and says what it passes over. Cause: the drain built its
   plan once, before the first job, and worked that frozen list, while `athena plan` builds it fresh on each run.
   A priority record added while a job ran, a job that ended, or a request queued after the start never reached
@@ -32,6 +38,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- CI runs fmt, clippy and the tests as parallel jobs, the tests in a matrix of 6 shards, and a final job (id `ci`,
+  named `fmt, clippy, tests`) says whether a commit is green. The earlier single job of that name ran everything
+  in sequence on one runner
+  (about 16 minutes on a cold cache, D125, the earlier measurement). Now `.github/workflows/ci.yml` has: `gate`
+  (fingerprint, lookup of an earlier pass and the decision, D121, run once); `fmt`, `clippy` and `test` (needing
+  `gate`, skipped when it reused a pass; each with its own target cache key `target-fmt-`, `target-clippy-` and
+  `target-test-`; the toolchain and registry keys and the default-branch-only saves are unchanged); `pass`
+  (needs all three with the default success condition, so it alone writes and saves the D121 marker and a failed
+  shard leaves none); and `ci` (displayed as `fmt, clippy, tests`; needs all of them, `if: always()`, fails
+  unless each succeeded, or was skipped because the gate reused a pass). Every job has `timeout-minutes` (ceilings, not measurements). New:
+  `cargo run -p xtask -- test-shard <k> <n>` (0-based, `k < n`) runs one of `n` slices of the workspace's test
+  targets (each lib, bin and integration-test file, plus one doctest run per library, sorted and dealt out by
+  index modulo `n`); `--dry-run` only lists them, for example `cargo run -p xtask -- test-shard 0 6 --dry-run`.
+  The `n` shards together run what `cargo test --workspace` runs. The test `xtask/tests/ci_shards.rs` reads
+  ci.yml, runs each listed shard with `--dry-run`, and fails unless the shards cover every workspace test target
+  exactly once; its oracle comes from `cargo metadata` and is cross-checked against the source files on disk.
+  Branch protection needs no change: the final job reports the check named `fmt, clippy, tests`. The
+  run time of the new layout is not measured here; the throughput review measures it later. Known effects, for
+  that review: (1) `EARLY_RUN_JOB` in `athena-core` names `fmt, clippy, tests`, which the final job carries
+  again, so the name mismatch is resolved; what remains is that the final job can finish before the marker is
+  saved by `pass`, so a landing run can still miss the cached pass; (2) the six test
+  shards share one target cache key and only shard 0 saves it on the default branch, so the saved entry holds
+  shard 0's build and the other shards compile some packages cold; the new keys also start cold; (3) each unit
+  is a separate `cargo test -p <package>` run, so features may resolve differently from one `--workspace` run.
+  The D121 policy tests in `xtask/tests/policy.rs` now read the `gate` and `pass` jobs.
 - A required test seam on the demonstration of a behavior criterion, and a planning refusal without it. Root cause
   of the repeated plan failure (jobs 20261018-095726-r3bn, 20261018-113512-gvcs and 20261024-115052-bzw6 stopped at
   planning round 3): a plan demonstration carried no field for the test seam, so the planning flow never required

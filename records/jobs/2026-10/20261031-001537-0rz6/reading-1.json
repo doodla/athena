@@ -1,0 +1,179 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-001537-0rz6",
+  "n": 1,
+  "at": "2026-10-31T07:26:05.255591652Z",
+  "invocation_seq": 1,
+  "base_commit": "7e569fd3c6e398311bc2e2a2830abe2b5f4dbe6a",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Split CI into parallel fmt, clippy and sharded test jobs with xtask",
+  "summary": "Replace the single `checks` job in ci.yml with parallel fmt, clippy and a 6-shard test matrix, plus a final `ci` gate job. Add an `xtask test-shard <k> <n>` subcommand that partitions workspace test targets, and a test that reads ci.yml and checks the shards form an exact partition. The audience is Athena's maintainers, who need a fast single required check.",
+  "class_of_work": "build",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The shard command and its test are Rust in xtask."
+    },
+    {
+      "id": "tested",
+      "how": "New xtask tests; cargo test and clippy -D warnings must pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "The partition rule is enforced by a test that reads ci.yml."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the partition and the shard command by running tests."
+    },
+    {
+      "id": "outcome-check",
+      "how": "A criterion states the run time is not claimed and is measured later."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to ci.yml plus xtask."
+    },
+    {
+      "id": "buy-first",
+      "how": "Use cargo metadata and the existing test runner rather than adding a sharding tool; record the call in a comment."
+    },
+    {
+      "id": "strangers",
+      "how": "Workflow comments and changelog written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read .github/workflows/ci.yml and xtask/src/main.rs (entry `main` dispatches subcommands; `ci()` at ~line 536 runs fmt --all --check, clippy --all-targets --locked -D warnings, then `cargo test --locked` in sequence). xtask/src/ci_cache.rs holds fingerprint and ci-cache check/mark/report. No record or data file is added under crates/, so check_record_file and AnyRecord are not touched; xtask/tests/ already holds integration tests.",
+    "The D121 pass marker stays: the fingerprint and gate steps run once in the fmt/clippy/test jobs' shared prelude (or a small first job whose outputs the others need); the marker is written only by the `ci` job or a job that needs all others, after all succeeded, so a failed shard never leaves a marker. Producer picks the least invasive design and documents it in comments.",
+    "Sharding unit is the workspace test target (each lib, bin, integration test file), enumerated deterministically by xtask (e.g. cargo metadata), assigned by index modulo n; shard k runs `cargo test --locked -p <pkg> --test <name>` / `--lib` for its targets, including doctests assigned to exactly one shard. All n shards together equal `cargo test --workspace`.",
+    "Cache layers keep their keys; each job gets its own target cache key (target-fmt/clippy/test) to avoid collisions, with restore-only on every event and save on default branch only. Existing history, attribution and pr-head jobs are unchanged apart from nothing.",
+    "The `ci` gate uses `if: always()` and fails unless every needed job result is `success`; the old `checks` name is replaced by `ci` as the required check (branch protection is outside the repo)."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Grep of .github/workflows/ci.yml shows separate jobs for fmt, clippy and a test job with `strategy.matrix` of 6 shards, plus a job with `name: ci` whose `needs` lists fmt, clippy and the test job and which uses `if: always()` and fails when any needed result is not success; every job has `timeout-minutes`.",
+      "kind": "content"
+    },
+    {
+      "text": "All `uses:` lines in ci.yml remain pinned by 40-hex commit SHA, the three cache layers (toolchain, registry, target) and the D121 fingerprint/ci-pass lookup, gate and mark steps are still present, and the pass marker is saved only after all checks succeeded.",
+      "kind": "content"
+    },
+    {
+      "text": "An xtask test reads .github/workflows/ci.yml, extracts each shard's test command and the shard count, and fails when the shards do not partition the workspace test targets exactly once; run `cargo test -p xtask` and see it pass, and a negative case inside the test (a mutated shard list with a dropped or duplicated shard) is shown to fail the check.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo run -p xtask -- test-shard <k> <n>` exists; for n=6 and k in 0..5 (or the documented index base) the selected targets are disjoint and their union equals the target set of `cargo test --workspace`; a test in xtask asserts this, and invalid k/n (k>=n, n=0) exits with an error. Run `cargo test -p xtask`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the parallel jobs, the shard matrix, the `ci` gate job and `xtask test-shard`.",
+      "kind": "content"
+    },
+    {
+      "text": "Outcome check: the real run time is not claimed; comments or the changelog state it is to be measured later by the throughput review, and no number is presented as measured.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "xtask/src/shard.rs",
+      "action": "create",
+      "p": 0.6
+    },
+    {
+      "path": "xtask/tests/ci_shards.rs",
+      "action": "create",
+      "p": 0.7
+    },
+    {
+      "path": "xtask/Cargo.toml",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "docs/design/ci-routing.md",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Reading CI results back into a job (a separate request)",
+    "Measuring real GitHub run time or changing branch protection settings",
+    "Changing the history, attribution and pr-head jobs",
+    "Changes to athena.toml, defaults.toml, setup.sh or rust-toolchain.toml",
+    "Tests that call real models"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7183823529411765,
+      "p_verification_passes": 0.6630901287553648,
+      "p_user_intervenes": 0.0856,
+      "cost_usd": {
+        "p10": 0.4139777373327592,
+        "p50": 1.0143121,
+        "p90": 2.8769091438096774
+      },
+      "wall_time_s": {
+        "p10": 380.4867679094879,
+        "p50": 1592.3980781600003,
+        "p90": 3435.760463743127
+      }
+    }
+  },
+  "departures": "Higher cost and lower pass odds than reference: a workflow rewrite, a new subcommand and a YAML-parsing test touching a hard gate, verified only locally.",
+  "urgent_reason": "Cuts the 16-minute single-runner CI wait that slows every check of every commit.",
+  "hard_reason": "Changes the CI gate that judges every commit (new required-check job `ci`, the pass-marker reuse across split jobs), so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}

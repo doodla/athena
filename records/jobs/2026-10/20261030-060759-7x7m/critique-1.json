@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060759-7x7m",
+  "round": 1,
+  "at": "2026-10-31T06:16:26.939146388Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/planning.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/planning.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The auth/usage classifier is a crude substring heuristic over model-written text and can match common words.",
+      "evidence": "claude.rs:264-280 builds `detail` as `<subtype>: <first 300 chars of result.text>`, and that is the model's final message. The planned matcher accepts any case-insensitive '401', 'unauthorized', 'authentication' or 'invalid api key'. A producer working on gh.rs HTTP handling or auth code that ends with error_max_turns and mentions 'authentication' or '401' would get an `environment:` reason, become Verdict::Environment and be dropped from T3/T1/T4. That is the runaway case the guard exists to catch. Decision 1 itself rejects matching free text inside attempt_of because 'free text from the work could match', yet the same text reaches the matcher here. The open questions also admit the match strings are guesses, not read from code. Fix: Classify from the structured result, not prose. Only consider `is_error` results (or a non-success subtype the CLI uses for API errors). Anchor the patterns to the CLI's API-error form, for example a detail whose text starts with 'API Error: 401' or contains 'authentication_error', or the CLI's fixed login and usage-limit messages. Drop the bare '401', 'authentication' and 'unauthorized' tokens. Better still, have athena-agent set a typed cause on AgentOutput (it sees is_error/subtype in stream.rs) and have agent_stop_reason read that. Add a disk.rs test where work text mentioning '401 handling' and 'authentication' with error_max_turns stays a plain 'did not complete' reason.",
+      "location": "Plan step 1 (disk.rs `environment_cause`), Decision 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Sending the timed-out reason through agent_stop_reason can record an `environment:` reason on a TimedOut job that the guard still counts as work.",
+      "evidence": "run/mod.rs:631-682 (keep_timed_out_work) handles a producer that hit its deadline and sets state TimedOut. attempt_of maps Closed(TimedOut) to Verdict::Failed whatever the reason says. If the reason ever matches, the record would say 'environment: … not the work' while the guard counts it as work, so the reason and the guard can drift apart again, which is the very problem being fixed. Fix: Leave line 680 alone. It is a deadline, not an agent failure detail. Alternatively, make the reason and the state agree: if an auth/usage cause is detected there, close it Failed with the environment reason.",
+      "location": "Plan step 3 / Decision 5, run/mod.rs line 680",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Dropping every environment-stopped attempt removes any bound on a line that keeps redoing work and keeps hitting environment stops.",
+      "evidence": "With the `kept` rule gone, a loop of [low-disk, low-disk, …] redone from scratch adds nothing to spend, and the T3_LINE_DOLLARS flag (t3_cost line 306) cannot fire either. Introspection kmx7 offered 'exclude … or count them separately'. Fix: Keep pauses off environment spend, but feed total line spend including environment stops into the T3_LINE_DOLLARS flag, or record it separately, so the owner still sees a line that burns money on repeated environment stops. Add a test for it.",
+      "location": "Decision 3 (t3_basis drops all environment spend)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A unit test pinned to CHANGELOG Unreleased wording will break at the next release, and it adds no behavior evidence.",
+      "evidence": "Criterion 1 is a content criterion that a reviewer checks by reading. A test that uses include_str! to load CHANGELOG.md and look for 'closing-reason prefix' and 'stored pause' in the Unreleased section fails as soon as the entry moves under a version heading or is reworded. Fix: Drop the test and check criterion 1 with Grep on CHANGELOG.md. If you keep it, search the whole file rather than the Unreleased section.",
+      "location": "Plan step 6, test `changelog_names_the_root_cause`",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Status will still list stale pause files until the next check.",
+      "evidence": "line_pause and try_watch_line are the only places that reconcile, so status can show a pause that would not refuse. Fix: Say in docs/design/scope-guard.md that status shows the stored file and that a pause holds only while a signal fires.",
+      "location": "Open question on `athena status`",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly. Its targets exist in the snapshot: attempt_of uses `starts_with(ENVIRONMENT_PREFIX)` (scope_guard.rs:525-530), t3_basis keeps the `kept` rule (273-292), line_pause trusts the stored file (728-735), try_watch_line removes only the flag file when nothing fires (796-798), and the 'did not complete' reasons are at producer.rs:206, planning.rs:186/332 and run/mod.rs:680. Its test seams exist too: the watcher_tests Plan/Rig/rig_with_space, FakeTurn with outcome/detail, and test_support::low_once_verifying. Criteria 3 and 4 would fail on the base commit as the plan describes. Recomputing in line_pause works on both refusal paths. Retry calls it with the old job id, which has a reading, and dispatch calls it with the new job. One major soundness problem remains. The new 401/usage classifier matches bare substrings such as '401' and 'authentication' against agent detail text, and that text includes up to 300 characters of the model's own result text (claude.rs:264-280). Work that is about authentication, or that mentions 401, would then be marked as an environment stop and dropped from T3. That defeats the guard the change is meant to keep, and the plan's own Decision 1 rejects free-text matching for this reason. There are also smaller issues: the timed-out path, losing any bound on a loop of environment stops, and a test pinned to CHANGELOG wording."
+}

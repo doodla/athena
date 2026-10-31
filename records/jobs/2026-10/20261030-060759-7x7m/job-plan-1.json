@@ -1,0 +1,215 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-060759-7x7m",
+  "round": 1,
+  "at": "2026-10-31T06:14:52.285117352Z",
+  "invocation_seq": 2,
+  "approach": "Root cause: scope_guard.rs stores a pause as a file that line_pause trusts forever, and attempt_of classifies an attempt as an environment stop only from the closing-reason prefix, which the producer's \"did not complete\" reason never carries for an expired login (401) or a usage limit. Fix at the source in four parts. (1) disk.rs gets one classifier, `is_environment_reason`, covering low disk, check timeout, auth stop and usage limit, plus `agent_stop_reason(who, detail)` that builds a closing reason with the right environment prefix from the agent's failure text. (2) attempt_of uses `crate::disk::is_environment_reason`. The producer, planner and critic failure sites call `agent_stop_reason`, so a 401 or usage-limit stop is recorded as an environment stop. (3) T3 drops all environment-stopped spend, not only \"kept\" spend. (4) line_pause stops trusting the file. It recomputes the line's signals from the per-attempt records under the current rules, keeps the stored pause only if the recomputation still pauses, and otherwise deletes the file and returns None. try_watch_line shares the same recomputation and removes a pause file when the level is below Pause. Deleting the file still lifts a pause. Add tests, a CHANGELOG entry and a doc update.",
+  "decisions": [
+    {
+      "choice": "One classifier `disk::is_environment_reason` for closing reasons (low disk, check timeout, auth/401, usage limit). attempt_of calls it instead of its own prefix test. A second helper `disk::agent_stop_reason(who, detail)` turns an agent failure text into a closing reason: `environment: login expired ...` or `environment: usage limit reached ...` when the text matches, else `the <who> did not complete: <detail>`.",
+      "reason": "Criterion 2 asks for a single function that maps reasons to Verdict::Environment, used by attempt_of. The producer and planner sites need the same match so recorded reasons and the guard cannot drift again. disk.rs already owns LOW_DISK, CHECK_TIMEOUT and is_environment_reason.",
+      "rejected": [
+        {
+          "option": "Keep attempt_of's `starts_with(ENVIRONMENT_PREFIX)` and only add prefixes at the call sites",
+          "why": "It leaves two places that must agree, which is the cause. Any future reason without the prefix is again counted as work."
+        },
+        {
+          "option": "Match the 401 / usage text inside attempt_of on every closing reason",
+          "why": "Free text from the work could match. Classification belongs where the reason is written, from the agent's failure detail, and attempt_of then reads a recorded prefix."
+        }
+      ]
+    },
+    {
+      "choice": "`resumable_stop` keeps resuming only for low disk and check timeout (a private narrower check). Auth and usage stops are environment for the guard but not resumable.",
+      "reason": "is_environment_reason now also matches auth and usage reasons. resumable_stop and resumed_candidate decide whether a retry resumes a kept candidate, and an auth stop at the producer has none. Widening them would change retry behaviour and the T3 forecast share, which is outside this fix.",
+      "rejected": [
+        {
+          "option": "Let resumable_stop use the widened is_environment_reason",
+          "why": "A retry after a 401 could be read as a resume of a candidate that does not exist, so T3 would use the verifier-share forecast and pause too early."
+        }
+      ]
+    },
+    {
+      "choice": "t3_basis drops the spend of every Environment attempt, not only a kept one. The `kept` logic goes. `resumed` still selects the verifier-share forecast.",
+      "reason": "Criterion 3 and three introspections say spend from an environment stop must not count toward progress-less spend. With the `kept` rule a line of [401 stop, low-disk stop] still pauses because the first stop is not followed by a resume. A loop of environment stops is bounded by the environment, not by runaway work.",
+      "rejected": [
+        {
+          "option": "Keep the `kept` rule and count redone environment spend",
+          "why": "It is the behaviour that paused the lines in the failing jobs. The existing test `resumed_retry_is_judged_on_remaining_stages` asserts it and must be changed with this decision."
+        },
+        {
+          "option": "Add a separate environment-spend field to MarkNumbers",
+          "why": "It changes the stored mark format for no signal. Not needed to prevent the pause."
+        }
+      ]
+    },
+    {
+      "choice": "The pause stays a file, but it is only a lift handle and the displayed text. line_pause returns it only while a fresh evaluation of the line (`evaluate_before_attempt` on `line_attempts` with the latest reading's p90) is at Level::Pause. Otherwise it removes the file and returns None. try_watch_line also removes a pause file when the new level is below Pause. A shared helper computes the line's attempts, p90 and signals for both.",
+      "reason": "Pauses are derived from per-attempt stop reasons under the current rule on every check, so a rule change or a reclassified stop clears a stale pause. The owner can still lift by deleting the file, as docs/design/scope-guard.md says. The pause is never created by line_pause, so the watcher still decides when to write it.",
+      "rejected": [
+        {
+          "option": "Compute the pause purely from records with no file",
+          "why": "The documented lift (delete the file) would stop working and out-of-scope hand-lifting would change. A deleted file must not be recreated by a read."
+        },
+        {
+          "option": "Store a rule version in the mark and compare it",
+          "why": "More state and a migration for existing files. Recomputing under the current rules needs neither."
+        },
+        {
+          "option": "Add a one-off cleanup of existing stale pause files",
+          "why": "Out of scope; it works around instances. Recompute clears them on the next check."
+        }
+      ]
+    },
+    {
+      "choice": "Route the producer's, planner's and critic's `did not complete` reasons through agent_stop_reason (producer.rs line 206, planning.rs lines 186 and 332, run/mod.rs line 680). The verifier failure at verification.rs line 219 is not changed.",
+      "reason": "They are the places that write an agent's failure text into the job's closing reason. run/mod.rs line 680 is the timed-out path, kept TimedOut and counted as work as before. The verifier's failure goes through verify.rs `judge` into a rejection, which is a separate path.",
+      "rejected": [
+        {
+          "option": "Classify inside Athena::failure (run/mod.rs line 1510) on any reason text",
+          "why": "failure() receives many reasons that are not agent output, so a match on free text could mislabel work failures."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Add AUTH_STOP and USAGE_LIMIT constants (both start with `environment:`), extend `is_environment_reason` to the four causes, add `agent_stop_reason(who, detail)` and a text matcher for 401 / login-expired and usage-limit failure text. Narrow `resumable_stop` to low disk and check timeout. Unit tests for all of it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "purpose": "attempt_of uses `crate::disk::is_environment_reason`. t3_basis drops all environment spend. A shared helper evaluates a line's signals. line_pause recomputes and clears a stale pause file. try_watch_line removes a pause file when the level is below Pause. Update the Verdict::Environment and ENVIRONMENT_PREFIX docs. New tests for criteria 1, 3 and 4, a Plan producer-error field, and updates to `retry_refuses_paused_line` and `resumed_retry_is_judged_on_remaining_stages`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Line 206: write the 'producer did not complete' reason with `disk::agent_stop_reason(\"producer\", detail)`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Line 680 (timed-out keep path): use `agent_stop_reason` for the same reason text. State stays TimedOut.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Lines 186 and 332: use `agent_stop_reason` for the planner's and critic's 'did not complete' reasons, so an auth stop in planning is also an environment stop.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry naming the root cause and jobs 20261028-055601-hg0n, 20261028-065911-m6m5, 20261028-103330-3d47.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/scope-guard.md",
+      "action": "modify",
+      "purpose": "Section on lifting (line 329) and the stop-reason text: the pause is recomputed on each check, deleting the file still lifts it, and auth and usage stops are environment stops whose spend is not counted.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "disk.rs: add `pub const AUTH_STOP: &str = \"environment: login expired\"` and `pub const USAGE_LIMIT: &str = \"environment: usage limit reached\"`. Add a private `environment_cause(detail: &str) -> Option<&'static str>` (case-insensitive: '401', 'unauthorized', 'please run /login', 'invalid api key', 'authentication' for auth; 'usage limit', 'hit your limit' for usage). Add `pub fn agent_stop_reason(who, detail) -> String`: returns `{AUTH_STOP}: the {who} could not authenticate ({detail}); this is the environment, not the work. Log in again, then `athena retry <job>`` or the usage form when matched, else `the {who} did not complete: {detail}`. Extend `is_environment_reason` to the four prefixes. Make `resumable_stop` use a private check for LOW_DISK and CHECK_TIMEOUT only.",
+    "disk.rs tests: the classifier accepts the four causes and rejects 'the producer did not complete: ...' and an unrelated reason; agent_stop_reason for a 401 text and a usage-limit text yields an environment reason, other text yields the plain reason; resumable_stop is false for the two new reasons; the new constants start with scope_guard::ENVIRONMENT_PREFIX.",
+    "producer.rs line 206, run/mod.rs line 680, planning.rs lines 186 and 332: replace the format of the 'did not complete' reason with `crate::disk::agent_stop_reason(role, detail)`. Leave the state of the timed-out path as TimedOut.",
+    "scope_guard.rs: attempt_of computes `environment` with `crate::disk::is_environment_reason`; update the `Verdict::Environment` and ENVIRONMENT_PREFIX docs. Rewrite t3_basis to sum only attempts whose verdict is not Environment (drop the `kept` logic) and keep the resumed-last forecast share. Update its doc comment and `t3_cost`'s.",
+    "scope_guard.rs: add a private helper `line_signals(records, requests, line) -> (Vec<AttemptRecord>, Signals, f64)` that does what try_watch_line does now (line_attempts, the latest request's forecast p90 via forecast_p90_dollars, evaluate_before_attempt). Use it in try_watch_line. In try_watch_line, remove the pause file whenever the level is below Pause (and the flag file when it is None). In `line_pause`, read the stored pause, recompute with the helper, return it only when `overall() == Level::Pause`, else remove the file and return None.",
+    "scope_guard.rs tests (watcher_tests): add `producer_errors: Mutex<VecDeque<Option<String>>>` to Plan (default empty in `rig_with_space`) and make the Producer branch return an Error turn with the scripted detail (no structured output, no edits) when one is queued. Add a `rig_with_producer_errors(...)` wrapper. Add tests: `environment_stops_are_not_line_spend` (401 stop then low-disk stop, no pause, plus a plain-failure control with the same spend that does pause), `a_stale_pause_is_cleared_when_nothing_fires` (two cases: environment-only line, and different-criterion rejections), `a_real_pause_survives_the_recompute` (same-criterion rejections and a T3 line; deleting the file lifts), and `changelog_names_the_root_cause` (include_str! of CHANGELOG.md).",
+    "scope_guard.rs: rewrite `retry_refuses_paused_line` to use the watcher's own pause (`rig(0.8, 0.01, &[Some(0), Some(0)])`, `two_rejections`, then assert the refusal, then delete the file and assert the retry works as the control). Update `resumed_retry_is_judged_on_remaining_stages`: the redone control now has spend 0.1 and no pause because environment spend is dropped; keep the resumed and over-forecast cases. Add a unit test that a [Environment, Environment] line with spend above 1.5 times p90 has Level::None for every signal.",
+    "CHANGELOG.md: add an Unreleased entry naming the root cause (the guard stores a pause and classifies attempts only by a closing-reason prefix, so environment stops and stale pauses counted as line spend), what changed, and the jobs 20261028-055601-hg0n, 20261028-065911-m6m5, 20261028-103330-3d47. docs/design/scope-guard.md: update the stop-reason and lifting text.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix what they report."
+  ],
+  "risks": [
+    {
+      "risk": "The auth/usage text matcher misses a real message or matches a work failure, so the class returns in a new form.",
+      "mitigation": "The match is on the agent's failure detail only (from agent_stop_reason at the writing site), against a short case-insensitive list, and has unit tests for non-matching text. A false match only drops that attempt from the counts for the pause; the stop is still recorded as failed."
+    },
+    {
+      "risk": "line_pause recomputation clears a pause that should hold, for example when the latest reading has no forecast p90.",
+      "mitigation": "Pause is required to be re-confirmed by a fresh evaluation using the same functions the watcher uses (one shared helper). A test with real same-criterion rejections and one with real T3 spend assert the pause stays."
+    },
+    {
+      "risk": "Dropping all environment spend in t3_basis changes an existing, documented test.",
+      "mitigation": "Update the test as decided and keep a control that a plain failure with the same spend still pauses. The change is stated in the CHANGELOG and docs."
+    },
+    {
+      "risk": "Widening is_environment_reason silently changes retry resume behaviour (resumable_stop, settle_resume_marks).",
+      "mitigation": "resumable_stop is narrowed to LOW_DISK and CHECK_TIMEOUT, with a test that the new reasons are not resumable. run/tests.rs resume tests must pass."
+    },
+    {
+      "risk": "retry_refuses_paused_line and other existing tests plant a hand-written pause that the recompute now clears.",
+      "mitigation": "The plan lists the test rewrite in step 7; the producer must run `cargo test -p athena-core scope_guard` and the whole suite."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check by reading the CHANGELOG entry. A small unit test in scope_guard.rs, `changelog_names_the_root_cause`, asserts the Unreleased section contains the job ids 20261028-055601-hg0n, 20261028-065911-m6m5 and 20261028-103330-3d47 and the root-cause phrasing.",
+      "command": "Grep 'environment' and 'root cause' in the first CHANGELOG.md entry under `## [Unreleased]`; then `cargo test -p athena-core scope_guard` (a new test reads CHANGELOG.md with include_str! and checks the three job ids and the words 'closing-reason prefix' and 'stored pause').",
+      "observes": "The Unreleased entry states that the guard stores a pause and classifies attempts only by a closing-reason prefix, so environment stops and stale pauses counted as line spend, and cites the three jobs.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Grep shows attempt_of calling `crate::disk::is_environment_reason` and no other `starts_with(ENVIRONMENT_PREFIX)` classification. New unit tests in disk.rs: is_environment_reason is true for LOW_DISK, CHECK_TIMEOUT, AUTH_STOP and USAGE_LIMIT reasons and false for 'the producer did not complete: ...' ; agent_stop_reason('producer', 'error_during_execution: API Error: 401 ... run /login') and a usage-limit text give reasons that is_environment_reason accepts; other detail text gives the plain 'did not complete' reason; resumable_stop is false for the new reasons. A test ties each new constant to ENVIRONMENT_PREFIX.",
+      "command": "Grep 'is_environment_reason' crates/athena-core/src/scope_guard.rs (attempt_of); Grep 'agent_stop_reason' crates/athena-core/src/run/producer.rs crates/athena-core/src/run/mod.rs; cargo test -p athena-core disk",
+      "observes": "The reasons produced for 401 and usage-limit stops are classified as environment by the one function that attempt_of uses, and unrelated reasons are not.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "New watcher test `environment_stops_are_not_line_spend` in scope_guard.rs, with the Rig and fake driver there. Production entry points: Athena::ask, Athena::go (which runs try_watch_line), Athena::line_pause, request_records. Preconditions: the pause check at dispatch and a free-space reader. Seam: the existing `rig_with_space(p90 0.8, cost 2.0, verdicts, crate::test_support::low_once_verifying)` and the scripted FakeAgentDriver. Step 6 adds a `producer_errors: Mutex<VecDeque<Option<String>>>` field to the test Plan and a rig variant that makes the first producer call return FakeTurn{outcome: Error, detail: 'error_during_execution: API Error: 401 ... Please run /login', structured None, no edits}. The first job gets a producer 401 stop; the retry then builds and stops at the low-disk gate before the verifier. Neither the fake nor the free-space reader contains guard logic.",
+      "command": "cargo test -p athena-core scope_guard",
+      "observes": "Both jobs close Failed with reasons that start with 'environment:'. request_records reads both attempts as Verdict::Environment. Spend is over 1.5 times p90. No pause or flag file exists, line_pause returns None, and a further `go` on the line is not refused. A control in the same test with a plain failing job and the same spend still pauses (T3), which shows real spend is still counted.",
+      "fails_without": "On the base commit the producer's 401 stop carries 'the producer did not complete: ...' with no environment prefix, so attempt_of gives Verdict::Failed. The line's spend of at least 4.0 dollars passes 1.5 times the 0.8 p90 and T3 writes a pause file, so the new test's `no pause` assertion fails. Low-disk spend that is not kept also counts on the base.",
+      "seam": "Production entry points Athena::go, Athena::line_pause and request_records. Fake: FakeAgentDriver scripted through the Rig's Plan, injected via rig_with_space. The free-space reader is `test_support::low_once_verifying`, which exists. The producer-error script field and the rig variant are added in step 6."
+    },
+    {
+      "criterion": 4,
+      "method": "New watcher tests in scope_guard.rs: `a_stale_pause_is_cleared_when_nothing_fires` and `a_real_pause_survives_the_recompute`. Entry point: Athena::line_pause(&records, job_id), and Athena::go for the end-to-end dispatch refusal. Seam: the Rig, `write_mark(r.pause(&a), &mark(\"pause\", a, \"T3\"))` to plant a stale file, and the scripted fake agents. Stale cases: (a) a line with one environment-stopped 401 attempt and a planted pause file, (b) a line of two rejections for different criteria (`rig(0.8, 0.01, &[Some(0), Some(1)])`, so no T4) with a planted T4 pause, which is a rule that no longer fires. Real cases: two rejections for the same criterion (`&[Some(0), Some(0)]`, watcher-written pause) and a T3 line (`rig(1.0, 0.8, &[Some(0)])`). Existing test `retry_refuses_paused_line` is rewritten in step 7 to use the watcher's own pause, since its hand-planted pause on different-criteria rejections is now (correctly) cleared.",
+      "command": "cargo test -p athena-core scope_guard",
+      "observes": "Stale cases: line_pause is None, the pause file no longer exists, `go` on the retry is dispatched. Real cases: line_pause is Some with the stored mark, the file still exists, and `go` refuses with the signal text. Deleting the file lifts a real pause, as before.",
+      "fails_without": "On the base commit line_pause reads the pause file and returns the stored mark, so the new assertions that line_pause is None and the file is gone fail. The kept-pause assertions pass on both, which shows the recompute does not clear real pauses.",
+      "seam": "Production entry points Athena::line_pause, Athena::go and try_watch_line via go. Fixture: the Rig and write_mark, both exist in watcher_tests. No new seam beyond step 6."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the full workspace test suite. Existing scope_guard tests are kept except two that encode the old rules and are updated in step 7: `retry_refuses_paused_line` and `resumed_retry_is_judged_on_remaining_stages`. Producer must also run the run/tests.rs and disk.rs tests that use is_environment_reason and resumable_stop.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass, including every existing scope_guard test.",
+      "fails_without": "Not a behavior of the change itself; it fails if a changed test or the changed t3_basis breaks an existing test.",
+      "seam": "Existing test suite; no new seam."
+    },
+    {
+      "criterion": 6,
+      "method": "Run both commands the verifier may run.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Both exit 0 with no diagnostics.",
+      "fails_without": "Not applicable: a lint and format gate, not a behavior.",
+      "seam": "No seam."
+    }
+  ],
+  "open_questions": [
+    "What exact text does the real agent driver put in `detail` for an expired login and for a usage limit? claude.rs writes `<subtype>: <first 300 chars of result text>`; the strings to match (for example '401', 'Please run /login', 'usage limit', 'hit your limit') come from observed failures and are not in the code. The matcher should be case-insensitive and kept to a small list.",
+    "The verifier's own 401 or usage stop goes through verify.rs `judge` as a rejection (verifier_failure), and the reader's stop is a different path. Both stay out of scope. Should a follow-up classify them?",
+    "`athena status` lists pause files without recomputing, so a stale pause shows until the next line_pause or watch_line for its line. Should status also reconcile? It is left out to keep the change small.",
+    "Existing hand-planted pauses on lines whose signals do not fire are cleared on the next check. That is the intended effect, but the owner who planted one by hand (outside the watcher) loses it. The docs should say a pause only holds while a signal fires."
+  ],
+  "producer_section_sha256": "036bbbd9271baa5e6abefdbe7792e5730fd03f27edd4b015465855fdc775a756"
+}
