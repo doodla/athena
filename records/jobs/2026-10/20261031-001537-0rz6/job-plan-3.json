@@ -1,0 +1,373 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-001537-0rz6",
+  "round": 3,
+  "at": "2026-10-31T07:36:10.326053626Z",
+  "invocation_seq": 6,
+  "approach": "Replace the single `checks` job in ci.yml with a `gate` job (D121 fingerprint, lookup, decide), parallel `fmt`, `clippy` and a 6-shard `test` matrix, a `pass` job that writes the D121 marker only when every check succeeded, and a final `ci` job (`if: always()`) that fails unless every needed job succeeded (or was skipped because the gate reused a pass). Add `xtask test-shard <k> <n> [--dry-run]` in xtask/src/shard.rs: it lists workspace test units from `cargo metadata --no-deps`, sorts them, gives unit i to shard i % n, and runs `cargo test --locked -p <pkg> <selector>` per unit. A new xtask/tests/ci_shards.rs reads ci.yml and checks the shards form an exact partition in three layers: a shape rule (matrix list and command), a pure `check_cover(shards, oracle)`, and an oracle built independently from cargo metadata and cross-checked against source files on disk by path (`src_path`), so renamed targets such as athena-cli's `[[bin]] name = \"athena\"` are handled. policy.rs and two doc strings under xtask/ are re-pointed at the new job names. No new crates (serde_json and regex are already xtask dependencies), so Cargo.lock stays unchanged.",
+  "decisions": [
+    {
+      "choice": "A separate `gate` job runs fingerprint, lookup and decide. fmt, clippy and test declare `needs: gate` and `if: needs.gate.outputs.skip != 'true'`. A separate `pass` job (default success() condition, needs gate, fmt, clippy, test) builds xtask, runs `ci-cache mark ci-pass` with an OUTCOME computed from the three results, and saves `ci-pass` with the gate's key.",
+      "reason": "Fingerprint and lookup run once, not eight times. The marker is written only when every check succeeded, because a failed or skipped need skips `pass`. Mark and save steps carry no always()/failure(), as the existing policy test requires.",
+      "rejected": [
+        {
+          "option": "Run the whole D121 prelude in every job",
+          "why": "Eight fingerprint builds, and eight jobs each deciding whether to write one marker, so a partial pass could be saved."
+        },
+        {
+          "option": "Put the marker step inside the ci job",
+          "why": "ci would need a checkout and an xtask build before reporting."
+        },
+        {
+          "option": "Pass the xtask binary between jobs as an artifact",
+          "why": "Needs extra action SHAs that cannot be verified here."
+        }
+      ]
+    },
+    {
+      "choice": "The `ci` job needs [gate, fmt, clippy, test], runs `if: always()`, and a shell step reads needs.*.result. gate must be success. If gate.outputs.skip == 'true', fmt, clippy and test must all be skipped; otherwise all must be success. Anything else exits 1. ci does not need `pass`.",
+      "reason": "One check name says whether a commit is green, including the reused-pass case. A cancelled job, or one skipped by mistake, cannot pass. A marker-write fault should not turn a commit red. The cost (ci can finish before pass writes the marker) is recorded as a known effect.",
+      "rejected": [
+        {
+          "option": "ci needs pass",
+          "why": "On a failed check pass is skipped, so ci needs special cases, and a marker-write failure would fail the required check."
+        },
+        {
+          "option": "Treat skipped as success",
+          "why": "A job skipped by a broken needs or if would pass silently."
+        }
+      ]
+    },
+    {
+      "choice": "Shard unit = workspace test target. For each workspace member take targets with test:true and kind lib, rlib, proc-macro, bin or test, giving selectors --lib, --bin <name>, --test <name>. Add a --doc unit for each lib target with doctest:true. Sort by (package, selector); unit i goes to shard i % n; shards are 0-based.",
+      "reason": "Mirrors what cargo test --workspace runs: examples and benches have test=false and are excluded; doctests run once per package. Deterministic with no cost data. Buy-first call recorded in a shard.rs comment: cargo metadata plus cargo test meet the need.",
+      "rejected": [
+        {
+          "option": "Shard by individual test name from `cargo test -- --list`",
+          "why": "Compiles everything to plan; name filters can misselect on overlapping names."
+        },
+        {
+          "option": "Weight units by source size",
+          "why": "More code and file-dependent split; a follow-up if the throughput review shows poor balance."
+        },
+        {
+          "option": "cargo-nextest partitioning",
+          "why": "New pinned tool and changes how doctests run."
+        }
+      ]
+    },
+    {
+      "choice": "test-shard runs one `cargo test --locked -p <pkg> <selector>` per unit, in order, keeps going after a failure, then exits non-zero naming the failed units. --dry-run prints one `<pkg> <selector>` line per unit and runs nothing. A comment in shard.rs and the risk list note that per-unit -p runs may resolve features differently from one --workspace run.",
+      "reason": "Cargo cannot attach a different target selector to each -p, so one invocation per unit runs exactly the selected units. --dry-run gives the partition test and local users the selection without compiling.",
+      "rejected": [
+        {
+          "option": "Single `cargo test -p a -p b --lib --test x`",
+          "why": "Target flags apply to every selected package."
+        },
+        {
+          "option": "Group a shard's units by package",
+          "why": "More code and does not remove the feature-resolution difference; follow-up if recompile cost shows."
+        }
+      ]
+    },
+    {
+      "choice": "The partition test has three layers. (a) parse_workflow(text) -> Result<(Vec<u32>, u32), String> reads `shard: [..]` in the test job and the single `test-shard ${{ matrix.shard }} <n>` command by regex; requires the list to be exactly 0..n. (b) shard_units runs `xtask test-shard k n --dry-run` per listed k. (c) pure check_cover(shards, oracle) fails naming the unit if it is in two shards, in none, or in a shard but not in the oracle. check_partition(text) calls (a), (b), (c). Negatives: shape mutations of the ci.yml text test (a); cover-only cases call (c) directly with well-formed shards (unit removed, unit copied to a second shard, extra oracle unit, shard unit not in oracle), each asserted Err naming the unit; a positive control asserts Ok.",
+      "reason": "Text mutations all change the matrix shape and are rejected before the cover comparison, so an always-Ok comparison would go unnoticed. A pure cover function can be fed well-formed but wrong shards. No YAML crate exists in Cargo.lock; regex is already a dev-dependency.",
+      "rejected": [
+        {
+          "option": "Only mutate ci.yml text",
+          "why": "No mutation reaches the cover comparison."
+        },
+        {
+          "option": "Add a YAML crate",
+          "why": "Changes Cargo.lock and needs network for one fixed-shape matrix."
+        },
+        {
+          "option": "Use test-shard output as the oracle",
+          "why": "Checks the splitter against itself."
+        }
+      ]
+    },
+    {
+      "choice": "Answer to finding 2. The oracle is computed in ci_shards.rs from `cargo metadata --no-deps --format-version 1 --locked`, encoding cargo's documented target rules separately from shard.rs. It is cross-checked against the filesystem BY PATH, not by derived name: for each workspace member, every existing src/lib.rs, src/main.rs, src/bin/*.rs, src/bin/*/main.rs, tests/*.rs and tests/*/main.rs must equal the `src_path` of some metadata target (canonicalised), and that target's unit (--lib, --bin <metadata name>, --test <metadata name>) must be in the oracle. The old claim that the workspace has no target-name overrides is removed: crates/athena-cli/Cargo.toml declares [[bin]] name = \"athena\" path = \"src/main.rs\", and the path mapping yields `athena-cli --bin athena`, matching cargo. A file with no target, or whose target has test=false, fails with the path named.",
+      "reason": "The check stays independent of the test/doctest flags and survives [[bin]]/[[test]] renames, so it passes on the real repository. Comment records why `cargo test --workspace --no-run` inside the test was rejected: it compiles the whole workspace and prints artifact paths, not stable target names.",
+      "rejected": [
+        {
+          "option": "Derive bin name from the package name",
+          "why": "Wrong for athena-cli; the test would fail on the base commit."
+        },
+        {
+          "option": "Only comment on the shared rule",
+          "why": "A comment documents the risk but detects nothing."
+        }
+      ]
+    },
+    {
+      "choice": "Per-job target cache keys target-fmt-, target-clippy-, target-test- with the existing restore-key shape. The six test shards share one key; only shard 0 saves it, on the default branch only. Toolchain and registry keys and the default-branch-only save rule are unchanged. Answer to finding 3: the partial coverage of the saved test entry is recorded as a KNOWN EFFECT in the ci.yml comment, the CHANGELOG and ci-routing.md for the throughput review (the saved entry holds shard 0's packages and feature variants; other shards compile some of their packages cold). Single key kept.",
+      "reason": "Different jobs build different artifacts, so one key would let them overwrite each other. Six shards saving one key race. The alternative, running `cargo test --workspace --no-run` before the save, would not help: it unifies features over the whole workspace, while the per-unit -p runs resolve per package, so the artifacts would not match the shards' builds, and it would lengthen the default-branch shard 0.",
+      "rejected": [
+        {
+          "option": "One target key per shard",
+          "why": "Six large entries against the repository cache quota."
+        },
+        {
+          "option": "Shared target-checks- key",
+          "why": "Collisions between clippy and test artifacts."
+        },
+        {
+          "option": "Save after a workspace --no-run on shard 0",
+          "why": "Different feature resolution than the shards use, so little reuse; extra time."
+        }
+      ]
+    },
+    {
+      "choice": "Add timeout-minutes to every job, including the unchanged history, attribution and pr-head jobs. Values are ceilings (about 30 for fmt, clippy and each shard; smaller for gate, pass, ci), labelled as ceilings, not measurements.",
+      "reason": "Criterion 1 requires it on every job; a timeout does not change what those jobs check.",
+      "rejected": [
+        {
+          "option": "Leave the three untouched jobs without a timeout",
+          "why": "Violates criterion 1."
+        }
+      ]
+    },
+    {
+      "choice": "Leave EARLY_RUN_JOB (crates/athena-core/src/gh/early.rs, 'fmt, clippy, tests') untouched. Record in the CHANGELOG and ci-routing.md, as a known effect, that land's early-run wait finds no check run with the old name and ends at once, so a landing run can miss the cached pass. The follow-up should name the job that writes the marker (`pass`), not `ci`, since ci can finish before the marker is saved.",
+      "reason": "The crate and its test fixtures are outside the listed files; renaming to `ci` would still race the marker write.",
+      "rejected": [
+        {
+          "option": "Change the constant to ci here",
+          "why": "Out of file scope, edits fixtures, still races pass."
+        },
+        {
+          "option": "Keep a job named 'fmt, clippy, tests'",
+          "why": "Contradicts the requested single ci check name."
+        }
+      ]
+    },
+    {
+      "choice": "Answer to finding 1. Modify xtask/tests/policy.rs only to re-point its two D121 tests from the single job to gate, the compute jobs and pass, replacing checks_job_steps() with job_steps(job_id). Keep both test function names unchanged because docs/decisions.md D121 (lines ~2987-2988) names them and the enforcement-map test checks names. The file sits under xtask/, which the request's Files line lists; the brief's expected-deliverables list omits it, so the reason is stated in the files list and the edit is limited to what the layout change forces (policy.rs lines ~523-529 find the job by `    name: fmt, clippy, tests` and end the slice at `\\n  history:`).",
+      "reason": "Without it `cargo test` fails on the new ci.yml (criterion 5). Re-pointing keeps the pass-marker enforcement (mechanism default).",
+      "rejected": [
+        {
+          "option": "Leave policy.rs unchanged",
+          "why": "Its tests fail on the new ci.yml."
+        },
+        {
+          "option": "Delete the D121 policy tests",
+          "why": "Loses enforcement of the pass-marker rule."
+        },
+        {
+          "option": "Rename the tests",
+          "why": "decisions.md D121 would name tests that no longer exist."
+        }
+      ]
+    },
+    {
+      "choice": "Answer to finding 4. Reword the reused-pass report string at xtask/src/ci_cache.rs:55 to name the gate job and the D121 layout (for example 'gate: reused an earlier pass; setup, build and checks skipped'), and update the module doc at ci_cache.rs:1, xtask/tests/fingerprint.rs:1 and xtask/src/main.rs:5. A grep found no test asserting the old string.",
+      "reason": "After this change the job named 'fmt, clippy, tests' no longer exists, so the printed message and docs would be misleading. All are under xtask/.",
+      "rejected": [
+        {
+          "option": "Leave as a follow-up",
+          "why": "The edit is a few strings in files already in scope and avoids a misleading log line."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Governance file, listed as a deliverable. Replace `checks` with gate, fmt, clippy, a 6-shard test matrix, pass and ci. Add timeout-minutes to every job. Per-job target cache keys. Header comments state the layout, D121 flow, cache rules, the partial test-cache known effect, and that the new run time is unmeasured (for the throughput review). history, attribution, pr-head otherwise unchanged. Every uses: keeps its current 40-hex SHA.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "xtask/src/shard.rs",
+      "action": "create",
+      "purpose": "test-shard <k> <n> [--dry-run]: plan_units from cargo metadata, select, parse_args, command. Comments record the buy-first call and the per-unit feature-resolution caveat. Unit tests on a metadata fixture.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "purpose": "Add `mod shard;`, the `test-shard` dispatch, the usage line, and module docs (line 5 reworded; ci() stays for local use).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/src/ci_cache.rs",
+      "action": "modify",
+      "purpose": "Reword the reused-pass report string (line 55) and module doc (line 1) to name the gate job (finding 4).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/tests/fingerprint.rs",
+      "action": "modify",
+      "purpose": "Doc comment on line 1 names the gate job instead of 'fmt, clippy, tests' (finding 4). No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/tests/ci_shards.rs",
+      "action": "create",
+      "purpose": "Partition test over ci.yml (parse_workflow, check_cover, check_partition), shape and cover-only negatives, independent oracle with by-path filesystem cross-check, test-shard n=6/n=1 equality and bad arguments, workflow job/timeout/ci-gate/pinned-action/cache tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "xtask/tests/policy.rs",
+      "action": "modify",
+      "purpose": "Not in the brief's deliverable list but under xtask/, which the request lists. The two D121 tests locate the job by name and `\\n  history:` and fail once `checks` is replaced. Replace checks_job_steps with job_steps(job_id) and re-point the two tests (names unchanged) at gate, compute jobs and pass, keeping every assertion that still applies.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/Cargo.toml",
+      "action": "modify",
+      "purpose": "Update the package description to mention test-shard. No new dependency.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "purpose": "Expected unchanged (no new crates); listed as a deliverable only. Confirm no diff.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry: parallel jobs, shard matrix, ci gate, pass job, xtask test-shard, partition test, required-check rename, stale EARLY_RUN_JOB and partial test-cache as known effects, run time not yet measured.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/ci-routing.md",
+      "action": "modify",
+      "purpose": "Update the CI job description (~lines 53 and 75); add a short section on the parallel layout, sharding and the pass/ci split; state run time is for the throughput review; state the EARLY_RUN_JOB follow-up (target the marker-writing job).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the rest of the D121 policy tests (xtask/tests/policy.rs ~520-630), xtask/src/ci_cache.rs (`check` writes `skip` to GITHUB_OUTPUT) and test patterns in xtask/tests/fingerprint.rs. Note every assertion that must survive the move to the new jobs. Read crates/athena-cli/Cargo.toml (renamed bin) to keep the oracle test honest.",
+    "Create xtask/src/shard.rs: Unit {package, selector} with sort key; plan_units(&serde_json::Value) -> Result<Vec<Unit>> (members from `packages`; targets with test:true and kind lib, rlib, proc-macro, bin or test; a --doc unit per lib target with doctest:true); select(&[Unit], k, n) (index % n == k over the sorted list); parse_args for `<k> <n> [--dry-run]` rejecting n==0, k>=n and non-numbers. Comments: buy-first call (cargo metadata plus cargo test, no sharding tool) and the per-unit -p feature-resolution caveat.",
+    "In shard.rs add command(args, root): run `cargo metadata --no-deps --format-version 1 --locked` in the repo root, plan, select. With --dry-run print `<pkg> <selector>` per line. Otherwise run `cargo test --locked -p <pkg> <selector>` per unit using the existing run helper pattern, keep going after a failure, return an error listing failed units. An empty shard prints a note and succeeds. Add unit tests on a hand-written metadata fixture (examples/benches excluded, bin/test selectors, doctest=false lib, select over n=1, 6 and n > units, argument errors).",
+    "Edit xtask/src/main.rs: `mod shard;`, `Some(\"test-shard\") => shard::command(&args[1..], &repo_root())`, usage line, module doc (line 5). Update the xtask/Cargo.toml description. Reword the report string and module doc in xtask/src/ci_cache.rs and the doc comment in xtask/tests/fingerprint.rs to name the gate job.",
+    "Rewrite .github/workflows/ci.yml. Header: layout, D121 flow (gate, compute jobs, pass, ci), cache rules, partial test-cache known effect, and that the new run time is not measured here (D125's about 16 minutes is the labelled baseline; timeouts are ceilings). Jobs: gate (checkout, fingerprint, lookup, decide; outputs skip/fingerprint/key; a step reporting a reused pass); fmt, clippy, test (`needs: gate`, `if: needs.gate.outputs.skip != 'true'`; test has `strategy: {fail-fast: false, matrix: {shard: [0, 1, 2, 3, 4, 5]}}`), each with checkout, the three cache restores using target-fmt-/target-clippy-/target-test- keys, `./setup.sh --ci`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, or `cargo run --locked -p xtask -- test-shard ${{ matrix.shard }} 6`, then default-branch-only saves (test saves only on shard 0); pass (needs gate, fmt, clippy, test; build xtask; ci-cache mark with OUTCOME from the three results; save ci-pass); ci (name ci, needs all four, `if: always()`, shell step over needs.*.result). Add timeout-minutes to history, attribution, pr-head with no other change. Keep every `uses:` at its current SHA.",
+    "Create xtask/tests/ci_shards.rs. Helpers: read ci.yml, split job blocks, run xtask via CARGO_BIN_EXE_xtask, build the oracle from cargo metadata (with a comment on cargo's documented target rules and why `cargo test --workspace --no-run` was rejected). parse_workflow, pure check_cover, check_partition. Tests: real ci.yml passes; shape mutations fail; cover-only negatives call check_cover directly and name the unit; positive control; oracle_matches_files_on_disk by src_path (lib.rs, main.rs, src/bin/*.rs, tests/*.rs, */main.rs); test-shard n=6 and n=1 equal the oracle; bad arguments exit non-zero; workflow_jobs_* with mutations; workflow_actions_are_pinned; workflow_caches.",
+    "Edit xtask/tests/policy.rs: replace checks_job_steps with job_steps(job_id) (slice from `\\n  <id>:\\n` to the next two-space-indent job). Keep both test names. Re-point the lookup test to gate (fingerprint < lookup < decide, lookup is cache/restore keyed by the fingerprint, report step carries the skip condition); assert each compute job has `needs: gate`, the skip condition, and its toolchain restore after the gate. Re-point the pass-marker test to `pass` (mark then save, no status override, no default-branch condition, OUTCOME from results). Keep the shared-cache saves default-branch-only.",
+    "Update CHANGELOG.md (Unreleased) and docs/design/ci-routing.md: layout, test-shard with example `cargo run -p xtask -- test-shard 0 6` and --dry-run, the `ci` check name and that `fmt, clippy, tests` no longer exists (branch protection), the pass job, the EARLY_RUN_JOB known effect and follow-up, the partial test-cache known effect, and that nothing about the new run time is measured here. Check no boundary-scan word or email-like text is added.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p xtask` and `cargo test --locked`. Confirm Cargo.lock is unchanged."
+  ],
+  "risks": [
+    {
+      "risk": "The ci job could report green when a needed job was skipped or cancelled, or red on a legitimately reused pass.",
+      "mitigation": "workflow_jobs tests assert the step exits non-zero unless every need is success (or skipped when gate.skip is true), with text-mutation negatives."
+    },
+    {
+      "risk": "The D121 marker could be written after a partial failure.",
+      "mitigation": "pass has the default success() condition and needs all four jobs; the policy test forbids always/failure/cancelled on mark and save steps; mark writes only for outcome success computed from all three results."
+    },
+    {
+      "risk": "The shard split drops or repeats a target (doctests, a bin sharing a lib's name), or shard.rs and the oracle share a wrong belief about cargo's target rules, or a renamed target (athena-cli's `athena` bin) breaks the cross-check.",
+      "mitigation": "check_cover is a separate pure function with cover-only negatives; the oracle is written independently of shard.rs and cross-checked by src_path against files on disk, which handles [[bin]]/[[test]] renames; a source file with no test target fails loudly."
+    },
+    {
+      "risk": "Per-unit `cargo test -p <pkg>` may resolve features differently from one `cargo test --workspace` (resolver unifies over selected packages), compiling extra dependency copies and running tests on a slightly different build.",
+      "mitigation": "Recorded in a shard.rs comment and the design doc for the throughput review; grouping by package is the follow-up."
+    },
+    {
+      "risk": "The shared target-test- cache is saved by shard 0 only, so it holds shard 0's packages and feature variants; other shards compile some packages cold.",
+      "mitigation": "Stated as a known effect in ci.yml, CHANGELOG and ci-routing.md for the throughput review; single key kept to stay inside the cache quota."
+    },
+    {
+      "risk": "Shards are unbalanced, or one failing shard masks others.",
+      "mitigation": "Each shard runs all its units before exiting non-zero and names failed ones; fail-fast: false keeps siblings running; balance follow-up recorded."
+    },
+    {
+      "risk": "ci can go green before pass writes the marker, and land's early wait (stale EARLY_RUN_JOB) ends at once, so a landing run may miss the cached pass.",
+      "mitigation": "A miss costs one extra run; stated as a known effect with the follow-up naming the marker-writing job."
+    },
+    {
+      "risk": "A too-short timeout-minutes fails a legitimate cold run.",
+      "mitigation": "Ceilings of about 30 minutes for compute jobs versus the D125 whole-run baseline of about 16; labelled as ceilings, to be reviewed by the throughput review."
+    },
+    {
+      "risk": "New per-job target cache keys start cold, so the first runs after merge are slower.",
+      "mitigation": "Comments and the design note say so."
+    },
+    {
+      "risk": "Editing policy.rs, ci_cache.rs and fingerprint.rs goes beyond the brief's deliverable list.",
+      "mitigation": "All are under xtask/, which the request lists; edits are limited to what the layout change forces (policy tests, a log string and doc comments); assertions are kept, not weakened."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Tests `workflow_jobs_*` in xtask/tests/ci_shards.rs read the real ci.yml with std::fs, split it into job blocks (two-space-indent keys under `jobs:`) and assert: jobs fmt, clippy, test exist; test has strategy.matrix.shard of 6 entries; the job with `name: ci` has needs containing gate, fmt, clippy, test, has `if: always()`, and its run step exits 1 unless each need is success (or skipped when gate.outputs.skip == 'true'); every job block has timeout-minutes. Text mutations (remove `if: always()`, drop one needs entry, strip one timeout-minutes) are asserted to be rejected.",
+      "command": "cargo test -p xtask --test ci_shards -- workflow_jobs",
+      "observes": "Tests pass on the new ci.yml; each mutated copy is rejected with a message naming the missing item.",
+      "fails_without": "If ci.yml lacked the separate jobs, the 6-shard matrix, the ci job's needs / if: always() / result check, or any job's timeout-minutes, one of these tests fails.",
+      "seam": "Reads the real .github/workflows/ci.yml via std::fs with line regexes over job blocks; no double; same style as existing checks_job_steps in xtask/tests/policy.rs (exists). The new test file is added by plan step 6."
+    },
+    {
+      "criterion": 2,
+      "method": "Re-pointed D121 tests in policy.rs use job_steps(job_id). In gate: fingerprint < lookup < decide, lookup is cache/restore keyed by the fingerprint. Each compute job has `needs: gate` and the skip condition, and restores toolchain, registry and target caches. `pass` needs gate, fmt, clippy, test, has no always/failure/cancelled, runs ci-cache mark then cache/save of ci-pass with no default-branch condition. Shared-cache saves stay default-branch-only. In ci_shards.rs, `workflow_actions_are_pinned` asserts every `uses:` matches @[0-9a-f]{40}, and `workflow_caches` asserts the three cache restores in fmt, clippy and test.",
+      "command": "cargo test -p xtask --test policy && cargo test -p xtask --test ci_shards -- workflow_actions workflow_caches",
+      "observes": "All pass; existing policy assertions are kept, moved to the job that now holds each step.",
+      "fails_without": "An unpinned uses, a removed cache layer, dropped gate/lookup/mark steps, or always() / a default-branch condition on the mark or save step makes the pinned-actions test or the re-pointed policy tests fail.",
+      "seam": "Real ci.yml read via the helper in policy.rs, generalised from checks_job_steps() (exists) to job_steps(job_id) (step 7). workflow_actions_are_pinned and workflow_caches are added in step 6."
+    },
+    {
+      "criterion": 3,
+      "method": "Test `shards_in_ci_yml_partition_every_workspace_test_target` calls check_partition(real ci.yml text): parse the matrix list and n, run the built `xtask test-shard k n --dry-run` for each listed k, then check_cover against the independent cargo-metadata oracle; expect Ok. Negatives, each asserted Err: (a) shape mutations of the ci.yml text (drop shard 5 with n=6; duplicate a shard; change the command's n to 5), each asserted to differ from the original; (b) cover-only cases calling check_cover directly with real per-shard unit sets: a unit removed (error names it missing), a unit copied into a second shard (error names it duplicated), an oracle with one extra synthetic unit, a shard unit absent from the oracle. A positive control checks check_cover returns Ok for the unmodified sets.",
+      "command": "cargo test -p xtask --test ci_shards -- partition",
+      "observes": "The positive test passes on the repository's ci.yml; each negative passes because it is rejected, the cover-only ones by check_cover with the unit named.",
+      "fails_without": "If the cover comparison always returned Ok, the cover-only negatives fail; if the shape rule were missing, the text-mutation cases fail; if the real shards missed or repeated a unit, the positive test fails.",
+      "seam": "Production entry point: the built xtask binary, `test-shard <k> <n> --dry-run`, via env!(\"CARGO_BIN_EXE_xtask\") (pattern in xtask/tests/fingerprint.rs, exists). Fixtures: the real ci.yml, in-memory mutated strings, and shard/oracle sets passed as arguments to the pure check_cover (step 6). The oracle is the test's own cargo metadata call plus the by-path filesystem cross-check, with no logic imported from shard.rs. The subcommand and --dry-run are added by steps 2-4."
+    },
+    {
+      "criterion": 4,
+      "method": "In ci_shards.rs, `test_shard_6_is_disjoint_and_equals_the_workspace_target_set` runs test-shard k 6 --dry-run for k in 0..=5 and asserts the unit lines are pairwise disjoint and their union equals the oracle; `test_shard_1_equals_the_workspace` does the same for n=1; `oracle_matches_files_on_disk` maps every src/lib.rs, src/main.rs, src/bin/*.rs and tests/*.rs (and */main.rs) of each member to a metadata target by src_path and requires its unit in the oracle (passes for athena-cli's renamed bin `athena`); `test_shard_rejects_bad_arguments` runs `6 6`, `0 0`, `3 2`, `x 6` and no arguments and asserts non-zero exit and an error message. Unit tests in shard.rs feed a hand-written metadata JSON to plan_units: examples and benches excluded; bin/test targets get --bin/--test; a lib with doctest=false has no --doc unit; select over n=1, 6 and n > unit count is disjoint and complete.",
+      "command": "cargo test -p xtask",
+      "observes": "All xtask tests pass, including existing ones. `cargo run -p xtask -- test-shard 0 6 --dry-run` prints a stable sorted list, and the six shards together equal the workspace target set.",
+      "fails_without": "If test-shard were missing, overlapped, dropped any unit (for example doctests), or accepted k>=n or n=0, the disjoint/union and bad-argument tests fail. If a target were renamed in a way the oracle mishandles, oracle_matches_files_on_disk fails.",
+      "seam": "Production entry point: the xtask binary (main dispatch to shard::command) run via CARGO_BIN_EXE_xtask against the real workspace. For unit tests, shard::plan_units(&serde_json::Value) takes the metadata JSON as an argument so a fixture is injected. Both added by steps 2-4; integration tests by step 6."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three commands Athena runs, in order.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0; cargo test also runs the new ci_shards tests and the re-pointed policy tests.",
+      "fails_without": "A formatting difference, a clippy warning in shard.rs or the new tests, or a failing test (including the re-pointed policy tests) makes a command exit non-zero.",
+      "seam": "The repository's own commands; no double."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff. An entry under `## [Unreleased]` names: the separate fmt, clippy and test jobs; the 6-shard matrix; the final `ci` gate job and its handling of a reused pass; the `pass` job that writes the D121 marker; `cargo run -p xtask -- test-shard <k> <n>` with --dry-run; the ci_shards partition test; the old check name `fmt, clippy, tests` that no longer exists (branch protection needs `ci`); the known EARLY_RUN_JOB effect; the partial test-cache known effect.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The entry exists and mentions each item.",
+      "fails_without": "An empty CHANGELOG.md diff, or an entry missing one of the named items."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff. The ci.yml header comment, the CHANGELOG entry and the ci-routing.md section each say the run time of the new layout is not measured and is to be measured later by the throughput review. The only numbers quoted are the D125 baseline (about 16 minutes, labelled as the earlier measurement) and the timeout ceilings (labelled as ceilings).",
+      "command": "git diff -- .github/workflows/ci.yml CHANGELOG.md docs/design/ci-routing.md",
+      "observes": "No new timing is claimed; the throughput review is named as the later measure.",
+      "fails_without": "Any text presenting a measured run time for the new layout would show as a minutes figure without a source in the diff."
+    }
+  ],
+  "open_questions": [
+    "EARLY_RUN_JOB in crates/athena-core/src/gh/early.rs is 'fmt, clippy, tests'. After this change land's early wait finds no such check run and ends at once. Do the maintainers want it pointed at `pass` (or ci made to wait for pass) in this job? The plan leaves it out and records it as a known effect.",
+    "Branch protection must change from the old check name to `ci`; this is outside the repository, so the changelog states it.",
+    "Every compute job runs ./setup.sh --ci, which builds xtask and athena in release mode. The code does not show whether fmt and clippy need it; kept for fidelity and the existing cache; the throughput review can judge.",
+    "Index-modulo over target units can leave shards unbalanced (one crate's tests cannot be split). Weighting by source size is a possible follow-up once real shard times exist.",
+    "ci.yml's matrix list and test-shard command shape are fixed by the regex parser. A later move to include or fromJSON makes the test fail loudly and the parser must be updated.",
+    "Whether the policy.rs edit is accepted as in scope (it is under xtask/ but absent from the brief's deliverable list)."
+  ],
+  "producer_section_sha256": "7860532405781cd38a1c4653fb8f54005a0fbdbe18e1659714422dad8a0e45e0"
+}

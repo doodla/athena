@@ -71,8 +71,9 @@ exists (section 9).
 
 ### 3.1 What exists today (read)
 
-- CI (`.github/workflows/ci.yml`) runs on `push`, `pull_request`, `workflow_dispatch` and weekly. Its `checks`
-  job runs `./setup.sh --ci` then `cargo run --locked -p xtask -- ci`; its `history` job runs
+- CI (`.github/workflows/ci.yml`) runs on `push`, `pull_request`, `workflow_dispatch` and weekly. Its
+  checks run as parallel jobs (`fmt`, `clippy` and a 6-shard `test` matrix, each after `./setup.sh --ci`), with a
+  `gate` job before them and a final `ci` job after them (section 4.4); its `history` job runs
   `athena check --history`. Actions are pinned by SHA and the token is read-only.
 - Athena's own checks for the change capability are `fmt`, `clippy` and `test`; `fmt` and `clippy` are skipped
   when a change touches only `docs/` or `*.md`; `test` never skips because `xtask/tests/policy.rs` reads
@@ -157,6 +158,45 @@ entries, or on a fork or new repository. It is bounded three ways:
 
 Each CI run records whether the cache hit exactly, by restore key, or missed, and the run's duration. That
 record is a data source for section 9.
+
+### 4.4 Parallel jobs and shards (built)
+
+One runner took about 16 minutes on a cold cache (D125, the earlier measurement). `ci.yml` now runs the checks on
+separate runners at the same time:
+
+- **`gate`** fingerprints the governed content, looks up `ci-pass-<fingerprint>` and decides (D121). It runs once.
+- **`fmt`, `clippy`, `test`** need `gate` and are skipped when it reused a pass. Each has its own target cache key
+  (`target-fmt-`, `target-clippy-`, `target-test-`) because they build different artifacts. The toolchain and
+  registry keys and the default-branch-only saves are unchanged.
+- **`test`** is a matrix of 6 shards. Shard `k` runs `cargo run -p xtask -- test-shard k 6`. The unit of sharding
+  is a workspace test target: each lib, bin and integration-test file, plus one doctest run per library with
+  doctests. `cargo metadata` lists them, the list is sorted by (package, selector), and unit `i` goes to shard
+  `i % n`. Run the same split locally with `cargo run -p xtask -- test-shard <k> <n>` (0-based, `k < n`;
+  `--dry-run` lists the units without running them). Running all `n` shards runs what `cargo test --workspace`
+  runs. No sharding tool is added: `cargo metadata` and `cargo test` meet the need.
+- **`pass`** needs all of them with the default success condition, so it runs only if every check succeeded; it
+  alone writes and saves the D121 marker. A failed shard leaves no marker.
+- **`ci`** needs all of them and runs `if: always()`. It fails unless each check succeeded, or was skipped
+  because the gate reused a pass. Branch protection requires this one check name; the old `fmt, clippy, tests`
+  check no longer exists.
+
+`xtask/tests/ci_shards.rs` reads `ci.yml` and fails unless the shards cover every workspace test target exactly
+once. Its oracle comes from `cargo metadata` and is cross-checked against the source files on disk.
+
+**Not measured.** The run time of this layout is not claimed here; the throughput review measures it later. The
+`timeout-minutes` values are ceilings.
+
+**Known effects, for that review.**
+
+1. `EARLY_RUN_JOB` in `athena-core` (the landing wait) still names `fmt, clippy, tests`, so the wait finds no such
+   check run and ends at once; a landing run can miss the cached pass. The follow-up should name the job that
+   writes the marker (`pass`), not `ci`, because `ci` does not wait for `pass` and can finish before the marker
+   is saved.
+2. The six shards share one `target-test-` key and only shard 0 saves it, so the saved entry holds shard 0's
+   build; the other shards compile some packages cold. The new keys also start cold.
+3. A shard runs one `cargo test -p <package> <selector>` per unit, because cargo cannot attach a different target
+   selector to each `-p`. Features may resolve differently from one `--workspace` run, and shards may be
+   unbalanced. Grouping a shard's units by package, or weighting units, are follow-ups if the review shows a cost.
 
 ## 5. One run per commit: avoiding duplicate tests
 
@@ -315,8 +355,9 @@ Each item is a separate later job, after review.
    warm build time and the target size; set `timeout-minutes`.
    *Built in part:* the three layers and the report are in `ci.yml`, with the `actions/cache` restore and save
    actions pinned by SHA; the target and the other layers are saved only by non-pull-request runs on the default
-   branch. The two jobs keep separate target entries (`target-checks-` and `target-history-`), since they build
-   different things. Not done: the cold and warm timing, the target size, and `timeout-minutes`.
+   branch. The jobs keep separate target entries (`target-fmt-`, `target-clippy-`, `target-test-` and
+   `target-history-`), since they build different things. Every job now has a `timeout-minutes` ceiling (section
+   4.4). Not done: the cold and warm timing and the target size.
 4. **Result-reuse job.** The record of 5.2, the SHA check of 5.3, the local fallback, and tests that fail
    without it: a result for a different SHA is ignored; a missing result runs locally; a red result fails; a
    stale record never marks a job verified.

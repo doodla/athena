@@ -2,9 +2,11 @@
 //!
 //! - `cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]`: takes a machine to a working Athena.
 //!   Every step is idempotent. `./setup.sh` installs rustup if needed and then runs this.
-//! - `cargo run -p xtask -- ci`: the checks CI runs (fmt, clippy, tests), runnable locally.
+//! - `cargo run -p xtask -- ci`: fmt, clippy and tests in sequence, runnable locally. CI itself runs them as
+//!   parallel jobs (see `.github/workflows/ci.yml`), the tests split by `test-shard`.
+//! - `cargo run -p xtask -- test-shard <k> <n>`: one of `n` disjoint slices of the workspace's tests (see `shard`).
 //! - `cargo run -p xtask -- walltime`: wall time per verified result from the job records.
-//! - `cargo run -p xtask -- fingerprint` and `ci-cache`: let the CI job reuse its own earlier pass for
+//! - `cargo run -p xtask -- fingerprint` and `ci-cache`: let the CI gate job reuse an earlier pass for
 //!   unchanged governed content (see `ci_cache`).
 //!
 //! Setup reads every pin from `athena.toml`, reads credentials only to report whether they work, and never
@@ -17,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 mod ci_cache;
+mod shard;
 mod site;
 mod walltime;
 
@@ -29,13 +32,15 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("setup") => setup(&Flags::parse(&args[1..])),
         Some("ci") => ci(),
+        Some("test-shard") => shard::command(&args[1..], &repo_root()),
         Some("site") => site_command(&args[1..]),
         Some("walltime") => walltime::command(&args[1..], &repo_root()),
         Some("fingerprint") => ci_cache::fingerprint_command(),
         Some("ci-cache") => ci_cache::command(&args[1..]),
         _ => {
             eprintln!(
-                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       {SITE_USAGE}\n       {}\n       {}",
+                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       {}\n       {SITE_USAGE}\n       {}\n       {}",
+                shard::USAGE,
                 walltime::USAGE,
                 ci_cache::USAGE
             );

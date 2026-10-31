@@ -1,4 +1,5 @@
-//! The 'fmt, clippy, tests' CI job's reuse of its own earlier pass (docs/decisions.md, D121).
+//! The CI gate job's reuse of an earlier pass (docs/decisions.md, D121). The gate decides; the fmt, clippy and
+//! test jobs skip on a reuse, and the pass job writes the marker.
 //!
 //! The workflow looks a cache entry up under a key made from the governed-content fingerprint. The entry is
 //! a directory holding one marker file, which names the fingerprint and exists only if the checks passed.
@@ -52,7 +53,7 @@ pub fn mark(dir: &Path, fingerprint: &str, outcome: &str) -> Result<bool> {
 /// The text that says why the build was skipped.
 pub fn report_text(fingerprint: &str, matched_key: &str) -> String {
     format!(
-        "fmt, clippy, tests: reused an earlier pass; setup, build and checks skipped\n\
+        "gate: reused an earlier pass; setup, build and checks skipped\n\
          - governed fingerprint: {fingerprint}\n\
          - matched cache key: {matched_key}\n"
     )
