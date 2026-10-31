@@ -65,6 +65,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The drain lands passed jobs through an ordered landing queue (first half of build job A6 in
+  `docs/design/async-drain.md`). With `[parallel] max_concurrency` above 1, a worker joins the queue when its run
+  passes and only the head takes the landing lock, so jobs land first in, first out in the order their runs
+  passed, not the order they started. The head keeps its place through the landing retry (both land calls) and
+  every exit gives the place up, a panic included. A worker held back says `drain      <job> waits in the
+  landing queue`. It does not rebase: landing itself is unchanged, a landing that fails behaves as before, and
+  with one job at a time the drain is unchanged. The rebase before landing is a separate, later change.
+
 - CI runs fmt, clippy and the tests as parallel jobs, the tests in a matrix of 6 shards, and a final job (id `ci`,
   named `fmt, clippy, tests`) says whether a commit is green. The earlier single job of that name ran everything
   in sequence on one runner

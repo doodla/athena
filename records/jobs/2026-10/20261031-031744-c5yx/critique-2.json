@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-031744-c5yx",
+  "round": 2,
+  "at": "2026-10-31T15:38:41.643426854Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The retry test would probably pass on the base code. On the base code it depends on a race for the `landing` mutex, so it does not show the head keeping its place.",
+      "evidence": "In the base code (drain.rs 1330-1331, 1436-1437) a passed b blocks in `Drain::land` on `self.landing.lock()`. On the base code no wait line ever appears, so the first `land(a)` times out after 5 s and returns `NotLanded`. That is the outcome it was scripted to return anyway, so the timeout changes nothing. a then releases the mutex at the end of `Drain::land` and goes straight back to `self.land` in the same loop (1442-1446). `std::sync::Mutex` is not fair, so the running thread a will usually take the lock again before the parked thread b wakes. The log is then [a, a, b] with `landed == 2`, and the test passes on the base code most of the time. The plan says the log 'is not [a, a, b]' on the base code. That is not guaranteed. This test is the only drain-level proof of the retry clause and of a wait the base code lacks, since the plan admits its pass-order test passes on the base code. Fix: Make the base code fail every time. Either (a) when the gate times out, the fake's first `land(a)` returns a distinguishable outcome (for example `Landed`, giving log [a, b]) or logs 'gate timed out', and the test asserts the log is exactly [a, a, b] with no timeout entry; or (b) also assert that the recording Ui holds `b waits in the landing queue` before the second `land a` entry in a shared ordered log. Then correct the 'Fails without the behavior' text to match.",
+      "location": "Demonstrations, criterion 2, `a_waiting_worker_does_not_land_between_the_heads_two_land_calls`, 'Fails without the behavior'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The reading's deliverables list `crates/athena-cli/tests/drain.rs (modify)`, and the plan leaves that file untouched.",
+      "evidence": "The brief's Expected deliverables include tests/drain.rs. The request's Files line names only drain.rs, async-drain.md and CHANGELOG.md. The plan gives its reason (the request's Files line takes precedence). Fix: Keep the decision, and state it in the producer's output so the verifier does not flag a missing deliverable. The plan already asks for this, so this is only a reminder.",
+      "location": "Decision 4 / Expected deliverables",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`catch_unwind` around a closure that captures `&Drain` and a `LandingSlot` may not be `UnwindSafe`.",
+      "evidence": "`Drain` holds `&S` and `&U` trait objects and Mutex/Condvar references. Whether it is `UnwindSafe` depends on the fakes. Fix: Wrap the closure in `std::panic::AssertUnwindSafe`, or move the slot into a scoped thread that panics, and check the result after `join`.",
+      "location": "Step 6, `a_slot_dropped_by_a_panic_leaves`",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the reading. It adds a pure `LandingQueue` stored in `State`, a `LandingSlot` drop guard carried in the `passed` tuple in `attempts` (so one slot serves both land calls and drops on every return or unwind), and a head-only wait through the existing `pause` and `wake`. Landing, `Steps::land` and athena-core are untouched. I checked the code it names in drain.rs: `State` (946), `FlagOnDrop` (1010), `landing` and `wake` (1041/1043), `Drain::land` (1330), the `attempts` loop with `passed.clone()` (1376-1446), `pause` (1983), and the public `drain_concurrent`, which runs each batch's items on scoped worker threads (2038-2050). The lock-order reasoning holds. Existing concurrent tests use the `Quiet` Ui, so the new wait line cannot change what they check. One major gap remains. The retry test is the plan's only drain-level demonstration that would fail on the base code, and it probably passes there instead. Without the queue, a's first land times out into the same `NotLanded` it was scripted to return. Because `std::sync::Mutex` is not fair, a usually takes the `landing` mutex again before b, so the log is still [a, a, b]. Making the timeout distinguishable, or asserting the wait line in an ordered log, fixes this. The other findings are minor. Verdict: revise."
+}

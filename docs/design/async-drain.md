@@ -134,6 +134,12 @@ For the head of the queue:
 
 One landing at a time keeps main linear and keeps the history check meaningful.
 
+Note on the first half of build job 6. The drain's landing queue (`LandingQueue` in `drain.rs`) is first in, first
+out, and a worker joins it when its run passes and keeps its place through the landing retry. So the queue order is
+the order runs pass, not the order their landing commits were stacked: a job that passes later lands later, whatever
+its commit sits on. That half adds the queue alone and does not rebase. The rebase before landing (steps 1 to 4
+above) is a later request that depends on it.
+
 ## 7. CI waits and self-rebuild as background awaits
 
 Point 4. A wait is not work. While one job waits for CI or while the drain rebuilds itself, the other jobs go on.
