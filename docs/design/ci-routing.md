@@ -176,9 +176,9 @@ separate runners at the same time:
   runs. No sharding tool is added: `cargo metadata` and `cargo test` meet the need.
 - **`pass`** needs all of them with the default success condition, so it runs only if every check succeeded; it
   alone writes and saves the D121 marker. A failed shard leaves no marker.
-- **`ci`** needs all of them and runs `if: always()`. It fails unless each check succeeded, or was skipped
-  because the gate reused a pass. Branch protection requires this one check name; the old `fmt, clippy, tests`
-  check no longer exists.
+- **`ci`** (job id) needs all of them and runs `if: always()`. It fails unless each check succeeded, or was
+  skipped because the gate reused a pass. Its display name is `fmt, clippy, tests`, the one check name branch
+  protection requires; `xtask/tests/ci_shards.rs` fails unless exactly one job carries that name.
 
 `xtask/tests/ci_shards.rs` reads `ci.yml` and fails unless the shards cover every workspace test target exactly
 once. Its oracle comes from `cargo metadata` and is cross-checked against the source files on disk.
@@ -188,10 +188,10 @@ once. Its oracle comes from `cargo metadata` and is cross-checked against the so
 
 **Known effects, for that review.**
 
-1. `EARLY_RUN_JOB` in `athena-core` (the landing wait) still names `fmt, clippy, tests`, so the wait finds no such
-   check run and ends at once; a landing run can miss the cached pass. The follow-up should name the job that
-   writes the marker (`pass`), not `ci`, because `ci` does not wait for `pass` and can finish before the marker
-   is saved.
+1. `EARLY_RUN_JOB` in `athena-core` (the landing wait) names `fmt, clippy, tests`, which the `ci` job carries
+   again, so the name mismatch is resolved. What remains: `ci` does not wait for `pass` and can finish before the
+   marker is saved, so a landing run can still miss the cached pass; naming the job that writes the marker
+   (`pass`) is a follow-up.
 2. The six shards share one `target-test-` key and only shard 0 saves it, so the saved entry holds shard 0's
    build; the other shards compile some packages cold. The new keys also start cold.
 3. A shard runs one `cargo test -p <package> <selector>` per unit, because cargo cannot attach a different target

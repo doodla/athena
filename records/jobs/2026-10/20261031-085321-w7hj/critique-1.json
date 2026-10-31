@@ -1,0 +1,27 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-085321-w7hj",
+  "round": 1,
+  "at": "2026-10-31T08:56:41.530859199Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Dropping `fmt` from `needs: [gate, fmt, clippy, test]` is ambiguous: the `pass` job has the same list first.",
+      "evidence": "ci.yml line 358 (`pass`) and line 402 (`ci`) both read `    needs: [gate, fmt, clippy, test]`. A `replacen(.., 1)` on that string alone edits the `pass` job, so `check_required_name` would still return Ok and the `is_err()` assertion would fail. The existing test avoids this by matching `needs: [..]\\n    if: always()` (ci_shards.rs:497-501). Fix: Anchor the mutation to the ci job, as the existing test does: replace `    name: fmt, clippy, tests\\n    needs: [gate, fmt, clippy, test]` (or the needs line followed by `    if: always()`) with the version without `fmt`.",
+      "location": "Plan step 3, mutation (c); ci.yml lines 358 and 402",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The header line `ci  needs gate, ...; the one check name that says whether a commit is green` will misname the check after the rename.",
+      "evidence": "ci.yml:12 calls `ci` the one check name. After the change the check name is `fmt, clippy, tests` and `ci` is only the job id. Line 5 (`The old single `fmt, clippy, tests` job`) is still true but may read oddly. Fix: Optionally add `(display name `fmt, clippy, tests`)` to line 12. Or keep the plan as is and drop the 'exactly one changed line' claim only if the comment is edited; the request's 'display name only' supports leaving comments alone.",
+      "location": "Decision 4; ci.yml line 12 and the comment at lines 397-399",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read ci.yml, xtask/tests/ci_shards.rs and policy.rs, and grepped the repository for the old and new names. The plan matches the request and the accepted reading. The fault is at ci.yml line 401 (`name: ci` on job id `ci`), and the plan fixes it there with a one-line change. The things the plan relies on all exist: `jobs()` at ci_shards.rs:47 only looks inside `jobs:`, so the workflow-level `name: ci` at line 37 is never counted; `ci_yml()` is at line 31, the `name: ci` assertion at line 467, and the mutation-test pattern at lines 493-513. Leaving policy.rs alone is correct, because line 350 only feeds a sample string to `flagged` and does not look up a job by name. The new test reads the real file and would fail on the base file, which has zero jobs named `fmt, clippy, tests`. The mutation cases (name reverted, name copied onto `pass`, a need dropped) show that it rejects each failure. The approach is sound: it reuses the existing parser and matches exact lines. I found no blocker or major problem, only one fragile mutation and a stale comment."
+}

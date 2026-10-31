@@ -463,10 +463,8 @@ fn check_jobs(text: &str) -> Result<(), String> {
             return Err(format!("job `{id}` has no timeout-minutes"));
         }
     }
+    check_required_name(text)?;
     let ci = &all["ci"];
-    if !ci.iter().any(|l| l == "    name: ci") {
-        return Err("the final job is not named `ci`".into());
-    }
     if !ci.iter().any(|l| l == "    if: always()") {
         return Err("the ci job lacks `if: always()`".into());
     }
@@ -482,6 +480,78 @@ fn check_jobs(text: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The check name branch protection requires. The job that reports it has the id `ci`.
+const REQUIRED_CHECK_NAME: &str = "fmt, clippy, tests";
+
+/// Why the required check name is not carried by exactly one job (the `ci` job) that needs every check job.
+fn check_required_name(text: &str) -> Result<(), String> {
+    let line = format!("    name: {REQUIRED_CHECK_NAME}");
+    let named: Vec<String> = jobs(text)
+        .into_iter()
+        .filter(|(_, lines)| lines.contains(&line))
+        .map(|(id, _)| id)
+        .collect();
+    if named.len() != 1 {
+        return Err(format!(
+            "expected exactly one job named `{REQUIRED_CHECK_NAME}`, found {named:?}"
+        ));
+    }
+    if named[0] != "ci" {
+        return Err(format!(
+            "the job named `{REQUIRED_CHECK_NAME}` is `{}`, not `ci`",
+            named[0]
+        ));
+    }
+    let all = jobs(text);
+    let needs = all["ci"]
+        .iter()
+        .find_map(|l| l.strip_prefix("    needs: ["))
+        .and_then(|l| l.strip_suffix(']'))
+        .ok_or("the required-check job has no `needs: [..]` list")?;
+    let needed: BTreeSet<&str> = needs.split(',').map(str::trim).collect();
+    for id in ["gate", "fmt", "clippy", "test"] {
+        if !needed.contains(id) {
+            return Err(format!("the required-check job does not need `{id}`"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn workflow_required_check_name_is_on_exactly_one_job_that_needs_every_check() {
+    let text = ci_yml();
+    check_required_name(&text).unwrap();
+    let named = format!("    name: {REQUIRED_CHECK_NAME}\n");
+    let pass_name = jobs(&text)["pass"]
+        .iter()
+        .find(|l| l.starts_with("    name: "))
+        .cloned()
+        .expect("the pass job has a name");
+    let mutations = [
+        // The final job reverts to the name `ci`.
+        text.replacen(&named, "    name: ci\n", 1),
+        // Another job takes the required name as well.
+        text.replacen(
+            &format!("{pass_name}\n"),
+            &format!("    name: {REQUIRED_CHECK_NAME}\n"),
+            1,
+        ),
+        // The named job stops needing a check job.
+        text.replacen(
+            "    needs: [gate, fmt, clippy, test]\n    if: always()",
+            "    needs: [gate, clippy, test]\n    if: always()",
+            1,
+        ),
+    ];
+    for mutated in mutations {
+        assert_ne!(mutated, text, "the mutation changed nothing");
+        assert!(
+            check_required_name(&mutated).is_err(),
+            "accepted:\n{mutated}"
+        );
+    }
 }
 
 #[test]
