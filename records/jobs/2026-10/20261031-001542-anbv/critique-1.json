@@ -1,0 +1,111 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-001542-anbv",
+  "round": 1,
+  "at": "2026-10-31T14:18:27.208132409Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/remote.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/remote.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/early.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/early.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/test_support.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/test_support.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/ci.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/ci.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/verification.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/verification.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/ci_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/ci_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "blocker",
+      "summary": "In production a red CI run where fmt passed but test failed becomes three passed check records, so the job passes its checks.",
+      "evidence": "parse_ci_run finds the first step whose name starts with CI_CHECK_STEP = \"cargo fmt --check\" and gives its conclusion to all of STEPS. In .github/workflows/ci.yml that step belongs only to the `fmt` job (line 164); clippy (line 187) and test (line 268, 6 shards) are separate jobs. Run conclusion 'failure' -> Reading::Red -> Outcome::Failed(record) with steps all 'success' -> run_routed's CI arm builds CheckRuns via runs_from_record with passed = step.passed() = true. The plan's tests feed per-step conclusions from a fake CiSource, so they never exercise this path. Fix: Put gh/client.rs back in scope (it is a listed deliverable). Change parse_ci_run to map the jobs reply to per-check steps: fmt from the `fmt` job, clippy from `clippy`, and test as the combined conclusion of all `test (...)` shard jobs. Make a red run with no attributable failing step fail all checks. Add unit tests on recorded JSON replies (no network) for 'fmt ok, test shard failed' -> test failed and fmt passed, and for an all-green run.",
+      "location": "Decision 6 / Approach ('Red results already reach judge as failed checks'); crates/athena-core/src/gh/client.rs:511-558; routing.rs:200-221",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The request's 'failing check's name in the reason' goes unshown in production, and the plan wrongly says it cannot be tested without GitHub.",
+      "evidence": "ci.yml already runs fmt, clippy and test as separate jobs (header lines 9-12), and parse_ci_run is a pure function over serde_json Values. Per-check names are therefore available from the existing jobs reply and testable from fixtures. As planned, a red run names all three checks, or gives 'no CI result for this check' when the step is absent. Fix: Drop the open question. Give criterion 2 a demonstration that goes through parse_ci_run on a fixture where one shard of the test job failed, and asserts the job's reason names `test` only.",
+      "location": "Open question 1; Criterion 2 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "When CI reuses an earlier pass, which is the common case for green runs, the record has no passed steps, so resolve ignores the green run and every check runs locally.",
+      "evidence": "When the gate finds a ci-pass marker, fmt, clippy and test are skipped and `ci` accepts that. The 'cargo fmt --check' step is then skipped or absent, so steps are empty or 'skipped', record.all_passed() is false, and resolve falls back to local after waiting. The goal (no local build on a green run) is then not met for exactly the runs that are green fastest, and the plan's fake-source test cannot reveal it. Fix: In parse_ci_run, treat a successful `ci` run whose check jobs were skipped because the gate found a pass marker as success for all three checks (the gate's job conclusion and outputs can be read from the jobs reply). Or state explicitly how such runs are handled, and test that case with a recorded jobs reply.",
+      "location": "Criterion 1 demonstration; ci.yml lines 31-36 (D121 marker reuse); ci_result.rs:205-211",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new push trigger reintroduces the duplicate push run that D125 removed, and the plan does not address it.",
+      "evidence": "ci.yml lines 40-43: push runs on non-main branches were dropped because 'two push runs of the same commit each ran the full 16 minutes' while the pull_request run hit the cache. early_pr (run/mod.rs line 1201) already pushes the same candidate and opens the pull request, so each job now starts two CI runs per SHA. fetch takes the newest one. Fix: Keep the trigger, as the user asked, but update the ci.yml header comment and ci-routing.md to say why the athena/ci/** push run is allowed despite D125, and which run `fetch` picks when both exist.",
+      "location": "Files: .github/workflows/ci.yml; Open question 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "When the candidate changes the workflow, a green run is never trusted, yet the job still waits up to 25 minutes before running locally.",
+      "evidence": "resolve computes workflow_changed but read_ci still polls until a finished run or the bound; Reading::Green with workflow_changed falls through to fall_back. This adds up to 25 minutes on top of the 15-18 minute local run. Fix: In the checks-stage wiring (not in the SHA rules), pass a one-poll Wait when a changed path is under the workflow directory. A routing-level test can count the fetches.",
+      "location": "Risks: wait bound; Open question 2; ci_result.rs:202-215",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Error paths leave the athena/ci/<id> branch behind, while the request says to delete it 'whatever the outcome'.",
+      "evidence": "run/mod.rs lines 925-949: errors from produce_and_verify or resume_candidate propagate with `?` and never reach close_dispatched. An Err from close_dispatched itself also skips the delete. Only the disk hold needs the branch kept. Fix: Delete on any result of close_dispatched_inner except a LowDisk hold, or check the error type (downcast to LowDisk) at go's exit. Record the remaining leak window in ci-routing.md.",
+      "location": "Decision 2 (delete only when close_dispatched returns Ok)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The wiring plan is sound and well seamed: config through an optional `[ci]` section like `[disk]`, the push at the top of `check_and_verify`, the delete around `close_dispatched`, `run_routed` returning the CiRecord, and the reuse statement as a `check-source` view. It rests on a false premise, though. It says a red CI result \"already reaches judge as failed checks\" and leaves `gh/client.rs` unchanged. In production, `parse_ci_run` gives the conclusion of the `fmt` job's 'cargo fmt --check' step to all three checks. The current ci.yml runs fmt, clippy and test as separate jobs, so a run that is red only because of a test failure comes back as Failed with three 'success' steps. `run_routed` then emits three passed CheckRuns: a red CI run passes the job's checks. The failing check's name (required by the request) cannot be right either. And because the workflow skips fmt, clippy and test on a cached earlier pass (D121), green runs often carry no usable steps and always fall back, defeating the purpose. The plan's tests use per-step fake conclusions and cannot catch any of this. Fixing it means changing `parse_ci_run` to read the per-job conclusions, which can be tested with JSON fixtures and needs no network. Smaller issues: duplicate CI runs against D125, a wasted wait when the workflow changed, and branch leaks on error paths."
+}

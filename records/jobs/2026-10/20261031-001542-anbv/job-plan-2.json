@@ -1,0 +1,362 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-001542-anbv",
+  "round": 2,
+  "at": "2026-10-31T14:21:41.475248977Z",
+  "invocation_seq": 7,
+  "approach": "Wire `resolve`/`run_routed` into the job run. (1) Config: optional `[ci] wait_s = 1500` section, same shape as `[disk]`. (2) `ci_result.rs` gains a small `CiBranches` trait (head, push, delete), `ci_branch(job)` and a pure `wait_for(wait_s, pause, changed)`. A new `run/ci.rs` holds the Athena methods, the production `GitBranches`, built over the existing `gh::GitRemote` and a new `Git::delete_remote_branch`, and a cfg(test) seam. The seam carries a fake `CiBranches`, a fake `CiSource` and a zero pause. This keeps the change out of gh/remote.rs, gh/mod.rs and test_support.rs. (3) `check_and_verify` pushes `athena/ci/<job id>` first, then passes the real `GhClient` CI source and the bounded `Wait` to `run_routed` in place of `NoCi`. `run_routed` returns the runs plus the `CiRecord` when the result came from CI. `Checked` carries the record, and `verification_stage` adds a `check-source` entry holding `verify::reuse_statement`. (4) `dispatch` becomes a thin wrapper that deletes the branch on every result except a `LowDisk` hold. (5) Production fix from the critic: `gh/client.rs::parse_ci_run` maps the jobs reply to per-check steps (the `fmt` job, the `clippy` job, and all `test (shard …)` jobs combined), treats gate-reused passes as success, and makes an unattributable red run fail all three checks. The jobs request asks for 100 jobs. (6) ci.yml gains the push trigger, with the header comment saying why it is allowed despite D125. (7) A workflow-file change gives a one-poll wait. Docs and CHANGELOG are updated.",
+  "decisions": [
+    {
+      "choice": "A small `CiBranches` trait in ci_result.rs (head, push, delete). Production impl `GitBranches` in run/ci.rs wraps `gh::GitRemote` (head and push, which exist) and `Git::delete_remote_branch` (new). The test seam is a cfg(test) thread-local in run/ci.rs carrying (Rc<dyn CiBranches>, Rc<dyn CiSource>, pause).",
+      "reason": "Answers findings 1, 3 and 4. The brief's own assumption says push and delete go 'behind an injectable trait for tests', and ci_result.rs is a listed deliverable. This drops gh/remote.rs, gh/mod.rs and test_support.rs from the plan. The fake lives in the test file, not in a shared support module.",
+      "rejected": [
+        {
+          "option": "Add `delete` to `gh::Remote` and reuse `EarlyFake`/`early_seam` (last plan)",
+          "why": "It touches three files outside the deliverables (remote.rs, gh/mod.rs, test_support.rs)."
+        },
+        {
+          "option": "A new field on `Athena` for the injected sources",
+          "why": "`Athena` is built literally in many tests and the CLI, so every site would change."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the off-deliverable files that cannot be avoided, each for one reason. run/ci.rs (new) holds the Athena methods and the seam, because run/mod.rs is 66 KB and the push and delete code is one concern. run/verification.rs builds the verifier's inputs and `Checked`, so the reuse statement goes there. gh/early.rs gets a one-word visibility change (`https_github_repository` becomes pub(crate)), so the https github.com gate is not copied. gh/tests.rs holds the existing `parse_ci_run` test, which asserts the old one-step format and must change. run/tests.rs only gets pub(super) on helpers. run/ci_tests.rs (new) holds the run-level tests.",
+      "reason": "Answers findings 5 to 8 and 2. Each file is needed by a stated step, and none gains behavior beyond the wiring.",
+      "rejected": [
+        {
+          "option": "Put everything in run/mod.rs",
+          "why": "It makes a 66 KB file larger and mixes test fakes into production code."
+        },
+        {
+          "option": "Copy the https github.com check into run/ci.rs",
+          "why": "Two copies of a gate that decides where Athena pushes can drift apart."
+        }
+      ]
+    },
+    {
+      "choice": "Rewrite `parse_ci_run` (gh/client.rs) to read per-check conclusions from the jobs reply: job named `fmt`, job named `clippy`, and the combination of all jobs named `test (…)`. The combination is failure if any shard is failure, cancelled or timed out. Matching is on exact names, so the `ci` job named `fmt, clippy, tests` is not taken for `fmt`. A missing check job gives no step. When the gate job succeeded and the check jobs were skipped, that is a reused pass, and all three are `success`. When the run conclusion is `failure` and no step is failure, all three become `failure`. The fetch asks for `jobs?filter=latest&per_page=100`.",
+      "reason": "Answers findings 9, 10 and 11. Today one step conclusion is given to all three checks, and in ci.yml that step is in the fmt job only, so a red test shard would become three passed records. The gate-skip case would leave no steps, so the commonest green run would fall back to local. `ci.yml` has more than 30 jobs, so the jobs request needs the page size. The reason then names only the failed check, which `judge` already writes as 'check <name> failed'.",
+      "rejected": [
+        {
+          "option": "Keep the single-step lookup and drop open question 1",
+          "why": "It passes a red test shard in production."
+        },
+        {
+          "option": "Read the failing check from job logs",
+          "why": "Log text is never used; the conclusions are fixed fields."
+        }
+      ]
+    },
+    {
+      "choice": "Delete the CI branch in a thin `dispatch` wrapper. The current `dispatch` is renamed (for example `dispatch_run`). The wrapper calls it, then calls `drop_ci_branch`, which deletes the branch on any result except an `Err` that downcasts to `disk::LowDisk`, and only when `remote_head` shows the branch and the run is not nested. A deletion failure is a warning line.",
+      "reason": "Answers finding 14. `?` errors from `produce_and_verify` or `resume_candidate` skip `close_dispatched`, so a delete placed there leaks the branch. A `LowDisk` hold is the one case where the job stays dispatched and resumes, so its branch must stay. A crash before the wrapper returns still leaks, and ci-routing.md says so.",
+      "rejected": [
+        {
+          "option": "Delete only after `close_dispatched` returns Ok",
+          "why": "Error exits leave the branch behind, against 'whatever the outcome'."
+        },
+        {
+          "option": "A Drop guard",
+          "why": "It would also delete on a disk hold."
+        }
+      ]
+    },
+    {
+      "choice": "Push at the top of `check_and_verify` when `recorded_checks` is None, skipping nested runs and any origin that is not an https github.com URL. A push failure is a warning, and that run then uses `NoCi` with one poll (local checks).",
+      "reason": "This is the first step after admission and also covers a resume. Pushing the same SHA twice is a git no-op. It covers criterion 4 (no remote or no GitHub changes nothing).",
+      "rejected": [
+        {
+          "option": "Push inside `produce_and_verify` only",
+          "why": "A resumed job would never push."
+        }
+      ]
+    },
+    {
+      "choice": "`ci_result::wait_for(wait_s, pause, changed)` returns polls = ceil(wait_s / pause) normally, and one poll when a changed path starts with `WORKFLOW_DIR`. The wiring calls it, so the SHA rules in `resolve` are untouched.",
+      "reason": "Answers finding 13. A workflow change makes `resolve` distrust a green run, so waiting up to 25 minutes is wasted time on top of the local run.",
+      "rejected": [
+        {
+          "option": "Change `resolve` to skip the read",
+          "why": "The brief puts the SHA rules out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "`run_routed` returns `RoutedRuns { runs, ci: Option<CiRecord> }`. `ci` is Some only for a CI-sourced Verified or Failed. The verifier's `check-source` entry (not a check, passed = true) uses `verify::reuse_statement(&record, &candidate)`, and only when the source is CI. verify.rs and the `CiSource` impl on `GhClient` are otherwise unchanged.",
+      "reason": "The statement needs the record's SHA, run address and steps, which only `run_routed` holds. It follows the existing `producer-report-gaps` entry, so no brief change is needed. `reuse_statement` returns None for a SHA mismatch.",
+      "rejected": [
+        {
+          "option": "Rebuild the record from check notes",
+          "why": "It parses free text and loses the run address and duration."
+        },
+        {
+          "option": "A new VerifierInputs field",
+          "why": "It touches the context crate's briefs and token-budget tests."
+        }
+      ]
+    },
+    {
+      "choice": "`wait_s` goes in a new optional `[ci]` section (`CiConfig`), default 1500, reset in `reading_inputs` the way `disk` is. The poll pause is a fixed 20 s constant (`CI_POLL_PAUSE`).",
+      "reason": "`Budget` has no per-field defaults, so a new field there would break every config literal. The reset keeps readings' config digest unchanged.",
+      "rejected": [
+        {
+          "option": "Add the key to `[budget]`",
+          "why": "It breaks every config literal and fixture."
+        }
+      ]
+    },
+    {
+      "choice": "ci.yml: `push: branches: [main, 'athena/ci/**']`. The header comment says the second push run is allowed on purpose. D125 removed push runs for PR branches because the two runs of one commit each ran the full 16 minutes. Athena pushes this branch to get a run for the exact SHA to read, and `early_pr` opens a pull request for the same SHA, which gives a second `ci` run. `GhClient::fetch` takes the newest `ci` run by `created_at` for the SHA, so either run serves. ci-routing.md says the same.",
+      "reason": "Answers finding 12. The request asks for the trigger. The duplicate cost is stated, not hidden.",
+      "rejected": [
+        {
+          "option": "Skip `early_pr` for CI jobs",
+          "why": "It is outside this request and changes landing."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add `DEFAULT_CI_WAIT_S = 1500`, `CiConfig { wait_s }`, `Config.ci: Option<CiConfig>` (skipped when absent), the `reading_inputs` reset and `Config::ci_wait_s()`, with tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "Add `[ci] wait_s = 1500` with a comment (governance file; the brief lists it).",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Push trigger `branches: [main, 'athena/ci/**']`, and the header comment on the D125 duplicate run (governance file; the brief lists it).",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `Git::delete_remote_branch(remote, branch)` (`push --quiet <remote> --delete <branch>`, refusing empty arguments), with a bare-remote test like the `push_branch` one.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "action": "modify",
+      "purpose": "Add the `CiBranches` trait, `CI_BRANCH_PREFIX`, `ci_branch(job)`, `CI_POLL_PAUSE` and `wait_for(wait_s, pause, changed)`, with unit tests. The SHA rules are unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "purpose": "`run_routed` returns `RoutedRuns { runs, ci }`. Update the docs and the test helper `go`. Add tests for cancelled, timed_out, skipped and unfinished fallback, the returned record, and a parsed-jobs red run.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "purpose": "Rewrite `parse_ci_run` to take per-check steps from the jobs reply (fmt job, clippy job, combined `test (…)` shards, gate-reused pass, unattributable red fails all). `fetch` asks for `jobs?filter=latest&per_page=100`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Replace the old one-step `parse_ci_run` assertions and add the recorded jobs-reply fixtures (an existing test must change).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/early.rs",
+      "action": "modify",
+      "purpose": "Make `https_github_repository` pub(crate) so run/ci.rs reuses the same gate. No behavior change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/ci.rs",
+      "action": "create",
+      "purpose": "`ci_target`, `push_ci_branch`, `ci_inputs` (real `GhClient` over `GhCli` or the seam; `wait_for`), `drop_ci_branch`, the production `GitBranches`, and the cfg(test) `seam`.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Declare `mod ci` and `#[cfg(test)] mod ci_tests`. In `check_and_verify`, push first, then pass the CI source and wait to `run_routed` in place of `NoCi`, and store the record in `Checked`. Rename `dispatch` and add the wrapper that deletes the branch except on a `LowDisk` hold. Update the stale 'No candidate commit is pushed yet' comment.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Add `ci_record: Option<CiRecord>` to `Checked`. When its source is Ci, push a `check-source` `CheckResultView` whose detail is `verify::reuse_statement(&record, &c)`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/ci_tests.rs",
+      "action": "create",
+      "purpose": "Run-level `ci_checks_*` tests with `CiFake`, a three-check test capability, and the workflow-trigger test.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Make `athena_with`, `Lines`, `base_script` and the repository helpers pub(super) for ci_tests.rs. No behavior change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for CI-backed checks.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/ci-routing.md",
+      "action": "modify",
+      "purpose": "Update section 10 items 4 and 5 from Not done to what is built and what remains. Record the D125 push-run reason, the run `fetch` picks, and the crash leak window.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Config: in athena-data/config.rs add `DEFAULT_CI_WAIT_S`, `CiConfig`, the `ci` field, the `reading_inputs` reset and `Config::ci_wait_s()`. Add `[ci] wait_s = 1500` to athena.toml. Add the tests (parse the committed file, default, override, digest unchanged).",
+    "Git: add `Git::delete_remote_branch` in athena-git/lib.rs with a bare-remote test (push a branch, delete it, `ls-remote` shows nothing). In ci_result.rs add the `CiBranches` trait, `CI_BRANCH_PREFIX`, `ci_branch`, `CI_POLL_PAUSE` and `wait_for(wait_s, pause, changed)`, with tests (75 polls, 1 poll on a workflow path).",
+    "routing.rs: `run_routed` returns `RoutedRuns { runs, ci }`, with `ci` Some only for a CI-sourced Verified or Failed. Update the module and function docs and the `go` helper. Add the cancelled, timed_out, skipped and unfinished fallback tests and a test that checks the returned record.",
+    "Production parser: rewrite `parse_ci_run` in gh/client.rs as designed. Match exact job names (`fmt`, `clippy`, prefix `test (`) and keep `fmt, clippy, tests` out. Treat a succeeded gate with skipped check jobs as three successes. An unattributable red run fails all three. Change the jobs request in `fetch` to `?filter=latest&per_page=100`. Update the old assertions in gh/tests.rs and add fixtures (i) to (v) from criterion 2. Add the routing test that feeds the parsed (i) fixture to `run_routed` with a counting `Exec`.",
+    "Make `https_github_repository` pub(crate) in gh/early.rs. Create run/ci.rs: `ci_target`, `push_ci_branch` (warning on failure, returns whether pushed), `ci_inputs` (the seam in cfg(test) builds, otherwise `GhClient` over `GhCli` and `GitBranches`, with `wait_for(config.ci_wait_s(), CI_POLL_PAUSE, changed)`), `drop_ci_branch` (skips a `LowDisk` error, a nested run and a missing branch; a failure is a warning line) and the cfg(test) `seam`. In cfg(test) builds, push and delete do nothing unless the seam is installed.",
+    "Wire run/mod.rs: call `push_ci_branch` at the top of `check_and_verify` when `recorded_checks` is None. Replace `NoCi` and the single-poll Wait with the CI source and wait (`NoCi` and one poll if the push did not happen). Keep `RoutedRuns.ci` in `Checked`. Rename `dispatch` to the inner function and add the wrapper that calls `drop_ci_branch`. Update the stale comments in run/mod.rs.",
+    "run/verification.rs: add `ci_record` to `Checked`, and the `check-source` entry via `verify::reuse_statement` when the source is Ci.",
+    "Make the run/tests.rs helpers pub(super). Create run/ci_tests.rs with `CiFake`, the three-check test capability and the `ci_checks_*` tests: green, red (only `test` named), other SHA, missing, cancelled, timed_out, skipped, unfinished, workflow-change one poll, branch pushed and deleted for accepted, rejected and failed, disk hold keeps the branch, push failure, no or non-GitHub remote, nested run, verifier statement present and absent, and the workflow trigger.",
+    "Edit .github/workflows/ci.yml: `push: branches: [main, 'athena/ci/**']`, and extend the header comment with the D125 reason and which run `fetch` picks.",
+    "Update docs/design/ci-routing.md section 10 items 4 and 5 and add the CHANGELOG.md Unreleased entry.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix whatever they report."
+  ],
+  "risks": [
+    {
+      "risk": "The wait blocks `check_and_verify` for up to 25 minutes while holding the job lock and a check slot.",
+      "mitigation": "The bound is in athena.toml. A missing, cancelled, timed-out or unreachable result falls back to local at once, a fetch error returns Missing without more waiting, and a workflow-file change gives one poll. Tests use a zero pause, so none sleeps."
+    },
+    {
+      "risk": "A red run caused by a non-check job in ci.yml (history, attribution) with fmt, clippy and test all green fails all three checks and rejects the job.",
+      "mitigation": "This fails closed, as the critic asked. The reason names the three checks. The case is listed in open questions for the maintainer to rule on."
+    },
+    {
+      "risk": "Job names in ci.yml change (for example `fmt` renamed), so the parser finds no step and the run is treated as incomplete.",
+      "mitigation": "A missing step gives no step, `resolve` does not trust a green run that lacks one, and the job falls back to local. A red run with no attributable failure fails all three. The fixtures are built from the names in ci.yml."
+    },
+    {
+      "risk": "The delete wrapper runs git against the network on every job end.",
+      "mitigation": "It does nothing for a nested run, a non-https-github origin, or a job whose branch is absent (`head` is None). Any failure is a warning line and never changes the outcome."
+    },
+    {
+      "risk": "A crash before the wrapper returns leaks `athena/ci/<id>`.",
+      "mitigation": "A later close of the same job deletes it, because the delete checks `head`. The remaining window is recorded in ci-routing.md. A sweep is out of scope."
+    },
+    {
+      "risk": "Existing run tests with an https github origin would reach the real `gh` through the push.",
+      "mitigation": "In cfg(test) builds, `push_ci_branch` and `drop_ci_branch` do nothing unless the seam is installed, and only the new tests install it."
+    },
+    {
+      "risk": "A new `[ci]` section changes the config digest of readings or trips the admission rule for config changes.",
+      "mitigation": "The field is Option, skipped when absent, and reset in `reading_inputs` as `disk` is. A test asserts the digest is unchanged."
+    },
+    {
+      "risk": "Pushing the candidate sends its content to the remote.",
+      "mitigation": "The candidate has already passed admission, and `early_pr` already pushes the same commit. The branch is deleted at close."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Run-level test through the real job run. The test capability has fmt, clippy and test checks whose command is `false`, so any local run fails the job. The fake CI source returns a finished `success` run for the exact candidate SHA with three passed steps. A routing-level test counts `Exec` calls.",
+      "command": "cargo test --locked -p athena-core ci_checks_green",
+      "observes": "The job ends Landed. The fake `Exec` was called 0 times and all three check records carry the note 'result reused from the CI run <address> for <sha>'. The fake source was asked for the SHA that the finished job's record names as its candidate. The routing-level test asserts `Exec` count 0 and `RoutedRuns.ci.source == Source::Ci`.",
+      "fails_without": "With `NoCi` still passed, the source is never read, the `false` commands run, the checks fail and the job is Rejected. With the exact-SHA rule dropped, the stale-SHA test in criterion 2 fails.",
+      "seam": "Production entry point: `Athena::go` (run/mod.rs), which reaches `dispatch`, `check_and_verify`, `push_ci_branch`, `routing::run_routed` and `ci_result::resolve`. Guards: origin is an https github.com URL, the run is not nested, and the capability lists fmt, clippy and test. The fixture is `ci::seam::install(branches, source, pause)`, a cfg(test) thread-local added by plan step 4 in run/ci.rs. It carries a `CiFake` (implements `CiBranches` and `CiSource`) defined in run/ci_tests.rs. Agents come from the existing `FakeAgentDriver` script in run/tests.rs (exists). The test repository gets origin `https://github.com/example/project.git` the way `early_run` in run_pin_tests.rs does (exists). The test capability is added by step 8."
+    },
+    {
+      "criterion": 2,
+      "method": "Run-level tests, one per case, with the same fixtures. (a) Red: the fake returns a `failure` run whose parsed steps are fmt success, clippy success, test failure. The job is Rejected with reason 'check test failed', not 'check fmt failed', and `Exec` is never called. (b) A green run for another SHA: the local checks run (commands `true`), the notes do not name CI, and the job Lands. (c) Missing (None), cancelled, timed_out and skipped runs, and a run that stays unfinished through the bound: each falls back to the local checks. Production-parser tests: `parse_ci_run` on recorded jobs-reply fixtures in gh/tests.rs. (i) fmt and clippy job success with one `test (shard 3)` failure gives fmt and clippy success and test failure. (ii) An all-green run gives three success steps. (iii) A gate that succeeded with fmt, clippy and the test shards skipped gives three success steps. (iv) A failed gate with skipped checks gives three failure steps. (v) The `fmt, clippy, tests` job is not taken for `fmt`. A routing test feeds the (i) fixture through `run_routed` with a counting `Exec`: fmt and clippy pass, test fails, and `Exec` is called 0 times.",
+      "command": "cargo test --locked -p athena-core ci_checks_red ci_checks_other_sha ci_checks_missing ci_checks_cancelled ci_checks_timed_out ci_checks_unfinished parse_ci_run routing_",
+      "observes": "Red: the state is Rejected, the reason contains 'check test failed' and not 'check fmt failed', and the `false` commands were never run. Other SHA, missing, cancelled, timed out and unfinished: the job Lands through the local checks, with 3 local `Exec` calls in the routing tests. The parser fixtures give exactly the per-check conclusions listed above.",
+      "fails_without": "If red mapped to fallback, the `true` commands would pass and the job would Land, but the test expects Rejected. If a stale SHA were accepted, the `false` commands would never run and the job would pass. With the old single-step parser, fixture (i) would give test success, and fixture (iii) would give no steps and a local fallback.",
+      "seam": "Entry points: `Athena::go`, `routing::run_routed` and `gh::parse_ci_run` (all exist). The run-level fixture is `ci::seam::install` with `CiFake` configured with a `Result<Option<CiRun>>` (step 4). The parser fixtures are JSON values built with `json!` in gh/tests.rs (the existing style; exists). The routing tests reuse the `Ci` and `Local` fakes in routing.rs (exist), and the `go` helper there is updated for `RoutedRuns` (step 3)."
+    },
+    {
+      "criterion": 3,
+      "method": "Run-level test with `CiFake` recording every `push`, `delete` and `head` call with a probe that reads the `FakeAgentDriver`'s invocation count. Three outcomes: accepted (green CI), rejected (red CI), and failed (the agent script makes the producer fail). A disk-hold variant checks that the branch stays when the result is a `LowDisk` error.",
+      "command": "cargo test --locked -p athena-core ci_checks_branch",
+      "observes": "Exactly one push of `athena/ci/<job id>` at the candidate commit, recorded after the producer's invocation and before the verifier's. Exactly one delete of the same branch, recorded after the job closed with Landed, Rejected or Failed. In the disk-hold variant there is no delete and the branch is still present in the fake. The push-failure variant gives one warning line and a local run.",
+      "fails_without": "With the push missing, the push assertion fails and the fake source is read for an SHA never pushed. With the delete missing on the rejected or failed path, the delete count stays 0. With the delete done on a `LowDisk` hold, the hold variant fails.",
+      "seam": "Entry point: `Athena::go` through the `dispatch` wrapper and `drop_ci_branch`. Guards as in criterion 1. The fixture is `ci::seam::install` with a `CiFake` implementing `CiBranches` (added in steps 2 and 4). The probe is a closure over the existing `FakeAgentDriver` call count in run/tests.rs (exists, made pub(super) in step 8). The production delete, `Git::delete_remote_branch`, is tested separately in athena-git against a bare remote."
+    },
+    {
+      "criterion": 4,
+      "method": "Run-level tests: (a) no `origin` remote; (b) an origin that is a local path and not an https github.com URL; (c) a nested run. The seam is installed in each.",
+      "command": "cargo test --locked -p athena-core ci_checks_no_remote",
+      "observes": "The fake records 0 push, 0 head and 0 delete calls and 0 CI source reads. The checks run locally (`Exec` count 3) and the job Lands. No warning line is printed.",
+      "fails_without": "If the origin gate were removed, the fake would record a push and a CI read and the zero-call assertions would fail.",
+      "seam": "Entry point: `Athena::go`. Guard: `ci_target()` in run/ci.rs, which calls `gh::early::https_github_repository` (made pub(crate) in step 4). Same `ci::seam::install` fixture. The origin-less pattern is `early_run(None, ..)` in run_pin_tests.rs (exists)."
+    },
+    {
+      "criterion": 5,
+      "method": "Run-level test that reads the verifier prompt the fake agent script receives (the `verifier_prompts` pattern in run_pin_tests.rs, exists), for a green-CI job and for a local-fallback job. Also Grep `verify::reuse_statement` in run/verification.rs.",
+      "command": "cargo test --locked -p athena-core ci_checks_verifier_gets_reuse_statement",
+      "observes": "With a green CI run, the verifier's prompt contains 'Check results for <candidate sha> come from the CI run <address>' and the three conclusions. With the local fallback, the sentence is absent.",
+      "fails_without": "If `Checked` did not carry the record, or the `check-source` entry were not added, the prompt would lack the sentence and the assertion fails.",
+      "seam": "Entry point: `Athena::verification_stage`, reached through `Athena::go`. It reads `Checked.ci_record` (added in step 7). The fake agent script and the `verifier_prompts` capture exist in run/tests.rs and run_pin_tests.rs. The `ci::seam` fixture is as in criterion 1."
+    },
+    {
+      "criterion": 6,
+      "method": "Unit tests in config.rs and ci_result.rs. The committed athena.toml parses with `[ci] wait_s = 1500`; an absent `[ci]` gives 1500; `wait_s = 60` gives 60; `reading_inputs` leaves the config digest unchanged. `wait_for(1500, 20s, &[])` gives 75 polls with a 20 s pause, and with a changed path under `.github/workflows/` it gives 1 poll.",
+      "command": "cargo test --locked -p athena-data ci_wait && cargo test --locked -p athena-core wait_for",
+      "observes": "`Config::ci_wait_s()` is 1500 for the committed file. `wait_for` gives 75 polls normally and 1 poll when a workflow file changed. The digest is unchanged by the new section. A run-level test, `ci_checks_workflow_change_polls_once`, counts the fake source's reads (1) for a candidate that changes a workflow path, if the fake agent script can write that path; otherwise the unit test is the evidence.",
+      "fails_without": "If the key were not parsed, `deny_unknown_fields` would make the committed athena.toml fail to load, and every test that loads it would fail. If the workflow rule were missing, the poll count would be 75.",
+      "seam": "Entry points: `Config::parse`, `Config::ci_wait_s` (added in step 1, the same shape as `min_free_gb`, which exists) and `ci_result::wait_for` (step 2). The committed file is read through `REPO_CONFIG`, as the existing config tests do (exists)."
+    },
+    {
+      "criterion": 7,
+      "method": "A test reads `.github/workflows/ci.yml` with include_str! and takes the text between the top-level `on:` and `jobs:` lines. It checks that `push: branches` lists both `main` and `athena/ci/**`.",
+      "command": "cargo test --locked -p athena-core ci_checks_workflow_triggers",
+      "observes": "The `on.push.branches` block contains `main` and `athena/ci/**`. Grep of the `on:` block shows the same.",
+      "fails_without": "Without the trigger, the pushed branch would start no CI run and the test fails.",
+      "seam": "No injection: it reads the file. The test is added to run/ci_tests.rs in step 8."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three Athena check commands on the final tree.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. This includes the updated routing and gh tests, the new athena-git `delete_remote_branch` test and the xtask policy and boundary tests.",
+      "fails_without": "A caller of `run_routed` not updated for `RoutedRuns`, an unused import or dead code (clippy), or an unformatted file would fail the build or clippy.",
+      "seam": "No injection; the whole workspace."
+    },
+    {
+      "criterion": 9,
+      "method": "Inspect the diff of CHANGELOG.md and docs/design/ci-routing.md.",
+      "command": "git diff -- CHANGELOG.md docs/design/ci-routing.md",
+      "observes": "A new Unreleased CHANGELOG entry names `athena/ci/<job id>`, `[ci] wait_s`, the per-check results read from the jobs, and the fallback rules. Section 10 items 4 and 5 are reworded from Not done to what is built, and say what remains: the build-job workflow run, the speedup measurement, and the leak window after a crash. The doc also says why the `athena/ci/**` push run is allowed despite D125 and which run `fetch` picks when both exist.",
+      "fails_without": "The diff would show no change to those files.",
+      "seam": "No injection; a documentation check."
+    }
+  ],
+  "open_questions": [
+    "A red `ci` run caused only by a non-check job (history or attribution) now fails fmt, clippy and test together. Should the parser instead ignore jobs that are not required checks?",
+    "A job whose process dies before the `dispatch` wrapper returns leaves its `athena/ci/<id>` branch until a later close of the same job. A periodic sweep is out of scope.",
+    "The per-check duration is 0 for CI steps, as before; the run's total time is kept. Job `started_at`/`completed_at` could fill it in a later job.",
+    "Does the fake agent script in run/tests.rs let a producer write a path under `.github/workflows/`? If it does not, the workflow-change one-poll rule is shown by the `wait_for` unit test alone."
+  ],
+  "producer_section_sha256": "8728aea054ad9cfcd7cc5b802feb13e756de04549c4dba56c5822e29efd5e905"
+}
