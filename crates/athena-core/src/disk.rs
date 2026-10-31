@@ -40,6 +40,14 @@
 //! or that `sccache` is not installed. The cargo and `sccache` work sits behind [`CargoBuilder`], so tests give
 //! it a fake. The Hestia sweep runs the measurement when there is no record and again when `Cargo.lock`
 //! changes ([`crate::hestia::measure_build_due`]), and `athena status` shows the latest.
+//!
+//! The in-flight bound (design `async-drain.md` section 5, build job 4). Each job's producer has its own
+//! worktree and build directory ([`crate::state::JobWorktree`]), so several jobs in flight multiply the disk
+//! they use. With `[drain.pipeline] max_in_flight` above 1, a job's start waits when the disk fits fewer jobs:
+//! `floor((free - reserve_disk_gb - max_check_slots x T) / (T + S))` ([`in_flight_limit`]), with T and S from
+//! the latest build measurement or, with none, the design's estimates ([`Figures`]). A wait is the existing
+//! hold ([`LowDisk`]): the job stays queued and a later drain starts it ([`start_decision`]). With
+//! `max_in_flight` 1, or with no other job in flight, nothing is held by the bound.
 
 use crate::commits::{NewFile, message};
 use crate::state::{StateDir, format_bytes};
@@ -285,6 +293,175 @@ impl Athena {
     /// all use. See [`gate`].
     pub(crate) fn disk_gate(&self, required_gb: u64, job: &JobId, ui: &dyn Ui) -> Option<LowDisk> {
         gate(&self.state, required_gb, job, ui)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The in-flight bound (docs/design/async-drain.md section 5)
+
+/// T when no build measurement exists: the design's estimate of one cold target directory, 6 GB.
+pub const ESTIMATE_T_BYTES: u64 = 6 * GB;
+
+/// S when no build measurement exists: the design's estimate of one worktree's tracked files, 0.2 GB.
+pub const ESTIMATE_S_BYTES: u64 = GB / 5;
+
+/// Where the figures of the bound came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FigureSource {
+    /// The latest `athena.build-measurement/1` record, by its id (`athena measure-build` writes it).
+    Measured(String),
+    /// No record exists: the design's estimates ([`ESTIMATE_T_BYTES`], [`ESTIMATE_S_BYTES`]).
+    DesignEstimate,
+}
+
+impl FigureSource {
+    /// "build measurement 20261029-090000-5abc" or "design estimate".
+    pub fn text(&self) -> String {
+        match self {
+            FigureSource::Measured(id) => format!("build measurement {id}"),
+            FigureSource::DesignEstimate => "design estimate".to_string(),
+        }
+    }
+}
+
+/// The two sizes the in-flight bound is computed from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Figures {
+    /// T: bytes of one cold target directory.
+    pub t: u64,
+    /// S: bytes of one worktree's tracked files.
+    pub s: u64,
+    pub source: FigureSource,
+}
+
+impl Figures {
+    /// The figures of the latest measurement (see [`BuildMeasurement::latest`]), or the design estimates when
+    /// there is none.
+    pub fn from_latest(latest: Option<&BuildMeasurement>) -> Figures {
+        match latest {
+            Some(m) => Figures {
+                t: m.target_bytes,
+                s: m.source_bytes,
+                source: FigureSource::Measured(m.id.to_string()),
+            },
+            None => Figures {
+                t: ESTIMATE_T_BYTES,
+                s: ESTIMATE_S_BYTES,
+                source: FigureSource::DesignEstimate,
+            },
+        }
+    }
+}
+
+/// How many jobs the disk holds at once (design section 5):
+/// `floor((free - reserve_disk_gb - max_check_slots x T) / (T + S))`, with `free` the free bytes before any
+/// of those jobs is placed. A disk below the reserve and the check slots holds none, so it is 0, never
+/// negative. With T + S = 0 a job costs nothing and the count is unbounded.
+pub fn in_flight_limit(
+    free_bytes: u64,
+    reserve_gb: u64,
+    check_slots: u32,
+    figures: &Figures,
+) -> u64 {
+    let kept = reserve_gb
+        .saturating_mul(GB)
+        .saturating_add(u64::from(check_slots).saturating_mul(figures.t));
+    free_bytes
+        .saturating_sub(kept)
+        .checked_div(figures.t.saturating_add(figures.s))
+        .unwrap_or(u64::MAX)
+}
+
+/// Whether a job must wait to start, given the pipeline settings and what the disk holds. `None` starts it.
+///
+/// - With `max_in_flight` 1 nothing is checked: today's one-job-at-a-time run, which `[disk] min_free_gb`
+///   already guards.
+/// - With no other job in flight nothing is checked either: waiting would free nothing, so a held lone job
+///   could never start.
+/// - Otherwise the job waits when the disk fits fewer jobs than `max_in_flight` ([`in_flight_limit`]) and
+///   `others` jobs are already in flight, the bound or more.
+///
+/// `free` is the free bytes now and `held` the bytes the other jobs' worktrees and build directories
+/// already use, which the bound counts as free because it assumes no job is placed yet. The returned
+/// [`LowDisk`] names the free bytes now and the free bytes `others + 1` jobs need.
+pub fn start_decision(
+    pipeline: &athena_data::config::PipelineConfig,
+    figures: &Figures,
+    free: u64,
+    held: u64,
+    others: usize,
+) -> Option<LowDisk> {
+    if pipeline.max_in_flight <= 1 || others == 0 {
+        return None;
+    }
+    let limit = in_flight_limit(
+        free.saturating_add(held),
+        pipeline.reserve_disk_gb,
+        pipeline.max_check_slots,
+        figures,
+    );
+    if limit >= u64::from(pipeline.max_in_flight) || (others as u64) < limit {
+        return None;
+    }
+    let per_job = figures.t.saturating_add(figures.s);
+    let needed = pipeline
+        .reserve_disk_gb
+        .saturating_mul(GB)
+        .saturating_add(u64::from(pipeline.max_check_slots).saturating_mul(figures.t))
+        .saturating_add((others as u64 + 1).saturating_mul(per_job));
+    Some(LowDisk {
+        free,
+        required: needed.saturating_sub(held),
+    })
+}
+
+impl Athena {
+    /// Whether the start of `id` must wait for a running job to end, by the in-flight bound
+    /// ([`start_decision`]). T and S come from the latest build measurement in `records`, or the design
+    /// estimates; the reserve, the check slots and `max_in_flight` come from `[drain.pipeline]`. `None` starts
+    /// the job. A free amount that cannot be read never holds a job. On a hold the reason is written to `ui`.
+    ///
+    /// This is a gate, not a lock. Another job counts as in flight when its job lock is held and it has a
+    /// worktree or build directory ([`StateDir::other_jobs_in_flight`]), and the probe locks that job for
+    /// microseconds. Two jobs that start at the same instant can both pass.
+    pub(crate) fn start_hold(
+        &self,
+        jc: &crate::capability::JobConfig,
+        records: &Records,
+        id: &JobId,
+        ui: &dyn Ui,
+    ) -> Option<LowDisk> {
+        let pipeline = jc.config.pipeline();
+        if pipeline.max_in_flight <= 1 {
+            return None;
+        }
+        let others = self.state.other_jobs_in_flight(id);
+        if others.is_empty() {
+            return None;
+        }
+        let free = self.state.free_bytes()?;
+        let held: u64 = others
+            .iter()
+            .map(|other| {
+                dir_bytes(&self.state.work_dir(other)) + dir_bytes(&self.state.produce_dir(other))
+            })
+            .sum();
+        let figures = Figures::from_latest(BuildMeasurement::latest(&records.build_measurements));
+        let low = start_decision(&pipeline, &figures, free, held, others.len())?;
+        ui.line(&format!(
+            "disk       start held: {} other job(s) in flight, which uses {} of the disk; with {} free, \
+             {} GB reserved, {} check slot(s), T {} and S {} ({}), fewer than {} jobs fit",
+            others.len(),
+            format_bytes(held),
+            format_bytes(free),
+            pipeline.reserve_disk_gb,
+            pipeline.max_check_slots,
+            format_bytes(figures.t),
+            format_bytes(figures.s),
+            figures.source.text(),
+            pipeline.max_in_flight,
+        ));
+        Some(low)
     }
 }
 
@@ -1022,6 +1199,115 @@ mod tests {
         std::fs::write(temp.path().join("a/b/z"), vec![0u8; 400]).unwrap();
         assert_eq!(dir_bytes(temp.path()), 430);
         assert_eq!(dir_bytes(&temp.path().join("missing")), 0);
+    }
+
+    fn measurement(id: &str, at_secs: i64, t: u64, s: u64) -> BuildMeasurement {
+        BuildMeasurement {
+            id: RecordId::parse(id).unwrap(),
+            at: jiff::Timestamp::from_second(1_790_000_000 + at_secs).unwrap(),
+            commit: "0123456789abcdef0123456789abcdef01234567".into(),
+            cargo_lock_hash: "89abcdef0123456789abcdef0123456789abcdef".into(),
+            target_bytes: t,
+            source_bytes: s,
+            first_build_seconds: 60.0,
+            second_build_seconds: 10.0,
+            sccache: SccacheFigures::NotInstalled,
+        }
+    }
+
+    fn estimates() -> Figures {
+        Figures::from_latest(None)
+    }
+
+    #[test]
+    fn with_no_record_the_design_estimates_are_used() {
+        let figures = estimates();
+        assert_eq!((figures.t, figures.s), (6_000_000_000, 200_000_000));
+        assert_eq!(figures.source, FigureSource::DesignEstimate);
+        assert_eq!(figures.source.text(), "design estimate");
+    }
+
+    #[test]
+    fn the_figures_are_those_of_the_latest_record_not_the_first() {
+        let older = measurement("20261029-090000-5abc", 0, 9 * GB, 3 * GB);
+        let newer = measurement("20261029-100000-6abc", 60, 4 * GB, GB);
+        for list in [
+            vec![older.clone(), newer.clone()],
+            vec![newer.clone(), older.clone()],
+        ] {
+            let figures = Figures::from_latest(BuildMeasurement::latest(&list));
+            assert_eq!((figures.t, figures.s), (4 * GB, GB));
+            assert_eq!(
+                figures.source,
+                FigureSource::Measured("20261029-100000-6abc".into())
+            );
+            assert_eq!(
+                figures.source.text(),
+                "build measurement 20261029-100000-6abc"
+            );
+        }
+    }
+
+    #[test]
+    fn the_limit_is_floor_of_free_less_reserve_and_check_slots_over_t_plus_s() {
+        // The design's example: (60 - 10 - 1 x 6) / (6 + 0.2) = 7.09.
+        assert_eq!(in_flight_limit(60 * GB, 10, 1, &estimates()), 7);
+        // Two check slots hold two T: (60 - 10 - 12) / 6.2 = 6.13.
+        assert_eq!(in_flight_limit(60 * GB, 10, 2, &estimates()), 6);
+        // A measured T = 4 GB and S = 1 GB: (60 - 10 - 4) / 5 = 9.2.
+        let measured =
+            Figures::from_latest(Some(&measurement("20261029-100000-6abc", 0, 4 * GB, GB)));
+        assert_eq!(in_flight_limit(60 * GB, 10, 1, &measured), 9);
+        // Exactly one job fits: (22.2 - 10 - 6) / 6.2 = 1; a byte less fits none.
+        assert_eq!(in_flight_limit(22_200_000_000, 10, 1, &estimates()), 1);
+        assert_eq!(in_flight_limit(22_199_999_999, 10, 1, &estimates()), 0);
+    }
+
+    #[test]
+    fn a_disk_below_the_reserve_and_check_slots_fits_none_and_zero_cost_is_unbounded() {
+        // 15 GB free is below reserve 10 + 1 slot x 6 = 16: saturates at 0, never wraps.
+        assert_eq!(in_flight_limit(15 * GB, 10, 1, &estimates()), 0);
+        assert_eq!(in_flight_limit(0, 10, 1, &estimates()), 0);
+        let free_jobs = Figures {
+            t: 0,
+            s: 0,
+            source: FigureSource::DesignEstimate,
+        };
+        assert_eq!(in_flight_limit(60 * GB, 10, 1, &free_jobs), u64::MAX);
+    }
+
+    fn pipeline(max_in_flight: u32) -> athena_data::config::PipelineConfig {
+        athena_data::config::PipelineConfig {
+            max_in_flight,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_start_waits_only_when_the_disk_fits_fewer_than_max_in_flight_and_others_fill_it() {
+        let figures = estimates();
+        // 25 GB free, nothing held by the other job: limit floor(9 / 6.2) = 1 of 2, one is running.
+        let low = start_decision(&pipeline(2), &figures, 25 * GB, 0, 1).expect("waits");
+        assert_eq!(low.free, 25 * GB);
+        // The free bytes two jobs need: 10 + 6 + 2 x 6.2 = 28.4 GB.
+        assert_eq!(low.required, 28_400_000_000);
+        assert!(low.free < low.required);
+        // The bytes the running job already holds count as free for the bound: 27 GB + 3 GB held gives 30.
+        assert_eq!(
+            start_decision(&pipeline(2), &figures, 27 * GB, 3 * GB, 1),
+            None
+        );
+        let low = start_decision(&pipeline(2), &figures, 20 * GB, 3 * GB, 1).expect("waits");
+        assert_eq!(low.required, 25_400_000_000, "28.4 less the 3 GB it holds");
+        // Room for three jobs, two allowed: not the bound's business.
+        assert_eq!(start_decision(&pipeline(2), &figures, 40 * GB, 0, 1), None);
+        // Nothing in flight: nothing to wait for, even on a disk that fits none.
+        assert_eq!(start_decision(&pipeline(2), &figures, 12 * GB, 0, 0), None);
+        // One job at a time never consults the bound.
+        assert_eq!(start_decision(&pipeline(1), &figures, 12 * GB, 0, 3), None);
+        // Three allowed, a disk of two (30 GB: floor(14 / 6.2) = 2), two running: the third waits.
+        assert!(start_decision(&pipeline(3), &figures, 30 * GB, 0, 2).is_some());
+        assert_eq!(start_decision(&pipeline(3), &figures, 30 * GB, 0, 1), None);
     }
 
     #[test]

@@ -209,7 +209,8 @@ The block ships with every value at today's behavior. Job 10 is the one that rai
 Build job 2 implemented this block in `athena-data`'s `Config` (`[drain.pipeline]`). The config refuses
 `max_in_flight` outside 1 to 8 (the `[parallel]` ceiling), `max_check_slots` outside 1 to 8, `read_ahead` of 0,
 `max_conflict_returns` of 0 and any unknown key. `reserve_disk_gb` may be any non-negative whole number. The table is
-left out of a reading's config digest. No drain code reads these values yet.
+left out of a reading's config digest. Build job 4 reads `max_in_flight`, `max_check_slots` and `reserve_disk_gb` for
+the start bound (section 12); the other values are not read yet.
 
 ## 12. Ordered build jobs
 
@@ -237,7 +238,34 @@ come first. Nothing here changes a limit until job 10.
    empty; a file that cannot be read is moved to `in-flight.json.corrupt` and noted. A failed write is a warning
    line, never a job failure. At `max_in_flight = 1` nothing else about the drain changes.
 4. **Per-job worktree start.** Depends on: 3. Create and remove a worktree and its target directory per job; the disk
-   bound from section 5 computed from job 1's numbers.
+   bound from section 5 computed from job 1's numbers. *Implemented (D145).*
+   - The worktree is the producer's isolated snapshot repository, `StateDir::work_dir` (`jobs/<id>/work`), made by
+     `Snapshot::create`; its build directory is `jobs/<id>/target/produce` (its `CARGO_TARGET_DIR`). It is a one-commit
+     repository of its own, **not a linked `git worktree`** of the user's repository (`git worktree list` does not show
+     it). A linked worktree shares the object store, the refs and the history, so the producer could read what the
+     snapshot keeps out of its reach (history, `records/`, private files). Whether to move to a linked worktree is an
+     open question that needs its own job.
+   - `StateDir::job_worktree` returns a `JobWorktree` guard. It clears both directories when it is made (a killed run's
+     leftover) and removes both when dropped, so a verdict, a stop and an error all leave neither behind. It lives for
+     the whole of `produce_and_verify`, so the build directory a failed check keeps for a send-back is still there while
+     the checks and the verifier run.
+   - The bound is `Athena::start_hold`, called at dispatch right after the `min_free_gb` gate. It computes the
+     section 5 limit, `floor((free - reserve_disk_gb - max_check_slots x T) / (T + S))` (`disk::in_flight_limit`), with
+     `free` counted before the other jobs were placed: the bytes their worktrees and build directories already use are
+     added back. T and S are `target_bytes` and `source_bytes` of the latest `athena.build-measurement/1` record
+     (`athena measure-build`, build job 1); with none, the design estimates in this section (6 GB, 0.2 GB) are used,
+     and the hold line names which. When the limit is below `max_in_flight` and that many jobs or more are already in
+     flight, the start waits: it is the existing disk hold (`LowDisk`, a hold marker, `go` returns it, the job stays
+     queued), so a later drain starts the same job.
+   - Not held: any start with `max_in_flight = 1` (the default and the repository's setting; today's behavior and its
+     tests are unchanged), and any start when no other job is in flight, because waiting would free nothing and a held
+     lone job could never start. `min_free_gb` still guards a lone job. A bound of zero therefore holds a start only
+     while another job runs.
+   - A job counts as in flight when its job lock is held and it has a worktree or build directory. A leftover of a dead
+     process holds no lock and does not count; acting on leftovers is build job 9. The check is a gate, not a lock: the
+     probe takes a shared lock on the other job's lock file for microseconds (never creating it), so a command on that
+     same job that races it can be refused as already running, and two jobs that start at the same instant can both
+     pass. Nothing runs more than one producer before build job 10, so this does not bite yet.
 5. **Read-ahead.** Depends on: 2. Read and plan up to `read_ahead` jobs, with the stale-reading re-check.
 6. **Landing queue, ordered.** Depends on: 3, 4. One queue with rebase and conflict return to the producer, thrash stop.
 7. **Re-check rule after rebase.** Depends on: 6. Re-run checks only when paths overlap; measures the share of rebases that

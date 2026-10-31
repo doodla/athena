@@ -743,6 +743,14 @@ impl Athena {
             ui.line(&format!("held       {}", low.text()));
             return Err(low.into());
         }
+        // With several jobs allowed in flight, each with its own worktree and build directory, the disk may
+        // fit fewer than are allowed (design section 5). The extra start waits the same way: held, queued,
+        // not failed. With one job at a time, or no other job running, this never holds.
+        if let Some(low) = self.start_hold(&jc, records, &id, ui) {
+            crate::disk::write_hold(&self.state, &id, &low);
+            ui.line(&format!("held       {}", low.text()));
+            return Err(low.into());
+        }
         crate::disk::clear_hold(&self.state, &id);
         let capability_id = reading.capability.clone().expect("checked by the caller");
         let capability = self.capability(&capability_id)?;
@@ -1083,7 +1091,8 @@ impl Athena {
     ///
     /// 1. `baseline_stage` takes the baseline checks before the producer runs.
     /// 2. `producer_snapshot` and `producer_loop` run the producer and collect its report; a stop in
-    ///    the loop closes the job here.
+    ///    the loop closes the job here. The producer's worktree and build directory are a
+    ///    [`crate::state::JobWorktree`], held until this function returns by any path.
     /// 3. `candidate_stage` admits the producer's work as a candidate commit; a refusal closes the job
     ///    here.
     /// 4. The producer's work tree is removed and the resume mark is written, so a job that stops for
@@ -1104,6 +1113,9 @@ impl Athena {
         let seq = ctx.next_seq(&closing);
 
         self.baseline_stage(ctx, &job_dir, seq, &mut closing);
+        // The producer's worktree and build directory belong to this call: cleared now, removed on every way
+        // out of the function (a verdict, a stop or an error), so a finished job leaves neither behind.
+        let _worktree = self.state.job_worktree(&id);
         let prepared = self.producer_snapshot(ctx)?;
         let Reported {
             report,

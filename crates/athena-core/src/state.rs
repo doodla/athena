@@ -142,6 +142,48 @@ impl StateDir {
         }
     }
 
+    /// Whether another handle holds the job lock of `job` right now. It is a probe, not a lock: it opens an
+    /// existing `job.lock` (never creating one, so a job with no lock file reads as not held and nothing is
+    /// created in its directory), takes a shared lock and lets it go at once. A shared lock conflicts only
+    /// with the exclusive lock [`try_lock_job`](StateDir::try_lock_job) takes. For the microseconds the probe
+    /// holds it, a command that tries to lock that same job can be refused as already running.
+    pub fn job_lock_held(&self, job: &JobId) -> bool {
+        let Ok(file) = File::options()
+            .read(true)
+            .open(self.job_dir(job).join("job.lock"))
+        else {
+            return false;
+        };
+        matches!(
+            file.try_lock_shared(),
+            Err(std::fs::TryLockError::WouldBlock)
+        )
+    }
+
+    /// The jobs other than `except` that are in flight: a process holds the job lock and the job has a
+    /// producer work tree or a producer build directory. A leftover directory of a process that died holds no
+    /// lock and does not count; acting on such leftovers is recovery, not this check.
+    pub fn other_jobs_in_flight(&self, except: &JobId) -> Vec<JobId> {
+        self.job_ids()
+            .into_iter()
+            .filter(|id| id != except)
+            .filter(|id| self.work_dir(id).exists() || self.produce_dir(id).exists())
+            .filter(|id| self.job_lock_held(id))
+            .collect()
+    }
+
+    /// The producer's per-job worktree and build directory, for the life of the returned guard. See
+    /// [`JobWorktree`].
+    pub fn job_worktree(&self, job: &JobId) -> JobWorktree {
+        let worktree = JobWorktree {
+            state: self.clone(),
+            job: job.clone(),
+        };
+        // A run that was killed may have left both behind: the producer starts from nothing.
+        worktree.remove();
+        worktree
+    }
+
     /// Writes a record's live copy, so `athena close` can commit it if this process dies first.
     pub fn write_live(&self, job: &JobId, path: &str, bytes: &[u8]) -> Result<()> {
         let full = self.live_dir(job).join(path);
@@ -293,6 +335,46 @@ impl StateDir {
                 error: Some((dir, e.to_string())),
             },
         }
+    }
+}
+
+/// What a job's producer owns on disk while it runs: its worktree ([`StateDir::work_dir`]) and its build
+/// directory ([`StateDir::produce_dir`], the producer's `CARGO_TARGET_DIR`).
+///
+/// The worktree is the producer's isolated checkout of the base commit: a one-commit repository of its own,
+/// made by `Snapshot::create`, not a linked `git worktree` of the user's repository. A linked worktree shares
+/// the object store, the refs and the history, so the producer could read what the snapshot keeps out of its
+/// reach (history, `records/`, private files).
+///
+/// [`StateDir::job_worktree`] clears both directories when it makes the guard, so a producer never starts on
+/// the leftover of an earlier run, and dropping the guard removes both again, so every way out of the run
+/// (a verdict, a stop, an error) leaves neither behind. A removal that fails is left to the job's closing
+/// cleanup ([`StateDir::clean_job`]). A worktree kept on purpose (a timed-out producer's work) was moved out
+/// before the guard drops.
+#[derive(Debug)]
+pub struct JobWorktree {
+    state: StateDir,
+    job: JobId,
+}
+
+impl JobWorktree {
+    fn remove(&self) {
+        for dir in [
+            self.state.work_dir(&self.job),
+            self.state.produce_dir(&self.job),
+        ] {
+            if dir.exists() {
+                let _ = (self.state.remover)(&dir);
+            }
+        }
+        // `remove_dir` removes only an empty directory: the checks' own build directory stays.
+        let _ = std::fs::remove_dir(self.state.job_dir(&self.job).join("target"));
+    }
+}
+
+impl Drop for JobWorktree {
+    fn drop(&mut self) {
+        self.remove();
     }
 }
 
@@ -615,5 +697,111 @@ mod tests {
         assert_eq!(state.read_resume(&job()), None);
         assert!(!state.resume_file(&job()).parent().unwrap().exists());
         assert!(!temp.path().join("kept").exists(), "nothing else is kept");
+    }
+
+    fn plant(state: &StateDir, id: &JobId, subdirs: &[&str]) {
+        for sub in subdirs {
+            let dir = state.job_dir(id).join(sub);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("file"), b"x").unwrap();
+        }
+    }
+
+    #[test]
+    fn a_job_worktree_clears_a_stale_start_and_removes_both_directories_when_dropped() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        plant(
+            &state,
+            &job(),
+            &["work", "target/produce", "target/check", "live"],
+        );
+
+        let guard = state.job_worktree(&job());
+        // The leftover of an earlier run is gone at the start; nothing else of the job is touched.
+        assert!(!state.work_dir(&job()).exists());
+        assert!(!state.produce_dir(&job()).exists());
+        assert!(state.job_dir(&job()).join("target/check/file").exists());
+        assert!(state.live_dir(&job()).join("file").exists());
+
+        // The producer's work, as it makes it.
+        plant(&state, &job(), &["work", "target/produce"]);
+        drop(guard);
+        assert!(!state.work_dir(&job()).exists());
+        assert!(!state.produce_dir(&job()).exists());
+        assert!(
+            state.job_dir(&job()).join("target/check/file").exists(),
+            "the checks' build directory is not the producer's"
+        );
+    }
+
+    #[test]
+    fn a_job_worktree_is_removed_on_an_early_return_with_an_error() {
+        fn produce(state: &StateDir, id: &JobId) -> Result<()> {
+            let _worktree = state.job_worktree(id);
+            plant(state, id, &["work", "target/produce"]);
+            anyhow::bail!("the run stopped part way");
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        assert!(produce(&state, &job()).is_err());
+        assert!(!state.work_dir(&job()).exists());
+        assert!(!state.produce_dir(&job()).exists());
+        assert!(
+            !state.job_dir(&job()).join("target").exists(),
+            "an empty build parent goes too"
+        );
+    }
+
+    #[test]
+    fn the_job_lock_probe_sees_a_held_lock_and_creates_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        // No lock file: not held, and the probe does not create one (or the job's directory).
+        assert!(!state.job_lock_held(&job()));
+        assert!(!state.job_dir(&job()).exists());
+
+        std::fs::create_dir_all(state.job_dir(&job())).unwrap();
+        assert!(!state.job_lock_held(&job()));
+        assert!(!state.job_dir(&job()).join("job.lock").exists());
+
+        let held = state.try_lock_job(&job()).unwrap().expect("lock is free");
+        assert!(state.job_lock_held(&job()));
+        // The probe let go: the holder still holds, and nobody else could take it.
+        assert!(state.job_lock_held(&job()));
+        assert!(state.try_lock_job(&job()).unwrap().is_none());
+        drop(held);
+        assert!(!state.job_lock_held(&job()));
+        assert!(
+            state.try_lock_job(&job()).unwrap().is_some(),
+            "a probe leaves the lock free"
+        );
+    }
+
+    #[test]
+    fn only_a_locked_job_with_a_work_tree_or_build_directory_is_in_flight() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        let ids: Vec<JobId> = (1..=5)
+            .map(|n| JobId::parse(&format!("20261026-00{n:02}00-aaa{n}")).unwrap())
+            .collect();
+        let (me, running, building, leftover, bare) = (&ids[0], &ids[1], &ids[2], &ids[3], &ids[4]);
+        plant(&state, me, &["work"]);
+        plant(&state, running, &["work"]);
+        plant(&state, building, &["target/produce"]);
+        plant(&state, leftover, &["work", "target/produce"]);
+        plant(&state, bare, &["live"]);
+        let _me = state.try_lock_job(me).unwrap().unwrap();
+        let _a = state.try_lock_job(running).unwrap().unwrap();
+        let _b = state.try_lock_job(building).unwrap().unwrap();
+        let _c = state.try_lock_job(bare).unwrap().unwrap();
+        // `leftover` has directories but its process is gone: no lock is held.
+        drop(state.try_lock_job(leftover).unwrap().unwrap());
+
+        assert_eq!(
+            state.other_jobs_in_flight(me),
+            vec![running.clone(), building.clone()],
+            "not the asking job, not a dead job's leftover, not a locked job with no producer directory"
+        );
     }
 }

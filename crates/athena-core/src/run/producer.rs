@@ -73,7 +73,8 @@ impl Athena {
     }
 
     /// Stage S2: the producer's detached snapshot of the base, with the grant, brief frame and environment
-    /// its invocations use.
+    /// its invocations use. The caller holds the [`crate::state::JobWorktree`] that cleared a stale work tree
+    /// before this runs and removes the work tree and build directory when the job's run ends.
     pub(super) fn producer_snapshot(&self, ctx: &RunContext<'_>) -> Result<ProducerWork> {
         let jc = ctx.jc;
         let p = ctx.prediction.clone();

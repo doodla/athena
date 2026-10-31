@@ -1,0 +1,253 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-013549-2cab",
+  "round": 2,
+  "at": "2026-10-31T01:14:28.432197879Z",
+  "invocation_seq": 4,
+  "approach": "Keep the producer's isolated per-job checkout (the one-commit `Snapshot` at `StateDir::work_dir`) as the job's \"worktree\". Do not use a linked `git worktree`, because that would give the producer the user's history and `records/`. Add a `JobWorktree` drop guard in state.rs that clears stale `work` and `target/produce` at producer start and removes both on every exit from `produce_and_verify`, including a `?` error. Add the section 5 bound to disk.rs as pure functions (`Figures`, `in_flight_limit`) plus `Athena::start_hold`. `dispatch` calls it right after the `min_free_gb` gate. At `max_in_flight` > 1 it returns the existing `LowDisk` hold, so the job stays queued and the drain's existing handling is the wait. A lone job is never held, and `max_in_flight` = 1 skips the check. In flight means the job lock is held and `work` or `target/produce` exists. The probe is a non-creating shared lock try. All new go-level tests go in crates/athena-cli/tests/drain.rs (a listed deliverable) through `Athena::go` and the real drain. run/tests.rs is not touched.",
+  "decisions": [
+    {
+      "choice": "The per-job \"worktree\" is the isolated snapshot repository at jobs/<id>/work with CARGO_TARGET_DIR at jobs/<id>/target/produce. The new part is a lifecycle guard that removes both on every exit of the run. CHANGELOG and the design note say plainly that this is a fresh repository, not a linked `git worktree` (`git worktree list` will not show it), and why.",
+      "reason": "The producer contract (producer_snapshot, Snapshot::create in athena-git/src/snapshot.rs) is a one-commit snapshot with no remote, no other branches and no records/. A linked worktree shares the object store, refs, hooks and history, and Snapshot's visibility rules (private paths, records/) would have to be rebuilt. A3 already records this path as the job's worktree. Stating it in the docs lets the verifier judge criterion 1 by directories created and removed, not by `git worktree list`.",
+      "rejected": [
+        {
+          "option": "`git worktree add` / `git worktree remove` on the user's repository at jobs/<id>/work",
+          "why": "The producer would see the user's whole history and records/ and share the object store. Rewriting Snapshot's rules is far more than one producer run. Kept as an open question for the user."
+        },
+        {
+          "option": "Leave removal to clean_job only",
+          "why": "state.rs clean_job removes jobs/<id> only after the closing commit. A `?` error out of produce_and_verify leaves work/ and target/produce behind (the job stays dispatched). That is the gap the guard closes."
+        }
+      ]
+    },
+    {
+      "choice": "The guard is created in produce_and_verify before producer_snapshot and lives to the end of that function. At creation it removes a stale `work` and `target/produce`. On drop it removes both, ignoring errors, using the state's remover. producer_snapshot's own `if work.exists() { remove_tree }` stays, and the guard clears first so Snapshot::create's refusal of an existing directory cannot trigger.",
+      "reason": "One scope covers every exit: Ok, Flow::Stop and `?`. The timed-out work is renamed to kept/ before it returns (keep_timed_out_work), so removing a missing work dir is harmless. check_and_verify runs inside the guard's lifetime, so the existing rule that target/produce is kept when a check fails still holds while the checks and verifier run. Nothing reads it after produce_and_verify returns, since resume_candidate does not use this function.",
+      "rejected": [
+        {
+          "option": "Remove only in the happy path after the candidate stage",
+          "why": "Misses `?` errors and stops. That is what exists today."
+        }
+      ]
+    },
+    {
+      "choice": "A start is held with the existing LowDisk hold when the bound is full: write_hold, a 'held' ui line, and Err(LowDisk) from `go`, with the job still Proposed. It is not a blocking sleep.",
+      "reason": "drain.rs already treats a LowDisk from `go` as 'left queued, not a failure; a later drain runs it' (the existing test the_real_steps_hold_a_job_on_low_disk...). That is the wait the design describes. A sleep inside `go` would stall a worker and need a clock seam.",
+      "rejected": [
+        {
+          "option": "Poll and sleep inside Athena::go until a slot frees",
+          "why": "Blocks a drain worker and needs a time seam."
+        },
+        {
+          "option": "Fail or reject the job when the bound is full",
+          "why": "The brief says the extra start waits rather than failing."
+        }
+      ]
+    },
+    {
+      "choice": "The bound never holds a start when no other job is in flight, and is skipped when max_in_flight = 1. With max_in_flight > 1 the allowed count is min(max_in_flight, bound), and a start is held when the number of other in-flight jobs is at or above it. LowDisk{free, required} reports required = reserve + slots x T + (n + 1) x (T + S), where n is the count of other in-flight jobs.",
+      "reason": "With nothing in flight, waiting frees nothing and would block forever on a small disk. min_free_gb still guards a lone job. Skipping at 1 keeps today's behavior and the existing drain.rs and lifecycle.rs tests. This departs from the reading's line that a zero bound holds the start. It is raised as an open question.",
+      "rejected": [
+        {
+          "option": "Hold a lone job whenever the formula gives 0",
+          "why": "Changes behavior at max_in_flight = 1 on disks that run today, and can never clear because nothing is running."
+        }
+      ]
+    },
+    {
+      "choice": "The limit is computed on free bytes plus the bytes already held by the other in-flight jobs' `work` and `target/produce` directories (dir_bytes of both).",
+      "reason": "Section 5's formula takes free space with no job placed. Running jobs have already used some of it, so raw free space would count them twice. Both dirs are added back because a job past its candidate stage still holds `target/produce` (about T bytes) when a check failed.",
+      "rejected": [
+        {
+          "option": "Apply the formula to current free bytes",
+          "why": "Under-counts the allowance as running targets grow."
+        },
+        {
+          "option": "Add back only `work`",
+          "why": "Misses `target/produce` of a job past the candidate stage, which is the larger directory."
+        }
+      ]
+    },
+    {
+      "choice": "T and S come from `BuildMeasurement::latest(&records.build_measurements)` (target_bytes, source_bytes), read from the `records` already loaded in dispatch. With none, the design estimates ESTIMATE_T_BYTES = 6 GB and ESTIMATE_S_BYTES = 0.2 GB are used. The hold line names the source. reserve_disk_gb, max_check_slots and max_in_flight are read through Config::pipeline().",
+      "reason": "This uses the record `athena measure-build` writes. It adds no record type or data file, so the records allow-list and config.rs stay untouched.",
+      "rejected": [
+        {
+          "option": "A new config key or record for the figures",
+          "why": "Touches config.rs and the records allow-list, both out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "A job counts as in flight when its job lock is held by another holder AND (`work_dir` or `produce_dir` exists). The probe is a new `StateDir::job_lock_held(&JobId) -> bool` that opens an existing job.lock without creating it, tries a shared lock (File::try_lock_shared) and releases it at once. It only probes jobs that have `work` or `produce_dir`. Nothing is created in other jobs' directories. The doc comment and the design note say this is a gate, not a lock: a probe holds a shared lock for microseconds, so a `go`, `close` or `retry` of that same job that races it can be refused as 'already running'. Two starts at the same instant can both pass the check.",
+      "reason": "The lock is what tells a live job from a leftover directory of a dead process; acting on leftovers is recovery, out of scope. Not creating job.lock removes the file-creation side effect. A shared try only conflicts with an exclusive holder. The race window is minimal and documented. It only matters with max_in_flight > 1, which nothing runs concurrently until job 10.",
+      "rejected": [
+        {
+          "option": "try_lock_job (exclusive, creating)",
+          "why": "Creates job.lock in other jobs' directories and refuses a racing real command for longer."
+        },
+        {
+          "option": "Treat any existing work/produce dir as in flight, with no lock",
+          "why": "A dead process's leftover would hold every later start with no way to clear it."
+        },
+        {
+          "option": "Count rows of the A3 in-flight.json",
+          "why": "It lives in athena-cli, which athena-core cannot read, and a stale row would count a dead job."
+        }
+      ]
+    },
+    {
+      "choice": "The go-level tests live in crates/athena-cli/tests/drain.rs, which is a listed deliverable. They use its existing harness: Fixture::with_config over test_config() plus a [drain.pipeline] block, go_with_disk-style script wrapping, `simulated_free` plus set_free, and real_steps. run/tests.rs is not touched.",
+      "reason": "This answers the finding that run/tests.rs is not a deliverable. drain.rs already builds an Athena over the public API (fx.athena(script), athena.state, athena.go) with a controllable free-space function. Unit tests for the guard and the formula sit in state.rs and disk.rs, both deliverables.",
+      "rejected": [
+        {
+          "option": "Add the tests to run/tests.rs",
+          "why": "Not in the deliverables; widens scope."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Add FigureSource, Figures { t, s, source }, Figures::from_latest, ESTIMATE_T_BYTES (6 GB) and ESTIMATE_S_BYTES (0.2 GB), in_flight_limit, and Athena::start_hold (returns Option<LowDisk>). Unit tests for criterion 2 and start_hold. Update the module doc. Doc comments say the check is a gate, not a lock.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "purpose": "Add JobWorktree (a drop guard for `work` and `target/produce`), StateDir::job_worktree(&JobId), StateDir::job_lock_held(&JobId) (a non-creating shared probe), and StateDir::other_jobs_in_flight(&JobId) (lock held and work or produce dir present). Unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "producer_snapshot reports the work tree and target dir in one ui line and relies on the guard's fresh-start clearing. The guard is held by the caller.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "In dispatch, call start_hold right after the min_free_gb gate (write_hold, a 'held' line, Err(LowDisk)). In produce_and_verify, create the JobWorktree guard before producer_snapshot. Doc lines on the stage list.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add per_job_worktree_* and in_flight_bound_* tests through Athena::go and the real drain, using the existing Fixture, simulated_free and set_free. No existing test is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "purpose": "Mark build job 4 implemented (D145). State that the worktree is the isolated snapshot repository and why, how the hold works, the lone-job and max_in_flight = 1 exemptions, where T and S come from, and that the check is a gate, not a lock.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the Unreleased entry for per-job worktree start and its disk bound.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the top of crates/athena-cli/tests/drain.rs (Fixture use, Scenario, simulated_free, set_free, go_with_disk, real_steps, rated_scenario), tests/common/mod.rs (test_config, config_with_change_checks), the state.rs tests module and the disk.rs tests module. Confirm test_config() has no `[drain]` table.",
+    "state.rs: add JobWorktree and StateDir::job_worktree. It clears a stale `work_dir` and `produce_dir` at creation and removes both on Drop, ignoring errors. Add job_lock_held (open the existing job.lock with no create, try_lock_shared, release) and other_jobs_in_flight (job_ids, excluding this job, with work or produce dir present and job_lock_held). Add unit tests.",
+    "disk.rs: add FigureSource, Figures, from_latest, the two estimate constants, and in_flight_limit (saturating integer maths, a guard against T + S = 0). Add Athena::start_hold(&self, jc, records, id, ui) -> Option<LowDisk>. It returns None when pipeline().max_in_flight == 1, when free bytes are unreadable, or when no other job is in flight. Otherwise it adds the dir_bytes of each other job's work and target/produce to free, computes the bound, and returns LowDisk{free, required} with a ui line naming T, S and their source when the count is at or above min(max_in_flight, bound). Add the criterion 2 tests and the start_hold tests. Update the module doc.",
+    "run/mod.rs dispatch: after the disk_gate block and before clear_hold, call self.start_hold; on Some, call write_hold, print the 'held' line and return Err(low.into()).",
+    "run/mod.rs produce_and_verify: `let _worktree = self.state.job_worktree(&id);` before producer_snapshot. In producer.rs, print one ui line with the work path and target path after the snapshot. Keep the existing remove_tree(&work) after the candidate stage.",
+    "drain.rs: add the per_job_worktree_* tests (a, b, c, d, e) and in_flight_bound_* tests (a to f) as in the demonstrations. Run (e) first to confirm that `go` returns Err. Do not edit existing tests.",
+    "Update docs/design/async-drain.md (job 4 implemented, D145; the isolated snapshot is the worktree and why; the hold; exemptions; source of T and S; gate, not lock) and add the CHANGELOG.md Unreleased entry.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any failure. Confirm with `git diff --stat` that no governance file, config.rs or run/tests.rs changed."
+  ],
+  "risks": [
+    {
+      "risk": "Dropping the guard at the end of produce_and_verify removes `target/produce`, which the existing rule keeps when a check fails.",
+      "mitigation": "The guard lives for the whole of produce_and_verify, including check_and_verify, so the kept-on-failure directory is present while the checks and verifier run. The existing test reads free-space probes taken during the run, not after it. The existing tests run unchanged."
+    },
+    {
+      "risk": "Existing drain and lifecycle tests change behavior through the new dispatch hook.",
+      "mitigation": "start_hold returns None before reading any directory when max_in_flight = 1, which is the default and the repository config. The existing assertions are not edited and the full `cargo test` runs them."
+    },
+    {
+      "risk": "The in-flight probe briefly locks another job, so a racing real command on that job could be refused.",
+      "mitigation": "The probe runs only when max_in_flight > 1, only on jobs that have a work or produce dir, never creates job.lock, and holds a shared lock for microseconds. The race is documented in the doc comment and the design note as a gate, not a lock."
+    },
+    {
+      "risk": "Two starts at the same instant both pass the check.",
+      "mitigation": "Accepted for this job, since there is no concurrent producer yet (job 10). Stated in the doc comment and the design note."
+    },
+    {
+      "risk": "The error-escape test (e) may not produce an Err, if the producer loop absorbs the broken repository into a Failed job.",
+      "mitigation": "Run the test first. If `go` closes the job, use a different sabotage, such as replacing `.git` with a plain file. If no seam yields an Err, report it instead of dropping the case."
+    },
+    {
+      "risk": "Per-test free-space amounts cannot be captured in closures.",
+      "mitigation": "FreeSpace is a fn pointer, so tests set the amount through the `simulated_free` file with `set_free`, as the existing drain.rs tests do."
+    },
+    {
+      "risk": "Scope creep through test files outside the deliverables.",
+      "mitigation": "The tests go in drain.rs, a deliverable. The unit tests are in disk.rs and state.rs. run/tests.rs is not touched, and criterion 6 checks it."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Integration tests in crates/athena-cli/tests/drain.rs, named per_job_worktree_*, call the production entry point `Athena::go(job, AcceptedBy::User, &lines)` on a proposed job. The Athena comes from the existing `Fixture::athena(script)`, with `athena.state.with_free_space(simulated_free)` as go_with_disk does. Both exist today. The script wraps `Scenario::default().script()`. For Role::Producer, the wrapper records `spec.workdir`, `spec.env[\"CARGO_TARGET_DIR\"]`, whether `<workdir>/.git` exists, and whether the target dir exists and is empty at that moment; it then delegates to the inner script. The wrapper observes only. The wrapper is the only new seam, added in this step. Preconditions: the config is test_config() (min_free_gb = 0, max_in_flight default 1). Five runs, each a fresh Fixture: (a) success: Landed; (b) rejected: a failing check from config_with_change_checks, so a check fails, `target/produce` is kept during the run, and the state is Rejected; (c) failed: the producer makes no change, so the state is Failed; (d) stale start: before `go`, the test plants `jobs/<id>/work/stale` and `jobs/<id>/target/produce/stale`, and the run still succeeds and the producer sees neither stale file; (e) error escape: the wrapper, for the producer only, deletes `<workdir>/.git` before returning, so a later `snapshot.change_list()?` in candidate_stage returns Err out of produce_and_verify. The test asserts `go` returns Err (not a closed job) and that `work_dir(id)` and `produce_dir(id)` are both gone. Without the guard that exit leaves both behind, because clean_job never runs. Unit tests in crates/athena-core/src/state.rs: dropping a JobWorktree removes both directories and a stale dir is cleared on creation; job_lock_held is true for a job whose lock another handle holds, false when no job.lock exists (and it creates none), and false once released.",
+      "command": "cargo test -p athena-cli --test drain per_job_worktree && cargo test -p athena-core state",
+      "observes": "During the producer, in (a)-(e): workdir == <state>/jobs/<id>/work, `<workdir>/.git` exists, CARGO_TARGET_DIR == <state>/jobs/<id>/target/produce, a different path under the same job directory, empty at start, and no stale file is visible. After `go` returns, for success, rejected and failed, neither `work` nor `target/produce` exists. In (e) `go` returned Err and neither exists. The state.rs drop test also shows both are removed on an early return.",
+      "fails_without": "Without the guard and the fresh-start clearing, the stale `work` and `target/produce` planted before the run are still present when the producer starts (Snapshot::create refuses an existing directory, so the run errors). The `?`-error case leaves both directories behind after `go` returns Err, so its final assertion fails. The state.rs drop test also fails. If no isolated work dir existed, the in-run assertion that the producer's workdir is its own repository root under jobs/<id> fails."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in the tests module of crates/athena-core/src/disk.rs call the pure public functions `Figures::from_latest(Option<&BuildMeasurement>)` and `in_flight_limit(free_bytes, reserve_gb, check_slots, &Figures)` directly. Nothing is faked. A further test builds `BuildMeasurement` values the way status.rs's build_measurement_tests does and calls `BuildMeasurement::latest` on a list of two. The seam is the functions themselves; step 3 adds them. Another test calls `Athena::start_hold` and checks that it reads the pipeline settings and the latest record. It uses a repository whose records contain a measurement and `StateDir::with_free_space` with a fixed fn, as the existing disk.rs tests do.",
+      "command": "cargo test -p athena-core disk",
+      "observes": "Free 60 GB, reserve 10, 1 slot, T 6 GB, S 0.2 GB gives 7 (the design example). A record with T 4 GB and S 1 GB at free 60 GB gives floor((60-10-4)/5) = 9. With two records the figures are the later one's. With no record the figures are exactly 6_000_000_000 and 200_000_000 bytes and the source says 'design estimate'. Free below reserve + slots x T gives 0 (saturating). 2 slots lowers the 7 case to floor((60-10-12)/6.2) = 6. T + S = 0 does not divide by zero.",
+      "fails_without": "A different formula, an ignored record, other fallback constants, or the first record in place of the latest would each change the exact integers asserted below. A limit that is not floor-saturating would fail the below-reserve case."
+    },
+    {
+      "criterion": 3,
+      "method": "New tests in crates/athena-cli/tests/drain.rs (names starting `in_flight_bound_`) call `Athena::go` on a Fixture whose config is test_config() plus `\\n[drain.pipeline]\\nmax_in_flight = 2\\n` (the TOML shape is DrainConfig/PipelineConfig). Defaults are reserve_disk_gb = 10 and max_check_slots = 1. Free space is set per test by `set_free` through the existing `simulated_free`. The other in-flight job is made real: the test creates `jobs/<other>/work/x` and holds `athena.state.try_lock_job(&other)` for the whole call. Both seams exist today. Cases: (a) 25 GB free, so the limit is floor((25-10-6)/6.2) = 1 with one running: `go` returns Err that downcasts to `LowDisk`, the job is still Proposed with no Job record, and the hold marker exists. (b) The lock is released: the same job now runs to Landed. (c) 40 GB: limit 3, min(2,3) = 2 > 1 running, so the job starts and lands. (d) 12 GB (limit 0) with nothing running: not held, lands. (e) the default config (max_in_flight = 1), 25 GB and a running other job: not held, lands as today. (f) Drain level: modelled on the_real_steps_hold_a_job_on_low_disk..., with max_in_flight = 2 and an in-flight job held, `drain::drain` reports outcome 'environment: low disk' with failed_item None and the job still queued. After release, the second drain lands the same job. The existing assertions of drain.rs and lifecycle.rs are not edited and run in the same `cargo test`.",
+      "command": "cargo test --locked",
+      "observes": "The extra start returns a hold, not a failure, and the same job starts later. A lone job and max_in_flight = 1 are not held. The existing drain.rs and lifecycle.rs tests pass with no assertion changed (`git diff` on those files shows only added tests).",
+      "fails_without": "Without start_hold in dispatch, case (a) returns a finished job instead of Err(LowDisk). A hold that fails the job would leave it Closed, which the test rejects. Without the lone-job exemption, case (d) is held. Without the max_in_flight = 1 skip, case (e) is held."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three checks Athena runs, in the order given. The producer runs `cargo fmt --all` first. All run through the real cargo tooling over the workspace.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0 with no new warning, and none of the new tests is #[ignore]d.",
+      "fails_without": "A formatting difference, any clippy warning (for example an unused import or a needless clone in the new code) or any failing test makes the command exit non-zero."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the CHANGELOG.md diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One new entry under `## [Unreleased]` for per-job worktree start. It names the bound floor((free - reserve_disk_gb - max_check_slots x T) / (T + S)). It says T and S are read from the latest `athena.build-measurement/1` record (`athena measure-build`), with 6 GB and 0.2 GB used when none exists. It says that max_in_flight = 1 is unchanged and that a lone job is never held. It says the per-job worktree is the producer's isolated snapshot repository, not a linked `git worktree`, and why (it keeps history and records/ out of the producer's reach).",
+      "fails_without": "Not applicable (content criterion)."
+    },
+    {
+      "criterion": 6,
+      "method": "List the changed paths.",
+      "command": "git diff --stat",
+      "observes": "Only crates/athena-core/src/{run/mod.rs,run/producer.rs,disk.rs,state.rs}, crates/athena-cli/tests/drain.rs, docs/design/async-drain.md and CHANGELOG.md. There is nothing under athena.toml, defaults.toml, .github/workflows or records/, not crates/athena-data/src/config.rs, and not run/tests.rs.",
+      "fails_without": "Not applicable (content criterion)."
+    }
+  ],
+  "open_questions": [
+    "The brief says 'real git worktree' and the reading says `git worktree add/remove`. This plan keeps the producer's isolated snapshot repository (not shown by `git worktree list`) because a linked worktree would expose history and records/ to the producer. Does the user want a literal linked worktree? That is a larger change to the producer's isolation and needs its own job.",
+    "The reading says a bound that allows zero in-flight jobs holds the start. This plan holds only when another job is in flight (or max_in_flight > 1 and the bound is full), because a held lone job can never clear and would change today's behavior on small disks. Confirm that is acceptable.",
+    "Nothing runs more than one producer yet (job 10), so the hold is only reachable with several drain workers or processes. The tests make the other in-flight job by hand with a planted work dir and a held job lock.",
+    "Whether the `[drain.pipeline]` block can simply be appended to test_config() was not confirmed. It works only if test_config() has no `[drain]` table already (a duplicate table would be a TOML error). The producer checks this first.",
+    "Whether the sabotage in case (e) (the fake producer deleting its own `.git`) makes `go` return Err rather than close a Failed job was not run. The producer must confirm, and if not, choose another post-producer `?` point."
+  ],
+  "producer_section_sha256": "2a422dd7638a04edc623db8c00cc7038a50c717cafbe4c7252983a239518ac3d"
+}

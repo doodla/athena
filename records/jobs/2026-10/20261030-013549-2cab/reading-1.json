@@ -1,0 +1,162 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-013549-2cab",
+  "n": 1,
+  "at": "2026-10-31T01:07:25.741533192Z",
+  "invocation_seq": 1,
+  "base_commit": "75f14845ef786fdd8e97d3b1d40048742442d58a",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Create and remove a per-job worktree and target dir with a disk bound",
+  "summary": "Build job A4 (D145, section 5): each job gets its own git worktree and CARGO_TARGET_DIR, created at producer start and removed when the job ends. The number of jobs allowed in flight is capped by a disk bound computed from the latest measured T and S (job A1's measurement record from 20261029-210827-18fc), with max_in_flight = 1 unchanged. The audience is Sri and the drain verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Tests for worktree lifecycle and the bound; fmt, clippy, test criterion."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria run through cargo test."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check dirs created and removed, and the computed limit."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to run and disk modules."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and changelog written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/disk.rs (guard, sweep_idle_targets, CargoBuilder, measure_build, BuildMeasurement use), crates/athena-core/src/run/mod.rs (Athena::go -> go_with_stages, the real entry point; kept_work_dir), crates/athena-core/src/run/producer.rs (producer_snapshot uses StateDir::work_dir, jobs/<id>/work), crates/athena-data/src/config.rs (PipelineConfig max_in_flight, reserve_disk_gb = 10). The disk bound formula is design section 5: in_flight = floor((free_gb - reserve_disk_gb - max_check_slots x T) / (T + S)). T and S come from the latest athena.build-measurement/1 record; with none, the design estimates T about 6 GB, S about 0.2 GB are used. No new record type or data file is added, so the records allow-list (check_record_file, AnyRecord round-trip) is not touched.",
+    "Job 20261030-013143-as0j (A3, in-flight table) landed and is kept as is. The worktree it records is StateDir::work_dir; this job makes that directory a real git worktree and removes it. Its minor finding (a moved row keeps the stage verifier) and its nit (section number) are not in this job's files and stay out of scope.",
+    "Job 20261029-142844-ynv3 (A1, rejected, no numbers measured) is dropped: its docs-only candidate changed CHANGELOG.md, docs/decisions.md and docs/design/async-drain.md and none of it is redone here. Its need for numbers was met by 20261029-210827-18fc (landed, kept as is), whose `athena measure-build` writes the T and S record this job reads. Its minor findings (extra store.rs, display.rs and test files; sccache stats not isolated) are not touched. If no record exists the bound uses the labelled design estimates.",
+    "Worktree creation and removal run through git worktree add/remove on the state directory path jobs/<id>/work with a per-job CARGO_TARGET_DIR; removal also runs on failure and when a job ends, so a finished job leaves neither directory.",
+    "With max_in_flight = 1 the drain runs as today, existing drain tests unchanged. Only a bound that would allow zero in-flight jobs on a small disk is applied, and it holds the start rather than failing the job."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test through Athena::go (the real entry point) shows a job's producer runs in a fresh git worktree with its own target directory under the job's state directory, and that after the job ends both directories are gone, on success and on a failed or rejected job. Run: cargo test -p athena-core -p athena-cli.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test in crates/athena-core/src/disk.rs shows the in-flight limit equals floor((free_gb - reserve_disk_gb - check_slots x T) / (T + S)) using T and S from the latest build-measurement record, and that with no record the design estimates (6 GB, 0.2 GB) are used. Run: cargo test -p athena-core disk.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that when the bound allows fewer in-flight jobs than max_in_flight, the extra start waits rather than failing, and that with max_in_flight = 1 behavior is unchanged and the existing tests in crates/athena-cli/tests/drain.rs and lifecycle.rs pass without edits to their assertions. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for per-job worktree start naming the disk bound and the source of T and S.",
+      "kind": "content"
+    },
+    {
+      "text": "The diff changes no file under athena.toml, defaults.toml, .github/workflows or records/, and does not change crates/athena-data/src/config.rs.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Running more than one producer at once or raising max_in_flight above 1 (build job 10)",
+    "Rebase at landing time, check slots, read-ahead, conflict return",
+    "Acting on leftover in-flight rows (recovery)",
+    "Fixing A3's moved-row stage finding or A1/measure-build findings",
+    "Changes to athena.toml, defaults.toml, .github/workflows, crates/athena-data/src/config.rs",
+    "Re-running or changing the build measurement itself"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 3800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7206434316353888,
+      "p_verification_passes": 0.6759259259259259,
+      "p_user_intervenes": 0.07853107344632769,
+      "cost_usd": {
+        "p10": 0.5411724548206036,
+        "p50": 1.2174350548463726,
+        "p90": 3.1230566849815506
+      },
+      "wall_time_s": {
+        "p10": 536.6753604381123,
+        "p50": 1716.4426109560002,
+        "p90": 3577.689263089882
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass chance than reference: worktree lifecycle touches the run pipeline and the prior A3 attempts were rejected twice.",
+  "hard_reason": "Changes the run pipeline (how a job's producer work tree is created and removed) and adds a disk limit that can hold job starts.",
+  "producer_effort": "high"
+}
