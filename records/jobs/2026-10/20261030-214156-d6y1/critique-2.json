@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-214156-d6y1",
+  "round": 2,
+  "at": "2026-10-31T13:10:44.073534301Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/capability.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/capability.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/admission.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/admission.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run_pin_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run_pin_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Calling check_budget in JobConfig::at swaps the drain's typed BudgetShort hold for a generic ConfigError. A short budget then counts as a failure, which brings back the failure class.",
+      "evidence": "drain.rs:2938-2940 (read) sets `held` only when `error.downcast_ref::<BudgetShort>()` matches, and drain.rs:2978-2984 only adds the BUDGET_SHORT reason for BudgetShort. drain.rs:2789 and main.rs:1146 (`drain` max_concurrency) also call JobConfig::at. With the plan, drain errors out at start, or each read or go fails with a non-BudgetShort error that is not held. The plan's own step 7 changes the run_pin test downcast from BudgetShort to ConfigError, which admits the error type changes for callers. Fix: Keep JobConfig::at structural. Enforce the budget where config changes come in (the admission.rs candidate check), and for running work rely on the existing preflight(Admission, 0.0) at reading.rs:976/1043, which already returns BudgetShort. If a load-time check is wanted on job paths, have it return BudgetShort, or make drain hold on BudgetBelowReserve too. drain.rs is out of scope, so prefer the first option.",
+      "location": "Decision 1 / Files: crates/athena-core/src/capability.rs (JobConfig::at)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "JobConfig::at is not just the job-start path. It is also the loader for recovery and admin commands, which a short budget at head would then block.",
+      "evidence": "Grep (run) shows JobConfig::at callers in manage.rs:100 (`close`), :316 (`intervene`), :450 (`restart`), plus introspect.rs:1339, hestia.rs:1521/1647/1857, steward.rs:1062, auditor.rs:337, audience.rs:236, pin.rs:414 and proposals.rs:554. A head with a short job_usd can still arrive through a commit that skips admission, for example a manual push, or a candidate with schema_changed, which the plan's open question says skips the check. Then `athena close` or `restart` fail too, and no Athena job can fix athena.toml. Fix: Do not put the check in the shared loader. Apply it only at admission of an athena.toml change (admission.rs:446). Leave running-job refusal to preflight, which already compares job_usd with the full Admission reserve before any spend.",
+      "location": "Decision 1: 'JobConfig::at, the single load path for every job command'",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The end-to-end demonstration does not discriminate. The base tree already refuses this case before the reader runs.",
+      "evidence": "reading.rs:1043 (read) calls `self.preflight(&jc, 0.0, ReserveStage::Admission)?` in the ask path. preflight (reading.rs:410-423) refuses when budget_reserve(Admission) > job_usd, and for the 8.00 planned config the reserve is 10.00. The existing test already asserts zero driver invocations with BudgetShort (run_pin_tests.rs:916). Without the new call, ask still refuses with zero invocations. Only the error type differs. Fix: Remove the claim. Demonstrate the new mechanism where it adds something the base lacks: an admission.rs test in which a candidate edits athena.toml to a short job_usd and gets a 'configuration' violation, failing when the check is removed. BASE_CONFIG fixtures exist at ~742. Make this case required, not 'if cheap' (step 6).",
+      "location": "Demonstrations, Criterion 5: 'Fails without the behavior: Without the JobConfig::at call, ask reaches the reader (driver count 1)'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Folding the budget error into the existing `problem` text yields the message 'athena.toml does not parse: [budget] job_usd ...', which is false for a file that parses.",
+      "evidence": "admission.rs:450-455 (read) formats every problem as `{path} does not parse: {problem}. Repair it: remove or correct the offending field so the file parses`. Fix: Push a separate violation for the budget, with its own text, e.g. 'athena.toml job_usd is below the configured stage caps: ...; raise job_usd or lower a cap'.",
+      "location": "Step 6 / admission.rs:454",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The root-cause framing overstates what this change adds. 'Admitted and spend before it found it was short' was already fixed by preflight in the base tree.",
+      "evidence": "preflight runs at admission (reading.rs:976, 1043), at dispatch (run/mod.rs:775), per round (planning.rs:114, 273) and before the run (mod.rs:943). The reading itself says so. Fix: In the CHANGELOG, say the new piece is refusing an unaffordable athena.toml at the point it enters the repository (admission of config changes). Runtime preflight remains the guard for running jobs.",
+      "location": "Approach / CHANGELOG criterion 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code with Read and Grep; nothing was run. The config.rs helpers (one sum of the caps that budget_reserve reuses), the typed BudgetBelowReserve error, and keeping Config::parse structural so history walks still work are all sound, and the criterion 2–4 tests parse real TOML. The problem is where check_budget is called. JobConfig::at is the shared loader for drain, close, intervene, restart, introspect, hestia, steward and others, not only for job starts. Putting the check there swaps the BudgetShort error that drain uses to hold a job (drain.rs:2938, 2978) for a ConfigError. Drain would then count a short-budget job as a failure, which is the failure class this job is meant to prevent, and recovery commands would fail at a bad head. The criterion 5 'fails without' claim is also false: the base tree's preflight(Admission, 0.0) at reading.rs:1043 already refuses the 8.00 config with zero driver invocations. The fix: keep JobConfig::at unchanged, enforce check_budget at the admission.rs candidate-config check with its own violation text, and require an admission test that fails without it. That also drops the capability.rs and run_pin_tests.rs edits."
+}

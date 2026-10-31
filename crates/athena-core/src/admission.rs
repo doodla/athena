@@ -440,10 +440,19 @@ fn admit_without_secrets(input: &AdmissionInput<'_>) -> Result<Vec<PolicyViolati
             continue;
         };
         let text = String::from_utf8_lossy(&bytes);
+        let mut budget_problem = None;
         let problem = if schema_changed {
             None
         } else if path == CONFIG_PATH {
-            Config::parse(&text).err().map(|e| e.to_string())
+            match Config::parse(&text) {
+                // A file that parses must also leave the job budget able to cover every stage's caps, or
+                // each job started under it would stop for budget before any code is written.
+                Ok(config) => {
+                    budget_problem = config.check_budget().err().map(|e| e.to_string());
+                    None
+                }
+                Err(e) => Some(e.to_string()),
+            }
         } else {
             DefaultsModel::parse(&text).err().map(|e| e.to_string())
         };
@@ -452,6 +461,13 @@ fn admit_without_secrets(input: &AdmissionInput<'_>) -> Result<Vec<PolicyViolati
                 "configuration",
                 Some(path),
                 format!("{path} does not parse: {problem}. Repair it: remove or correct the offending field so the file parses"),
+            ));
+        }
+        if let Some(problem) = budget_problem {
+            violations.push(violation(
+                "configuration",
+                Some(path),
+                format!("{path} job_usd is below the configured stage caps: {problem}"),
             ));
         }
     }
@@ -837,6 +853,23 @@ mod tests {
         assert!(found[0].detail.contains("does not parse"), "{found:?}");
         assert!(found[0].detail.contains("bogus"), "{found:?}");
         assert!(found[0].detail.contains("Repair it"), "{found:?}");
+    }
+
+    #[test]
+    fn a_job_usd_below_the_stage_caps_is_a_configuration_violation() {
+        let text = BASE_CONFIG.replace("job_usd = 12.00", "job_usd = 9.00");
+        assert_ne!(text, BASE_CONFIG, "athena.toml sets job_usd = 12.00");
+        let found = configuration(admit_files(&[("athena.toml", &text)]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].path.as_deref(), Some("athena.toml"));
+        let detail = &found[0].detail;
+        assert!(detail.contains("[budget] job_usd"), "{detail}");
+        assert!(detail.contains("$1.00 short"), "{detail}");
+        assert!(detail.contains("raise job_usd or lower a cap"), "{detail}");
+        assert!(!detail.contains("does not parse"), "{detail}");
+        // The shipped budget, and the same file edited, are not refused.
+        let edited = format!("# edited\n{BASE_CONFIG}");
+        assert!(configuration(admit_files(&[("athena.toml", &edited)])).is_empty());
     }
 
     #[test]

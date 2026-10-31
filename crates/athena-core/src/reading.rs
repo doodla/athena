@@ -75,27 +75,25 @@ pub enum ReserveStage {
 /// read from `config`, so a changed cap in athena.toml changes the reserve with no code change. Each planning
 /// round is a planner call and a critic call, up to `[job_plan] max_rounds` of them.
 pub fn budget_reserve(config: &athena_data::Config, stage: ReserveStage) -> f64 {
-    let budget = &config.budget;
-    let after = budget.producer_usd + budget.verifier_usd;
-    let (planner, critic, max_rounds) = config.job_plan.map_or((0.0, 0.0, 0), |p| {
-        (p.planner_usd, p.critic_usd, p.max_rounds)
-    });
-    let rounds = |n: u32| f64::from(n) * (planner + critic);
+    // Every sum of caps comes from `Config`, which `Config::check_budget` also uses: one place to change.
+    let max_rounds = config.job_plan.map_or(0, |p| p.max_rounds);
+    let after = config.run_usd();
     match stage {
-        ReserveStage::Admission => {
-            let planning = if config.job_plan.is_some_and(|p| p.enabled) {
-                rounds(max_rounds)
+        ReserveStage::Admission => config.budget_required(),
+        ReserveStage::Dispatch { planned } => {
+            let planning = if planned {
+                config.planning_usd(max_rounds)
             } else {
                 0.0
             };
-            budget.reader_usd + planning + after
-        }
-        ReserveStage::Dispatch { planned } => {
-            let planning = if planned { rounds(max_rounds) } else { 0.0 };
             planning + after
         }
-        ReserveStage::Planner { round } => rounds(max_rounds.saturating_sub(round) + 1) + after,
-        ReserveStage::Critic { round } => critic + rounds(max_rounds.saturating_sub(round)) + after,
+        ReserveStage::Planner { round } => {
+            config.planning_usd(max_rounds.saturating_sub(round) + 1) + after
+        }
+        ReserveStage::Critic { round } => {
+            config.critic_usd() + config.planning_usd(max_rounds.saturating_sub(round)) + after
+        }
         ReserveStage::Run => after,
     }
 }
@@ -3664,6 +3662,9 @@ mod tests {
         assert!(close(reserve, 10.0), "{reserve}");
         // The shipped job budget of 12.00 covers it; the recorded 8.00 is $2.00 short.
         assert!(config.budget.job_usd >= reserve);
+        // The config-load check and the runtime reserve are one sum, and the shipped file passes the check.
+        assert!(close(config.budget_required(), reserve));
+        assert!(config.check_budget().is_ok());
         let short = BudgetShort {
             left: 8.0,
             job_usd: 8.0,
@@ -3723,6 +3724,38 @@ mod tests {
         // With planning off, admission is the reader, the producer and the verifier.
         config.job_plan = None;
         assert!(close(budget_reserve(&config, ReserveStage::Admission), 6.5));
+    }
+
+    #[test]
+    fn required_budget_follows_the_configured_caps() {
+        let base = shipped_config();
+        let required = |c: &athena_data::Config| {
+            let need = c.budget_required();
+            assert!(close(need, budget_reserve(c, ReserveStage::Admission)));
+            need
+        };
+        let before = required(&base);
+        let rounds = f64::from(base.job_plan.unwrap().max_rounds);
+
+        // A dearer planner raises the requirement by one dollar a round, with no other change.
+        let mut dearer = base.clone();
+        dearer.job_plan.as_mut().unwrap().planner_usd += 1.0;
+        assert!(close(required(&dearer), before + rounds));
+
+        // One more round adds one planner call and one critic call.
+        let mut longer = base.clone();
+        longer.job_plan.as_mut().unwrap().max_rounds += 1;
+        let pair = base.job_plan.unwrap().planner_usd + base.job_plan.unwrap().critic_usd;
+        assert!(close(required(&longer), before + pair));
+
+        // The check follows: a budget a cent under the new requirement is refused, exactly it is accepted.
+        for changed in [&mut dearer, &mut longer] {
+            let need = required(changed);
+            changed.budget.job_usd = need - 0.01;
+            assert!(changed.check_budget().is_err());
+            changed.budget.job_usd = need;
+            assert!(changed.check_budget().is_ok());
+        }
     }
 
     /// A valid reading of one README deliverable, with the given forecast median wall time (seconds).

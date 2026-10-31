@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-214156-d6y1",
+  "round": 1,
+  "at": "2026-10-31T13:08:14.490571822Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run_pin_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run_pin_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "blocker",
+      "summary": "Putting the budget check in validate makes the history check fail on real past commits whose athena.toml had job_usd 8.00 with planning enabled.",
+      "evidence": "check_history_with_exempt walks rev_list_reverse(tip) from the root. Judged::new calls config_at on each commit's parent, which runs Config::parse, and any GateError::Config becomes a Rule::Configuration violation (lib.rs:340, history.rs:239-242). HISTORY.txt line 76: '6f0ddf1 Raise job_usd budget from 8.00 to 12.00'. run_pin_tests.rs:891-893 says the shipped caps needed 10.00 against the recorded 8.00. invariant.rs:815 also parses parent configs with .ok(), so trailers_stopped would return false for those commits. The plan's open question 2 notices old configs but not this effect, and no demonstration exercises the real history. Fix: Keep validate for structural checks. Add a separate Config::check_budget() (or similar) that returns BudgetBelowReserve, and call it where a config is used to run jobs (when Athena loads the config to run agents, i.e. at admission and dispatch) and where a proposed athena.toml change is judged (admission.rs:446, athena-gate/src/content.rs:99), so no commit can introduce an unaffordable budget. Add a test that an 8.00 config with the shipped planning caps still passes Config::parse but is refused by the budget check. Point the criterion 3 test at the new function or at the load path that runs it.",
+      "location": "Plan decision 1 / step 3: check in Config::validate; crates/athena-gate/src/history.rs:235-242, crates/athena-gate/src/lib.rs:178-191, 294-297, 340",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The Grep for hand-written cap sums would also match existing test code.",
+      "evidence": "crates/athena-data/src/config.rs:746-749 (the_repository_budget_covers_two_reading_and_two_planning_rounds) and crates/athena-core/src/reading.rs:3692 both add producer_usd + verifier_usd by hand in tests. Fix: Say that the search covers non-test code only, or switch those tests to the new helper.",
+      "location": "Demonstration for criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'Re-serialise the edited TOML text' is vague about how the text is built and which call refuses it.",
+      "evidence": "The plan edits the parsed Config struct and then speaks of re-serialising TOML. Config is Serialize, but serialising it may not round-trip through parse exactly. Fix: Build the text with String::replace on the shipped lines (for example planner_usd = 0.75 and job_usd = 12.00), and assert that the budget check refuses it at 0.01 under the requirement and accepts it at exactly the requirement.",
+      "location": "Demonstration for criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "With the check moved out of validate, the 8.00 fixture would still load and could be refused when the job is admitted, so this edit may become unnecessary or much smaller.",
+      "evidence": "run_pin_tests.rs:890-924 expects BudgetShort from Athena::ask. Under the fix it would get BudgetBelowReserve from the admission load check instead. Fix: Recheck whether the edit is needed after moving the check, and limit it to the error-type assertion.",
+      "location": "Files: crates/athena-core/src/run_pin_tests.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan's design is right: one shared Config sum of the stage caps, reused by budget_reserve, plus a check where the budget is defined. But it puts the check inside Config::validate, and that function is also used to re-parse the athena.toml of every past commit. check_history walks the whole history (crates/athena-gate/src/history.rs:235-242). Judged::new parses each parent's config through config_at, and a parse error becomes a Rule::Configuration violation (crates/athena-gate/src/lib.rs:294-297, 340). HISTORY.txt shows commit 6f0ddf1 raised job_usd from 8.00 to 12.00. The run_pin_tests comment says the shipped planning caps needed 10.00 against that 8.00. So every older commit that sits on an 8.00 config would now fail the history check, and trailers_stopped (invariant.rs:815) would quietly treat those configs as unreadable. The plan names this risk only as an open question, and none of its demonstrations would catch it. The budget check should be its own function, called where a config is loaded to run jobs and where a proposed athena.toml change is judged, not inside the structural validate that history depends on. Fixtures I read (job_plan.rs:80 and 148, run_pin_tests.rs:866, run/tests.rs:269) all still pass the new check, with the 1e-9 tolerance covering run_pin_tests.rs:866, which sits exactly at its reserve (2.60). Demonstrations otherwise name real seams and would fail without the change."
+}
