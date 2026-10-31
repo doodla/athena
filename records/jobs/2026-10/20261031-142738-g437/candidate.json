@@ -1,0 +1,111 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261031-142738-g437",
+  "base_commit": "9e111804289676d4a53411251a228328041050cd",
+  "base_fingerprint": "sha256:9155c5d6ad481e77a0a254e8f3c18fc02a339f73a0d3ecdfe631c81872f962f8",
+  "previous_job": "20261030-214156-d6y1",
+  "candidate_commit": "0188fe1244e049c862b904bcb4520fe63081f51e",
+  "candidate_tree": "d3168539465b8788e6e3a836ca74adafe3ca9e6c",
+  "changes": [
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31285
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 116519
+    }
+  ],
+  "fingerprint": "sha256:bc71f1bc1913e08937a23682bc8e89b032364c2a5da41dbea7552834ebf18838",
+  "violations": [],
+  "producer_report": {
+    "summary": "The CI result fetch now reads only the `push` run on the job's CI branch, and takes its verdict from the aggregate `fmt, clippy, tests` job. A newer `pull_request` run for the same SHA can no longer be returned.\n\n**What changed, all in gh/client.rs:**\n- `pick_ci_run(runs, branch)` keeps only runs named `ci` with event `push` and `head_branch == branch`, then takes the newest. Its doc comment says which run is trusted and why, without claiming that a `pull_request` run tests a merge with main.\n- `parse_ci_run(runs, jobs, branch)` uses that pick. `CI_CHECK_STEP` is gone.\n- With a jobs reply, the verdict comes from the job `fmt, clippy, tests`:\n  - A successful aggregate job gives three `success` steps, also when the check jobs were skipped.\n  - A failed aggregate job gives red only if a job `fmt`, `clippy` or `test (..)` itself failed, and each step then takes its own job's result. Otherwise, such as a cancelled check job or a failed gate, the conclusion is `unusable`, so `resolve` falls back to local checks.\n  - Any other aggregate conclusion is kept as is, with no steps.\n  - A `history`-only failure does not matter.\n- `GhClient::ci_source(branch)` returns a `CiBranchSource` that implements `CiSource`. Its runs query is `actions/runs?head_sha=..&event=push&branch=..&per_page=20`, and it reads `actions/runs/<id>/jobs?filter=latest&per_page=100` for the chosen run on each fetch.\n- The unfiltered `impl CiSource for GhClient` is removed.\n\n**Tests, in gh/tests.rs:** I updated the existing parser test and added four. They use a recording `CiRunner` fake that answers by path, and a local-checks fake with a call counter.\n- `ci_push_run_wins_over_newer_pull_request_run`\n- `ci_push_run_ignores_other_events_and_branches`\n- `ci_push_run_query_names_event_and_branch`\n- `ci_push_run_verdict_comes_from_the_aggregate_job`\n\n**Checks:** fmt, clippy, `cargo test -p athena-core gh` and the policy scan pass. I did not run the full `cargo test`.",
+    "files": [
+      "crates/athena-core/src/gh/client.rs",
+      "crates/athena-core/src/gh/tests.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core gh",
+        "result": "pass",
+        "note": "95 unit tests passed, including the four new ci_push_run_* tests and the updated ci run test; ran again after the last edit"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean after cargo fmt --all"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean; first run showed a missing Debug warning on CiBranchSource, fixed before this run"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed, including the banned-word scan"
+      },
+      {
+        "command": "Grep CI_CHECK_STEP crates",
+        "result": "pass",
+        "note": "no match"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core gh`. A new fixture test has two runs for the same SHA, a `pull_request` run with the newer created_at and a different conclusion, and a `push` run on `athena/ci/<job id>`. It shows that only the push run's result is returned.",
+        "status": "met",
+        "evidence": "ci_push_run_wins_over_newer_pull_request_run in gh/tests.rs. A newer failed pull_request run and an older green push run give the push run's address, conclusion success and three success steps, through both parse_ci_run and ci_source(..).fetch. The jobs request names the push run's id. The reverse case (newer green pull_request, red push) returns the red push run. Passes in `cargo test -p athena-core gh`."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core gh`. A new test where only a `pull_request` run exists, or a push run exists on another branch, shows that the source returns no result (None), so `resolve` reports it missing and never uses that run.",
+        "status": "met",
+        "evidence": "ci_push_run_ignores_other_events_and_branches in gh/tests.rs. Three cases (pull_request only, push on another job's branch, push on main) each have a canned green run whose reply ignores the query. parse_ci_run gives None and fetch gives Ok(None), with no jobs read. resolve then returns Failed with Source::Local, and the local fake was called once. Passes."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core gh`. A new test shows that the HTTP path built by the CI source includes `event=push` and the branch name. Use the recording transport in gh/tests.rs if present, or assert on the built query.",
+        "status": "met",
+        "evidence": "ci_push_run_query_names_event_and_branch in gh/tests.rs. The recorded runs path starts with repos/example/project/actions/runs? and holds head_sha=<sha>, event=push and branch=athena/ci/20261031-142738-g437. The second call is actions/runs/10/jobs?filter=latest&per_page=100. Passes."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core gh`. A new fixture test shows that a failed aggregate `fmt, clippy, tests` job gives red steps, and a successful one gives green steps for all three check names. The current behaviour of copying the `cargo fmt --check` step to all three checks is gone (Grep for `CI_CHECK_STEP` in client.rs).",
+        "status": "met",
+        "evidence": "ci_push_run_verdict_comes_from_the_aggregate_job in gh/tests.rs. A failed aggregate job with a failed clippy job gives failure, clippy failure, fmt and test success. A failed aggregate job with a failed fmt job gives red. A failed shard gives a red test step. A successful aggregate job gives success and steps fmt, clippy, test all success, also with skipped check jobs. A cancelled check job or a failed gate under a failed aggregate job gives `unusable`, and resolve then runs the local fallback. A history-only failure is still success. Cases for an aggregate in progress, cancelled, missing, or a lone `fmt` job are covered. Grep of crates/ for CI_CHECK_STEP finds nothing. Passes."
+      },
+      {
+        "criterion": "crates/athena-core/src/gh/client.rs filters runs on `event` and `head_branch`. The other changed files are crates/athena-core/src/gh/tests.rs and, only if needed, ci_result.rs call sites. No change appears in run/mod.rs, ci.yml, athena.toml or CHANGELOG.md.",
+        "status": "met",
+        "evidence": "pick_ci_run in client.rs filters name == ci, event == push and head_branch == branch. The only files edited are crates/athena-core/src/gh/client.rs and crates/athena-core/src/gh/tests.rs. ci_result.rs needed no call-site change, since no caller used GhClient as a CiSource. run/mod.rs, ci.yml, athena.toml and CHANGELOG.md are untouched."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran cargo fmt --all --check and cargo clippy --all-targets --locked -- -D warnings (both clean), plus cargo test -p athena-core gh and cargo test -p xtask --test policy (both pass). I did not run the full cargo test."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan: a run that is not yet completed and has no aggregate job in its jobs reply gives finished=false with an empty conclusion, not `unusable`. A run that is completed with no aggregate job still gives `unusable`. Reason: a run that has just started may not list the job yet, and `unusable` there would end the wait early.",
+      "CHANGELOG.md and ci_result.rs are in the expected deliverables but left unchanged: criterion 5 says no CHANGELOG.md change, and ci_result.rs needed no call-site change. The changelog entry belongs to follow-up C.",
+      "The push-only rule is kept per the reading, but ci.yml now runs pull_request checks on the PR head SHA, so the earlier reason (a merge with main) no longer holds in this repository. The doc comment does not claim it. Whether an exact-SHA pull_request run should also be accepted is for the user to decide.",
+      "A failed aggregate job where no job named `fmt`, `clippy` or `test (` failed reads as `unusable` (safe: local fallback). If ci.yml renames those jobs, the CI speedup is lost until the names here follow.",
+      "fetch reads the jobs reply on every poll once a run exists; the follow-up that adds the wait should decide whether that rate is acceptable.",
+      "The branch is put in the query unencoded; job ids are digits, lowercase letters and hyphens, so this is fine for `athena/ci/<job id>`.",
+      "I did not run the full `cargo test`; Athena runs it."
+    ],
+    "mistakes": [
+      "The first build warned that CiBranchSource has no Debug. I added a manual impl before the final clippy run."
+    ],
+    "learnings": [
+      "ci.yml pins every check job's checkout to the pull request head SHA, so in this repository a pull_request run tests the candidate's head tree. The push-only rule rests on the reading, not on that claim.",
+      "CiBranchSource needed a manual Debug impl: the crate warns on missing Debug implementations, and clippy runs with warnings denied.",
+      "GhClient is only built through GhClient::new in tests, and nothing outside client.rs used it as a CiSource, so removing that impl broke no caller."
+    ],
+    "desires": [
+      "A way to read ci.yml job status semantics from the platform, to check that an aggregate job is created before the check jobs start."
+    ]
+  }
+}
