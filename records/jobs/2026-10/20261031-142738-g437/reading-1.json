@@ -1,0 +1,149 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-142738-g437",
+  "n": 1,
+  "at": "2026-10-31T14:28:35.762428503Z",
+  "invocation_seq": 2,
+  "base_commit": "8087646d3894c45b6d5fca8692980950510ebd95",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make the CI result fetch read only the push run on the job's CI branch",
+  "summary": "Retry of job 20261031-001542-anbv, cut to its first slice so one run can finish. Change only the GitHub CI result fetch (`parse_ci_run` and the `CiSource` impl in gh/client.rs, plus tests in gh/tests.rs) so it returns just the `push` run on branch `athena/ci/<job id>`, read from the aggregate `fmt, clippy, tests` job. The goal is a trustworthy exact-tree CI result for the Athena maintainer; wiring it into the run is a follow-up.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The change and its tests are Rust in crates/athena-core."
+    },
+    {
+      "id": "tested",
+      "how": "New tests cover the filter; fmt, clippy and the full test suite must pass."
+    },
+    {
+      "id": "small",
+      "how": "One focused slice of the request; the rest is named in out_of_scope as follow-ups."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run fixture tests with competing runs, not just check that code exists."
+    },
+    {
+      "id": "root-cause",
+      "how": "The parser and source are fixed, not just the one call site."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo commands the verifier can run."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments on the changed functions state which run is trusted and why."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261031-001542-anbv failed in planning (round 3 of 3) and its candidate changed no files, so none of its work is kept. Its major finding (the newest `ci` run may be a pull_request run that tests a merge with main) is fixed in this slice by selecting only event `push` on branch `athena/ci/<job id>`. Its minor finding that the reread path calls `self.dispatch` from inside `dispatch` does not apply yet, because this slice does not touch dispatch; it moves to the follow-up that wires the run. Its six scope findings are resolved by listing gh/tests.rs here and moving the run/* files and gh/early.rs to follow-ups.",
+    "Code survey: crates/athena-core/src/gh/client.rs. `parse_ci_run` (about line 519) picks the newest run named `ci` by created_at with no event or branch filter. It copies the conclusion of the one step starting with `cargo fmt --check` to all three checks. `impl CiSource for GhClient::fetch` (about line 570) queries `actions/runs?head_sha=..&per_page=20`. crates/athena-core/src/ci_result.rs: `CiSource::fetch(&self, sha)` and `resolve` check only `run.sha == sha`. .github/workflows/ci.yml has an aggregate job `ci` named `fmt, clippy, tests` (about line 400) next to the separate fmt, clippy and test jobs. No record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are unaffected. The property is measured directly by feeding fixture JSON for both runs to the parser and the source.",
+    "The branch is passed by a new constructor or wrapper, for example `GhClient::ci_source(branch)`, so the `CiSource` trait signature stays unchanged. It adds `&event=push&branch=<branch>` to the runs query, and the parser also filters `event == push` and `head_branch == branch` as a second guard.",
+    "Kept to one producer run: no governance file, workflow, athena.toml or prompt change. This is not a refusal rule, so no refusal-rate criterion applies."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-core gh`. A new fixture test has two runs for the same SHA, a `pull_request` run with the newer created_at and a different conclusion, and a `push` run on `athena/ci/<job id>`. It shows that only the push run's result is returned.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core gh`. A new test where only a `pull_request` run exists, or a push run exists on another branch, shows that the source returns no result (None), so `resolve` reports it missing and never uses that run.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core gh`. A new test shows that the HTTP path built by the CI source includes `event=push` and the branch name. Use the recording transport in gh/tests.rs if present, or assert on the built query.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core gh`. A new fixture test shows that a failed aggregate `fmt, clippy, tests` job gives red steps, and a successful one gives green steps for all three check names. The current behaviour of copying the `cargo fmt --check` step to all three checks is gone (Grep for `CI_CHECK_STEP` in client.rs).",
+      "kind": "behavior"
+    },
+    {
+      "text": "crates/athena-core/src/gh/client.rs filters runs on `event` and `head_branch`. The other changed files are crates/athena-core/src/gh/tests.rs and, only if needed, ci_result.rs call sites. No change appears in run/mod.rs, ci.yml, athena.toml or CHANGELOG.md.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "p": 0.93
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    }
+  ],
+  "out_of_scope": [
+    "Follow-up request A: wire `resolve` and `run_routed` into the run in run/mod.rs, replacing `NoCi`. This covers the verifier reuse statement, the CI wait bound in athena.toml and config.rs, and the local fallback.",
+    "Follow-up request B: push `athena/ci/<job id>` after admission and delete it at close (athena-git, run/mod.rs, and the reread path calling `dispatch` recursively so the delete runs once). This also covers run/ci.rs, run/verification.rs, run/ci_tests.rs, run/tests.rs and gh/early.rs.",
+    "Follow-up request C: make .github/workflows/ci.yml run on `athena/ci/**` pushes, update docs/design/ci-routing.md section 10 items 4 and 5 and the 'either run serves' text, and add the CHANGELOG.md entry.",
+    "Changing what the CI workflow checks, giving the producer GitHub access, or making real network calls in tests.",
+    "Files the failed job's candidate changed: none were recorded, so nothing is kept or dropped."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.7,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 0.9,
+        "p90": 2.2
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1200.0,
+        "p90": 2200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.718716577540107,
+      "p_verification_passes": 0.6696696696696697,
+      "p_user_intervenes": 0.09209809264305176,
+      "cost_usd": {
+        "p10": 0.5299694692271771,
+        "p50": 1.2311548449900849,
+        "p90": 3.3528818083139775
+      },
+      "wall_time_s": {
+        "p10": 529.0420783129066,
+        "p50": 1719.1836763963308,
+        "p90": 3694.7716192129883
+      }
+    }
+  },
+  "departures": "Median wall time is below the reference because the scope is cut to one small slice, and it stays under verifier_timeout_s of 2400s.",
+  "hard_reason": "This changes which external CI record the gate that judges jobs will trust, so a mistake would silently accept or reject work on the wrong tree.",
+  "producer_effort": "high"
+}
