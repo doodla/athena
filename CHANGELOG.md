@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Low disk space after a job's candidate is built no longer ends the job `failed`. Cause: the two late disk
+  gates (before the checks, before the verifier) closed the job with an `environment: low disk` reason that
+  told a person to run `athena retry`, so a full disk counted as a failed attempt for the drain, introspection,
+  failure classes and the scope guard. Fix (hold-and-auto-resume): at both gates the job is held, not closed.
+  Its records are committed with no score and no outcome, a hold marker records the free and required
+  amounts, and `go` returns the low-disk hold. The job stays dispatched with no process, so `athena status`
+  shows it as interrupted with its reason and amounts, and nothing counts it as a work failure. The next drain
+  pass resumes it from its kept candidate by itself (one new job, one reader call, no planner or producer run)
+  and uses no drain attempt; space that stays short holds it again. Idle build directories are still removed
+  first, and only those of Athena's own unlocked jobs. The rebuild is skipped only while the main branch has
+  changed nothing outside `records/` since the job's base; otherwise the retry plans and produces again. A
+  failed write probe at the verifier gate is held the same way, with 0 bytes free. `athena retry` still
+  resumes jobs that earlier versions closed failed for this reason. Decision D146.
+
 - The final CI job is named `fmt, clippy, tests` again (its id stays `ci`), the check name branch protection
   requires. Cause: the CI split gave the final job the display name `ci`, so no check named `fmt, clippy, tests`
   was reported and pull request #314 could not merge (HTTP 405, `Required status check "fmt, clippy, tests" is

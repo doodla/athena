@@ -61,6 +61,8 @@
 //!   channel only ([`athena_core::steward::interrupted_work`]). Its first attempt is `athena retry`, which
 //!   reads the request again as a new job; that job is then run. The interrupted job is left as it is, but a
 //!   job that a retry already names is not listed again. A job whose process is still running is never listed.
+//!   A job held for low disk space after its candidate was built (see "Low disk holds a job") is listed the
+//!   same way, so the next pass resumes it with no one running `athena retry`.
 //! - **The in-flight table.** The real steps keep a local file, `in-flight.json` in the state directory, with
 //!   one row per job being worked: job id, stage and worktree ([`InFlight`]). The stage is reported by the run
 //!   itself where it enters a stage (`athena_core::state::StageSink`, called by `Athena::go_with_stages`):
@@ -136,9 +138,15 @@
 //!   left queued with the reason (outcome `needs accepting`, plus a note); that is not a failure and stops
 //!   nothing.
 //! - **Low disk holds a job.** When free disk space is below `[disk] min_free_gb` (default 10) at dispatch,
-//!   even after idle jobs' build directories are removed, `athena go` returns [`athena_core::disk::LowDisk`].
-//!   The item is left queued (outcome `environment: low disk`, with the free and required amounts, plus a
-//!   note); that is not a failure, is not retried, and stops nothing. A later drain runs the same job.
+//!   before the checks or before the verifier, even after idle jobs' build directories are removed,
+//!   `athena go` returns [`athena_core::disk::LowDisk`]. The item ends held (outcome `environment: low disk`,
+//!   with the free and required amounts, plus a note); that is not a failure, uses no attempt, and stops
+//!   nothing. A hold at dispatch leaves the job queued, and a later drain runs it. A hold after the candidate
+//!   was built leaves the job dispatched with no process, so the next pass lists it as interrupted and
+//!   resumes it from its kept candidate by itself, with no planner or producer run and no one running `athena
+//!   retry`. That skips the rebuild only while the main branch has changed nothing outside `records/` since
+//!   the job's base; otherwise the retry plans and produces again, as any retry does. Space that stays short
+//!   holds the job again.
 //! - **A short budget holds a job.** A job's own budget (`[budget] job_usd`) must cover everything still to run
 //!   (`athena_core::reading::budget_reserve`). When it does not, `athena go` returns
 //!   [`athena_core::reading::BudgetShort`] before spending anything. The item is left queued (outcome

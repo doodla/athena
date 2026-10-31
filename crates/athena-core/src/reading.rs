@@ -1023,7 +1023,7 @@ impl Athena {
     }
 
     /// `athena retry <job>`: reads a retry of a rejected, failed or interrupted job (dispatched with no
-    /// process working on it, for example after a restart), seeded from that job's
+    /// process working on it, for example after a restart, or held for low disk space), seeded from that job's
     /// introspection record when it has one. The request recorded is "try again on <job id>", so a later
     /// retry of this job finds the original; nothing is run. The flag says whether the introspection
     /// record seeded the reading (false: the plain "try again on" behavior).
@@ -1464,7 +1464,8 @@ pub fn job_history(records: &Records) -> Vec<JobEnd> {
 }
 
 /// The job a request of the form "try again on <job>" may resume from its kept candidate: one that failed for
-/// an environment cause, or was interrupted (dispatched, and `running` says no process works on it). See
+/// an environment cause, or was interrupted (dispatched, and `running` says no process works on it; a job
+/// held for low disk space after its candidate was built is one, and the drain retries it by itself). See
 /// [`crate::disk::resumable_stop`]. Whether a candidate was kept is for the caller to find out.
 pub fn resumable_job(
     records: &Records,

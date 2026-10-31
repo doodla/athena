@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-111730-dyh4",
+  "round": 1,
+  "at": "2026-10-31T11:23:21.859767011Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The auto-resume works through the drain's own call to Athena::retry, but criterion 2 requires the resume with no `athena retry`. The check the plan gives for that cannot fail.",
+      "evidence": "For an item that is interrupted (dispatched, no process), the first attempt is ReadOf::Retry (drain.rs:1373), which calls `self.athena.retry(job, self.ui)` (drain.rs:2896). That is the same code the `athena retry` command runs: it makes a new job id and runs the reader again. The drain module docs (drain.rs:59-62) call this attempt `athena retry`. The plan's criterion 2 check says 'no `athena retry` command ran (the test calls only drain)'. That is true whatever the code does, so it proves nothing. The plan also lists this reading of 'no athena retry' as an open question instead of deciding it. Because the retry reads the request again, the resume costs a reader run, and a new reading with a different scope could stop the automatic resume. Fix: Choose one of two fixes. (a) Resume in place: when `go` runs on a dispatched job that has a hold marker and a resume mark, start again at the gate that held it, using the committed candidate. Have the drain list held jobs as queued items, not interrupted ones. Then criterion 2 holds literally: same job id, no reader run, no producer run. (b) Keep the retry path but record as a decision that criterion 2's 'no `athena retry`' means no person runs the command. Then make the criterion 2 test check the number of jobs and reader calls (exactly one new job and one reader call), check that the producer and planner counts are unchanged, and check that the resumed job's reading did not need accepting.",
+      "location": "Plan decision 1 and the criterion 2 demonstration; crates/athena-cli/src/drain.rs:1373 and :2896",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "When space stays short, pass 2 still retries the held job, so a new job is created and the reader runs again. The planned checks would not notice this.",
+      "evidence": "steward::interrupted_work (steward.rs:382) lists the held job, which is still dispatched, on the next drain pass. The drain's first attempt for it is a retry (drain.rs:1373), which creates a new job; that job is then held at the dispatch gate. The plan checks that 'the held job's records are unchanged between passes' and that 'the item is attempted once per pass'. The first passes trivially because the old job never changes, and the second misses that the item now carries a different job id. Fix: Have the test follow the new job id. Check that pass 2 creates at most one new job and that it is held at dispatch, still proposed and with a hold marker. Check that pass 3 creates no further job and no further reader call. Also check that the report shows held, not a failed attempt.",
+      "location": "Plan demonstration for criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The resume works only while main has changed nothing outside records/. If main moves while the job is held, the resume builds the work again from scratch, and the plan does not say so.",
+      "evidence": "resume_seed returns None when `diff_tree(mark.base_commit, head)` shows any change outside records/. The retry then plans and runs the producer again, so 'no new producer run' does not hold if another job lands while this one is held. Fix: List this in the risks and in the disk.rs and drain.rs module docs and the decisions.md entry, so readers know the resume skips the rebuild only on an unchanged base. Checking it is not needed for this job.",
+      "location": "Plan risks; crates/athena-core/src/run/mod.rs:408-411 (resume_seed)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "When the write probe fails, the job would be held with a misleading 'low disk' message whose amounts may show enough free space, or none if free space cannot be read.",
+      "evidence": "In base, verifier_environment_problem (disk.rs:214-227) reports a probe failure with its own text. The LowDisk struct holds only free and required (disk.rs:74). StateDir::free_bytes can return None (gate returns early on `?`, disk.rs:270). After the change the marker could say for example '50 GB free, 10 GB required', and the probe error would appear only in a passing ui line. Fix: Say what happens when free space cannot be read: fall back to free = 0, or keep a reason that names the probe failure. Also say how status explains a hold where free space is at or above the requirement.",
+      "location": "Plan decision 2 and step 4 (verifier_environment_problem returns LowDisk for a write-probe failure)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The drain tests set free space through a file (the simulated_free file with with_free_space), not the ATHENA_FREE_BYTES variable the reading names.",
+      "evidence": "The plan uses `athena.state.with_free_space(simulated_free)` and `set_free`. The reading says the property is measured with ATHENA_FREE_BYTES. The plan correctly notes that the variable stays the same for the whole process, so it cannot drop in the middle of a run. Fix: Say in the change description that the file is used so free space can drop partway through a run, and that ATHENA_FREE_BYTES is used where a fixed value is enough (the status test in binary.rs).",
+      "location": "Plan demonstrations for criteria 1 to 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan's account of the code checks out. steward::interrupted_work lists a job that is still dispatched with no process. disk::resumable_stop accepts a dispatched job for resume, and scope_guard::resumed_candidate reads such a resume as resumed. scope_guard::attempt_of returns None for a job with no closing record, so a hold is not counted as an attempt. The drain already reports LowDisk as held and does not try the same item twice in one run. Status shows the hold only for proposed jobs today. The scope_guard test is at line 1375. The main design problem is how the plan resumes a held job. It uses the drain's path for interrupted jobs, whose first attempt calls Athena::retry, the same code as the `athena retry` command. That creates a new job and runs the reader again, while criterion 2 requires the resume with no `athena retry`. The plan's check for that criterion ('the test calls only drain') cannot fail, and the plan leaves the question open instead of deciding it. Either resume the held job in place (same job id, no reader run) or state the interpretation as a decision and make the tests count jobs and reader calls. The still-short test (criterion 3) has similar trivially-passing checks. Smaller gaps: the resume skips the rebuild only while main is unchanged outside records/, and a failed write probe would become a misleading low-disk hold."
+}

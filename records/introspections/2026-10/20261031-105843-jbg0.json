@@ -1,0 +1,30 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261031-105843-jbg0",
+  "at": "2026-10-31T10:58:43.219225788Z",
+  "trigger": "failure",
+  "job": "20261031-095235-zq9x",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "failed",
+  "what_happened": "Job 20261031-095235-zq9x, a retry of b5hm (\"hold and auto-resume a job when disk stays low\"), ended failed. The free-disk guard fired before the verifier: 9.4 GB was free and 10.0 GB was required. The message says this is the environment, not the work. No acceptance criteria were reported unmet, no checks failed, and no findings were raised. The work was not judged. To continue, someone has to free disk and run `athena retry`. The job exists to stop exactly this outcome, so it hit the fault it was meant to fix.",
+  "failure_class": "20261026-140223-4xmw",
+  "new_class": false,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "Athena treats low disk as a terminal job failure, not a pause. The guard checks disk only at a late point, just before the verifier, so the producer's spend is already made when it fires. Nothing reclaims space on its own: no cleanup of old worktrees, build output or finished jobs' state. The job that would add hold-and-resume is blocked by the missing hold behavior it was asked to build. This is a second attempt, and nothing checked or reserved free disk at retry admission against the 10 GB the later stages need. The earlier case 20261031-095208-bksh has the same self-referential shape (the job meant to add hold-on-environment-stop failed for a missing hold), but its cause was the planner's budget cap, so it is a different class.",
+  "prevention_kind": "design-change",
+  "prevention": "Make low disk a held state, not a failure. Run the disk check at admission, at retry and before each stage, not only before the verifier. When free space is below the requirement, first clean up what Athena itself owns (finished jobs' build directories and worktrees, stale caches). If space is still short, put the job on hold with a recorded reason and resume it automatically when space returns. The hold must keep the producer's work and must not count as failure or as line spend for the scope guard. Meanwhile, the the person running Athena frees disk by hand once, then retries this job.",
+  "proposed_request": "Make a job that stops on low disk hold instead of fail, and resume by itself once space is free. Outcome: when free disk is below what the next stage needs (for example 10 GB before the verifier), Athena first deletes disk that it owns and no longer needs (build output and worktrees of finished or closed jobs). If space is still short, the job goes into a held state that names the low-disk reason, keeps the producer's work, and is not marked failed. The drain keeps running other items that fit and resumes the held job when free space is enough, without an the person running Athena command. A low-disk hold must not count as spend or progress-less spend for the scope guard. The disk check also runs at admission and at retry, not only before the verifier. Acceptance: a test with a faked free-disk value shows a job held at 9.4 GB free with a 10.0 GB requirement; the same job resumes and reaches the verifier once the fake reports enough space, with no retry command; cleanup runs before the hold and removes only Athena-owned finished-job directories; and a held job shows its reason in status. Keep the change to the disk guard, job states and drain, and add a changelog entry.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.092534,
+    "input_tokens": 2,
+    "output_tokens": 1209
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}

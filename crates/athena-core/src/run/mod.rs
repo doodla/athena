@@ -343,6 +343,12 @@ impl Athena {
                 if self.running(id.as_str()) {
                     bail!("job {id} is running");
                 }
+                if let Some(low) = crate::disk::read_hold(&self.state, &id) {
+                    bail!(
+                        "job {id} is held: {}. A drain resumes it from its kept candidate once space is free; `athena retry {id}` does the same by hand, or `athena close {id} --why \"...\"` records what happened",
+                        low.text()
+                    )
+                }
                 bail!(
                     "job {id} was interrupted: its process died before it closed. `athena retry {id}` reads it again to resume, or `athena close {id} --why \"...\"` records what happened"
                 )
@@ -571,8 +577,9 @@ impl Athena {
         }
     }
 
-    /// Spends the resume marks when a job closes: the mark of the job this one resumed from, and this job's
-    /// own unless it closed failed for an environment cause (which `athena retry` resumes from).
+    /// Spends the resume marks when a job closes: the mark (and any hold marker) of the job this one resumed
+    /// from, and this job's own unless it closed failed for an environment cause (which `athena retry`
+    /// resumes from).
     fn settle_resume_marks(
         &self,
         id: &JobId,
@@ -582,6 +589,7 @@ impl Athena {
     ) {
         if let Some(old) = consumed {
             self.state.remove_resume(old);
+            crate::disk::clear_hold(&self.state, old);
         }
         if !(state == OutcomeState::Failed && crate::disk::is_environment_reason(reason)) {
             self.state.remove_resume(id);
@@ -1179,22 +1187,13 @@ impl Athena {
         let recorded_checks = built.recorded_checks.take();
 
         // Free disk space, before the checks. Low space makes builds fail in ways that look like faults in the
-        // work, so after the idle build directories are removed, space that is still low fails the job with a
-        // retryable environment reason. Nothing is held: the job closes, and `athena retry` reads it again.
+        // work, so after the idle build directories are removed, space that is still low holds the job: it is
+        // committed with its records and no outcome, stays dispatched, and the next drain resumes it from the
+        // kept candidate. It is not a failure of the work and no one needs to run `athena retry`.
         if recorded_checks.is_none()
             && let Some(low) = self.disk_gate(jc.config.min_free_gb(), &id, ctx.ui)
         {
-            let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
-            closing.happened = self.failure(
-                ctx,
-                &format!(
-                    "{} before the checks; this is the environment, not the work. Free disk space, then `athena retry {id}`",
-                    low.text()
-                ),
-            );
-            closing.happened.changed_paths = changed_paths;
-            closing.happened.verification_passed = None;
-            return Ok(closing);
+            return Err(self.hold_for_disk(ctx, closing, low));
         }
 
         // Verification starts: open or update the job's pull request now, so the host's checks run on the

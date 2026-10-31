@@ -35,46 +35,7 @@ impl Athena {
                 scored_at,
             ))
         };
-        for inv in &closing.new_invocations {
-            closing
-                .files
-                .push(NewFile::record(&AnyRecord::Invocation(Box::new(
-                    inv.clone(),
-                ))));
-        }
-        for plan in &closing.plans {
-            closing
-                .files
-                .push(NewFile::record(&AnyRecord::JobPlan(Box::new(plan.clone()))));
-        }
-        for critique in &closing.critiques {
-            closing
-                .files
-                .push(NewFile::record(&AnyRecord::Critique(Box::new(
-                    critique.clone(),
-                ))));
-        }
-        if let Some(baseline) = &closing.baseline {
-            closing
-                .files
-                .push(NewFile::record(&AnyRecord::Baseline(Box::new(
-                    baseline.clone(),
-                ))));
-        }
-        if let Some(candidate) = &closing.candidate {
-            closing
-                .files
-                .push(NewFile::record(&AnyRecord::Candidate2(Box::new(
-                    candidate.clone(),
-                ))));
-        }
-        if let Some(verification) = &closing.verification {
-            closing
-                .files
-                .push(NewFile::record(&AnyRecord::Verification(Box::new(
-                    verification.clone(),
-                ))));
-        }
+        push_closing_records(&mut closing);
         let reading_path = format!("{}/reading-{}.json", id.dir(), ctx.reading.n);
         let prediction = introducing_commit(self, "HEAD", &reading_path)?
             .unwrap_or_else(|| ctx.prediction.clone());
@@ -204,6 +165,38 @@ impl Athena {
             score: Some(score),
             verification: closing.verification,
         })))
+    }
+
+    /// Holds a job whose candidate is built because free disk space stayed low at a late gate (before the
+    /// checks, or before the verifier). The attempt's records are committed, with no score and no outcome, so
+    /// the job stays dispatched with no process: it reads as interrupted, which no failure, introspection or
+    /// scope-guard count looks at. A hold marker records the amounts, the job's own resume mark stays, and
+    /// the next drain resumes the job from its kept candidate ([`Athena::retry`]). The error returned is the
+    /// [`LowDisk`] hold; the caller returns it from `go`.
+    pub(super) fn hold_for_disk(
+        &self,
+        ctx: &RunContext<'_>,
+        mut closing: Closing,
+        low: crate::disk::LowDisk,
+    ) -> anyhow::Error {
+        let id = ctx.id().clone();
+        push_closing_records(&mut closing);
+        let trailers = [("Athena-Job", id.as_str().to_string())];
+        let subject = format!("Held: {}", ctx.reading.title);
+        let committed =
+            self.commit_records(&closing.files, &message(&subject, &low.text(), &trailers));
+        if let Err(why) = committed {
+            return why.context(format!(
+                "job {id} was held for low disk space, but its records could not be committed"
+            ));
+        }
+        crate::disk::write_hold(&self.state, &id, &low);
+        ctx.ui.line(&format!("held       {}", low.text()));
+        if let Some(old) = closing.consumed_resume.as_ref() {
+            self.state.remove_resume(old);
+            crate::disk::clear_hold(&self.state, old);
+        }
+        low.into()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -530,6 +523,40 @@ impl Athena {
         }
         bail!("the branch kept moving while Athena landed; run `athena go {id}` again")
     }
+}
+
+/// Adds the record files every attempt commits, whether it closes or is held: its invocations, plans,
+/// critiques, baseline, candidate and verification.
+fn push_closing_records(closing: &mut Closing) {
+    let mut records: Vec<AnyRecord> = Vec::new();
+    records.extend(
+        closing
+            .new_invocations
+            .iter()
+            .map(|inv| AnyRecord::Invocation(Box::new(inv.clone()))),
+    );
+    records.extend(
+        closing
+            .plans
+            .iter()
+            .map(|plan| AnyRecord::JobPlan(Box::new(plan.clone()))),
+    );
+    records.extend(
+        closing
+            .critiques
+            .iter()
+            .map(|critique| AnyRecord::Critique(Box::new(critique.clone()))),
+    );
+    if let Some(baseline) = &closing.baseline {
+        records.push(AnyRecord::Baseline(Box::new(baseline.clone())));
+    }
+    if let Some(candidate) = &closing.candidate {
+        records.push(AnyRecord::Candidate2(Box::new(candidate.clone())));
+    }
+    if let Some(verification) = &closing.verification {
+        records.push(AnyRecord::Verification(Box::new(verification.clone())));
+    }
+    closing.files.extend(records.iter().map(NewFile::record));
 }
 
 /// The subject of a closing commit: the outcome, then the job's title (the job id is in the trailer).

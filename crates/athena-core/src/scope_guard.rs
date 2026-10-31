@@ -1375,17 +1375,20 @@ mod watcher_tests {
     fn a_low_disk_job_is_read_as_an_environment_attempt() {
         let r = rig_with_space(0.8, 0.01, &[None], crate::test_support::low_once_verifying);
         let a = r.ask("describe the demo in the readme");
-        assert_eq!(r.go(&a).unwrap(), OutcomeState::Failed);
+        // Low space at the verifier gate holds the job: `go` returns the hold, and the job closes with no
+        // outcome, so it is no attempt at all (neither a failure nor an environment attempt).
+        let hold = r.go(&a).expect_err("low space holds the job");
+        assert!(
+            hold.downcast_ref::<crate::disk::LowDisk>().is_some(),
+            "{hold:#}"
+        );
         let records = r.records();
-        let reason = &records.jobs[a.as_str()].outcome.as_ref().unwrap().reason;
-        assert!(reason.starts_with(ENVIRONMENT_PREFIX), "{reason}");
+        assert!(records.jobs[a.as_str()].outcome.is_none());
         let requests = request_records(&records);
-        assert_eq!(requests[0].attempts.len(), 1);
-        assert_eq!(requests[0].attempts[0].verdict, Verdict::Environment);
-        assert!(!requests[0].attempts[0].resumed);
+        assert!(requests[0].attempts.is_empty(), "{requests:?}");
         assert!(
             !r.pause(&a).exists() && !r.flag(&a).exists(),
-            "an environment stop marks nothing"
+            "a hold marks nothing"
         );
 
         // Space is back: the retry resumes the kept candidate (no producer), lands, and is read as resumed.

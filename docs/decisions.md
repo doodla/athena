@@ -3869,3 +3869,43 @@ should replace those estimates with its figures.
   cause. D84's "not reproduced" outcome stands until a record with `sccache` figures exists.
 - **Effect on D145:** none yet. Alternative e (re-enable a compiler cache) stays uncosted until a record shows the
   cache figures. No `athena.toml` change was made.
+
+## D146 · Low disk after the build holds the job, and the next drain resumes it
+
+- **Case:** A drain that met low free space after a candidate was built (before the checks, or before the
+  verifier, the two gates D142 describes) closed the job `failed` with an `environment: low disk` reason that
+  told a person to run `athena retry`. Failed jobs feed introspection, failure classes and the scope guard, and
+  the drain counts a failed run as an attempt, so a full disk could still end a job failed and stop a drain
+  after two such items. The failure class `low-disk-ends-job-failed-no-automatic-cleanup` was recorded in 10
+  cases in 9 jobs.
+- **Root cause:** The two late gates reused the closing path, which writes an outcome. A job with an outcome is
+  a finished attempt, however the reason reads, and only a person could move it on.
+- **Decision:** At both gates, `Athena::hold_for_disk` (`crates/athena-core/src/run/close.rs`) commits the
+  attempt's records (shared with the closing path through `push_closing_records`) with no score and no outcome,
+  writes the hold marker with the free and required amounts, keeps the job's resume mark, removes the
+  verifier's snapshot, and `go` returns `disk::LowDisk`. The job stays dispatched with no process, which the
+  code already reads as interrupted: it is no attempt for the scope guard, no failure for introspection or
+  failure classes, and `athena status` shows it with its reason and amounts. The idle-build cleanup still runs
+  first and still removes only the `target/` of unlocked Athena job directories. The drain maps `LowDisk` to
+  a held item and uses no attempt. On a later pass the drain lists the job as interrupted and calls
+  `Athena::retry` by itself, which makes one new job from the kept candidate (`resume_seed`): one reader call, no
+  planner call, no producer call. A write probe that fails at the verifier gate is held the same way, with 0
+  bytes free and the probe error printed first. Old jobs that closed failed with an environment reason are
+  still told apart from work failures, and `athena retry` still resumes them.
+- **What "no `athena retry`" means:** No person runs the command. The drain runs it. The resume is the
+  existing retry path, not a second one.
+- **Condition:** The rebuild is skipped only while the files agents see on the main branch are those the job's
+  base had (only `records/` differs). If another job landed while this one was held, the retry plans and runs
+  the producer again, as any retry does.
+- **Alternatives:** (a) Keep closing failed and rely on `athena retry`: the behavior this removes. (b) Resume in
+  place, with `go` restarting a held job at its gate: dispatch builds the run context once per job, so a second
+  entry and a new resume path is a larger change with new risk and no gain in outcome. (c) Count the resume as a
+  drain attempt: a hold is not a failure of the work. (d) Add a reason field to `LowDisk`: it is copied and
+  stored in markers, and the probe error is printed as a line instead.
+- **Tradeoff:** A held job stays dispatched until a retry resumes it, and the retry's job lists the held job as
+  the one it came from; the held job is not closed. Its build directory is left to the next idle sweep.
+- **Reversal cost:** Low. Return the two gates to a failure with an environment reason.
+- **Provenance:** Read: `crates/athena-core/src/disk.rs`, `run/mod.rs`, `run/verification.rs`, `run/close.rs`,
+  `crates/athena-cli/src/drain.rs`, `scope_guard.rs`. Measured: `cargo test --locked -p athena-cli --test drain`
+  (the hold, the resume on a later pass, and space that stays short), `cargo test --locked -p athena-core`,
+  `cargo test --locked -p athena-cli --test binary`, `cargo test --locked -p athena-cli --test backtest`.

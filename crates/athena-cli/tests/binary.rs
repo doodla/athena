@@ -265,6 +265,82 @@ fn status_and_check_work_from_the_repository_alone() {
     );
 }
 
+/// Free space that drops once a job has a verifier snapshot: the checks have run, and the gate before the
+/// verifier finds 3 GB.
+fn low_once_verifying(state: &std::path::Path) -> std::io::Result<u64> {
+    let verifying = std::fs::read_dir(state.join("jobs"))
+        .map(|dirs| dirs.flatten().any(|e| e.path().join("verify").exists()))
+        .unwrap_or(false);
+    Ok(if verifying {
+        3_000_000_000
+    } else {
+        500_000_000_000
+    })
+}
+
+#[test]
+fn status_shows_a_job_held_for_low_disk_with_the_amounts_and_that_the_next_drain_resumes_it() {
+    let fx = Fixture::with_config(&with_min_free_gb(&test_config(), 10));
+    // The state directory the spawned binary will use for this repository (`$ATHENA_STATE_DIR/<name>-<key>`),
+    // so both see the same job. Only the last component of the path is taken from `repo_state_dir`: the test
+    // process does not set `ATHENA_STATE_DIR`, which would race with the other tests.
+    let key = athena_data::paths::repo_state_dir(&fx.root().join(".git"));
+    let state = athena_core::state::StateDir::new(fx.state.path().join(key.file_name().unwrap()))
+        .with_free_space(low_once_verifying);
+    let mut in_process = fx.athena(Scenario::default().script());
+    in_process.state = state;
+    let job = in_process
+        .ask("add a greeting to the readme", &athena_core::Quiet)
+        .unwrap()
+        .job;
+    let held = in_process
+        .go(
+            job.as_str(),
+            athena_data::records::AcceptedBy::User,
+            &athena_core::Quiet,
+        )
+        .expect_err("low space after the checks holds the job");
+    assert!(
+        held.downcast_ref::<athena_core::disk::LowDisk>().is_some(),
+        "{held:#}"
+    );
+
+    let run = |args: &[&str]| {
+        let out = athena()
+            .current_dir(fx.root())
+            .env("ATHENA_STATE_DIR", fx.state.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let shown = run(&["status"]);
+    // The job shows under open work (with its hold) and under recent jobs (without).
+    let line = shown
+        .lines()
+        .find(|l| l.contains(job.as_str()) && l.contains("environment: low disk"))
+        .unwrap_or_else(|| panic!("the held job is listed with its reason:\n{shown}"));
+    assert!(line.contains("interrupted"), "{line}");
+    assert!(
+        line.contains("environment: low disk: 3.0 GB free, 10.0 GB required"),
+        "{line}"
+    );
+    assert!(line.contains("the next drain resumes it"), "{line}");
+    let json: serde_json::Value = serde_json::from_str(&run(&["status", "--json"])).unwrap();
+    let open = json["open"].as_array().unwrap();
+    let entry = open.iter().find(|j| j["id"] == job.as_str()).unwrap();
+    assert_eq!(entry["state"], "interrupted");
+    assert_eq!(
+        entry["hold"],
+        "environment: low disk: 3.0 GB free, 10.0 GB required"
+    );
+}
+
 #[test]
 fn ask_later_queues_a_request_without_calling_a_model() {
     // Capability 10, point 3 of the fix round after acceptance verification 1: a request queued for later

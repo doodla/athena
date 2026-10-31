@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-095235-zq9x",
+  "round": 1,
+  "at": "2026-10-31T09:58:13.304167532Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Holding by returning Err discards the Closing, so the held attempt's spend and records are never committed and the drain budget under-counts",
+      "evidence": "`check_and_verify` takes `mut closing: Closing` and today returns `Ok(closing)`, so the run's records are committed. Returning `Err` throws that `Closing` away. The drain counts spend with `job_cost`, which reads committed `spent_usd()` (drain.rs:2700-2705), and `run()` adds `job_cost(job) - before` to the budget (drain.rs:2938-2948). So each held job's planner, critic and producer spend never reaches the drain or line budget, and its plan, critique and invocation records are lost for good. The plan admits this under Risks and Open questions and leaves it to the producer. Fix: Keep the records when holding. Commit the Closing's records without an outcome record (invocations, plan, critiques, spend), or persist the invocations in the resume mark and have the resume job commit them, with a round-trip test. Add a demonstration that the held attempt's spend is in the records after the hold and that the drain counts it.",
+      "location": "Plan Decision 1 and Step 2; crates/athena-core/src/run/mod.rs:1170-1197",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Holding on write-probe failure widens the change and risks breaking the serialized hold marker",
+      "evidence": "`LowDisk` is serialized as the hold marker with serde_json (disk.rs:172-186). A new `why` field without `#[serde(default)]` would make existing markers fail to parse. A write probe that never succeeds (a read-only mount) would hold the job forever. Fix: Hold only when `gate` returns LowDisk, and keep the failed close for a pure write-probe failure. Or mark the field `#[serde(default)]` and test that an old marker still parses.",
+      "location": "Plan Decision 3 / Step 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The kept-candidate handling differs from the reading's assumption without saying so",
+      "evidence": "The reading assumes target/produce is retained. The plan releases it, because the candidate commit is recorded in the resume mark. Fix: State this as a decision and record it in docs/decisions.md. The criterion 2 producer-count assertion covers the behavior.",
+      "location": "Plan Open question 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 4 fixture uses a static flag that can race in parallel tests",
+      "evidence": "cargo test runs the athena-core tests in parallel threads, so a process-wide static flag shared by several gate tests can race. Fix: Use a per-test free-space file under the test's temp dir, or a thread-local.",
+      "location": "Demonstration for criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The drain's read-held branch hard-codes the budget-short label and note",
+      "evidence": "`if read.held` sets `line.outcome = BUDGET_SHORT` and a budget note. Fix: Branch on the error type, as `run` does at drain.rs:1289-1303.",
+      "location": "Step 6 / drain.rs:1229-1237",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's claims against the code. The hooks it names exist: `disk::write_hold`, `read_hold` and `clear_hold`; `disk_gate`; `steward::interrupted_work`; `resume_seed`; `settle_resume_marks`; `scope_guard::resumed_candidate`; the hold mapping in the drain's run step; `RealSteps` in tests/drain.rs; and the resumable-job branch of `Athena::retry`. The approach fits the code: hold at both gates, leave the job Dispatched with a marker, and resume through the interrupted-job retry path, with a disk guard in `retry` and a held mapping in the drain's read step. The demonstrations name real seams and would fail on the old code. The one major problem is soundness. Holding by returning `Err` from `check_and_verify` throws away the `Closing`, so the held attempt's planner, critic and producer spend and records are never committed. The drain budget reads spend only from committed records (`job_cost`), so it under-counts, and the attempt's records are lost for good. The plan leaves this as an open question instead of designing it. The minor points: holding on write-probe failures widens the change and risks breaking the serialized marker, the kept-candidate handling differs from the reading without saying so, and the criterion 4 tests may race through a static flag."
+}

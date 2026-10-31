@@ -6,20 +6,32 @@
 //! - At dispatch, before anything is committed. If space is low, the build directories (`target/`) of idle jobs
 //!   are removed; if it is still low, the job is held: it stays queued, a local marker records the amounts,
 //!   and `go` returns [`LowDisk`]. A later drain picks up the same job.
-//! - Before the checks. If space is still low after the same cleanup, the job fails with an `environment: low
-//!   disk` reason, which `athena retry` handles. Nothing is left dispatched with a marker.
+//! - Before the checks, once the candidate is built. If space is still low after the same cleanup, the job is
+//!   held, not failed: its records (candidate, invocations, plans) are committed with no outcome and no
+//!   score, a marker records the amounts, and `go` returns [`LowDisk`]. The job stays dispatched with no
+//!   process, which reads as interrupted, so it is no work failure for introspection, failure classes or the
+//!   scope guard.
 //! - Before the verifier agent runs, after the checks. The same gate runs again, and so does a write probe in
-//!   the verifier's workspace ([`verifier_environment_problem`]). Failing either closes the job with the same
-//!   `environment: low disk` reason and no verification verdict.
+//!   the verifier's workspace ([`verifier_environment_problem`]). Failing either holds the job the same way,
+//!   with no verification verdict. A workspace that takes no write has no usable space, so a failed probe
+//!   is held with 0 bytes free, and the probe's error is printed first.
+//!
+//! Hold and resume. A held job needs no `athena retry` from a person. The drain lists a dispatched job with
+//! no process as interrupted and retries it by itself on a later pass, once space is free; the retry resumes
+//! from the kept candidate ([`crate::state::ResumeMark`]) with no planner or producer run. That skips the
+//! rebuild only while the files agents see on the main branch are those the job's base had (only `records/`
+//! differs); if another job landed in between, the retry plans and produces again, as any retry does. Space
+//! that stays short leaves the job held again, with no attempt used.
 //!
 //! Why the third place exists. The first two guards ran before the checks, but the checks are what fill the
 //! disk: their builds write into the verifier's snapshot and the build directories. The disk guard did not
 //! cover the point between the checks and the verifier, so the verifier started in an environment that could
 //! not build or write, its failure read as a failure of the work, and the cause was found only by reading
-//! logs. An environment failure there was not separated from a work failure. Now a verifier is never started
-//! in such an environment, and the closing reason says it is the environment ([`is_environment_reason`]).
+//! logs. Now a verifier is never started in such an environment.
 //!
-//! A free amount that cannot be read never holds or fails a job. A failing write probe always does.
+//! A free amount that cannot be read never holds a job. A failing write probe always does. Jobs that closed
+//! failed with an `environment: low disk` reason before this change are still told apart from failures of
+//! the work ([`is_environment_reason`]) and `athena retry` still resumes them ([`resumable_stop`]).
 //!
 //! A fourth environment stop sits beside these: a check killed at its deadline, when no check failed for
 //! real. A near-limit run on a loaded machine says nothing about the work, so the job closes `environment:
@@ -210,28 +222,28 @@ pub fn write_probe(dir: &Path) -> std::io::Result<()> {
 
 /// The check before the verifier agent runs: the shared disk gate (with the idle-job cleanup) and then a
 /// write probe in `workspace`, the verifier's snapshot. Returns `None` when the environment can build and
-/// write, else the `environment: low disk` text that says what is wrong. `job` keeps its own build directory.
+/// write, else the hold that says what is wrong. A workspace that takes no write has no usable space, so a
+/// failed probe is held with 0 bytes free (the probe error is written to `ui` first). `job` keeps its own
+/// build directory.
 pub(crate) fn verifier_environment_problem(
     state: &StateDir,
     required_gb: u64,
     job: &JobId,
     workspace: &Path,
     ui: &dyn Ui,
-) -> Option<String> {
+) -> Option<LowDisk> {
     if let Some(low) = gate(state, required_gb, job, ui) {
-        return Some(low.text());
+        return Some(low);
     }
-    write_probe(workspace)
-        .err()
-        .map(|why| format!("{LOW_DISK}: the verifier's workspace cannot be written to ({why})"))
-}
-
-/// The closing reason for a job whose verifier did not start because of `problem`
-/// ([`verifier_environment_problem`]). It names the environment, not the work, and the retry command.
-pub fn before_verifier_reason(problem: &str, job: &JobId) -> String {
-    format!(
-        "{problem} before the verifier; this is the environment, not the work. Free disk space, then `athena retry {job}`"
-    )
+    write_probe(workspace).err().map(|why| {
+        ui.line(&format!(
+            "disk       the verifier's workspace cannot be written to: {why}"
+        ));
+        LowDisk {
+            free: 0,
+            required: required_gb.saturating_mul(GB),
+        }
+    })
 }
 
 /// The closing reason for a job whose check was killed at its deadline and whose other checks did not fail
@@ -867,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn the_verifier_environment_check_fails_as_the_environment_for_any_job() {
+    fn the_verifier_environment_check_holds_the_job_for_any_job() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("verify");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -883,23 +895,42 @@ mod tests {
                 None
             );
 
-            // Too little space after cleanup: the environment's fault, with the amounts.
+            // Too little space after cleanup: a hold with the amounts.
             let low = verifier_environment_problem(&tight, 10, &job, &workspace, &ui)
                 .expect("low space is a problem");
-            assert_eq!(low, "environment: low disk: 3.0 GB free, 10.0 GB required");
+            assert_eq!(
+                low,
+                LowDisk {
+                    free: 3 * GB,
+                    required: 10 * GB
+                }
+            );
+            assert_eq!(
+                low.text(),
+                "environment: low disk: 3.0 GB free, 10.0 GB required"
+            );
 
-            // An unwritable workspace is the environment's fault too, whatever the free space says.
+            // An unwritable workspace is held too, whatever the free space says: it has 0 usable bytes, and
+            // the probe error is said first.
             let broken = temp.path().join("not-there");
+            let before = ui.0.lock().unwrap().len();
             let unwritable = verifier_environment_problem(&roomy, 10, &job, &broken, &ui)
                 .expect("an unwritable workspace is a problem");
-            assert!(unwritable.starts_with(LOW_DISK), "{unwritable}");
-
-            for problem in [low, unwritable] {
-                let reason = before_verifier_reason(&problem, &job);
-                assert!(is_environment_reason(&reason), "{reason}");
-                assert!(reason.contains(&format!("athena retry {job}")), "{reason}");
-                assert!(reason.contains("not the work"), "{reason}");
-            }
+            assert_eq!(
+                unwritable,
+                LowDisk {
+                    free: 0,
+                    required: 10 * GB
+                }
+            );
+            let said = ui.0.lock().unwrap();
+            assert!(
+                said[before..]
+                    .iter()
+                    .any(|l| l.contains("workspace cannot be written to")),
+                "{said:?}"
+            );
+            assert!(unwritable.text().starts_with(LOW_DISK));
         }
         // A work failure is not mistaken for an environment one.
         assert!(!is_environment_reason("admission refused the change: x"));
@@ -940,7 +971,7 @@ mod tests {
 
     #[test]
     fn only_an_environment_failure_or_an_interrupted_job_is_resumable() {
-        let low = before_verifier_reason(LOW_DISK, &id(1));
+        let low = format!("{LOW_DISK}: 3.0 GB free, 10.0 GB required before the checks");
         let failed = JobState::Closed(OutcomeState::Failed);
         assert!(resumable_stop(failed, Some(&low)));
         assert!(!resumable_stop(
@@ -1308,6 +1339,21 @@ mod tests {
         // Three allowed, a disk of two (30 GB: floor(14 / 6.2) = 2), two running: the third waits.
         assert!(start_decision(&pipeline(3), &figures, 30 * GB, 0, 2).is_some());
         assert_eq!(start_decision(&pipeline(3), &figures, 30 * GB, 0, 1), None);
+    }
+
+    #[test]
+    fn a_probe_failure_hold_has_no_free_bytes_and_a_marker_names_the_amounts() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf()).with_free_space(plenty);
+        let job = id(2);
+        let ui = Said::default();
+        let low = verifier_environment_problem(&state, 10, &job, &temp.path().join("gone"), &ui)
+            .expect("an unwritable workspace holds");
+        write_hold(&state, &job, &low);
+        let read = read_hold(&state, &job).expect("the marker is written");
+        assert_eq!(read.free, 0);
+        assert_eq!(read.required, 10 * GB);
+        assert!(read.text().contains("0 B free"), "{}", read.text());
     }
 
     #[test]
