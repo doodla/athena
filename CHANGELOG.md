@@ -9,6 +9,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Refusal and matching rules are now run against a stored corpus of real request and reading shapes before they
+  land, and a plan that adds or changes one must map its input forms to that corpus. Root cause: such rules
+  (the parts parser, stems, stop lists and the reading checks) were specified by reasoning and hand-checked on
+  a few cases, and nothing executed them against real request and reading shapes before they were planned or
+  landed, so gaps (numbered `N.` and `N)` parts, stop-list and stem order, a job cited but not relied on, a
+  brand word read as a symbol) surfaced only in critic rounds; jobs 20261029-111202-2bpc and
+  20261030-060751-5389 each failed in planning that way (failure class
+  `plan-for-new-refusal-rule-untested-against-real-request-shapes-fails-planning-rounds`). Fix at the shared
+  gate and the planning rule, not in one job's check: `reading::refusing_check` runs the checks of
+  `check_reading_acceptance` in the same order and names the first one that refuses (the latter is now a
+  wrapper); `crates/athena-core/tests/refusal_corpus.rs` stores labeled shapes (Steward bullets, `N.` / `N)` /
+  `(a)` parts, a request citing rejected jobs, a retry complaint, governance and path cases) with their expected
+  outcome; a mechanism test fails when a check has no corpus case in which it refuses; and the planner prompt and
+  brief carry the rule. The corpus is the planning-time, refuse-side complement of the verify-time replay of
+  accepted readings, which is unchanged. Limit: the mechanism sees `check_*` steps only; a change to the parser,
+  a stem list or a stop list is narrowed by pinned bullet counts and a fixed list of input forms, and otherwise
+  rests on the planner rule. No refusal rule changed (0% newly refused readings). Recorded as D148.
+
 - A reading that relies on a repo path absent from the snapshot is now refused at reading acceptance. Root
   cause: reading acceptance never compared the reading's references with the snapshot. It checked only the
   deliverable paths, so a reading that said an earlier job's file, role or prompt already exists was accepted

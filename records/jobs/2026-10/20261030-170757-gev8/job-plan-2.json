@@ -1,0 +1,261 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-170757-gev8",
+  "round": 2,
+  "at": "2026-10-31T20:18:28.366326252Z",
+  "invocation_seq": 4,
+  "approach": "Root cause: refusal and matching rules (parts parser, stems, stop list, reading checks) are specified by reasoning and hand-checked on a few cases, and nothing executes them against real request and reading shapes before they are planned or landed. Fix at the gate seam and the planning rule. (1) In reading.rs add `refusing_check`, which runs the same six checks in the same order and returns the first refusing check's name (via `stringify!`) with its error; `check_reading_acceptance` becomes a thin wrapper, so outcomes and error text are unchanged. (2) Add crates/athena-core/tests/refusal_corpus.rs: a stored corpus of at least twelve labeled request-and-reading shapes (source job, verbatim or rebuilt), each with form tags, a pinned bullet count and an expected outcome (accept, or refuse by a named check), run through the real gate. (3) The same file holds mechanism tests: every `check_*` step in `refusing_check` must have a corpus case where it refuses, and the check list is read from source so it cannot drift. (4) Planner rule, worded for what a planner can do (Read, Grep, Glob only): read the corpus file, map each input form to a case id or list the case a producer step adds, and make `cargo test -p athena-core --test refusal_corpus` the demonstration the producer and verifier run. planner.md is already 480 of its 500-token cap (`planner_and_critic_frames_are_short_and_fit_the_budgets`), so it gets one short clause paid for by trimming existing words; the full wording goes in the Report section of `planner_brief`, which is outside the budget sets. (5) Briefs test, CHANGELOG.md and docs/decisions.md entries naming the root cause, the replay relationship and the residual parser/stem limit. No refusal rule is tightened.",
+  "decisions": [
+    {
+      "choice": "Put the corpus in an integration test, crates/athena-core/tests/refusal_corpus.rs, as Rust cases built from athena_data types (Reading, Criterion, Deliverable, Forecasts) and athena_context::briefs::EarlierAttempt. Each case states its source job id and 'verbatim' or 'rebuilt from the job brief', carries `forms` tags and a mandatory `bullets_expected`.",
+      "reason": "The brief lists this path. A Rust fixture needs no record-file validation (check_record_file, AnyRecord) and no new data format. An integration test compiles only against the public API, so it drives the same gate the pipeline uses. The mandatory bullets_expected field means every case pins what the request parser (is_bullet, request_text_acceptance) does with its shape, so a parser change must touch visible corpus expectations.",
+      "rejected": [
+        {
+          "option": "A JSON or TOML corpus file under crates/",
+          "why": "It becomes a data deliverable needing round-trip coverage and a parser, for no gain over a Rust fixture."
+        },
+        {
+          "option": "Put the corpus in reading.rs's #[cfg(test)] module",
+          "why": "reading.rs is already 330 KB; the brief names a separate file; an integration test checks the public gate."
+        }
+      ]
+    },
+    {
+      "choice": "Add `pub fn refusing_check(reading, request, attempt, referenced, repo_files) -> Option<(&'static str, anyhow::Error)>` using a local macro `step!` that evaluates a `check_*` call and returns `(stringify!(name), error)` on Err. `check_reading_acceptance` calls it and drops the name.",
+      "reason": "The corpus can assert which check refused, and the mechanism test can prove each check fires. Names come from the called functions, so no hand-kept list drifts. Order, short-circuit and messages stay identical, so the refusal rate is unchanged (criterion 6). The other callers (the reader loop at reading.rs:637, check_reading_text at 3427 which feeds BinaryChecker replay, and the unit-test `accept` helper) keep calling the unchanged wrapper.",
+      "rejected": [
+        {
+          "option": "A hand-maintained ACCEPTANCE_CHECKS name list beside the unchanged function",
+          "why": "It can drift from the real call list, the same kind of specification gap this job removes."
+        },
+        {
+          "option": "Match error-message text to identify the refusing check",
+          "why": "Messages are free prose and change often; the corpus would be brittle."
+        },
+        {
+          "option": "Change every check to return a typed refusal",
+          "why": "Wide refactor with risk to error text; not one focused change."
+        }
+      ]
+    },
+    {
+      "choice": "The mechanism test reads reading.rs with include_str!, extracts the body of `pub fn refusing_check`, collects `step!(check_*(` names, and fails for any name with no corpus case that expects a refusal by that name (coverage computed by running every case through refusing_check). It also fails if the body of `check_reading_acceptance` calls any `check_*(` directly. The extract-and-compare logic is a pure helper that a second test runs on the real source with one extra inserted step line. It asserts at least six names are found.",
+      "reason": "Enforces by mechanism that a new reading check cannot land without a refusing case (the 'mechanism' default). Requiring a case where the check actually refuses stops a check that never fires from counting as covered. The doctored-source test proves the extractor catches a missing case without editing production code.",
+      "rejected": [
+        {
+          "option": "Count a check as covered if any case merely passes it",
+          "why": "Every accepted case passes every check; vacuous."
+        },
+        {
+          "option": "A build script or proc macro to enumerate checks",
+          "why": "Heavier than a source-text test; external_calls_guard.rs already sets a source-scanning precedent."
+        }
+      ]
+    },
+    {
+      "choice": "State the mechanism's limit. It covers `check_*` steps only. A new helper inside an existing check, or a change to is_bullet, request_text_acceptance, stems or stop lists, adds no step and so needs no new case by mechanism. Two things narrow it: every case must pin its bullet count (a required field), so a parser change moves a visible expectation; and a test asserts the corpus `forms` tags cover a fixed list of input forms (dash bullet, star bullet, `1.`, `1)`, `(a)`, request citing a job, retry complaint, governance path, crate-relative path). The remaining gap is covered by the planner rule (prose, not mechanism), and the CHANGELOG, decisions entry and test header say so.",
+      "reason": "The 2bpc gaps were parser and stem/stop-list order. Claiming the mechanism closes them would overstate it. A required field plus a form-list test cost little and make parser edits visible.",
+      "rejected": [
+        {
+          "option": "Claim the check-step test covers parser, stem and stop-list rules",
+          "why": "It does not: the extractor matches only `step!(check_*(`."
+        },
+        {
+          "option": "Add a parser-change detector (hash of is_bullet source)",
+          "why": "Brittle, and it blocks harmless refactors."
+        }
+      ]
+    },
+    {
+      "choice": "Relate the corpus to the existing replay (replay_cases, reading.rs:3514, and the replay at ~3720). Replay runs the newest accepted readings from records/ through the base and candidate checkers at verification and holds a candidate that newly refuses more than its declared share. The corpus is its planning-time, refuse-side complement: the planner cannot see records/, and replay holds only accepted readings and acts only after code is written. Record this in the CHANGELOG and decisions entries, and in the refusal_corpus.rs header. Replay is left unchanged.",
+      "reason": "Without this the reader would see two overlapping mechanisms. They cover different sides at different stages.",
+      "rejected": [
+        {
+          "option": "Feed the corpus into replay_cases",
+          "why": "Replay reads records/ at verification; mixing fixtures in changes the declared-share arithmetic and is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Word the planner rule for what a planner can do. The planner has Read, Grep and Glob only (planner.md line 3; planning_grant gives no commands). The rule: a plan that adds or changes a refusal or matching rule (parser, stem, stop list, reading check) lists the input forms it handles; reads crates/athena-core/tests/refusal_corpus.rs and maps each form to a corpus case by id, or lists the case a producer step adds; and names `cargo test -p athena-core --test refusal_corpus` as the demonstration the producer and verifier run. It must not cite results the planner did not read. The full text goes in the Report section of planner_brief. planner.md gets one short clause only.",
+      "reason": "A rule to run a command the planner cannot run would invite invented results, which is the reasoning-instead-of-executing fault this job removes. The planner can execute the corpus in the only way available: map forms to existing cases, and make the run a producer/verifier demonstration. Execution happens at verification.",
+      "rejected": [
+        {
+          "option": "Tell the planner to run the corpus and cite results",
+          "why": "No command tool; results would be invented."
+        },
+        {
+          "option": "Put the full rule in planner.md",
+          "why": "planner.md is 480 of its 500-token cap (lib.rs:402); about 300 bytes more fails planner_and_critic_frames_are_short_and_fit_the_budgets."
+        }
+      ]
+    },
+    {
+      "choice": "Keep planner.md within 500 tokens (at most 1497 bytes; it is 1439 now) by condensing existing wording in step with the added clause. For example: 'the job's base commit' becomes 'the base commit'; drop '(you read the code)'; shorten 'A revision brief quotes your last plan and every finding' to 'A revision brief quotes your plan and findings'. Never touch phrases that existing tests pin ('seam, fake or fixture', 'Never put the logic under test inside the double', 'seam'). Aim for a net change of 0 to -2 bytes, which leaves the composed planner size at 806 tokens and docs/system-facts.md untouched. If the budgets test still reports a different value, update that one line (see the open question).",
+      "reason": "This avoids breaking the under-500 cap (critic finding 2), and it avoids widening scope to docs/system-facts.md (finding 1) where possible.",
+      "rejected": [
+        {
+          "option": "Grow planner.md by about 100 tokens and update the system-facts line",
+          "why": "Breaks the 500-token cap test and widens scope."
+        },
+        {
+          "option": "Edit the 500 cap in lib.rs",
+          "why": "Weakens a guard; the test text says to update the line, never the budget."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `refusing_check` (existing checks, same order, first refusing check's name via stringify! plus its error). Make `check_reading_acceptance` a wrapper with unchanged outcomes and messages. Doc comment names the root cause.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "create",
+      "purpose": "The stored corpus (at least twelve sourced, labeled request-and-reading shapes with form tags, bullet counts and expected outcomes), the gate test, the form-coverage test, and the mechanism tests. The header names the root cause, the replay relationship, the parser/stem limit, and how to add a case.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-context/prompts/planner.md",
+      "action": "modify",
+      "purpose": "One short clause: for a refusal or matching rule, map each input form to a refusal_corpus case. Existing wording is trimmed so the file stays under 500 tokens (at most 1497 bytes) and the composed size stays 806.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add the full rule to the Report section of `planner_brief`, worded for a Read/Grep/Glob planner. Add `planner_prompt_and_brief_carry_the_refusal_corpus_rule`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry: root cause, the gate seam fix, the planner rule, the relationship to replay, the residual limit, and that no refusal rule changed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "New decision entry: refusal and matching rules are validated against a stored corpus of real shapes. Records the mechanism and its limit, the corpus as the planning-time refuse-side complement to the verify-time replay, and the follow-ups (parts coverage, prior-job existence) that add cases. The next D number is read from the file's tail.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-core/src/reading.rs add `pub fn refusing_check(reading, request, attempt, referenced, repo_files) -> Option<(&'static str, anyhow::Error)>` with a local `macro_rules! step` that evaluates a `check_*` call and on Err returns `Some((stringify!(name), error))`. Call the six checks in the current order with the same arguments, including `&continued_jobs(request, attempt, referenced)` for the first. Rewrite `check_reading_acceptance` as a wrapper (None gives Ok, Some gives the error). Update its doc comment to name the root cause. Touch no check body.",
+    "Create crates/athena-core/tests/refusal_corpus.rs. The header names the root cause, the relationship to replay_cases (verify-time, accepted readings from records/; the corpus is planning-time and refuse-side), the parser/stem limit, and how to add a case. Add a `Case` struct (id, source, rebuilt flag, forms, request, bullets_expected, reading spec, optional attempt, referenced attempts, repo files, expected Accept or Refuse(check name)) and a `reading(...)` builder from an all-checks-passing base. Use athena_data Reading, Criterion, Deliverable, DeliverableAction, Forecasts, `jiff::Timestamp::UNIX_EPOCH` and `JobId::parse`, copying the field set from the `final_reading` fixture in reading.rs's tests. Build criteria from `request_text_acceptance(request)`.",
+    "Fill in at least twelve cases (the shapes in demonstration 3), each with its source job and a rebuilt/verbatim label. Add `corpus_cases_get_the_expected_outcome` (outcome, refusing check name, bullet count, Ok/Err and message equality with `check_reading_acceptance`) and `corpus_covers_the_listed_input_forms`.",
+    "In the same file add the mechanism: `acceptance_check_names(source)`, `uncovered(names, covered)`, and the tests `every_acceptance_check_has_a_refusing_corpus_case`, `an_extra_check_with_no_case_is_reported` (real source plus one inserted step line) and `no_check_bypasses_refusing_check`.",
+    "Edit crates/athena-context/prompts/planner.md. Add one short clause: for a refusal or matching rule, map each input form to a refusal_corpus case. Trim existing wording by at least as many bytes, without touching phrases tests pin. Keep it at most 1497 bytes. Add the full rule to the Report text of `planner_brief` in briefs.rs: list the input forms; read crates/athena-core/tests/refusal_corpus.rs and map each form to a corpus case by id, or list the case a producer step adds; make `cargo test -p athena-core --test refusal_corpus` the demonstration the producer and verifier run; do not cite results you did not read. Add `planner_prompt_and_brief_carry_the_refusal_corpus_rule` beside `planning_prompts_and_brief_require_a_named_test_seam`.",
+    "Run `cargo test --locked -p athena-context planner_and_critic_frames_are_short_and_fit_the_budgets` and `cargo test --locked -p athena-cli --test budgets`. If `system_facts_budgets_match_computed` reports a different planner size, update only the `- budget planner:` line in docs/system-facts.md to the computed value. Never change a budget number.",
+    "Add the CHANGELOG.md Unreleased entry and the docs/decisions.md entry (next D number from the file's tail). Both name the root cause and the cause-level fix. Both state the relationship to replay, the residual parser/stem/stop-list limit covered by the planner rule, that no refusal rule was tightened (0% newly refused), and the follow-ups (parts coverage, prior-job existence) that will add corpus cases.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix findings. Check the fixtures for banned words, email-like text and secrets."
+  ],
+  "risks": [
+    {
+      "risk": "The refactor changes check order or error text and shifts the refusal rate. Other callers are affected: the reader loop (reading.rs:637), check_reading_text (3427, which feeds BinaryChecker replay), and the replay itself.",
+      "mitigation": "Build `refusing_check` from one macro, add no logic, keep the order. The wrapper returns the same anyhow error. The existing reading.rs unit tests, the replay tests and the check-reading tests assert error text and pass unmodified. The corpus asserts Ok/Err and message equality with `check_reading_acceptance` for every case."
+    },
+    {
+      "risk": "planner.md exceeds the 500-token cap in lib.rs:402 (it is 480 now, 1439 bytes) and `cargo test` fails.",
+      "mitigation": "Add only a clause of about 70 bytes and trim existing words by the same amount. The producer runs `planner_and_critic_frames_are_short_and_fit_the_budgets` and checks that bytes are at most 1497. Put the full text in the planner_brief Report section."
+    },
+    {
+      "risk": "The source-scanning mechanism test breaks on a formatting or rename change, or silently finds no checks.",
+      "mitigation": "Anchor on the exact `pub fn refusing_check` heading and its closing brace at line start. Assert at least six names. The doctored-source test fails if the extractor stops finding steps."
+    },
+    {
+      "risk": "The mechanism gives false assurance about parser, stem and stop-list rules, which add no check_* step.",
+      "mitigation": "State the limit in the header, CHANGELOG and decisions entry. Every case must pin its bullet count, a form-coverage test lists the input forms, and the planner rule (prose-only) covers the residue."
+    },
+    {
+      "risk": "Fixture text contains a banned boundary word or personal data and fails the policy scan.",
+      "mitigation": "Keep fixtures neutral. Use athena.toml and defaults.toml only as path names. Include no email-like text. The xtask policy test runs under `cargo test --locked`."
+    },
+    {
+      "risk": "A refusing case fails an earlier check than the one it targets, since checks short-circuit.",
+      "mitigation": "Build each refusing reading from a known-good base and change one field. Assert the exact check name per case."
+    },
+    {
+      "risk": "Pinning the unhandled `1)` and `(a)` forms looks like endorsing the gap.",
+      "mitigation": "Label them as the parser's current behavior and a known gap that the parts-coverage follow-up will update. They are bullet-count assertions only."
+    },
+    {
+      "risk": "The new planner rule could be satisfied by invented results.",
+      "mitigation": "The rule asks the planner only to read the corpus file, map forms to case ids, and name the command for the producer and verifier. It says not to cite results the planner did not read."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff. CHANGELOG.md (Unreleased), the new docs/decisions.md entry, the doc comment on `refusing_check` and the header of refusal_corpus.rs each name the root cause: refusal and matching rules are never executed against real request and reading shapes before they are planned or landed. They also state the replay relationship and the residual parser/stem limit. The diff to reading.rs adds `refusing_check` and turns `check_reading_acceptance` into a wrapper; no check_* body changes.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md crates/athena-core/src/reading.rs crates/athena-core/tests/refusal_corpus.rs",
+      "observes": "The root-cause sentence appears in the changelog, the decisions entry and the code comments. The fix is the shared gate (refusing_check, corpus test, mechanism test) plus the planner rule, with no change to any single check's logic.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the planner.md diff for the short clause (map each input form of a refusal or matching rule to a refusal_corpus case), then run the two budget tests. `planner_and_critic_frames_are_short_and_fit_the_budgets` checks that planner.md stays under 500 tokens and the planner set within 1300. `system_facts_budgets_match_computed` checks the system-facts line. The full rule, with the input forms, the case ids from refusal_corpus.rs and the producer/verifier command, is checked under criterion 5.",
+      "command": "cargo test --locked -p athena-context planner_and_critic_frames_are_short_and_fit_the_budgets && cargo test --locked -p athena-cli --test budgets",
+      "observes": "Both pass. planner.md is at most 1497 bytes (499 tokens or fewer) and the planner set is within 1300 (806 now). The diff shows the rule clause and the trimmed existing words.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Run the corpus test. `corpus_cases_get_the_expected_outcome` iterates at least twelve cases. Each builds a request and a Reading, calls `refusing_check`, and asserts Accept or Refuse(check name) plus the bullet count from `request_text_acceptance`. It also asserts that `check_reading_acceptance` agrees (Ok/Err and identical error text). Cases (source job in each): (1) Steward three-bullet acceptance: accepted, 3 bullets. (2) `1.`/`2.`/`3.` parts: 3 bullets. (3) `1)` parts: 0 bullets, labeled the current parser behavior and a known gap. (4) `(a)(b)(c)` parts: 0 bullets, same label. (5) root-cause request that cites two rejected job ids as evidence ('Introspection ... (job ...)') with both passed as `referenced` and a reading that names neither: accepted, since citing is not following. (6) the same request with 'Follow up on job <id>' and a reading that does not name it: refused by check_prior_result_and_scope. (7) retry complaint with `attempt` set, reading names the job and lists deliverables and out_of_scope: accepted. (8) the same retry with the job id omitted: refused by check_prior_result_and_scope. (9) a criterion saying 'the producer's report lists ...': refused by check_criteria_evidence. (10) code reading with a behavior criterion and no `Code survey:`: refused by check_code_survey; with a survey naming crates/ paths: accepted. (11) request naming athena.toml, reading neither lists nor excludes it: refused by check_governance_coverage. (12) modify deliverable `src/reading.rs` (crate-relative) with a `repo_files` set holding only the crates/ path: refused by check_boundary_and_repo_files. (13) summary relying on an absent `crates/athena-core/src/prior_job_check.rs`: refused by check_reading_references; the same with 'does not exist yet': accepted. (14) text with `GitHub/env-var` and `owner/repo` tokens: accepted (brand word and env var are not repo paths). Request text rebuilt from briefs is labeled so; no secrets or personal data. A further test checks the union of `forms` tags covers the fixed form list.",
+      "command": "cargo test --locked -p athena-core --test refusal_corpus",
+      "observes": "All cases pass; each outcome matches the live gate and names the refusing check. A mismatch fails with the case id and source job.",
+      "fails_without": "Before the change neither the test file nor `refusing_check` exists, so the command fails to compile and runs no tests. If the gate stopped refusing a retry that does not name its prior job, or accepted a modify of a missing file, the matching case would fail with its id and source. If the parser started reading `1)` parts, the pinned bullet count would fail.",
+      "seam": "Entry point: athena_core::reading::refusing_check, which check_reading_acceptance wraps and the test also calls. Guards: capability Some and question None for most checks; `repo_files` Some for the path checks; `attempt` or `referenced` plus a follow-up phrase for the prior-result check. Fixtures: a `reading(...)` builder in the test file built from athena_data Reading/Criterion/Deliverable/Forecasts (field set copied from the `final_reading` test fixture in reading.rs), `EarlierAttempt::default()` with job and request set, and a BTreeSet<String> of repo paths, all passed as arguments. No double replaces any check. Exists today: the checks, `Reading`, `EarlierAttempt` (Default) and `check_reading_acceptance` are pub. Step 1 adds `refusing_check`; steps 2 and 3 add the test file."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the mechanism tests in the same file. `acceptance_check_names(source)` extracts `step!(check_*(` names from the body of `refusing_check` in reading.rs (include_str!) and asserts at least six. `uncovered(names, covered)` returns names with no corpus case expecting a refusal by that name; `covered` comes from running every corpus case through `refusing_check`. Tests: the real source has no uncovered check; the real source with one inserted line `step!(check_new_rule(reading));` yields exactly ['check_new_rule']; the body of `check_reading_acceptance` holds no direct `check_*(` call.",
+      "command": "cargo test --locked -p athena-core --test refusal_corpus every_acceptance_check_has_a_refusing_corpus_case an_extra_check_with_no_case_is_reported no_check_bypasses_refusing_check",
+      "observes": "The six current checks (check_prior_result_and_scope, check_criteria_evidence, check_code_survey, check_governance_coverage, check_boundary_and_repo_files, check_reading_references) each have a refusing case. The doctored source reports exactly the invented check.",
+      "fails_without": "If a check_* step were added to `refusing_check` with no refusing case, `every_acceptance_check_has_a_refusing_corpus_case` would fail naming it; `an_extra_check_with_no_case_is_reported` proves this on a doctored copy and would fail if the extractor missed steps. If a check were called directly in `check_reading_acceptance`, `no_check_bypasses_refusing_check` would fail.",
+      "seam": "Entry points: athena_core::reading::refusing_check (live coverage) and the text of crates/athena-core/src/reading.rs via include_str!(\"../src/reading.rs\"). Fixture: the criterion 3 corpus. The extractor and `uncovered` are small pure functions in the test file; the doctored source is the real text plus one inserted line, so the logic under test is never inside the double. Step 1 adds the `step!`-based refusing_check; step 4 adds the mechanism tests."
+    },
+    {
+      "criterion": 5,
+      "method": "Add `planner_prompt_and_brief_carry_the_refusal_corpus_rule` to the briefs tests, beside `planning_prompts_and_brief_require_a_named_test_seam`. It builds `planner_brief(&planner_inputs(None))` and takes the text after '## Report'. It asserts the Report contains the pinned words: 'refusal or matching rule', 'input forms', 'corpus case', 'cargo test -p athena-core --test refusal_corpus', and a clause saying the planner cannot run it (so no results may be cited). It asserts `crate::PLANNER_FRAME.text` contains 'refusal_corpus'.",
+      "command": "cargo test --locked -p athena-context planner_prompt_and_brief_carry_the_refusal_corpus_rule",
+      "observes": "The composed planner brief carries the full rule (list input forms, map each to a corpus case or a producer-added case, demonstrate with the corpus test) and the planner prompt carries the short clause.",
+      "fails_without": "Before the change neither PLANNER_FRAME.text nor the planner_brief Report section contains the rule, so the first assert fails. Removing either copy later fails it again.",
+      "seam": "Entry points: athena_context::briefs::planner_brief and the PLANNER_FRAME asset (include_str! of prompts/planner.md). Fixture: the existing `planner_inputs(None)` helper in the briefs tests module. Exists today (briefs.rs ~2081-2093). Step 5 adds the sentences and step 5 also adds the test."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the whole athena-core suite. Existing reading.rs unit tests call `check_reading_acceptance` directly (the `accept` helper at ~6278 and the code-survey, evidence, governance and reference tests) and pass unmodified. The corpus test asserts, for every case, that `check_reading_acceptance(...).is_ok()` equals `refusing_check(...).is_none()` and that the error strings match. Corpus accept cases stay accepted. The diff touches no check body. Other callers (the reader loop at reading.rs:637, `check_reading_text` at 3427 feeding BinaryChecker replay) call the unchanged wrapper; the existing replay and check-reading tests already guard their error text.",
+      "command": "cargo test --locked -p athena-core",
+      "observes": "All pre-existing tests pass unmodified, plus the corpus accept cases and the equality assert, so 0% of shapes are newly refused.",
+      "fails_without": "If the refactor changed any check's order, short-circuit or error text, the existing unit tests that assert on messages (for example the `Code survey:` text) would fail, and so would the corpus equality assert. A newly refused real shape would fail its accept case.",
+      "seam": "Entry point: athena_core::reading::check_reading_acceptance, the unchanged public gate, called by the existing unit tests (`accept` helper, exists today) and by the corpus test (step 2). No double."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three Athena checks across the workspace.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0, including planner_and_critic_frames_are_short_and_fit_the_budgets, the cli budgets test and the xtask policy scan over the new fixtures.",
+      "fails_without": "Any formatting, lint or test failure anywhere in the workspace fails this criterion, including the 500-token planner.md cap if the rule is added without trimming existing text.",
+      "seam": "Entry points are the workspace commands. No fixture. The budget tests exist today (lib.rs:394, crates/athena-cli/tests/budgets.rs); step 6 checks them."
+    }
+  ],
+  "open_questions": [
+    "docs/system-facts.md is not a listed deliverable. The plan avoids editing it by keeping planner.md's net change at 0 to -2 bytes (composed size stays 806). If the budgets test still reports a different value, only that one line needs an update, which the test forces. Confirm that is acceptable. The plan assumes yes, since the file is documentation.",
+    "Criterion 2 says the plan must 'cite the results'. A planner with Read/Grep/Glob cannot run tests. The plan reads this as citing the corpus case ids it read and naming the command the producer and verifier run. Confirm this reading.",
+    "Criterion 5 says 'planner brief'. The plan tests both the Report section of planner_brief (full rule) and PLANNER_FRAME (short clause).",
+    "The next free decision number in docs/decisions.md was not read (316 KB file); the producer reads its tail.",
+    "Fixture request texts are rebuilt from the briefs, since records/ is absent from the snapshot. They are labeled so; real stored text can replace them later.",
+    "The `1)` and `(a)` cases pin today's result (0 bullets). The parts-coverage follow-up will change those expectations on purpose."
+  ],
+  "producer_section_sha256": "09e323a380d8af47170359463aab7914d195b24be8a3d95b8c177378990a2ff3"
+}
