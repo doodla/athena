@@ -61,6 +61,8 @@
 //!   channel only ([`athena_core::steward::interrupted_work`]). Its first attempt is `athena retry`, which
 //!   reads the request again as a new job; that job is then run. The interrupted job is left as it is, but a
 //!   job that a retry already names is not listed again. A job whose process is still running is never listed.
+//!   A job held for low disk after its build is such a job (it carries a hold marker): the retry checks the disk
+//!   first, and while space is short the item is held again with no attempt used (see "Low disk holds a job").
 //! - **The in-flight table.** The real steps keep a local file, `in-flight.json` in the state directory, with
 //!   one row per job being worked: job id, stage and worktree ([`InFlight`]). The stage is reported by the run
 //!   itself where it enters a stage (`athena_core::state::StageSink`, called by `Athena::go_with_stages`):
@@ -136,9 +138,14 @@
 //!   left queued with the reason (outcome `needs accepting`, plus a note); that is not a failure and stops
 //!   nothing.
 //! - **Low disk holds a job.** When free disk space is below `[disk] min_free_gb` (default 10) at dispatch,
-//!   even after idle jobs' build directories are removed, `athena go` returns [`athena_core::disk::LowDisk`].
-//!   The item is left queued (outcome `environment: low disk`, with the free and required amounts, plus a
-//!   note); that is not a failure, is not retried, and stops nothing. A later drain runs the same job.
+//!   before the checks or before the verifier, even after idle jobs' build directories are removed,
+//!   `athena go` returns [`athena_core::disk::LowDisk`]. The item is left held (outcome `environment: low
+//!   disk`, with the free and required amounts, plus a note); that is not a failure, uses up no attempt, and
+//!   stops nothing. A job held after its build stays dispatched with its resume mark and a hold marker. A
+//!   later drain lists it as interrupted work and retries it with no `athena retry` from anyone: while the
+//!   space stays short the retry is held again before the reader runs (no cost, no new job); once space is
+//!   free the job resumes from its kept candidate, with no new planner or producer run. A job held at
+//!   dispatch is run by a later drain as before.
 //! - **A short budget holds a job.** A job's own budget (`[budget] job_usd`) must cover everything still to run
 //!   (`athena_core::reading::budget_reserve`). When it does not, `athena go` returns
 //!   [`athena_core::reading::BudgetShort`] before spending anything. The item is left queued (outcome
@@ -1226,12 +1233,20 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 }));
                 // Refused before any money was spent because the budget does not cover the whole path: the
                 // item stays queued with its reason on one line, and the next item runs.
+                // A job held for low disk (a retry that finds the disk still short) says so, as a held run does.
                 if read.held {
-                    line.outcome = BUDGET_SHORT.into();
+                    let reason = line.reason.as_deref().unwrap_or("its budget is short");
+                    let low = reason.starts_with(athena_core::disk::LOW_DISK);
+                    line.outcome = if low {
+                        athena_core::disk::LOW_DISK.into()
+                    } else {
+                        BUDGET_SHORT.into()
+                    };
                     self.note(format!(
-                        "item {} is left queued: {}",
+                        "item {} is left {}: {}",
                         item.job,
-                        one_line(line.reason.as_deref().unwrap_or("its budget is short"))
+                        if low { "held" } else { "queued" },
+                        one_line(reason)
                     ));
                     self.push(line);
                     return RunStep::Held;
@@ -2927,9 +2942,11 @@ impl Steps for RealSteps<'_> {
                 },
                 runnable: false,
                 error: Some(format!("{error:#}")),
+                // A retry of a job held for low disk is held again while the disk stays short.
                 held: error
                     .downcast_ref::<athena_core::reading::BudgetShort>()
-                    .is_some(),
+                    .is_some()
+                    || error.downcast_ref::<athena_core::disk::LowDisk>().is_some(),
             },
         }
     }

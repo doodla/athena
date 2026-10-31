@@ -32,7 +32,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// A stub world: a scripted queue, outcomes, landings and ratings, and a log of every call in order.
 /// Each read costs 0.1, each run 0.5 and each rating 0.2; their caps are 0.2, 1.0 and 0.3.
@@ -1601,7 +1601,7 @@ fn low_disk_at_dispatch_that_cleanup_does_not_cure_holds_the_job_queued_and_not_
 }
 
 #[test]
-fn low_disk_before_the_checks_fails_the_job_retryably_and_a_retry_with_space_runs_the_checks() {
+fn low_disk_before_the_checks_holds_the_job_and_a_retry_with_space_runs_the_checks() {
     let fx = disk_fixture();
     let root = fx.state.path().join("repo");
     let flag = root.join("low_at_producer");
@@ -1614,22 +1614,16 @@ fn low_disk_before_the_checks_fails_the_job_retryably_and_a_retry_with_space_run
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(&flag, "").unwrap();
 
-    let result = athena.go(job.as_str(), AcceptedBy::User, &lines).unwrap();
-    let GoResult::Finished(finished) = result else {
-        panic!("expected the job to finish");
-    };
-    assert_eq!(finished.state, OutcomeState::Failed, "not rejected");
-    assert!(
-        finished
-            .reason
-            .contains("environment: low disk: 3.0 GB free, 10.0 GB required"),
-        "{}",
-        finished.reason
-    );
-    assert!(
-        finished.reason.contains(&format!("athena retry {job}")),
-        "{}",
-        finished.reason
+    // The job is held, not closed: `go` returns the low-disk hold and tells no one to run `athena retry`.
+    let error = athena
+        .go(job.as_str(), AcceptedBy::User, &lines)
+        .expect_err("held");
+    let low = error
+        .downcast_ref::<athena_core::disk::LowDisk>()
+        .expect("a low-disk hold");
+    assert_eq!(
+        low.text(),
+        "environment: low disk: 3.0 GB free, 10.0 GB required"
     );
     let said = lines_of(&lines);
     assert!(
@@ -1637,21 +1631,24 @@ fn low_disk_before_the_checks_fails_the_job_retryably_and_a_retry_with_space_run
         "no check ran: {said:#?}"
     );
     assert!(
-        !athena.state.hold_file(&job).exists(),
-        "no hold marker is left"
+        !said.iter().any(|l| l.contains("athena retry")),
+        "{said:#?}"
+    );
+    assert_eq!(
+        athena_core::disk::read_hold(&athena.state, &job),
+        Some(*low)
     );
     let records = Records::load(&fx.git, &fx.head()).unwrap();
-    assert_eq!(
-        records.jobs[job.as_str()].state(),
-        JobState::Closed(OutcomeState::Failed)
-    );
+    assert_eq!(records.jobs[job.as_str()].state(), JobState::Dispatched);
+    assert!(records.jobs[job.as_str()].outcome.is_none());
 
-    // Space is freed: `athena retry` reads the job again and its run goes on to the checks.
+    // Space is freed: the retry reads the job again, clears the hold and its run goes on to the checks.
     std::fs::remove_file(&flag).unwrap();
     std::fs::remove_file(root.join("simulated_free")).unwrap();
     let retry_lines = Lines::default();
     let (proposal, _) = athena.retry(job.as_str(), &retry_lines).unwrap();
     assert_ne!(proposal.job, job);
+    assert_eq!(athena_core::disk::read_hold(&athena.state, &job), None);
     let result = athena
         .go(proposal.job.as_str(), AcceptedBy::User, &retry_lines)
         .unwrap();
@@ -1682,7 +1679,7 @@ fn low_once_verifying(state: &Path) -> std::io::Result<u64> {
 }
 
 #[test]
-fn low_disk_after_the_checks_fails_the_job_as_the_environment_before_the_verifier_runs() {
+fn low_disk_after_the_checks_holds_the_job_before_the_verifier_runs() {
     let fx = disk_fixture();
     let verifier_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = verifier_calls.clone();
@@ -1701,28 +1698,24 @@ fn low_disk_after_the_checks_fails_the_job_as_the_environment_before_the_verifie
         .unwrap()
         .job;
 
-    let result = athena.go(job.as_str(), AcceptedBy::User, &lines).unwrap();
-    let GoResult::Finished(finished) = result else {
-        panic!("expected the job to finish");
-    };
-
-    // The environment failed, not the work: failed (retryable), not rejected, with the amounts and the hint.
-    assert_eq!(finished.state, OutcomeState::Failed, "{}", finished.reason);
-    assert!(
-        finished
-            .reason
-            .contains("environment: low disk: 3.0 GB free, 10.0 GB required before the verifier"),
-        "{}",
-        finished.reason
-    );
-    assert!(
-        finished.reason.contains(&format!("athena retry {job}")),
-        "{}",
-        finished.reason
+    // The environment is short, not the work: the job is held, with the amounts, and nothing says to retry.
+    let error = athena
+        .go(job.as_str(), AcceptedBy::User, &lines)
+        .expect_err("held");
+    let low = error
+        .downcast_ref::<athena_core::disk::LowDisk>()
+        .expect("a low-disk hold");
+    assert_eq!(
+        low.text(),
+        "environment: low disk: 3.0 GB free, 10.0 GB required"
     );
     // The checks ran first; the verifier agent never did.
     let said = lines_of(&lines);
     position(&said, "checks     ");
+    assert!(
+        !said.iter().any(|l| l.contains("athena retry")),
+        "{said:#?}"
+    );
     assert!(
         !said.iter().any(|l| l.starts_with("verifier   ")),
         "{said:#?}"
@@ -1734,17 +1727,17 @@ fn low_disk_after_the_checks_fails_the_job_as_the_environment_before_the_verifie
     );
     // No verdict was recorded.
     let records = Records::load(&fx.git, &fx.head()).unwrap();
-    let closed = &records.jobs[job.as_str()];
-    assert_eq!(closed.state(), JobState::Closed(OutcomeState::Failed));
-    assert!(closed.verification.is_none(), "no verification verdict");
+    let held = &records.jobs[job.as_str()];
+    assert_eq!(held.state(), JobState::Dispatched, "held, not closed");
+    assert!(held.outcome.is_none());
+    assert!(held.verification.is_none(), "no verification verdict");
     assert!(
-        !closed.invocations.iter().any(|i| i.role == Role::Verifier),
+        !held.invocations.iter().any(|i| i.role == Role::Verifier),
         "no verifier invocation is recorded"
     );
-    assert!(
-        athena_core::disk::is_environment_reason(&finished.reason),
-        "{}",
-        finished.reason
+    assert_eq!(
+        athena_core::disk::read_hold(&athena.state, &job),
+        Some(*low)
     );
 }
 
@@ -1821,6 +1814,211 @@ fn the_real_steps_hold_a_job_on_low_disk_without_a_failure_and_a_later_drain_run
             .exists(),
         "the hold marker is gone"
     );
+}
+
+/// An athena whose free space is ample until the producer has run, and 3 GB after it: the disk fills during
+/// the build, so the gate before the checks finds it short. The scenario's invocations are returned with it.
+fn athena_low_after_the_build(fx: &Fixture) -> (Athena, Arc<Mutex<Vec<Role>>>) {
+    let scenario = rated_scenario();
+    let invocations = scenario.invocations.clone();
+    let inner = scenario.script();
+    let free_file = fx.state.path().join("repo").join("simulated_free");
+    let script: Script = Box::new(move |spec| {
+        if spec.role == Role::Producer {
+            std::fs::create_dir_all(free_file.parent().unwrap()).unwrap();
+            std::fs::write(&free_file, "3000000000").unwrap();
+        }
+        inner(spec)
+    });
+    let mut athena = fx.athena(script);
+    athena.state = athena.state.clone().with_free_space(simulated_free);
+    (athena, invocations)
+}
+
+fn count_of(invocations: &Mutex<Vec<Role>>, role: Role) -> usize {
+    invocations
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| **r == role)
+        .count()
+}
+
+#[test]
+fn low_disk_after_the_build_holds_the_job_for_a_later_drain_with_no_failure_or_retry() {
+    let fx = disk_fixture();
+    let (athena, invocations) = athena_low_after_the_build(&fx);
+    let job = queue_steward_request(&athena, "Add a greeting to the README.");
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = RealSteps {
+        ui: &lines,
+        ..real_steps(&athena, &lander)
+    };
+
+    let first = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&first);
+    // Held, not failed: no failed item, no attempt used, nothing landed.
+    assert_ne!(first.stop, Stop::RepeatedFailure, "{text}");
+    assert_eq!(first.failed_item, None);
+    assert_eq!(first.landed, 0);
+    assert_eq!(first.jobs.len(), 1, "{text}");
+    assert_eq!(first.jobs[0].outcome, "environment: low disk");
+    assert_eq!(first.jobs[0].job, job, "attempted once, not retried");
+    for needle in ["environment: low disk", "3.0 GB", "10.0 GB"] {
+        assert!(text.contains(needle), "{needle}: {text}");
+    }
+    assert!(lander.0.lock().unwrap().is_empty());
+
+    // The job is dispatched with no outcome and no verdict; nothing says to run `athena retry`.
+    let id = athena_data::JobId::parse(&job).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let held = &records.jobs[&job];
+    assert_eq!(held.state(), JobState::Dispatched);
+    assert!(held.outcome.is_none() && held.verification.is_none());
+    assert_eq!(
+        athena_core::disk::read_hold(&athena.state, &id),
+        Some(athena_core::disk::LowDisk {
+            free: 3_000_000_000,
+            required: 10_000_000_000
+        })
+    );
+    assert!(
+        athena.state.read_resume(&id).is_some(),
+        "the candidate is kept"
+    );
+    assert_eq!(count_of(&invocations, Role::Producer), 1);
+    assert_eq!(count_of(&invocations, Role::Verifier), 0);
+    let said = lines_of(&lines);
+    position(
+        &said,
+        "held       environment: low disk: 3.0 GB free, 10.0 GB required",
+    );
+    assert!(
+        !said
+            .iter()
+            .any(|l| l.starts_with("checks     ") || l.contains("athena retry")),
+        "{said:#?}"
+    );
+    // The producer's spend is committed with the held attempt, so the drain counted it.
+    assert!(held.spent_usd() > 0.0);
+    assert!(
+        (first.jobs[0].cost_usd - held.spent_usd()).abs() < 1e-9,
+        "{text}"
+    );
+    // Status shows the held job with its reason and amounts, not as failed or interrupted.
+    let status = athena.status().unwrap();
+    let shown = display::status(&status);
+    assert!(
+        shown.contains("held")
+            && shown.contains("environment: low disk: 3.0 GB free, 10.0 GB required"),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("interrupted") && !shown.contains("athena retry"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_later_drain_resumes_the_held_job_from_its_candidate_without_a_new_producer_run() {
+    let fx = disk_fixture();
+    let (athena, invocations) = athena_low_after_the_build(&fx);
+    let job = queue_steward_request(&athena, "Add a greeting to the README.");
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = RealSteps {
+        ui: &lines,
+        ..real_steps(&athena, &lander)
+    };
+    let first = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    assert_eq!(first.jobs[0].outcome, "environment: low disk");
+    assert_eq!(count_of(&invocations, Role::Producer), 1);
+
+    // Space is back. The test runs no `athena retry`: the next drain resumes the held job itself.
+    set_free(&athena, 500_000_000_000);
+    let second = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&second);
+    assert_eq!(second.failed_item, None, "{text}");
+    assert_eq!(second.jobs.len(), 1, "{text}");
+    assert_eq!(second.jobs[0].outcome, "passed", "{text}");
+    assert_eq!(second.landed, 1, "{text}");
+    assert_ne!(second.jobs[0].job, job, "the resume is a job of its own");
+    assert_eq!(
+        count_of(&invocations, Role::Producer),
+        1,
+        "no new producer run"
+    );
+    assert_eq!(count_of(&invocations, Role::Planner), 0);
+    assert_eq!(count_of(&invocations, Role::Verifier), 1);
+    let said = lines_of(&lines);
+    position(
+        &said,
+        &format!("resume     job {job} kept its candidate (stage: checks)"),
+    );
+    let id = athena_data::JobId::parse(&job).unwrap();
+    assert_eq!(athena_core::disk::read_hold(&athena.state, &id), None);
+    assert!(athena.state.read_resume(&id).is_none(), "the mark is spent");
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let resumed = &records.jobs[&second.jobs[0].job];
+    assert!(resumed.outcome.is_some(), "the resumed job finished");
+    assert!(
+        !resumed.invocations.iter().any(|i| i.role == Role::Producer),
+        "the resumed job ran no producer"
+    );
+    // The held job is no longer listed as held.
+    let status = athena.status().unwrap();
+    assert_eq!(status.jobs_by_state.get("held"), None);
+}
+
+#[test]
+fn space_that_stays_short_leaves_the_job_held_and_uses_no_attempt() {
+    let fx = disk_fixture();
+    let (athena, invocations) = athena_low_after_the_build(&fx);
+    let job = queue_steward_request(&athena, "Add a greeting to the README.");
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = RealSteps {
+        ui: &lines,
+        ..real_steps(&athena, &lander)
+    };
+    let first = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    assert_eq!(first.jobs[0].outcome, "environment: low disk");
+    let id = athena_data::JobId::parse(&job).unwrap();
+    let job_records = || Records::load(&fx.git, &fx.head()).unwrap().jobs.len();
+    let counts = |inv: &Mutex<Vec<Role>>| inv.lock().unwrap().clone();
+    let (jobs_after_first, invoked_after_first) = (job_records(), counts(&invocations));
+
+    // The space stays short for two more passes: each leaves the job held and spends nothing.
+    for pass in 2..=3 {
+        let again = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+        let text = display::drain(&again);
+        assert_ne!(again.stop, Stop::RepeatedFailure, "pass {pass}: {text}");
+        assert_eq!(again.failed_item, None, "pass {pass}: {text}");
+        assert_eq!(again.jobs.len(), 1, "pass {pass}: {text}");
+        assert_eq!(
+            again.jobs[0].outcome, "environment: low disk",
+            "pass {pass}"
+        );
+        assert_eq!(again.jobs[0].job, job, "pass {pass}: no new job");
+        assert_eq!(again.jobs[0].cost_usd, 0.0, "pass {pass}: nothing spent");
+        assert_eq!(again.landed, 0);
+        assert_eq!(
+            job_records(),
+            jobs_after_first,
+            "pass {pass}: no job record made"
+        );
+        assert_eq!(
+            counts(&invocations),
+            invoked_after_first,
+            "pass {pass}: no agent ran"
+        );
+        assert!(athena_core::disk::read_hold(&athena.state, &id).is_some());
+        assert!(athena.state.read_resume(&id).is_some());
+        let records = Records::load(&fx.git, &fx.head()).unwrap();
+        assert_eq!(records.jobs[&job].state(), JobState::Dispatched);
+        assert!(records.jobs[&job].outcome.is_none());
+    }
 }
 
 /// Commits `config` as the repository's `athena.toml`.

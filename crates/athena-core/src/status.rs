@@ -1611,6 +1611,10 @@ impl Athena {
     fn state_name(&self, job: &JobRecords) -> String {
         match job.state() {
             JobState::Dispatched if self.running(job.id().as_str()) => "running".into(),
+            // Held for low disk after the build: dispatched, no outcome, a hold marker. A later drain resumes it.
+            JobState::Dispatched if crate::disk::read_hold(&self.state, job.id()).is_some() => {
+                "held".into()
+            }
             JobState::Dispatched => "interrupted".into(),
             other => other.name().into(),
         }
@@ -1656,7 +1660,7 @@ impl Athena {
             let state = self.state_name(job);
             *jobs_by_state.entry(state.clone()).or_default() += 1;
             let mut line = job_line(job, &state);
-            if state == "proposed" {
+            if state == "proposed" || state == "held" {
                 line.hold = crate::disk::read_hold(&self.state, job.id()).map(|h| h.text());
             }
             // Queued requests have not run; they show under open work.
@@ -1665,7 +1669,7 @@ impl Athena {
             }
             if matches!(
                 state.as_str(),
-                "queued" | "proposed" | "declined" | "interrupted" | "running" | "blocked"
+                "queued" | "proposed" | "declined" | "interrupted" | "held" | "running" | "blocked"
             ) {
                 open.push(line);
             }
@@ -1750,6 +1754,7 @@ impl Athena {
                 "proposed" => next.push(format!("athena go {id}   # or: athena correct {id} \"<line>\" · athena close {id} --why \"...\"")),
                 "declined" => next.push(format!("athena correct {id} \"<line>\"   # or: athena close {id} --why \"...\"")),
                 "interrupted" => next.push(format!("athena retry {id}   # reads it again to resume · or: athena close {id} --why \"...\" (commits what the interrupted job left)")),
+                "held" => next.push(format!("athena drain   # a later drain resumes job {id} from its candidate once disk space is free · or: athena close {id} --why \"...\"")),
                 "blocked" => next.push(format!("athena go {id}   # after resolving local edits; or: athena close {id} --why \"...\"")),
                 _ => {}
             }
