@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013549-2cab",
+  "round": 1,
+  "at": "2026-10-31T01:11:44.343181998Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The go-level checks that both directories are gone after success, rejection and failure would already pass on today's code. The one path the new guard fixes, a `?` error escaping the run, is shown only by a state.rs unit test, not through the real entry point.",
+      "evidence": "state.rs:283-296: `clean_job` removes the whole `jobs/<id>` directory after the closing commit, and every Landed, Rejected or Failed close goes through it. So `!work.exists() && !target/produce.exists()` after `go` holds without any change. The plan's Decision 1 says the gap is a `?` error out of the run, but its demonstration admits that path is shown only by 'a state.rs unit test ... which `go` cannot easily reach'. The stale-dir planting does tell old code from new for the creation half, because snapshot.rs:66-70 makes `Snapshot::create` refuse an existing directory. Nothing does the same for removal. Fix: Add a case through Athena::go where the run returns Err before closing. Examples: a Script whose producer or a later step returns an error that propagates with `?`, or a remover or free-space fn that makes a later step error. Assert that `go` returns Err and that `work_dir(id)` and `target/produce` are both gone. Without the guard this case leaves both behind. Keep the unit test as well.",
+      "location": "Demonstrations, Criterion 1 (run/tests.rs tests through Athena::go)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Probing each other job with `try_lock_job` takes that job's lock for a moment. A concurrent command on that job can then fail 'at once', and the probe creates job.lock files in other jobs' directories.",
+      "evidence": "state.rs:135-143: `try_lock_job` opens or creates `job.lock` and takes the flock. The doc says it 'Fails at once if another holds it', so a real `go`, `close` or `retry` of the probed job that races the probe is refused. Fix: Document the race and keep the probe window minimal, or make the probe non-intrusive. For example, try a shared lock, or treat an existing work_dir plus a target/produce dir as in flight without taking the job lock. Say in the design note that this is a gate, not a lock (the plan already says this for the start race).",
+      "location": "Decision 6 / Step 2, `StateDir::other_jobs_in_flight`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A job past its candidate stage is not counted as in flight, even though its `target/produce` (about T bytes) is still on disk when a check failed and the send-back needs it.",
+      "evidence": "run/mod.rs:1135 removes `work` after `candidate_stage`. disk.rs:29-31 keeps `target/produce` when a check fails. The count requires `work_dir` to exist, so the bound and the dir_bytes add-back both leave that job out. Fix: Count a job as in flight when its job lock is held and either `work_dir` or `produce_target_dir` exists, and add back both dirs' bytes.",
+      "location": "Decision 6 / Decision 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan departs from two statements in the accepted reading. It keeps the isolated snapshot instead of `git worktree add/remove`, and it never holds a lone job, where the reading says a zero bound holds the start. Both departures are reasoned, but they need the user's explicit confirmation.",
+      "evidence": "The reading's assumptions say 'Worktree creation and removal run through git worktree add/remove' and 'a bound that would allow zero in-flight jobs ... holds the start'. The plan's reasons are sound: the producer's isolation contract in snapshot.rs, and the request's 'with max_in_flight = 1 drain behaves as today'. Both are raised as open questions. Fix: Keep the open questions. In the CHANGELOG and the design note, state plainly that the per-job 'worktree' is the isolated snapshot repository, not a linked `git worktree`, and say why. That way the verifier does not judge criterion 1's 'fresh git worktree' wording against `git worktree list`.",
+      "location": "Decision 1 and Open questions (real `git worktree add`, zero-bound hold)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot using Read and Grep. The functions and seams it names exist: StateDir::work_dir, try_lock_job, with_free_space, free_bytes, the produce_target_dir path (target/produce), clean_job, dir_bytes, write_hold, LowDisk, BuildMeasurement::latest with its target_bytes and source_bytes, and PipelineConfig's reserve_disk_gb and max_check_slots. The disk-bound design is sound. It is pure functions, it reuses the existing LowDisk hold (which the drain already treats as 'left queued'), it is skipped when max_in_flight is 1, it never holds a lone job, and it adds no config field or record type. The worked numbers match the formula: 60 GB free gives 7, the 4 GB/1 GB record gives 9, and the 12 GB case clears the default min_free_gb of 10. Keeping the isolated snapshot instead of `git worktree add` is a justified departure from the reading, and the plan raises it as an open question. Athena's finding about run/tests.rs is weighed: the file is needed because it holds the go fixtures. The one major gap is criterion 1. Its go-level 'both directories gone' checks for success, rejection and failure already pass today, because clean_job removes the whole job directory on every close. The new guard's real effect, removal when a `?` error escapes the run, is shown only by a unit test and not through Athena::go. Adding a go case that returns Err and asserting both directories are gone would close the gap. The minor findings cover the lock-probe race, counting jobs whose work dir is removed but whose target/produce is kept, and how to word the 'worktree' term."
+}

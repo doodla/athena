@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013549-2cab",
+  "round": 2,
+  "at": "2026-10-31T01:16:26.409061233Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The plan says a stale `work` makes the run fail today. It does not: producer_snapshot already removes a stale work directory. Also, the 'gone after go' checks in cases (a)-(c) already pass today.",
+      "evidence": "crates/athena-core/src/run/producer.rs:83-86 already runs `if work.exists() { remove_tree(&work)? }` before Snapshot::create. close_dispatched calls clean_job, which removes jobs/<id> whole after closing, so on Landed, Rejected and Failed both directories are already gone after `go` returns. Fix: Correct the claim. Make case (d) depend on the stale `target/produce/stale` file and an empty CARGO_TARGET_DIR at producer start, since that is what fails without the guard. State that case (e) is the one that shows removal on exit. Cases (a)-(c) only show that nothing regressed.",
+      "location": "Demonstrations, Criterion 1, 'Fails without the behavior' and case (d)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The in-flight count misses jobs that hold their lock but have no work dir yet (they are still planning). The add-back also ignores other jobs' check build directories, which the formula already covers as check slots x T.",
+      "evidence": "Decision 7 counts a job as in flight only when its lock is held and work or target/produce exists. Decision 5 adds back the bytes of only work and target/produce. state.rs remove_target shows that target/ also holds the checks' own directory. Fix: Say in the doc comment that the count and the add-back are estimates. Either add back all of the other job's target/ or leave it out on purpose, and give the reason. No new test is needed.",
+      "location": "Decisions 5 and 7 (in-flight count and add-back)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Design section 5 says the drain waits for a job to finish. The plan's hold returns LowDisk, which ends the current drain run; the job runs on a later drain, not when a slot frees.",
+      "evidence": "docs/design/async-drain.md:96-97: 'it waits for a job to finish and free its directory'. The plan reuses the existing low-disk hold, which reports 'environment: low disk' and leaves the job queued. Fix: State in the design note and CHANGELOG that until job 10 the wait is a hold across drains. Name job 10 as the point where an in-drain wait for a free slot comes in.",
+      "location": "Decision 3 and Criterion 3 case (f)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The shared-lock probe of another job's job.lock can make a `go`, `close` or `retry` of that job that starts at the same moment be refused as already running.",
+      "evidence": "state.rs:136-142 try_lock_job takes an exclusive try_lock and returns None on WouldBlock. A shared lock held at that moment produces that None. Fix: This is already documented. As an option, check whether the lock is held without taking one: if an exclusive try succeeds the lock is free, so release it at once. That has the same race, so documenting it is enough.",
+      "location": "Decision 7 (job_lock_held probe)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot code. Its claims hold up. `produce_and_verify` (run/mod.rs:1093) returns early on `?` and on `Flow::Stop`, so a guard scoped to that function covers every exit. A `?` error reaches `go` unchanged (mod.rs:932), and `clean_job` never runs on that path, so test case (e) can tell the fixed code from the old code. `dispatch` has the `min_free_gb` gate followed by `clear_hold` at mod.rs:741-746, which is where the plan puts the new check. `LowDisk`, `write_hold`, `try_lock_job` (which already uses `File::try_lock`), `with_free_space`, `work_dir`, `produce_dir`, `BuildMeasurement::latest` and `Config::pipeline()` all exist. In drain.rs, `simulated_free`, `set_free` and `go_with_disk` exist. `test_config()` has no `[drain]` table and neither does athena.toml, so appending `[drain.pipeline]` to the test config is valid TOML. The plan uses the isolated snapshot as the per-job worktree instead of `git worktree add`, which departs from the reading. That choice is justified by the system fact that a producer works in a one-commit snapshot with no history or records/; the plan raises it as an open question and says so in the docs. Not holding a lone job, and skipping the check at max_in_flight = 1, are also reasoned and raised openly. I found no blocker or major problem. The remaining findings are about the accuracy of the \"fails without the behavior\" claims and the rough edges of an estimate-based gate."
+}

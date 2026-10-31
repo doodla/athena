@@ -32,6 +32,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Per-job worktree start and its disk bound (async drain build job 4, `docs/design/async-drain.md` sections 5 and 12
+  and decision D145). Each job's producer runs in its own worktree (`jobs/<id>/work`) with its own build directory
+  (`jobs/<id>/target/produce`, its `CARGO_TARGET_DIR`). The new `JobWorktree` guard clears both when the producer
+  starts, so a killed run's leftover is never seen, and removes both when the run ends by any path (a verdict, a stop
+  or an error), where before an error left them behind. The worktree is the producer's isolated one-commit snapshot
+  repository, not a linked `git worktree`: a linked one shares the user's history and `records/` with the producer.
+  With `[drain.pipeline] max_in_flight` above 1, a start now waits when the disk fits fewer jobs than that. The bound
+  is `floor((free - reserve_disk_gb - max_check_slots x T) / (T + S))` (`disk::in_flight_limit`), where `free` counts
+  the bytes the other jobs' worktrees and build directories already use as free. T and S are `target_bytes` and
+  `source_bytes` of the latest `athena.build-measurement/1` record, which `athena measure-build` writes; with no
+  record the design's estimates, 6 GB and 0.2 GB, are used and the hold line says so. A wait is the existing disk
+  hold: the job stays queued, `go` returns `LowDisk`, and a later drain starts the same job. With `max_in_flight = 1`
+  (the default) nothing changes, and a job is never held while no other job is in flight, since waiting would free
+  nothing. The check is a gate, not a lock: two jobs that start at the same instant can both pass.
 - The drain's in-flight table (async drain build job 3, `docs/design/async-drain.md` sections 7 and 12 and decision
   D145). The real steps keep a local file, `in-flight.json` in the state directory, with a row of job id, stage and
   worktree for each job being worked. The run reports the stage itself: the new `Athena::go_with_stages` tells a

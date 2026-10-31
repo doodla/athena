@@ -5411,3 +5411,341 @@ mod parallel {
         assert_eq!(landed_jobs(&report).len(), 1);
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// Per-job worktree and build directory, and the disk bound on how many jobs start (async-drain.md section 5)
+
+/// What a producer saw of its own worktree and build directory the moment it started.
+#[derive(Debug, Clone)]
+struct Start {
+    workdir: std::path::PathBuf,
+    target: Option<std::path::PathBuf>,
+    has_git: bool,
+    /// Entries in the build directory; `None` when it does not exist yet.
+    target_entries: Option<usize>,
+    stale_in_work: bool,
+    stale_in_target: bool,
+}
+
+/// One job run through `Athena::go` with a producer that reports where it started.
+struct OwnRun {
+    athena: Athena,
+    job: athena_data::JobId,
+    result: anyhow::Result<GoResult>,
+    starts: Arc<std::sync::Mutex<Vec<Start>>>,
+}
+
+/// Reads and runs one job. `stale` plants a leftover worktree and build directory first, as a killed run
+/// leaves them. `break_repo` makes the producer delete its own `.git`, so a later step of the run fails with
+/// an error instead of closing the job.
+fn run_watched(fx: &Fixture, scenario: Scenario, stale: bool, break_repo: bool) -> OwnRun {
+    let inner = scenario.script();
+    let starts: Arc<std::sync::Mutex<Vec<Start>>> = Arc::default();
+    let seen = starts.clone();
+    let script: Script = Box::new(move |spec| {
+        if spec.role == Role::Producer {
+            let target = spec
+                .env
+                .get("CARGO_TARGET_DIR")
+                .map(std::path::PathBuf::from);
+            seen.lock().unwrap().push(Start {
+                workdir: spec.workdir.clone(),
+                has_git: spec.workdir.join(".git").exists(),
+                target_entries: target
+                    .as_ref()
+                    .and_then(|t| std::fs::read_dir(t).ok())
+                    .map(|entries| entries.count()),
+                stale_in_work: spec.workdir.join("stale").exists(),
+                stale_in_target: target.as_ref().is_some_and(|t| t.join("stale").exists()),
+                target,
+            });
+            if break_repo {
+                std::fs::remove_dir_all(spec.workdir.join(".git")).unwrap();
+            }
+        }
+        inner(spec)
+    });
+    let athena = fx.athena(script);
+    let proposal = athena.ask("add a greeting to the readme", &Quiet).unwrap();
+    let job = proposal.job;
+    if stale {
+        for dir in [athena.state.work_dir(&job), athena.state.produce_dir(&job)] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("stale"), b"left by an earlier run").unwrap();
+        }
+    }
+    let result = athena.go(job.as_str(), AcceptedBy::User, &Quiet);
+    OwnRun {
+        athena,
+        job,
+        result,
+        starts,
+    }
+}
+
+impl OwnRun {
+    fn finished(&self) -> &athena_core::run::Finished {
+        match self.result.as_ref().expect("the job ran to an end") {
+            GoResult::Finished(finished) => finished.as_ref(),
+            GoResult::Reread(_) => panic!("expected the job to finish"),
+        }
+    }
+
+    /// Every producer started in its own repository, with its own empty build directory, both under this
+    /// job's directory, and saw nothing a past run left.
+    fn assert_isolated_start(&self) {
+        let state = &self.athena.state;
+        let starts = self.starts.lock().unwrap();
+        assert!(!starts.is_empty(), "the producer ran");
+        for start in starts.iter() {
+            assert_eq!(start.workdir, state.work_dir(&self.job));
+            assert!(start.has_git, "the worktree is a repository: {start:?}");
+            assert_eq!(
+                start.target.as_deref(),
+                Some(state.produce_dir(&self.job).as_path())
+            );
+            assert_ne!(start.target.as_deref(), Some(start.workdir.as_path()));
+            assert!(start.workdir.starts_with(state.job_dir(&self.job)));
+            assert!(
+                start
+                    .target
+                    .as_ref()
+                    .unwrap()
+                    .starts_with(state.job_dir(&self.job))
+            );
+            assert!(matches!(start.target_entries, None | Some(0)), "{start:?}");
+            assert!(!start.stale_in_work && !start.stale_in_target, "{start:?}");
+        }
+    }
+
+    /// After the run neither the worktree nor the build directory is left.
+    fn assert_both_gone(&self) {
+        let state = &self.athena.state;
+        assert!(!state.work_dir(&self.job).exists(), "worktree left behind");
+        assert!(
+            !state.produce_dir(&self.job).exists(),
+            "build directory left behind"
+        );
+    }
+}
+
+#[test]
+fn per_job_worktree_a_landed_job_runs_in_its_own_worktree_and_build_directory_and_leaves_neither() {
+    let fx = Fixture::new();
+    let run = run_watched(&fx, Scenario::default(), false, false);
+    assert_eq!(
+        run.finished().state,
+        OutcomeState::Landed,
+        "{}",
+        run.finished().reason
+    );
+    run.assert_isolated_start();
+    run.assert_both_gone();
+}
+
+#[test]
+fn per_job_worktree_a_rejected_job_leaves_neither_directory() {
+    // A check that passes on the base and fails on the candidate: the job is rejected, and the producer's
+    // build directory is kept for a send-back while the checks run.
+    let config =
+        config_with_change_checks(&[("no-greeting", &["sh", "-c", "! grep -q Hello README.md"])]);
+    let fx = Fixture::with_config(&config);
+    let run = run_watched(&fx, Scenario::default(), false, false);
+    assert_eq!(
+        run.finished().state,
+        OutcomeState::Rejected,
+        "{}",
+        run.finished().reason
+    );
+    run.assert_isolated_start();
+    run.assert_both_gone();
+}
+
+#[test]
+fn per_job_worktree_a_failed_job_leaves_neither_directory() {
+    let fx = Fixture::new();
+    let scenario = Scenario {
+        edits: vec![],
+        ..Scenario::default()
+    };
+    let run = run_watched(&fx, scenario, false, false);
+    assert_eq!(
+        run.finished().state,
+        OutcomeState::Failed,
+        "{}",
+        run.finished().reason
+    );
+    run.assert_isolated_start();
+    run.assert_both_gone();
+}
+
+#[test]
+fn per_job_worktree_a_start_clears_what_a_killed_run_left() {
+    let fx = Fixture::new();
+    let run = run_watched(&fx, Scenario::default(), true, false);
+    assert_eq!(
+        run.finished().state,
+        OutcomeState::Landed,
+        "{}",
+        run.finished().reason
+    );
+    run.assert_isolated_start();
+    run.assert_both_gone();
+}
+
+#[test]
+fn per_job_worktree_a_run_that_ends_in_an_error_still_removes_both_directories() {
+    let fx = Fixture::new();
+    let run = run_watched(&fx, Scenario::default(), false, true);
+    assert!(
+        run.result.is_err(),
+        "the run ends in an error, not a closed job"
+    );
+    assert_eq!(run.starts.lock().unwrap().len(), 1, "the producer ran once");
+    run.assert_both_gone();
+    // The job was not closed: it is dispatched and waits for a retry.
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert!(records.jobs[run.job.as_str()].outcome.is_none());
+}
+
+/// A job another process is running: a worktree on disk and the job lock held. Keep the returned lock
+/// for as long as that job runs.
+const OTHER_JOB: &str = "20260102-000000-abce";
+
+fn running_elsewhere(athena: &Athena) -> athena_core::state::Lock {
+    let other = athena_data::JobId::parse(OTHER_JOB).unwrap();
+    let work = athena.state.work_dir(&other);
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("x"), vec![1u8; 1000]).unwrap();
+    athena
+        .state
+        .try_lock_job(&other)
+        .unwrap()
+        .expect("the lock of the other job is free")
+}
+
+/// The test configuration allowing `max_in_flight` jobs at once (reserve 10 GB, 1 check slot, no
+/// measurement, so T 6 GB and S 0.2 GB).
+fn pipelined(max_in_flight: u32) -> String {
+    format!(
+        "{}\n[drain.pipeline]\nmax_in_flight = {max_in_flight}\n",
+        test_config()
+    )
+}
+
+fn assert_landed(result: anyhow::Result<GoResult>) {
+    match result.expect("the job ran") {
+        GoResult::Finished(finished) => {
+            assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason)
+        }
+        GoResult::Reread(_) => panic!("expected the job to finish"),
+    }
+}
+
+#[test]
+fn in_flight_bound_makes_the_extra_start_wait_and_a_later_start_runs_the_same_job() {
+    let fx = Fixture::with_config(&pipelined(2));
+    let (athena, job, lines) = go_with_disk(&fx, || {});
+    // 25 GB free: floor((25 - 10 - 6) / 6.2) = 1 job fits, and one is running.
+    set_free(&athena, 25_000_000_000);
+    let running = running_elsewhere(&athena);
+
+    let error = athena
+        .go(job.as_str(), AcceptedBy::User, &lines)
+        .expect_err("the start waits");
+    let low = error
+        .downcast_ref::<athena_core::disk::LowDisk>()
+        .expect("a hold, not another error");
+    assert_eq!(low.free, 25_000_000_000);
+    assert!(low.required > low.free, "{low:?}");
+    let said = lines_of(&lines);
+    let line = said
+        .iter()
+        .find(|l| l.contains("start held"))
+        .unwrap_or_else(|| panic!("no hold line: {said:#?}"));
+    assert!(line.contains("design estimate"), "{line}");
+    assert!(
+        !said.iter().any(|l| l.starts_with("dispatched ")),
+        "{said:#?}"
+    );
+    // Queued, not rejected or failed, and the hold is recorded.
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let held = &records.jobs[job.as_str()];
+    assert_eq!(held.state(), JobState::Proposed);
+    assert!(held.job.is_none() && held.outcome.is_none());
+    assert_eq!(
+        athena_core::disk::read_hold(&athena.state, &job),
+        Some(*low)
+    );
+
+    // The other job ends: the same job starts and lands.
+    drop(running);
+    assert_landed(athena.go(job.as_str(), AcceptedBy::User, &lines));
+    assert_eq!(athena_core::disk::read_hold(&athena.state, &job), None);
+}
+
+#[test]
+fn in_flight_bound_lets_a_start_through_when_the_disk_fits_the_jobs_allowed() {
+    let fx = Fixture::with_config(&pipelined(2));
+    let (athena, job, lines) = go_with_disk(&fx, || {});
+    // 40 GB free: floor((40 - 10 - 6) / 6.2) = 3 fit, two are allowed and one is running.
+    set_free(&athena, 40_000_000_000);
+    let _running = running_elsewhere(&athena);
+    assert_landed(athena.go(job.as_str(), AcceptedBy::User, &lines));
+}
+
+#[test]
+fn in_flight_bound_never_holds_a_job_when_no_other_is_in_flight() {
+    let fx = Fixture::with_config(&pipelined(2));
+    let (athena, job, lines) = go_with_disk(&fx, || {});
+    // 12 GB free: the bound is 0 jobs, but waiting would free nothing.
+    set_free(&athena, 12_000_000_000);
+    // A leftover of a dead process (no lock held) is not a job in flight.
+    let other = athena_data::JobId::parse(OTHER_JOB).unwrap();
+    std::fs::create_dir_all(athena.state.work_dir(&other)).unwrap();
+    assert_landed(athena.go(job.as_str(), AcceptedBy::User, &lines));
+}
+
+#[test]
+fn in_flight_bound_does_not_apply_with_max_in_flight_one() {
+    let fx = Fixture::new();
+    let (athena, job, lines) = go_with_disk(&fx, || {});
+    set_free(&athena, 25_000_000_000);
+    let _running = running_elsewhere(&athena);
+    assert_landed(athena.go(job.as_str(), AcceptedBy::User, &lines));
+}
+
+#[test]
+fn in_flight_bound_holds_a_start_in_a_drain_without_a_failure_and_a_later_drain_runs_it() {
+    let fx = Fixture::with_config(&pipelined(2));
+    let scenario = rated_scenario();
+    let mut athena = fx.athena(scenario.script());
+    athena.state = athena.state.clone().with_free_space(simulated_free);
+    let job = queue_steward_request(&athena, "Add a greeting to the README.");
+    set_free(&athena, 25_000_000_000);
+    let running = running_elsewhere(&athena);
+
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let first = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&first);
+    assert_eq!(first.jobs.len(), 1, "{text}");
+    assert_eq!(first.jobs[0].outcome, "environment: low disk");
+    assert_eq!(first.failed_item, None, "{text}");
+    assert_ne!(first.stop, Stop::RepeatedFailure, "{text}");
+    assert_eq!(first.landed, 0);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(
+        records.jobs[&job].state(),
+        JobState::Proposed,
+        "still queued"
+    );
+    assert!(records.jobs[&job].job.is_none(), "never dispatched");
+
+    drop(running);
+    let second = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    assert_eq!(second.jobs.len(), 1, "{}", display::drain(&second));
+    assert_eq!(second.jobs[0].job, job, "the same job, not a new one");
+    assert_eq!(second.landed, 1);
+}
