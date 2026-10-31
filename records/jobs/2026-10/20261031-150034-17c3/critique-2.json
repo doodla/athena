@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-150034-17c3",
+  "round": 2,
+  "at": "2026-10-31T21:48:06.211024934Z",
+  "invocation_seq": 19,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "With no push (no GitHub remote, ssh or local origin, or a failed push), the plan still passes the 25-minute `Wait` to `resolve` over `NoCi`. Every such job would sleep about 25 minutes before its local checks run. That breaks 'with no GitHub remote configured, nothing changes', and the criterion 4 test would hang.",
+      "evidence": "In `read_ci` (ci_result.rs:165-188), `Ok(None)` does not return; the loop sleeps `wait.pause` and polls again until `wait.polls` runs out. `NoCi::fetch` (routing.rs:109-112) always returns `Ok(None)`. Step 7 builds the wait from `ci_wait_s` whatever the push result, and the plan's `ci_wait(1500)` gives 76 polls of 20 s. Today run/mod.rs:1271-1274 passes `Wait { polls: 1, pause: ZERO }` with `NoCi`. Fix: Pick the wait inside `with_ci_source`, or next to the push: `ci_wait(ci_wait_s)` only when a `CiPush` exists, otherwise `Wait { polls: 1, pause: Duration::ZERO }` as today. In the criterion 4 test, assert the job finishes without sleeping, for example with an elapsed-time bound or a pause seam.",
+      "location": "Plan step 7 (the `with_ci_source(..., |src| run_routed_recorded(..., ci_wait(jc.config.budget.ci_wait_s)))` call) and Decision 7",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan says a missing run returns on the first poll. It does not: an empty `workflow_runs` reply, a reply holding only a pull_request run, and a run for another SHA all make `read_ci` keep polling. With the default `ci_wait_s = 1500`, each of those fallback tests would sleep about 25 minutes. Only case (e) sets the bound to 0.",
+      "evidence": "`CiBranchSource::fetch` returns `Ok(None)` when `pick_ci_run` finds no push run on the branch (gh/client.rs:728-730), which covers (b) and (h). `read_ci` handles `Ok(None)` with no return, and a run for another SHA with `continue` (ci_result.rs:173-177), which covers (f). Only cancelled and timed_out conclusions, and source `Err`, return Missing at once (ci_result.rs:172, 183). Fix: Correct the risk text. Run every fallback test that gets no usable reply ((b), (e), (f), (h)) with `ci_wait_s = 0`, or with a test-only zero pause, and say so in the demonstration. Optionally add one test with a small bound and a counting Runner that shows the source is polled more than once before the fallback.",
+      "location": "Risks ('The green, red and missing replies return on the first poll') and Criterion 2 demonstration cases (b), (f), (h)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The demonstrations say the recording `CiBranchRemote` and the fake `gh::Runner` are added in step 11. Step 11 edits ci.yml; the tests are written in step 10.",
+      "evidence": "Steps list: step 10 is 'In run/ci_tests.rs write the tests…', step 11 is 'Edit .github/workflows/ci.yml'. Fix: Change the references to step 10.",
+      "location": "Demonstrations, 'Test seam' lines ('fakes added in step 11')",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The reuse statement reaches the verifier as a fake passed check named `ci-result` with command 'not a check'. The plan defends this, but it can make the verifier's check list look like four checks.",
+      "evidence": "`CheckResultView` is in athena-context/src/briefs.rs:797, and athena-context is not a deliverable. Fix: Keep it if the report-gaps entry sets the precedent, but word the detail so it clearly states the checks' source, not a check result.",
+      "location": "Decision 4 / Open question 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code at the base commit and checked the plan's main claims. Most hold. The `NoCi` call is at run/mod.rs:1265-1275. `GhClient::new(runner, repository)` and `ci_source(branch)` exist, and `CiBranchSource::fetch` builds the push-only query that the logged-query assertion relies on. `gh::Runner` and `GhCli` are public. `https_github_repository` and `early_pr`'s nested and origin guards are in gh/early.rs. `Budget` has `deny_unknown_fields`, so a serde default is the right shape for the new field. `push_branch` is at athena-git lib.rs:422 and no delete operation exists. `verify::reuse_statement` is at verify.rs:60. Driving the tests through `Athena::go` with only the Runner and the branch remote faked is a sound seam. The design has one real fault: `resolve`'s `read_ci` keeps polling on `Ok(None)`. Because the plan passes the 25-minute `Wait` even when nothing was pushed, any job without a GitHub remote (or with a failed push) would sleep about 25 minutes over `NoCi` before running its local checks. That breaks requirement 5, and the criterion 4 test would hang. For the same reason, the plan's claim that a missing run returns on the first poll is wrong: fallback cases (b), (f) and (h) would each sleep about 25 minutes under the default bound. Both fixes are small: use the old one-read wait when there is no push, and run the fallback tests with a zero bound. So the verdict is revise."
+}

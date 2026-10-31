@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-150034-17c3",
+  "round": 3,
+  "at": "2026-10-31T21:50:30.640278005Z",
+  "invocation_seq": 21,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The CI tests with a github.com https origin would also trigger the real early pull request, which means real network calls.",
+      "evidence": "`check_and_verify` calls `self.early_pr(&id, &c, ...)` on every non-nested run. For an https github.com origin, `early_pr_to` goes through `early_seam::current()` under cfg(test); with no seam installed it builds `GhCli` and a `GitRemote` on `origin` and pushes for real. The plan installs only `ci_seam` and `check_seam`. `early_seam::install` is used today only in run_pin_tests.rs. The request says the tests must not reach GitHub, and its out-of-scope list forbids real network calls. Fix: In every ci_tests case with an https github origin, also install `early_seam` with recording fakes for the remote and the host, following run_pin_tests.rs. Name this in step 10 and in each demonstration's seam. Optionally, assert that the early pull request fake was called, so the two pushes are shown to be separate.",
+      "location": "Demonstrations, criteria 1–3; step 10; crates/athena-core/src/run/mod.rs:1201; crates/athena-core/src/gh/early.rs:321-359",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Changing only `on.push.branches` leaves the trigger comment above it wrong.",
+      "evidence": "The comment above the trigger says 'Push runs only for main' and explains why pushes to pull request branches were dropped. After this change, pushes to athena/ci/** also run, so the comment contradicts the trigger. The plan says to 'change nothing else'. Fix: Allow a comment edit there: say athena/ci/** push runs are Athena's candidate CI runs, read by `resolve`, and that they run in the push cache scope.",
+      "location": "Step 11; .github/workflows/ci.yml:40-45",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A job that resumes with checks recorded earlier from CI gives the verifier no reuse statement.",
+      "evidence": "`ci_record` is only filled from `run_routed_recorded`. When `recorded_checks` is Some (resume at the verifier stage, including after a disk hold), the checks come from CI but `Checked.ci_record` is None. The verifier would then see CI-sourced check entries with no statement of where they came from. Fix: Either rebuild the record from the resumed CheckRuns when their notes name CI, or state in the plan and the CHANGELOG that a resumed job carries no reuse statement.",
+      "location": "Decision 5 / step 8; run/mod.rs:1233-1237 (resumed checks path)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Make sure the fake runs reply exercises the aggregate-job verdict, not only the run's conclusion.",
+      "evidence": "`parse_ci_run` / `aggregate_verdict` (client.rs:548-635) decide by the 'fmt, clippy, tests' job. The real `history` job fails on candidates, so a red run is decided by that aggregate job, not by the run's overall conclusion. Fix: In the green test, have the canned jobs reply include a failed `history` job next to a successful aggregate job, so the test matches what a real candidate push run returns.",
+      "location": "Step 10, green and red tests",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read run/mod.rs (dispatch, check_and_verify, the NoCi call at lines 1264-1275), ci_result.rs (Wait, read_ci, resolve), gh/early.rs, gh/client.rs and ci.yml. The plan's design is sound. Choosing the source and the wait together in `with_ci_source` stops a no-remote job from sitting through the 25-minute wait over `NoCi`. Only the `gh::Runner` is faked, so the production `GhClient::ci_source` query is what the tests exercise. The forced push handles a branch left over from a killed job. The delete sits in `dispatch` after the `RunContext` is built, so on the reread path only the inner call deletes, and it deletes once. The ci.yml `history` job runs on pushes too and would fail on a candidate, but g437's `aggregate_verdict` already judges by the aggregate job (client.rs:548), so that is handled. One real gap remains. The criterion 1–3 tests set `origin` to `https://github.com/example/project.git`. `check_and_verify` calls `early_pr` at line 1201 for that origin, and outside `early_seam` it uses `GhCli` and a real `git push`. The plan never installs `early_seam`, so its main demonstrations would make real network calls, which the request forbids, and could hang or flake. The other findings are minor."
+}
