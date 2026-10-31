@@ -1,0 +1,195 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-214156-d6y1",
+  "round": 3,
+  "at": "2026-10-31T13:11:52.655470395Z",
+  "invocation_seq": 8,
+  "approach": "Name the root cause: `[budget] job_usd` was never required to cover the reader, every planning round, the producer and the verifier, and nothing refused an athena.toml that set it too low. The base tree has a runtime `preflight` that catches this only when a job starts. The new piece is a refusal at the point an unaffordable budget enters the repository. In config.rs add the one sum of the stage caps (`planning_usd`, `critic_usd`, `run_usd`, `budget_required`) and `Config::check_budget()`, which returns a new `ConfigError::BudgetBelowReserve` naming `[budget] job_usd` and the shortfall. `Config::parse`/`validate` stay structural, so history walks and gate checks on past commits still parse. `JobConfig::at` is not touched, so drain's `BudgetShort` hold and the close/restart/intervene recovery commands behave as today. `budget_reserve` in reading.rs takes every stage's sum from the same helpers, so no second hand-written sum remains. In admission.rs, when a candidate changes athena.toml (and the schema is not also changing), a separate `configuration` violation is pushed if the file parses but `check_budget` fails. Runtime `preflight` stays the guard for running jobs.",
+  "decisions": [
+    {
+      "choice": "Apply `check_budget` only where an athena.toml change is admitted (admission.rs, the candidate config check), as a separate violation from the parse violation. Do not call it from `Config::parse`, `validate` or `JobConfig::at`.",
+      "reason": "Findings 4 and 5. `JobConfig::at` also loads config for close, restart, intervene, introspect, hestia and others. A short head budget would block the recovery commands and no job could repair athena.toml. It would also turn drain's typed `BudgetShort` hold into a generic `ConfigError` that drain.rs (out of scope) does not hold on. The gate's history walks parse past commits (for example an 8.00 budget with planning on) with `Config::parse`, so a parse-time refusal would break them. Running jobs are already refused before any spend by `preflight(Admission)` at reading.rs 976/1043. Admission is where a config change enters, so the unaffordable budget is stopped at its origin.",
+      "rejected": [
+        {
+          "option": "Check inside `Config::validate`/`parse`",
+          "why": "Breaks parsing of past commits in gate history and invariant checks."
+        },
+        {
+          "option": "Call `check_budget` in `JobConfig::at`",
+          "why": "Blocks recovery and admin commands at a short head, and swaps drain's BudgetShort hold for an unheld ConfigError (drain.rs 2938-2984)."
+        },
+        {
+          "option": "Add more `preflight` call sites",
+          "why": "They exist already and fire only when a job starts; drain.rs is out of scope."
+        },
+        {
+          "option": "Fold the budget error into the existing `does not parse` text",
+          "why": "Finding 7: that message would say a parsing file does not parse. Use a separate violation with its own text."
+        }
+      ]
+    },
+    {
+      "choice": "Count planning rounds only when `job_plan` is `Some` and enabled (the `ReserveStage::Admission` rule). The helpers `planning_usd(rounds)`, `critic_usd()`, `run_usd()` and `budget_required()` live on `Config`, and `budget_reserve` calls them for every stage. Refuse only when `job_usd + 1e-9 < required`.",
+      "reason": "Admission semantics stay unchanged: the shipped config needs 0.50 + 3*(0.75+0.75) + 5.00 = 10.00 and passes at 12.00. A changed cap changes both the check and the runtime reserve with no code change. The tolerance keeps a budget exactly at the reserve loading despite f64 rounding.",
+      "rejected": [
+        {
+          "option": "Only the Admission arm uses `budget_required`",
+          "why": "Leaves hand-written producer+verifier and round sums in the other arms, a second copy."
+        },
+        {
+          "option": "Count rounds whenever a [job_plan] table exists",
+          "why": "Would refuse configs with enabled = false that never plan."
+        }
+      ]
+    },
+    {
+      "choice": "Do not edit run_pin_tests.rs, capability.rs, drain.rs, run/mod.rs, athena.toml or defaults.toml. Edit admission.rs, which is outside the three listed deliverables.",
+      "reason": "Findings 1-3: with the load-path call dropped, capability.rs and run_pin_tests.rs need no change (ask still returns `BudgetShort` for the 8.00 planned config). admission.rs stays because the critic's fix points there and it is the only place that stops a bad athena.toml entering. `Files: crates/` covers it, and the edit is one block plus tests.",
+      "rejected": [
+        {
+          "option": "Keep the change inside the three listed files",
+          "why": "Then nothing calls `check_budget` and the new rule would have no effect on a candidate."
+        }
+      ]
+    },
+    {
+      "choice": "The CHANGELOG entry says the new piece is refusing an unaffordable athena.toml when a change is admitted, and that runtime preflight remains the guard for running jobs.",
+      "reason": "Finding 8: preflight at admission, dispatch, per round and before the run already exists; the entry must not claim to add it.",
+      "rejected": [
+        {
+          "option": "Describe the change as adding a pre-spend budget check",
+          "why": "Overstates the change; preflight already does that."
+        }
+      ]
+    },
+    {
+      "choice": "Tests in reading.rs change a cap by mutating the parsed `Config` (`config.job_plan.as_mut().unwrap().planner_usd += 1.0`, `max_rounds += 1`) instead of editing TOML text with `replace`. The two existing hand-written sums in tests stay as independent expectations.",
+      "reason": "Avoids guessing the exact text of athena.toml lines. `Config` derives Clone and its fields are pub (config.rs 844 mutates `budget.job_usd`). The Grep for criterion 2 covers non-test code only.",
+      "rejected": [
+        {
+          "option": "`String::replace` on shipped athena.toml lines",
+          "why": "Brittle: the exact lines were not read."
+        },
+        {
+          "option": "Rewrite the existing sum tests to use the helper",
+          "why": "They would then check the helper against itself."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add `Config::planning_usd`, `critic_usd`, `run_usd` and `budget_required` (the one sum of the stage caps), `ConfigError::BudgetBelowReserve { job_usd, required }` and `Config::check_budget()`. `parse`/`validate` stay structural. Add the criterion 3 test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "`budget_reserve` takes every stage's sum from the Config helpers. Extend `shipped_budget_covers_the_reserve` and add `required_budget_follows_the_configured_caps`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "In the candidate athena.toml check (~lines 434-457), when the file parses and the schema is not changing, push a separate `configuration` violation if `check_budget()` fails, with its own text. Add the 9.00 candidate test. Not a listed deliverable; it is the only place where a bad budget is stopped as it enters.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased/Fixed entry naming the root cause, the admission-time check, the preflight that stays, and the three jobs.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read config.rs `ConfigError` (481-512), `Config::parse` (516) and the tests module (REPO_CONFIG, `unplanned`, the budget test at ~741). Read reading.rs `budget_reserve` (77-101) and `shipped_budget_covers_the_reserve`. Read admission.rs 422-457 and its tests (567, 742, 824-859). Grep athena.toml for the exact `job_usd` line.",
+    "In config.rs add `impl Config` helpers with doc comments marking them the one sum of the stage caps: `planning_usd(rounds)` (rounds * (planner+critic) from `job_plan`, 0 when absent), `critic_usd()`, `run_usd()` (producer+verifier) and `budget_required()` (reader + `planning_usd(max_rounds)` when `job_plan` is enabled + `run_usd`).",
+    "Add `ConfigError::BudgetBelowReserve { job_usd: f64, required: f64 }`, checking the derives (`Clone`, `PartialEq`) still compile. The message reads: `[budget] job_usd ${job_usd:.2} is ${short:.2} short of the ${required:.2} the configured caps need (the reader, every planning round, the producer and the verifier); raise job_usd or lower a cap`. The shortfall is computed in the message or via a method, and the f64 formatting uses a helper to avoid duplicating `required - job_usd`. Add `Config::check_budget()`, which refuses when `job_usd + 1e-9 < budget_required()`. Do not call it from `parse` or `validate`.",
+    "Add the config.rs test `job_usd_below_the_reserve_is_refused_by_the_budget_check` with cases (a) to (f). Confirm it fails with `check_budget` stubbed to Ok, and that the 8.00 config still goes through `Config::parse`.",
+    "Rewrite `budget_reserve` in reading.rs on the helpers: Admission = `budget_required`; Dispatch = (`planning_usd(max_rounds)` if planned) + `run_usd`; Planner = `planning_usd(max_rounds-round+1)` + `run_usd`; Critic = `critic_usd` + `planning_usd(max_rounds-round)` + `run_usd`; Run = `run_usd`. Keep the `saturating_sub` forms. Extend `shipped_budget_covers_the_reserve` and add `required_budget_follows_the_configured_caps`, mutating the parsed Config.",
+    "In admission.rs, in the config loop, parse the CONFIG_PATH text once. If `schema_changed` is false and it parses, call `check_budget()`; on error push a second `configuration` violation for the path with the text `{path} job_usd is below the configured stage caps: {error}`. Leave the parse-failure violation unchanged. Add `a_job_usd_below_the_stage_caps_is_a_configuration_violation`, asserting the replace changed the text. Add the check that 12.00 gives none.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. If a fixture fails because of the new call, fix only that fixture's budget. Do not edit athena.toml.",
+    "Add the CHANGELOG.md Unreleased/Fixed entry: root cause, the admission-time check on athena.toml changes (not at parse, so history stays readable), runtime preflight remaining, and the three jobs 20261028-082151-67fa, 20261030-033434-3v30 and 20261030-151827-48rm. Confirm that athena.toml, defaults.toml, workflows, drain.rs, run/mod.rs, capability.rs and run_pin_tests.rs are untouched."
+  ],
+  "risks": [
+    {
+      "risk": "A head athena.toml that is short reaches the repository by a path that skips admission (manual push, or schema_changed).",
+      "mitigation": "The check lives in admission.rs and `check_budget` only, not in `parse` or `JobConfig::at`, so loading, history walks, drain holds and recovery commands behave as before. Only a candidate that edits athena.toml can be refused."
+    },
+    {
+      "risk": "A short budget at head is not refused when a job loads its config.",
+      "mitigation": "The runtime `preflight` at admission, dispatch, per round and before the run stays and still returns the typed `BudgetShort` that drain holds. Nothing there is changed."
+    },
+    {
+      "risk": "The `budget_reserve` refactor changes a stage's value.",
+      "mitigation": "Only the sum helpers move, not the formulas. The existing stage test has its own expected sums, and the runtime BudgetShort tests run unchanged."
+    },
+    {
+      "risk": "A candidate that edits athena.toml for an unrelated reason is refused because the base budget was already short.",
+      "mitigation": "A refused candidate gets a message saying to raise job_usd or lower a cap, so the repair is one line. The shipped 12.00 covers the 10.00 reserve, so unrelated athena.toml edits pass."
+    },
+    {
+      "risk": "f64 rounding refuses an exactly-sufficient budget.",
+      "mitigation": "The 1e-9 tolerance, and a test at exactly 10.00 and exactly 5.50 (unplanned)."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check of the diff.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "The Unreleased/Fixed entry names the root cause (`[budget] job_usd` never required to cover the reader, planning rounds, producer and verifier caps) and the new `Config::check_budget`, run when an athena.toml change is admitted (not at parse, so history stays readable). It says runtime preflight remains the guard for running jobs. It names 20261028-082151-67fa, 20261030-033434-3v30 and 20261030-151827-48rm as addressed. A Grep of CHANGELOG.md for each id and for `job_usd` finds all of them in the new entry.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Grep of non-test code for a second hand-written sum, then Read of `budget_reserve`. The existing stage test pins the values.",
+      "command": "cargo test -p athena-core every_stage_counts_only_what_is_still_to_run_and_takes_its_caps_from_config",
+      "observes": "Grep over crates/ for `producer_usd *\\+` and `\\+ *[a-z_.]*verifier_usd`, outside `mod tests`, matches only `Config::run_usd` in config.rs. `budget_reserve` has no `+` of producer and verifier caps and calls `budget_required`, `planning_usd`, `critic_usd` and `run_usd`. The stage test, which carries its own expected sums, passes, so the shared function agrees with the earlier values.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "New unit test `job_usd_below_the_reserve_is_refused_by_the_budget_check` in config.rs. Real TOML is parsed, no double. Entry points: `Config::parse`, then `Config::check_budget`. Preconditions: the text must change, so each `replace` of `job_usd = 12.00` is followed by an assertion that the text differs from REPO_CONFIG (the producer reads the exact line first).",
+      "command": "cargo test -p athena-data job_usd_below_the_reserve",
+      "observes": "(a) job_usd 9.99 parses and `check_budget` returns `Err(ConfigError::BudgetBelowReserve{..})`, whose text contains `[budget] job_usd`, `$0.01 short` and `$10.00`. (b) Exactly 10.00 returns Ok. (c) 12.00 returns Ok. (d) An 8.00 config with the shipped planning caps still passes `Config::parse`. (e) The `unplanned` config at 5.49 is refused and at 5.50 is Ok. (f) Raising `max_rounds` in the parsed config moves the threshold by one planner+critic pair.",
+      "fails_without": "If `check_budget` is a no-op or ignores the [job_plan] caps, the Err assertions for 9.99 (planned) and 5.49 (unplanned) fail. If the check were moved into `Config::parse`, the assertion that the 8.00 config still parses fails.",
+      "seam": "`Config::parse` and `Config::check_budget` in crates/athena-data/src/config.rs. REPO_CONFIG and `unplanned` exist today in the config.rs tests module (read, lines 706-721). Step 2 adds `check_budget`; the test is added in step 4."
+    },
+    {
+      "criterion": 4,
+      "method": "In reading.rs tests, extend `shipped_budget_covers_the_reserve`. The shipped config parses via the existing `shipped_config()`. `job_usd >= budget_required()`, `check_budget()` is Ok, and `budget_required()` equals `budget_reserve(&config, ReserveStage::Admission)`. Add `required_budget_follows_the_configured_caps`. It starts from the parsed shipped config and clones it with `planner_usd += 1.0`, then with `max_rounds += 1`, with no other code change. `budget_required` and `budget_reserve(Admission)` both rise by `max_rounds * 1.0` for the planner change and by one planner+critic pair for the rounds change. With `job_usd` set to the new requirement minus 0.01, `check_budget` is refused; at exactly the requirement it is accepted.",
+      "command": "cargo test -p athena-core budget",
+      "observes": "The shipped athena.toml still parses and covers its reserve. The required budget tracks changed caps in both the helper and `budget_reserve`, and the check follows the changed cap.",
+      "fails_without": "If `budget_reserve` kept its own sum, its equality with `budget_required` breaks once a cap is changed. If `check_budget` ignored the [job_plan] caps, the refusal at requirement minus 0.01 fails.",
+      "seam": "`athena_core::reading::budget_reserve`, `Config::budget_required` and `Config::check_budget`, driven on a real `Config` from `shipped_config()`, which exists in the reading.rs tests (~3652, read earlier). Step 5 adds the new test and the `Config` helpers. Mutating the parsed struct is the input, not a double."
+    },
+    {
+      "criterion": 5,
+      "method": "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` as three separate commands. The test that discriminates is the new admission.rs test, which calls the admission entry through the existing helper `admit_files(&[(\"athena.toml\", &text)])` and filters with `configuration(..)`. The text is BASE_CONFIG with `job_usd = 12.00` replaced by `job_usd = 9.00`, after asserting the replace changed it. Only athena.toml is in the change set, so `schema_changed` is false.",
+      "command": "cargo test --locked admission",
+      "observes": "fmt, clippy and the full suite pass. The 9.00 candidate gives exactly one `configuration` violation for path athena.toml. Its detail contains `[budget] job_usd` and `$1.00 short`, plus `raise job_usd or lower a cap`, and does not contain `does not parse`. BASE_CONFIG at 12.00 and an `# edited` copy give none. The existing parse-error tests still pass, which shows the parse violation is unchanged. The runtime BudgetShort tests in run/tests.rs and run_pin_tests.rs pass unchanged, because `JobConfig::at` and `preflight` are untouched.",
+      "fails_without": "The new admission test `a_job_usd_below_the_stage_caps_is_a_configuration_violation` fails if the `check_budget` call in admission.rs is removed (no violation is produced for the 9.00 candidate). Unformatted code or a clippy warning fails the other two commands. A fixture that breaks the new `shipped_budget_covers_the_reserve` assertions fails the suite.",
+      "seam": "The existing `admit_files` helper and `configuration` filter in the admission.rs tests (read, lines 824-859) and the BASE_CONFIG constant (line 567) exist today. Step 6 adds the production call in the candidate config check and the test. There is no double; real git and Config parsing."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the list of changed files.",
+      "command": "git diff --stat",
+      "observes": "Changed files are only crates/athena-data/src/config.rs, crates/athena-core/src/reading.rs, crates/athena-core/src/admission.rs and CHANGELOG.md. athena.toml, defaults.toml, .github/workflows, crates/athena-cli/src/drain.rs, crates/athena-core/src/run/mod.rs, capability.rs and run_pin_tests.rs are absent from the list.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether a candidate that edits athena.toml together with `crates/athena-data/` (schema_changed) skips the budget check in admission.rs. Following the existing rule it does, because the candidate's own athena-data tests judge it; the check in config.rs's own tests covers the shipped file.",
+    "The exact text of the `job_usd = 12.00` line in athena.toml. The producer reads it before writing the `replace` calls and asserts each replace changed the text.",
+    "Whether any test fixture builds a Config with job_usd below its reserve and calls the new `check_budget`. None is expected, since only the new calls use it; `cargo test --locked` will show."
+  ],
+  "producer_section_sha256": "28f40c9973cfae761a562af0467f0d663adc23fa5b67265ce12b1d7b11206701"
+}

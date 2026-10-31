@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A job budget too small for the whole path no longer reaches the repository. Root cause: `[budget] job_usd` was
+  never required to cover the reader, every planning round (`max_rounds` of planner plus critic), the producer
+  and the verifier, and nothing refused an `athena.toml` that set it too low, so a job started under it stopped
+  for budget before any code was written (jobs 20261028-082151-67fa, 20261030-033434-3v30 and
+  20261030-151827-48rm, and the others in that failure class). Fix at the origin: `Config::check_budget`
+  refuses a `job_usd` below `Config::budget_required`, and admission runs it when a change to `athena.toml` is
+  admitted, as its own `configuration` violation naming `[budget] job_usd` and the shortfall. It is not run
+  inside `Config::parse`, so a past commit's file still reads when history is walked, and the recovery commands
+  still load a short head. The sum of the stage caps now lives in one place (`Config::planning_usd`,
+  `critic_usd`, `run_usd`, `budget_required`) and the runtime `budget_reserve` takes every stage from it, so a
+  changed cap changes the check and the reserve together. The runtime `preflight` at admission, dispatch, each
+  planning round and before the run is unchanged and stays the guard for running jobs.
+
 - Low disk space after a job's candidate is built no longer ends the job `failed`. Cause: the two late disk
   gates (before the checks, before the verifier) closed the job with an `environment: low disk` reason that
   told a person to run `athena retry`, so a full disk counted as a failed attempt for the drain, introspection,

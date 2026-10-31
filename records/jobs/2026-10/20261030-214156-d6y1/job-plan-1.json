@@ -1,0 +1,183 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-214156-d6y1",
+  "round": 1,
+  "at": "2026-10-31T13:06:11.944068359Z",
+  "invocation_seq": 4,
+  "approach": "Add one origin check where the budget is defined and loaded. In crates/athena-data/src/config.rs add Config helpers `planning_usd(rounds)`, `run_usd()` and `budget_required()` (reader + every planning round when [job_plan] is enabled + producer + verifier), and a ConfigError::BudgetBelowReserve that Config::validate (run by Config::parse) returns, naming `[budget] job_usd`, the required sum and the shortfall, when job_usd is below budget_required (1e-9 tolerance). `budget_reserve` in crates/athena-core/src/reading.rs then takes every stage's sum from those helpers, so the caps are summed in one place. Existing preflight stays for money already spent. Tests in both crates; one existing test in run_pin_tests.rs is rewritten because it loads the very config that is now refused; CHANGELOG entry under Unreleased/Fixed.",
+  "decisions": [
+    {
+      "choice": "Check in Config::validate as a new ConfigError variant, with the sum in Config::budget_required.",
+      "reason": "The budget is defined and loaded in config.rs. Refusing there stops every job, retry, queued read and athena.toml change proposal from starting under an unaffordable budget; preflight only catches the symptom after money is spent.",
+      "rejected": [
+        {
+          "option": "Another preflight call site (admission, retry, drain)",
+          "why": "Those exist already; more of them is the instance-level work-around the request rejects, and drain.rs is out of scope."
+        },
+        {
+          "option": "Raise job_usd in athena.toml",
+          "why": "Out of scope; fixes one value, not the class; 12.00 already covers the 10.00 reserve."
+        }
+      ]
+    },
+    {
+      "choice": "Count planning rounds only when job_plan is Some and enabled (same rule as ReserveStage::Admission).",
+      "reason": "Keeps admission semantics unchanged; shipped config needs 0.50 + 3*1.50 + 5.00 = 10.00 and passes at 12.00; unplanned fixtures need only 5.50.",
+      "rejected": [
+        {
+          "option": "Count rounds whenever a [job_plan] table exists",
+          "why": "Would refuse configs that never plan, e.g. `enabled = false`."
+        }
+      ]
+    },
+    {
+      "choice": "budget_reserve calls the Config helpers for all stages (reader stays budget.reader_usd).",
+      "reason": "No second hand-written sum of the caps; changing a cap changes both the load check and the runtime reserve.",
+      "rejected": [
+        {
+          "option": "Only the Admission arm calls budget_required",
+          "why": "Leaves hand-written producer+verifier and rounds sums elsewhere, a second copy of the formula."
+        }
+      ]
+    },
+    {
+      "choice": "Refuse only when job_usd + 1e-9 < required.",
+      "reason": "A config exactly at the reserve must parse; f64 sums of caps can differ from the literal by an ulp.",
+      "rejected": [
+        {
+          "option": "Strict job_usd < required",
+          "why": "Could refuse an exactly-sufficient config through rounding."
+        }
+      ]
+    },
+    {
+      "choice": "Edit run_pin_tests.rs (test code only): rewrite the first half of admission_refuses_a_job_short_of_the_whole_planning_reserve (lines ~890-924) to expect the load-time config error; keep the second half (12.00 admitted).",
+      "reason": "That test builds a planned config at job_usd = 8.00 and expects a BudgetShort from Athena::ask. After this change that config cannot load, so the old assertion is wrong by design and cargo test (criterion 5) would fail otherwise. The file is outside the listed deliverables only because the test encodes the behavior this change supersedes; the edit is test-only, adds no production code, and keeps the no-invocation and no-commit asserts. Runtime BudgetShort remains covered by the other preflight tests.",
+      "rejected": [
+        {
+          "option": "Leave the test unchanged",
+          "why": "It fails: ask now returns a config error, not BudgetShort."
+        },
+        {
+          "option": "Delete the test",
+          "why": "Loses the check that nothing is invoked or committed for a short budget."
+        },
+        {
+          "option": "Weaken validate so 8.00 planned configs still load",
+          "why": "Defeats the origin check."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add Config::planning_usd, run_usd, budget_required; ConfigError::BudgetBelowReserve; call the check in validate; add tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "budget_reserve uses the Config helpers for every stage (no second cap sum); extend shipped_budget_covers_the_reserve; add required_budget_follows_the_configured_caps.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Test-only: the job_usd = 8.00 planned config in admission_refuses_a_job_short_of_the_whole_planning_reserve is now refused at load; rewrite its first half to expect the config error. Needed for criterion 5; outside the listed deliverables for that reason only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased/Fixed entry naming the root cause, the config-load check and the three jobs.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the ConfigError enum (~478-510), Config::validate, and the tests module helpers (REPO_CONFIG, unplanned) in config.rs.",
+    "Add `impl Config` with planning_usd(rounds), run_usd() and budget_required() (reader_usd + planning when job_plan is enabled + run_usd), with doc comments marking it the one sum of the stage caps.",
+    "Add ConfigError::BudgetBelowReserve { job_usd, required } with a message naming `[budget] job_usd`, the shortfall and the required sum; check it in validate after the caps are known positive, with job_usd + 1e-9 < required. Check ConfigError's derives accept f64 fields.",
+    "Add the config.rs test job_usd_below_the_reserve_is_refused_at_load (criterion 3 cases); confirm it fails with the check commented out.",
+    "Rewrite budget_reserve in reading.rs on the Config helpers (Admission = budget_required; Dispatch planned = planning_usd(max_rounds) + run_usd; Planner/Critic use planning_usd or critic cap). Extend shipped_budget_covers_the_reserve and add required_budget_follows_the_configured_caps.",
+    "Rewrite the first half of the run_pin_tests.rs admission test to expect the config error (text has `[budget] job_usd`, `$2.00 short`, `$10.00`), keeping zero invocations and unchanged head; keep the 12.00 half. Check how ask surfaces the load error.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked; fix any fixture that loads an unaffordable job_usd.",
+    "Add the CHANGELOG.md Unreleased/Fixed entry. Confirm athena.toml, defaults.toml, workflows, drain.rs and run/mod.rs are untouched."
+  ],
+  "risks": [
+    {
+      "risk": "Existing tests that set a small job_usd and load it through Config::parse now fail at load.",
+      "mitigation": "Run the full suite and fix only fixtures that truly lack an affordable job_usd. The ones surveyed sit at or above their reserve with planning off, and the epsilon covers exact-reserve cases."
+    },
+    {
+      "risk": "Refactoring budget_reserve changes a stage's value by mistake.",
+      "mitigation": "Only the helper functions change, not the formulas; the existing stage test with its own expected sums covers Dispatch, Planner, Critic and Run."
+    },
+    {
+      "risk": "A config valid at load can still fall short at runtime after spending (retries, re-reads).",
+      "mitigation": "Runtime preflight stays for money already spent; the CHANGELOG says the load check guards the configured sum."
+    },
+    {
+      "risk": "A job pinned to an old short config now fails with a parse error instead of a drain hold.",
+      "mitigation": "The error names `[budget] job_usd` and the shortfall, so the fix is clear."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check: read the diff, plus the Grep tool on CHANGELOG.md for `job_usd`, `20261028-082151-67fa`, `20261030-033434-3v30`, `20261030-151827-48rm`.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "The Unreleased/Fixed entry names the cause (job_usd never required to cover reader, planning rounds, producer and verifier caps), the config-load check, that runtime preflight remains, and that the three jobs are addressed by it.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Grep tool over crates/ for `producer_usd *\\+` and `\\+ *[a-z_.]*verifier_usd` in non-test code; Read budget_reserve in reading.rs. Then run the existing stage test, which carries its own expected sums.",
+      "command": "cargo test -p athena-core every_stage_counts_only_what_is_still_to_run_and_takes_its_caps_from_config",
+      "observes": "The only non-test sum of producer and verifier caps is Config::run_usd in config.rs; budget_reserve contains no `+` of those caps and calls budget_required, planning_usd and run_usd; the stage test still passes, so the shared function agrees with the previous values.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "New unit test `job_usd_below_the_reserve_is_refused_at_load` in config.rs. Entry point: Config::parse (public; runs validate after the existing positive-cap checks). Fixture: REPO_CONFIG (the shipped athena.toml included in the test module) edited with String::replace on `job_usd = 12.00`, and the existing `unplanned` helper for the no-[job_plan] case. Cases: 9.99 gives Err(BudgetBelowReserve) whose text contains `[budget] job_usd`, `$0.01 short`, `$10.00`; exactly 10.00 parses; 12.00 parses; unplanned 5.49 refused and 5.50 parses; raising max_rounds moves the threshold.",
+      "command": "cargo test -p athena-data job_usd_below_the_reserve",
+      "observes": "Err with the variant and message for a short budget; Ok at exactly the reserve and above.",
+      "fails_without": "With the check removed from validate, Config::parse returns Ok for job_usd = 9.99 and the expect_err assertion fails.",
+      "seam": "Config::parse in crates/athena-data/src/config.rs, REPO_CONFIG and `unplanned` in its tests module: all exist today (read). Plan steps 2-4 add the check and the test. No double; the real TOML is parsed."
+    },
+    {
+      "criterion": 4,
+      "method": "Extend shipped_budget_covers_the_reserve in reading.rs (assert shipped job_usd >= config.budget_required() and that budget_required equals budget_reserve at ReserveStage::Admission). Add `required_budget_follows_the_configured_caps`: take shipped_config() (exists), mutate planner_usd and then max_rounds on the parsed Config, and assert budget_required and budget_reserve(Admission) both rise by the formula (planner change: rounds * delta; round change: one more planner+critic pair) with no other code change. Then re-serialise the edited TOML text with job_usd set 0.01 under the new requirement and assert Config::parse refuses it, and at exactly the requirement accepts it.",
+      "command": "cargo test -p athena-core budget",
+      "observes": "The shipped athena.toml still parses; the required budget tracks the caps in both the helper and budget_reserve; the load check follows the changed cap.",
+      "fails_without": "If budget_reserve kept its own sum, or the load check ignored the [job_plan] caps, the equality and refusal assertions fail.",
+      "seam": "athena_core::reading::budget_reserve, Config::budget_required and Config::parse; shipped_config() exists in reading.rs tests (read). Plan step 5 adds the test. Real TOML is parsed; no double."
+    },
+    {
+      "criterion": 5,
+      "method": "Run as three separate commands over the workspace: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. The test run goes end to end through Athena::ask (production entry point) in the rewritten run_pin_tests admission test: fixture `repo(&planned)` builds a git repo whose athena.toml has job_usd = 8.00 with the shipped planning caps; `athena_with(...)` injects CountingPinner::new(FAKE_SHA) and a counting closure as the agent driver; the test asserts the error text contains `[budget] job_usd`, `$2.00 short`, `$10.00`, that the counter is 0 and the head is unchanged, and that the same caps at 12.00 are admitted and invoke the driver. Every other fixture that loads a config with a small job_usd (cli lifecycle, job_plan, run_pin tests) also passes through the new check.",
+      "command": "cargo test --locked",
+      "observes": "fmt, clippy and the whole test suite pass; an 8.00 planned config is refused at load before any agent runs or commit is made, and an affordable one is admitted.",
+      "fails_without": "Without the check, the rewritten admission test fails (ask reaches the reader instead of a config error, driver count is 1); with the check but without updating the unaffordable fixtures, the suite fails at load; unformatted code or any clippy warning fails the other two commands.",
+      "seam": "Athena::ask in crates/athena-core/src/run (via athena_with, repo and CountingPinner in run_pin_tests.rs), which exist today (read lines 889-935); step 6 changes the assertions, and no production logic sits in the double."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the list of changed files.",
+      "command": "git diff --stat",
+      "observes": "Only crates/athena-data/src/config.rs, crates/athena-core/src/reading.rs, crates/athena-core/src/run_pin_tests.rs (test-only), and CHANGELOG.md; no change to athena.toml, defaults.toml, .github/workflows, crates/athena-cli/src/drain.rs or crates/athena-core/src/run/mod.rs.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "run_pin_tests.rs is outside the listed deliverables but must change for the suite to pass; the brief's Files: crates/ should cover it.",
+    "A pinned older athena.toml with planning enabled and a short job_usd will now fail to parse instead of reaching BudgetShort. How capability.rs and gh/records.rs treat a parse error was not read; the producer should check and note it in the CHANGELOG.",
+    "Whether any test in crates/athena-gate or admission.rs builds a short-budget athena.toml and expects success was not read; cargo test will show it."
+  ],
+  "producer_section_sha256": "19a824614a7a7161ae3e3ff4c25260892ce846b398473d086d7c4835bc809548"
+}

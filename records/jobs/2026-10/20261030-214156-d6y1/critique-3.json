@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-214156-d6y1",
+  "round": 3,
+  "at": "2026-10-31T13:12:39.801784421Z",
+  "invocation_seq": 9,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/admission.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/admission.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The admission rule's module doc is not updated for the new budget violation",
+      "evidence": "admission.rs:10 module doc says the `configuration` rule covers a changed athena.toml or defaults.toml that \"does not parse\". After step 6, the same rule also refuses a file that parses but whose job_usd is below the stage caps. Fix: In step 6, extend the module doc bullet at admission.rs:10 to say the `configuration` rule also refuses an athena.toml whose job_usd is below the summed stage caps.",
+      "location": "Step 6 / crates/athena-core/src/admission.rs:10",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The refusal runs at admission, not at load. That departs from the reading's wording but the plan states and justifies it",
+      "evidence": "Criterion 3 and the reading say the check is \"config validation that refuses a job_usd below the reserve\" at load. Decision 1 instead runs check_budget only when a candidate changes athena.toml, and keeps `Config::parse` structural. The reasons it gives hold up against the code: history walks parse past commits, `JobConfig::at` serves the recovery commands, and drain holds only the typed BudgetShort. A short shipped file is still caught by `shipped_budget_covers_the_reserve` in `cargo test` (reading.rs:3660), which also covers manual pushes and the case where the schema changes. Fix: In the CHANGELOG entry, say plainly that the refusal runs when an athena.toml change is admitted, and that the shipped-file test covers changes that skip admission. Do not describe it as a parse-time check.",
+      "location": "Decision 1 vs criterion 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot with Read and Grep. The code it names exists:\n- `budget_reserve` at reading.rs:77-101 has the hand-written sums the plan replaces.\n- The config loop at admission.rs:422-457 has the `schema_changed` skip and the \"does not parse\" violation.\n- `admit_files` (admission.rs:717), `configuration` (824), BASE_CONFIG, which is include_str of athena.toml (567), and `shipped_budget_covers_the_reserve` (reading.rs:3660) all exist.\n- athena.toml:38 is exactly `job_usd = 12.00`.\n- `ConfigError` derives Clone and PartialEq, but not Eq, so an f64 field compiles.\n\nMoving the sums into Config helpers leaves one sum of the caps, and the Admission formula is unchanged. The shipped config needs 10.00 and has 12.00. Each demonstration drives the real seam with real TOML or a real parsed Config, with no doubles, and each would fail without the behavior:\n- The 9.99 and 5.49 configs must be refused.\n- The 8.00 config must still parse, which also fails if the check is moved into parse.\n- After a cap changes, `budget_reserve` must still equal `budget_required`.\n- The 9.00 admission candidate must produce a violation.\n\nThe design choice to refuse at admission rather than in `Config::parse` or `JobConfig::at` is sound and argued from the code. The shipped-file test covers changes that skip admission. Athena's finding that admission.rs is outside the listed deliverables is justified: without that edit nothing calls the new check. That leaves two minor findings: update the admission.rs module doc, and keep the CHANGELOG wording clear that the check runs at admission. Neither blocks acceptance."
+}

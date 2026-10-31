@@ -509,7 +509,19 @@ pub enum ConfigError {
     Effort(&'static str, String),
     #[error("[models] hard_producer_model {0} is not in producer_allowed")]
     HardProducerNotAllowed(String),
+    #[error(
+        "[budget] job_usd ${job_usd:.2} is ${short:.2} short of the ${required:.2} the configured caps need (the reader, every planning round, the producer and the verifier); raise job_usd or lower a cap"
+    )]
+    BudgetBelowReserve {
+        job_usd: f64,
+        required: f64,
+        short: f64,
+    },
 }
+
+/// How far below an exact sum a budget may fall and still count as covering it, so that f64 rounding does not
+/// refuse a budget set to exactly the required amount.
+const BUDGET_TOLERANCE_USD: f64 = 1e-9;
 
 impl Config {
     /// Parses and validates `athena.toml` text.
@@ -696,6 +708,53 @@ impl Config {
     pub fn is_class(&self, class: &str) -> bool {
         self.classes.list.iter().any(|c| c == class)
     }
+
+    /// The cost of `rounds` planning rounds, a planner call and a critic call each, at their caps; zero when
+    /// `[job_plan]` is absent. This and the three methods below are the one place the stage caps are summed:
+    /// the runtime reserve (`athena_core::reading::budget_reserve`) and [`Config::check_budget`] both use
+    /// them, so a changed cap changes both with no other edit.
+    pub fn planning_usd(&self, rounds: u32) -> f64 {
+        self.job_plan
+            .map_or(0.0, |p| f64::from(rounds) * (p.planner_usd + p.critic_usd))
+    }
+
+    /// The cap on one critic call, zero when `[job_plan]` is absent.
+    pub fn critic_usd(&self) -> f64 {
+        self.job_plan.map_or(0.0, |p| p.critic_usd)
+    }
+
+    /// What the producer and the verifier may spend: the part of a job that always runs once planning is over.
+    pub fn run_usd(&self) -> f64 {
+        self.budget.producer_usd + self.budget.verifier_usd
+    }
+
+    /// What a job needs from the start: the reader, every planning round when `[job_plan]` is enabled (the
+    /// reading's `hard` flag is not known yet, so planning is counted; over-reserving is the safe side), the
+    /// producer and the verifier.
+    pub fn budget_required(&self) -> f64 {
+        let rounds = match self.job_plan {
+            Some(p) if p.enabled => p.max_rounds,
+            _ => 0,
+        };
+        self.budget.reader_usd + self.planning_usd(rounds) + self.run_usd()
+    }
+
+    /// Refuses a `[budget] job_usd` below [`Config::budget_required`], so no job is started on a budget that
+    /// cannot cover planning plus the producer and verifier caps. Kept apart from [`Config::parse`] because a
+    /// past commit's file must stay readable (history walks parse every commit's `athena.toml`); it is called
+    /// where a change to `athena.toml` is admitted.
+    pub fn check_budget(&self) -> Result<(), ConfigError> {
+        let required = self.budget_required();
+        let job_usd = self.budget.job_usd;
+        if job_usd + BUDGET_TOLERANCE_USD < required {
+            return Err(ConfigError::BudgetBelowReserve {
+                job_usd,
+                required,
+                short: required - job_usd,
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -752,6 +811,55 @@ pub(crate) mod tests {
             "two reading and two planning rounds need ${need:.2} but job_usd is ${:.2}",
             b.job_usd
         );
+    }
+
+    fn with_job_usd(text: &str, job_usd: &str) -> String {
+        let changed = text.replace("job_usd = 12.00", &format!("job_usd = {job_usd}"));
+        assert_ne!(changed, text, "athena.toml sets job_usd = 12.00");
+        changed
+    }
+
+    #[test]
+    fn job_usd_below_the_reserve_is_refused_by_the_budget_check() {
+        // (a) One cent under the reader, three planning rounds, the producer and the verifier.
+        let short = Config::parse(&with_job_usd(REPO_CONFIG, "9.99")).unwrap();
+        assert_eq!(short.budget_required(), 10.0);
+        let error = short.check_budget().unwrap_err();
+        assert!(matches!(error, ConfigError::BudgetBelowReserve { .. }));
+        let text = error.to_string();
+        for part in ["[budget] job_usd", "$9.99", "$0.01 short", "$10.00"] {
+            assert!(text.contains(part), "{part:?} missing from: {text}");
+        }
+        // (b) Exactly the reserve, and (c) the shipped value, are accepted.
+        let exact = Config::parse(&with_job_usd(REPO_CONFIG, "10.00")).unwrap();
+        assert!(exact.check_budget().is_ok());
+        assert!(Config::parse(REPO_CONFIG).unwrap().check_budget().is_ok());
+        // (d) Parsing stays structural, so a past commit's file with a short budget still reads.
+        assert!(Config::parse(&with_job_usd(REPO_CONFIG, "8.00")).is_ok());
+        // (e) Without planning the reserve is the reader, the producer and the verifier.
+        let unplanned_text = unplanned(REPO_CONFIG);
+        let below = Config::parse(&with_job_usd(&unplanned_text, "5.49")).unwrap();
+        assert!(below.check_budget().is_err());
+        let at = Config::parse(&with_job_usd(&unplanned_text, "5.50")).unwrap();
+        assert!(at.check_budget().is_ok());
+        // (f) A changed cap moves the threshold with no other change: one more round adds one planner and
+        // one critic call.
+        let mut more = exact.clone();
+        more.job_plan.as_mut().unwrap().max_rounds += 1;
+        assert_eq!(more.budget_required(), 11.5);
+        assert!(more.check_budget().is_err());
+        more.budget.job_usd = 11.5;
+        assert!(more.check_budget().is_ok());
+    }
+
+    #[test]
+    fn rounds_count_only_when_planning_is_enabled() {
+        let mut config = Config::parse(&with_job_usd(REPO_CONFIG, "10.00")).unwrap();
+        config.job_plan.as_mut().unwrap().enabled = false;
+        // A [job_plan] table that is switched off adds no planning to the requirement.
+        assert_eq!(config.budget_required(), 5.5);
+        assert_eq!(config.planning_usd(2), 3.0);
+        assert_eq!(config.critic_usd(), 0.75);
     }
 
     #[test]
