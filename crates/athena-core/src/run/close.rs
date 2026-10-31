@@ -3,6 +3,51 @@
 
 use super::*;
 
+/// Adds the records an attempt produced (invocations, plans, critiques, baseline, candidate and
+/// verification) to `closing.files`. A closing commit and a hold for low disk both write them.
+pub(super) fn push_closing_records(closing: &mut Closing) {
+    for inv in &closing.new_invocations {
+        closing
+            .files
+            .push(NewFile::record(&AnyRecord::Invocation(Box::new(
+                inv.clone(),
+            ))));
+    }
+    for plan in &closing.plans {
+        closing
+            .files
+            .push(NewFile::record(&AnyRecord::JobPlan(Box::new(plan.clone()))));
+    }
+    for critique in &closing.critiques {
+        closing
+            .files
+            .push(NewFile::record(&AnyRecord::Critique(Box::new(
+                critique.clone(),
+            ))));
+    }
+    if let Some(baseline) = &closing.baseline {
+        closing
+            .files
+            .push(NewFile::record(&AnyRecord::Baseline(Box::new(
+                baseline.clone(),
+            ))));
+    }
+    if let Some(candidate) = &closing.candidate {
+        closing
+            .files
+            .push(NewFile::record(&AnyRecord::Candidate2(Box::new(
+                candidate.clone(),
+            ))));
+    }
+    if let Some(verification) = &closing.verification {
+        closing
+            .files
+            .push(NewFile::record(&AnyRecord::Verification(Box::new(
+                verification.clone(),
+            ))));
+    }
+}
+
 impl Athena {
     /// Commits the closing records of a dispatched job, landing the change when it was verified.
     pub(super) fn close_dispatched(
@@ -35,46 +80,7 @@ impl Athena {
                 scored_at,
             ))
         };
-        for inv in &closing.new_invocations {
-            closing
-                .files
-                .push(NewFile::record(&AnyRecord::Invocation(Box::new(
-                    inv.clone(),
-                ))));
-        }
-        for plan in &closing.plans {
-            closing
-                .files
-                .push(NewFile::record(&AnyRecord::JobPlan(Box::new(plan.clone()))));
-        }
-        for critique in &closing.critiques {
-            closing
-                .files
-                .push(NewFile::record(&AnyRecord::Critique(Box::new(
-                    critique.clone(),
-                ))));
-        }
-        if let Some(baseline) = &closing.baseline {
-            closing
-                .files
-                .push(NewFile::record(&AnyRecord::Baseline(Box::new(
-                    baseline.clone(),
-                ))));
-        }
-        if let Some(candidate) = &closing.candidate {
-            closing
-                .files
-                .push(NewFile::record(&AnyRecord::Candidate2(Box::new(
-                    candidate.clone(),
-                ))));
-        }
-        if let Some(verification) = &closing.verification {
-            closing
-                .files
-                .push(NewFile::record(&AnyRecord::Verification(Box::new(
-                    verification.clone(),
-                ))));
-        }
+        push_closing_records(&mut closing);
         let reading_path = format!("{}/reading-{}.json", id.dir(), ctx.reading.n);
         let prediction = introducing_commit(self, "HEAD", &reading_path)?
             .unwrap_or_else(|| ctx.prediction.clone());

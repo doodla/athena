@@ -519,7 +519,8 @@ pub fn list_lines(state: &StateDir) -> Vec<LineMark> {
     pauses
 }
 
-/// The finished attempt a request's job made, when it has one: it was dispatched and reached a final state.
+/// The finished attempt a request's job made, when it has one: it was dispatched and reached a final state. A
+/// job held for low disk has none yet (it is dispatched with no outcome), so it is no failure and no spend here.
 /// A job closed `failed` with a reason that starts with [`ENVIRONMENT_PREFIX`] is an environment stop; `resumed`
 /// says whether it resumed a kept candidate (see [`AttemptRecord::resumed`]).
 fn attempt_of(job: &JobRecords, resumed: bool) -> Option<AttemptRecord> {
@@ -565,7 +566,8 @@ fn attempt_of(job: &JobRecords, resumed: bool) -> Option<AttemptRecord> {
 }
 
 /// Whether `job`, a retry of `target`, resumed the target's kept candidate. Basis: the target stopped in a way
-/// `athena retry` resumes ([`crate::disk::resumable_stop`]) and this job ran no producer. The resume mark in the
+/// `athena retry` resumes ([`crate::disk::resumable_stop`]; a job held for low disk is dispatched with no
+/// outcome, so it qualifies, and it is itself no finished attempt) and this job ran no producer. The resume mark in the
 /// state directory is spent when the job closes, so the records are the only evidence left. A retry that planned
 /// and built again has a producer invocation and is judged as a fresh job.
 fn resumed_candidate(job: &JobRecords, target: Option<&JobRecords>) -> bool {

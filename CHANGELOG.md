@@ -7,6 +7,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- A job whose free disk space stays short after the idle-build cleanup is held, not failed, and a later drain
+  resumes it with no `athena retry`. Cause: the gates before the checks and before the verifier closed the job
+  failed with `environment: low disk ... before the checks` or `before the verifier` and told the person to run
+  `athena retry`; the drain counted that as a failure, and a closed job could not resume by itself when space
+  came back (eight cases in eight jobs). Now the job stays dispatched with no outcome and no verdict, keeps
+  its resume mark, and gets a hold marker with the free and required amounts. The attempt's records are
+  committed with no score and no outcome, so its spend counts against the drain and line budgets. The producer's
+  build directory (`target/produce`) is released on hold, since the disk is short; the kept candidate is the
+  commit in the resume mark. The next drain lists the job as interrupted work; `athena retry` first checks the
+  disk, and while space is short the job stays held with no cost, no new job and no drain attempt used; once
+  space is free it resumes from the candidate with no new planner or producer run. `athena status` shows the
+  job as `held` with the reason and amounts. A held job counts as no failure in introspection, the failure
+  classes or the scope guard. A verifier workspace that cannot be written to although space is enough still
+  closes failed, since waiting does not help. Tests: the hold, resume and still-short drain tests in
+  `crates/athena-cli/tests/drain.rs`, `held_job_is_not_a_work_failure_before_the_checks` in
+  `crates/athena-core/src/run/tests.rs`, and `status_shows_a_held_job_with_its_low_disk_reason` in
+  `crates/athena-cli/tests/binary.rs`.
+
 ### Fixed
 
 - The final CI job is named `fmt, clippy, tests` again (its id stays `ci`), the check name branch protection

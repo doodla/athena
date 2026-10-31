@@ -124,23 +124,30 @@ impl Athena {
         // The environment, immediately before the verifier agent runs. The checks above build and fill the
         // disk after the earlier gate passed, and a verifier started on a full disk fails in ways that read
         // as faults in the work. So the same gate (with its idle-build cleanup) runs again, and a small file
-        // is written and removed in the verifier's snapshot. A problem closes the job with the retryable
-        // `environment: low disk` reason and no verdict; the verifier is not started and its brief is not
-        // recorded.
-        if let Some(problem) = crate::disk::verifier_environment_problem(
+        // is written and removed in the verifier's snapshot. Low space holds the job: it stays dispatched
+        // with its resume mark (stage: verifier), and a later drain resumes it. The verifier is not started
+        // and its brief is not recorded. A workspace that cannot be written to although space is enough
+        // closes the job failed with a retryable environment reason, since waiting does not help.
+        match crate::disk::verifier_environment_problem(
             &self.state,
             jc.config.min_free_gb(),
             &id,
             vsnap.dir(),
             ctx.ui,
         ) {
-            let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
-            closing.happened =
-                self.failure(ctx, &crate::disk::before_verifier_reason(&problem, &id));
-            closing.happened.changed_paths = changed_paths;
-            closing.happened.verification_passed = None;
-            let _ = crate::pin::remove_tree(&verify_dir);
-            return Ok(closing);
+            None => {}
+            Some(crate::disk::VerifierProblem::Low(low)) => {
+                let _ = crate::pin::remove_tree(&verify_dir);
+                return Err(self.hold_for_disk(ctx, closing, low));
+            }
+            Some(crate::disk::VerifierProblem::Unwritable(reason)) => {
+                let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
+                closing.happened = self.failure(ctx, &reason);
+                closing.happened.changed_paths = changed_paths;
+                closing.happened.verification_passed = None;
+                let _ = crate::pin::remove_tree(&verify_dir);
+                return Ok(closing);
+            }
         }
         let mut verifier_invocation = None;
         let mut verdict_output: Option<VerdictOutput> = None;
