@@ -125,7 +125,8 @@ mod produce_and_verify_order_tests {
         fn verifier_grant(&self, _: &JobConfig) -> ToolGrant {
             ToolGrant {
                 tools: vec!["Read".into()],
-                commands: BTreeMap::new(),
+                // One command, so a behavior demonstration has something the verifier may run.
+                commands: BTreeMap::from([("cargo".to_string(), vec!["test".to_string()])]),
                 writes: false,
                 permission_mode: "dontAsk".into(),
             }
@@ -603,6 +604,57 @@ mod produce_and_verify_order_tests {
         (finished, calls)
     }
 
+    /// `run_planned` for a reading whose one criterion is a behavior criterion, which Athena's plan rules
+    /// hold to a named test seam.
+    fn run_planned_behavior(
+        repo: &tempfile::TempDir,
+        planner: Vec<serde_json::Value>,
+        critic: Vec<serde_json::Value>,
+    ) -> (Box<Finished>, Vec<(Role, String)>) {
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let inner = planning_script(planner, critic, calls.clone());
+        let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            if spec.role == Role::Reader
+                && let Some(reading) = turn.structured.as_mut()
+            {
+                reading["acceptance_criteria"][0]["kind"] = "behavior".into();
+            }
+            turn
+        });
+        let athena = athena_with(
+            repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let go = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+            .unwrap();
+        let GoResult::Finished(finished) = go else {
+            panic!("expected the job to finish: {go:?}");
+        };
+        let calls = calls.lock().unwrap().clone();
+        (finished, calls)
+    }
+
+    /// A plan for a behavior criterion: a `cargo test` demonstration with a fails_without and this seam.
+    fn behavior_plan(seam: serde_json::Value) -> serde_json::Value {
+        let mut plan = good_plan();
+        plan["demonstrations"] = json!([{
+            "criterion": 1,
+            "method": "run the suite",
+            "command": "cargo test --locked",
+            "observes": "the demo test passes",
+            "fails_without": "the demo test fails",
+            "seam": seam
+        }]);
+        plan
+    }
+
     fn prompts_of(calls: &[(Role, String)], role: Role) -> Vec<&str> {
         calls
             .iter()
@@ -723,6 +775,63 @@ mod produce_and_verify_order_tests {
             "{reason}"
         );
         // The first plan and two mechanical passes; no critic, producer or verifier.
+        assert_eq!(prompts_of(&calls, Role::Planner).len(), 3);
+        for role in [Role::Critic, Role::Producer, Role::Verifier] {
+            assert!(prompts_of(&calls, role).is_empty(), "{role:?} was called");
+        }
+    }
+
+    #[test]
+    fn a_seamless_behavior_demonstration_is_sent_back_before_the_critic_and_a_seam_is_accepted() {
+        let repo = repo_with_planning(3);
+        let seam = json!("run_planned with a scripted planner and critic queue; exists");
+        let (_, calls) = run_planned_behavior(
+            &repo,
+            vec![behavior_plan(json!(null)), behavior_plan(seam)],
+            vec![accepting_critique()],
+        );
+        let roles: Vec<Role> = calls.iter().map(|(r, _)| *r).take(4).collect();
+        assert_eq!(
+            roles,
+            [Role::Reader, Role::Planner, Role::Planner, Role::Critic],
+            "the seamless plan is revised with no critic call in between: {}",
+            calls[3].1
+        );
+        let planner = prompts_of(&calls, Role::Planner);
+        assert!(!planner[0].contains("does not name its test seam"));
+        assert!(
+            planner[1].contains("does not name its test seam"),
+            "the planner is shown the seam finding: {}",
+            planner[1]
+        );
+        assert!(
+            planner[1].contains("behavior criterion 1"),
+            "the finding names the criterion: {}",
+            planner[1]
+        );
+        let critic = prompts_of(&calls, Role::Critic);
+        assert!(
+            critic[0].contains("Test seam: run_planned with a scripted planner"),
+            "the critic is shown the seam: {}",
+            critic[0]
+        );
+    }
+
+    #[test]
+    fn a_behavior_plan_that_never_names_a_seam_stops_planning_without_the_critic() {
+        let repo = repo_with_planning(4);
+        // A blank seam counts as none. The critic queue is empty, so any critic call fails the test.
+        let (finished, calls) =
+            run_planned_behavior(&repo, vec![behavior_plan(json!("  "))], vec![]);
+        assert_eq!(finished.state, OutcomeState::Failed);
+        let reason = &finished.reason;
+        assert!(
+            reason.starts_with(athena_data::records::PLANNING_STOPPED_PREFIX),
+            "{reason}"
+        );
+        assert!(reason.contains("does not name its test seam"), "{reason}");
+        assert!(reason.contains("behavior criterion 1"), "{reason}");
+        assert!(reason.contains("after 2 mechanical revisions"), "{reason}");
         assert_eq!(prompts_of(&calls, Role::Planner).len(), 3);
         for role in [Role::Critic, Role::Producer, Role::Verifier] {
             assert!(prompts_of(&calls, role).is_empty(), "{role:?} was called");

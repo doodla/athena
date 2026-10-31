@@ -2352,6 +2352,11 @@ pub struct Demonstration {
     pub observes: String,
     /// What would fail if the behavior were missing; a behavior demonstration needs it.
     pub fails_without: Option<String>,
+    /// The test seam the demonstration drives; a behavior demonstration needs it. It names the production
+    /// entry point called, the fake or fixture used and how it is injected, and either "exists" or the plan
+    /// step that adds it. Records written before the field existed lack it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seam: Option<String>,
 }
 
 /// `athena.job-plan/1`: one round of the planner's plan, at `<job>/job-plan-<round>.json`.
@@ -4060,11 +4065,41 @@ mod tests {
                 command: "cargo test".into(),
                 observes: "all pass".into(),
                 fails_without: Some("the new test fails".into()),
+                seam: None,
             }],
             open_questions: vec![],
             producer_section_sha256: "c".repeat(64),
             resumed_from: None,
         }
+    }
+
+    #[test]
+    fn a_demonstration_seam_is_optional_in_old_records_and_round_trips_when_set() {
+        // A record written before the field existed has no `seam` key; it parses with none and re-serializes
+        // to the same text.
+        let old = AnyRecord::JobPlan(Box::new(sample_plan(1)));
+        let old_json = old.to_json();
+        assert!(!old_json.contains("seam"), "none is not written");
+        let AnyRecord::JobPlan(parsed) = AnyRecord::parse("x", old_json.as_bytes()).unwrap() else {
+            panic!("a job plan");
+        };
+        assert_eq!(parsed.demonstrations[0].seam, None);
+        assert_eq!(
+            AnyRecord::JobPlan(parsed).to_json(),
+            old_json,
+            "an old record re-serializes byte for byte"
+        );
+        let path = format!("{}/job-plan-1.json", job().dir());
+        assert!(check_record_file(&path, old_json.as_bytes()).is_ok());
+
+        // A record with a seam keeps it.
+        let mut plan = sample_plan(1);
+        plan.demonstrations[0].seam = Some("run_planned with a scripted planner; exists".into());
+        let with = AnyRecord::JobPlan(Box::new(plan));
+        let json = with.to_json();
+        assert!(json.contains("\"seam\""));
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), with);
+        assert!(check_record_file(&path, json.as_bytes()).is_ok());
     }
 
     #[test]

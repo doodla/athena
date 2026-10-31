@@ -1,0 +1,34 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261031-030054-6wkt",
+  "at": "2026-10-31T03:00:54.791171549Z",
+  "trigger": "failure",
+  "job": "20261030-013555-f5qm",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "failed",
+  "what_happened": "Job 20261030-013555-f5qm (build job A6, an ordered landing queue for the async drain) failed in planning before any code was written. After round 3 of 3 the critic still said the plan needed revising. The critic found the plan well grounded: the functions it relies on exist with the expected shapes (drain_concurrent, Drain::land, attempts, Git::replay, Git::reset_keep, attrs::fingerprint, landed_commit_for, Athena::ask). Two major findings remained. (1) The plan says behaviour is unchanged only for a fully serial drain. It ignores the shipped `[parallel] max_concurrency` > 1 path, where max_in_flight is still 1 but group jobs land one after another onto a main that has moved. (2) The plan leaves open what the old job's records look like after `drop_landed`, and whether a later drain picks that job up again as work. That decides whether a conflict return makes duplicate work, and reading the code could settle it. Three minor findings: no test for the production Rebase-to-Rebased mapping; the thrash outcome ('closes as an environment-type stop') does not say whether a later drain re-picks the item; and the work is near the limit of one producer run (queue, rebase, conflict extraction, drop_landed, send_back, thrash handling, about ten tests across two crates). No acceptance criteria were reported unmet and no repo checks failed. Nothing was delivered.",
+  "failure_class": "20261031-030110-hnnx",
+  "new_class": true,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "The planner designs from the reading and from the code paths it first finds. It does not enumerate every existing caller and mode that reaches the function it changes, such as the `[parallel] max_concurrency` path into landing. It also may leave an 'open question' in the plan even when the code can answer it. Nothing in the planning stage requires a plan to resolve code-answerable questions, or to list the existing modes and callers and say how each is affected, before it is submitted to the critic. The critic sees these only by tracing the code by hand. Planning has three fixed rounds and keeps no partial plan, so a major finding in the last round loses the planning spend. The job is also big enough for one producer run only barely, so the plan carries many decisions, each a place for a gap. The failure shows the same pattern as the earlier cases in this area: plan-time flaws found late with no repair step.",
+  "prevention_kind": "code-check",
+  "prevention": "Add a plan-structure check that runs before each critic round. (a) A plan may not list an open question that is marked answerable by reading code. The planner must settle it by reading the code and cite the file and line. (b) Any plan that changes a function must list every existing caller and mode that reaches it, found by search, with one line saying how each is affected or why it is not. A plan that omits the section is returned to the planner without costing a critic round. Also let the critic's last round keep the plan and send the remaining major findings back as one repair round, instead of failing the job.",
+  "proposed_request": "Build job A6 again: add an ordered landing queue to the async drain, so that jobs that verified in parallel land one at a time onto the current main, and a job whose rebase conflicts goes back for rework instead of failing the drain. Settle these before planning ends, from the code, and state each answer in the plan with the file and line: (1) how the existing `[parallel] max_concurrency` > 1 path (main.rs:1144-1158) lands group jobs today, and whether the queue changes it; the plan must show that path unchanged, or say how it changes, and give a test for it; (2) what the old job's records look like after `drop_landed`, and whether a later drain picks that job up again as work; the conflict return must not create duplicate work, and a test must show it. Also include tests for the production mapping from Rebase to Rebased (Unchecked becomes Clean with a warning, NeedsRecheck becomes Blocked, an error after the fetch becomes Blocked), and state whether a thrashed job is picked up by a later drain. Keep the change to one producer run: if it cannot fit, make the queue and the real rebase one job and the conflict-return and thrash handling a second job that depends on it.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.099116,
+    "input_tokens": 2,
+    "output_tokens": 1708
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [
+    "20261030-171844-a950",
+    "20261030-170739-hq09"
+  ],
+  "planning_stopped": true,
+  "from_jev": false
+}

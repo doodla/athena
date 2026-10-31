@@ -413,7 +413,8 @@ fn demo(n: u32, command: &str, fails_without: Option<&str>) -> Value {
         "method": "run the tests",
         "command": command,
         "observes": format!("criterion {n} holds"),
-        "fails_without": fails_without
+        "fails_without": fails_without,
+        "seam": "the planned job script and its fake agents; exists"
     })
 }
 

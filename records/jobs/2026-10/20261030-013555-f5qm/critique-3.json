@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013555-f5qm",
+  "round": 3,
+  "at": "2026-10-31T03:00:47.655402245Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan never covers `[parallel] max_concurrency` > 1, which ships today and runs with max_in_flight = 1. The queue may change how that path lands.",
+      "evidence": "main.rs:1144-1158 reads `[parallel] max_concurrency` from athena.toml and passes it to `drain_concurrent`, whose help text says jobs of one group run side by side and land one at a time. In such a group, every job after the first has a landing commit whose base is no longer the latest main. Under the plan, `plan_rebase` then replays it, the fingerprint differs (the first job changed governed files), and the result is NeedsRecheck, i.e. 'not landed'. The plan's only claim of 'no change' assumes main is an ancestor of the landed commit, which holds for max_concurrency 1 only. The reading's 'with max_in_flight = 1 drain behaves as today' includes this configuration. Nothing in the plan says how today's code lands the second job of a group, and no test covers it. Fix: Read how today's parallel drain lands the second job of a group: does `land_pr`/`resync_onto_merge` succeed, or does the host's up-to-date rule already refuse it? Write the answer into the plan. If it lands today, keep it landing: for example, apply the queue's rebase and NeedsRecheck only where it does not regress this path, or name the regression to the user. Add a test through `drain_concurrent` with max_concurrency 2 that pins the chosen behaviour.",
+      "location": "Approach / Risks ('At max_in_flight = 1 ... the serial drain is unchanged'); Demonstrations criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "What happens to the old job after its landing commit is dropped is left open. Yet it decides whether the conflict return makes duplicate work, and reading the code can settle it.",
+      "evidence": "Before C0, `landed_commit` finds the landing commit as the one that added `outcome-landed.json`, and reads `verification.json` at that commit (landing.rs:60-71). So dropping it can strip the old job's verification and outcome records and leave a job with a candidate but no verdict. A later drain could then work that request again alongside the new job made by `ask`. The plan defers this to 'the producer checks ... and states what it finds'. Its tests cover only the trailer form (open question 3), and the pre-C0 versus post-C0 behaviour is unsettled. Fix: Before the build, read `cutover_job_for`, `landed_commit_from_records` and the drain's queue read (what makes an item queued) and settle the old job's state in both forms. Then either keep the old job out of the queue (for example, the new request names it, and the queue view or plan skips a request superseded that way) or say plainly that it reappears and why that is safe. Add a test through the real queue read showing that after `send_back` the old job is not offered as work again, or that it is, matching the decision.",
+      "location": "Decision 4 (`send_back` / `drop_landed`); Open questions 2 and 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No test shows the production mapping from Rebase to Rebased: Unchecked becomes Clean with a warning, NeedsRecheck becomes Blocked naming build job 7, and an error after the fetch becomes Blocked.",
+      "evidence": "The criterion 1(a) and 2(a) tests stub `Steps::rebase` in `QueueWorld`. The landing.rs tests cover `plan_rebase` and `drop_landed` only. The fetch-failure behaviour ('landing goes on as before') is claimed in the design doc and CHANGELOG, but no test shows it. Fix: Make the mapping a small pure function in drain.rs (`Rebase` -> `Rebased`) and unit-test each arm, including that Unchecked prints one warning line and still lands.",
+      "location": "Decision 5 / Step 8 (`PrLander::rebase` mapping)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Section 6 step 4 says a thrashed job 'closes as an environment-type stop'. The plan only reports it and does not say whether a later wave or drain picks the item up again.",
+      "evidence": "Design doc lines 132-133. The plan's open question 6 leaves re-pickup unsettled. Whether a thrashed item is added to `tried` (see `batches_for`, drain.rs:2215) is not stated. Fix: State that a thrashed item is added to `tried` for this run, and assert in `landing_queue_thrash_is_not_a_drain_stop` that it is not worked again in a later wave. Keep the deferral of the record close in the docs.",
+      "location": "Decision 6 / 8 (thrash)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The work is near the limit of one producer run: a queue, a real rebase, conflict-path extraction, drop_landed, send_back via ask, thrash handling, and about ten new tests across two crates.",
+      "evidence": "The plan itself notes that drain.rs is 174 KB, and it adds about five public items to landing.rs plus Athena methods, each with tests on a real temporary repository. Fix: Keep it as planned, but order the steps so that the queue plus rebase (criteria 1 and 4) can stand alone if the run ends early. Alternatively, ask whether `send_back` could be split out after the two majors are settled.",
+      "location": "Files / Risks ('large for one producer run')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is detailed and mostly grounded in real code. These all exist with the shapes the plan relies on: `drain_concurrent` (drain.rs:2194), `Drain::land` with its `landing` mutex (drain.rs:1322), `attempts` with its two-call landing retry (drain.rs:1368-1438), `Git::replay`, `Git::exit`, `Git::reset_keep` (athena-git lib.rs:773, 240, 704), `attrs::fingerprint` (attrs.rs:139), `landed_commit_for` (landing.rs:78) and `Athena::ask` (reading.rs:827). The parentless-commit pre-check matches the `Refused` text in `replay`. Blocking a rebase whose governed fingerprint changed (NeedsRecheck) is backed by `observe_merge`, which checks the merge against the verified fingerprint (pr.rs:372), and the plan raises that scope tension with the user openly. Two gaps remain. First, the plan claims behaviour is unchanged only for a fully serial drain. It ignores the existing `[parallel] max_concurrency` > 1 path (main.rs:1144-1158), where max_in_flight is still 1 but group jobs land one after another onto a main that has moved. Second, it leaves as an open question what the old job's records look like after `drop_landed`, and whether a later drain picks the old job up again as work. Reading the code can settle that, and the answer decides whether the conflict return creates duplicate work. Both should be settled before the build."
+}

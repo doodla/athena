@@ -1,0 +1,32 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261031-042200-bnc1",
+  "at": "2026-10-31T04:22:00.228066875Z",
+  "trigger": "intervention",
+  "job": "20261030-112518-9h6z",
+  "intervention": "20261031-042154-vnbp",
+  "class_of_work": "build",
+  "category": "fixed-environment",
+  "what_happened": "While job 20261030-112518-9h6z's producer was still running, free disk fell to 9.7 GB, under the 10 GB guard that runs before the checks. The the person running Athena deleted the verify-side build folder (7.8 GB, left by the finished baseline checks) and the workspace target directory by hand. Without this, the job would have ended failed on low disk after its producer, as jobs d103 and sz3z did. No criterion or check had failed. The checks stage rebuilds the verify side from cold, so the deletion costs build time later.",
+  "failure_class": "20261026-140223-4xmw",
+  "new_class": false,
+  "earlier_cases": [
+    "20261030-225609-4p4x"
+  ],
+  "decisions_matched": [],
+  "cause": "Athena owns no disk lifecycle. Build artifacts from finished baseline checks, caches and workspace targets are never reclaimed or counted against a disk budget. The 10 GB guard only reports failure at the check stage and frees nothing. Nothing watches free space while the producer runs. The hold-on-low-disk fix (b5hm) is still queued and has not been made urgent, even though d103, sz3z and the earlier 4p4x case showed the same gap. Each job near the threshold therefore depends on an the person running Athena noticing in time.",
+  "prevention_kind": "code-check",
+  "prevention": "Land b5hm first and extend it. Before the checks stage, and again when free disk drops below the guard, Athena should delete regenerable artifacts itself: the verify-side build folder of finished baseline checks, the workspace target, and the uv and npm caches. If that is still not enough, the job should be held, not failed, and resumed once space is free. A hold on low disk should not count as failure or spend. Athena should log each cleanup, so the the person running Athena does not need to intervene and the intervention count stays accurate.",
+  "proposed_request": "Make Athena manage free disk itself so a job never fails or needs an the person running Athena for low disk. (1) Before a job's checks stage starts, if free disk is under the configured guard (10 GB), Athena automatically deletes regenerable space in this order, re-measuring after each step: the verify-side build folders left by finished baseline checks, the job workspace target directory, then the uv and npm caches. Never delete anything under the records branch or a running job's source. (2) If free space is still under the guard after cleanup, put the job on hold with a visible reason, not ended failed, and resume it automatically when space returns. A hold must not count as a failed attempt or as progress-less spend. (3) Record each cleanup (what was removed, bytes freed, free space before and after) in the job's records. Acceptance: a test with a fake low-disk reading shows the cleanup frees space and the job proceeds to checks. A second test shows that when cleanup cannot reach the guard the job is held, not failed, and resumes when the reading recovers. The job must not change the 10 GB guard value. This supersedes the queued request b5hm; fold it in and close b5hm as redundant.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.086518,
+    "input_tokens": 2,
+    "output_tokens": 1149
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}

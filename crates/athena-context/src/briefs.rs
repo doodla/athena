@@ -1191,6 +1191,9 @@ fn demonstration_lines(out: &mut String, demonstrations: &[Demonstration]) {
         if let Some(f) = &d.fails_without {
             let _ = writeln!(out, "  Fails without the behavior: {}", f.trim());
         }
+        if let Some(s) = &d.seam {
+            let _ = writeln!(out, "  Test seam: {}", s.trim());
+        }
     }
 }
 
@@ -2675,6 +2678,7 @@ mod tests {
                     command: "ls CHANGELOG.md".into(),
                     observes: "the file is listed".into(),
                     fails_without: None,
+                    seam: None,
                 },
                 Demonstration {
                     criterion: 2,
@@ -2682,6 +2686,7 @@ mod tests {
                     command: "cargo test --locked".into(),
                     observes: "all tests pass".into(),
                     fails_without: Some("the changelog test fails".into()),
+                    seam: Some("SEAM-MARK run_planned with a scripted planner; exists".into()),
                 },
             ],
             open_questions: vec!["QUESTION-MARK which format".into()],
@@ -2845,6 +2850,7 @@ mod tests {
             }
         }
         assert!(brief.contains("the changelog test fails"));
+        assert!(brief.contains("Test seam: SEAM-MARK run_planned"));
         assert!(brief.contains("ATHENA-FINDING-TEXT"));
         assert!(brief.contains("evidence for ATHENA-FINDING-TEXT"));
         assert!(brief.contains("1. [content] CHANGELOG.md exists"));
@@ -3010,6 +3016,22 @@ mod tests {
             assert!(first.contains(text), "the plan section omits {text}");
         }
         assert_ne!(first, render_plan_section(&plan(3)));
+    }
+
+    #[test]
+    fn a_demonstrations_test_seam_is_rendered_beneath_it_and_only_when_set() {
+        let record = plan(2);
+        let section = render_plan_section(&record);
+        let demos = &section[section.find("Demonstrations:").unwrap()..];
+        assert!(
+            demos.contains("  Test seam: SEAM-MARK run_planned with a scripted planner; exists\n"),
+            "the seam is shown under the demonstrations: {demos}"
+        );
+        // Criterion 1 has no seam, so exactly one seam line appears.
+        assert_eq!(demos.matches("Test seam:").count(), 1);
+        // The seam line follows the demonstration it belongs to.
+        let criterion_2 = demos.find("- Criterion 2:").unwrap();
+        assert!(demos.find("Test seam:").unwrap() > criterion_2);
     }
 
     fn plain_verifier_inputs() -> VerifierInputs {

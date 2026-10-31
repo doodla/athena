@@ -365,7 +365,8 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                         "method": "read the change",
                         "command": "cargo test --locked",
                         "observes": format!("fake planner: {text}"),
-                        "fails_without": "fake planner: nothing was checked"
+                        "fails_without": "fake planner: nothing was checked",
+                        "seam": "fake planner: no seam, the change is not exercised; exists"
                     })
                 })
                 .collect();

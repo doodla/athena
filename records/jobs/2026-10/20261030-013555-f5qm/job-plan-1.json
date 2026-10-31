@@ -1,0 +1,189 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-013555-f5qm",
+  "round": 1,
+  "at": "2026-10-31T02:49:20.903961009Z",
+  "invocation_seq": 4,
+  "approach": "Add a FIFO landing queue to the `Drain` in drain.rs. A job joins the queue when its run passes verification, so queue order is the order verification finished. It lands only when it is the head. Before landing, the head is rebased onto the latest main through a new `Lander::rebase`, backed by a new rebase function in landing.rs that uses the existing `Git::replay`. A clean rebase goes to the existing `Steps::land` path. A conflict is never landed: the drain calls a new `Steps::return_to_producer`, which gives a fresh reading. It runs that reading again through `run_job` with `Source::Given`. The new job re-enters the queue behind the jobs already waiting. A per-item conflict counter stops an item on its third conflict (the second return plus one more, section 6's \"more than `max_conflict_returns` (2)\"). The item is reported as thrashing and the drain moves on. All new Steps and Lander methods have defaults (clean rebase), so the serial drain at `max_in_flight = 1` and every existing test double behave as today. New tests drive `drain_concurrent` in tests/drain.rs with a Sync stub world.",
+  "decisions": [
+    {
+      "choice": "Queue inside `Drain` (State gets `queue: VecDeque<String>` and `conflicts: BTreeMap<String,u32>`). The job is enqueued in `run_job` at `RunStep::Passed`. `Drain::land` waits (using `pause`) until the job is the head, then takes the existing `landing` mutex and dequeues at the end, however the landing ends.",
+      "reason": "The existing `landing` mutex serialises landings but does not order them: waiters wake in no fixed order. The design says jobs land in the order their checks and verifier passed, and `State` is already shared by the concurrent workers. With one worker the job is always the head, so the serial path is unchanged.",
+      "rejected": [
+        {
+          "option": "Rely on the `landing` mutex alone",
+          "why": "No FIFO guarantee, so the order criterion could pass by luck."
+        },
+        {
+          "option": "A separate queue thread or object",
+          "why": "More machinery than the shared State already provides; the workers already wait on `wake`."
+        }
+      ]
+    },
+    {
+      "choice": "Rebase through a new `Lander::rebase` (default: clean) and `Steps::rebase` (default: clean). `PrLander` implements it with a new `Athena::rebase_for_landing`, backed by the pure function `rebase_landed(git, main_tip, landed, sign)` in landing.rs. It replays `parent(landed)..landed` onto main using `Git::replay` and maps its `GitError::Refused` conflict to `Rebase::Conflict { onto, paths, text }`. Any other error stays an error. When main is already an ancestor of the landed commit (always so at `max_in_flight = 1`) the result is `Current` and nothing moves.",
+      "reason": "`Git::replay` (athena-git lib.rs:773) already does a three-way rebase without touching the work tree and refuses on conflict. The existing `Lander` seam, with `RecordingLander` in tests, lets the real steps run without a network.",
+      "rejected": [
+        {
+          "option": "Shell out to `git rebase`",
+          "why": "It touches the work tree, and the repository has no such wrapper."
+        },
+        {
+          "option": "Let the host's 'branch must be up to date' rule detect staleness",
+          "why": "That gives no conflict text and cannot return the job to the producer."
+        }
+      ]
+    },
+    {
+      "choice": "Conflict return does not use `failures`/`ATTEMPTS`. A separate per-item counter increments on each conflict. Return the job while the count is <= `MAX_CONFLICT_RETURNS` (const 2). On the next conflict the item ends as `ItemEnd::Thrashed`: its job line's `landing` reads 'thrashing: ...' with the paths, a note is added, and `Steps::item_over` runs. It is not a `Stop`, so the drain moves on and the Stop list in the help text is unchanged.",
+      "reason": "Section 6 step 4: returned more than twice, closes, and the drain moves on. `[drain.pipeline] max_conflict_returns` is not read by the drain yet (design section 11) and config.rs is out of scope, so a constant is used with a doc comment pointing at the config key.",
+      "rejected": [
+        {
+          "option": "Count conflicts against `ATTEMPTS`",
+          "why": "A conflict would consume the one retry of a failed landing and change today's failure behaviour."
+        },
+        {
+          "option": "Add a `Stop::Thrash`",
+          "why": "It would stop the whole drain, against 'the drain moves on', and would change the stop-list help test."
+        }
+      ]
+    },
+    {
+      "choice": "`Steps::return_to_producer(job, &Conflict) -> Read` (default: a Read with an error). The drain feeds its result to `run_job` as `Source::Given`, so the returned job is budgeted and counted like any retry.",
+      "reason": "It reuses `run_job`'s budget, hold and job-limit rules and the in-flight rows. The producer stage is entered by the run itself (`TableSink`), as in A3.",
+      "rejected": [
+        {
+          "option": "Call `Steps::read(ReadOf::Retry)`",
+          "why": "`athena retry` accepts only rejected, failed or interrupted jobs (reading.rs:1030 and the `ask` comment), not a verified one, and it carries no conflict text."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "purpose": "Add `pub enum Rebase { Current, Moved { onto, tip }, Conflict { onto, paths, text } }`, `pub fn rebase_landed(git, main_tip, landed, sign)`, and `Athena::rebase_for_landing(job_ref, ui)` (finds the landed commit with `landed_commit_for`, the main tip with `Git::fetch_remote_branch` on origin, calls `rebase_landed`, and on a clean move calls `Git::reset_keep(tip)`). Add a `#[cfg(test)]` module testing `rebase_landed` on a real temporary repository (clean, moved, conflict).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Rebased`/`Conflict` types, `MAX_CONFLICT_RETURNS`, default methods `Steps::rebase`/`Steps::return_to_producer` and `Lander::rebase`. Add State fields `queue` and `conflicts`. Enqueue at `RunStep::Passed`. Make `Drain::land` wait for the queue head and dequeue in a drop guard. Add the rebase/conflict/return path in `attempts`, plus `ItemEnd::Thrashed` handled in `finish` as a non-stop. `PrLander::rebase` and `RealSteps::rebase`/`return_to_producer` delegate to the Athena method; `return_to_producer` sets the old job's row to the producer stage through `TableSink`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add only new tests and the Sync `QueueWorld` stub for criteria 1-3. No existing line is edited or removed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "purpose": "Mark build job 6 'Implemented (D145)' with a short description in the style of jobs 3 and 4: queue order, rebase, conflict return, the thrash rule as built (constant 2 until config is wired), and that at `max_in_flight = 1` nothing changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased entry naming the ordered landing queue, rebase onto the latest main, conflict return and the thrash stop.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `take_until_done`, `finish` (the ItemEnd mapping), `Drain::new` and the `RealSteps::run` / `TableSink` code in drain.rs, `Athena::ask` for job-state rules, and `DiffEntry` in athena-git. Settle open questions 2 and 5.",
+    "In landing.rs add `Rebase`, `rebase_landed` (replay of `parent(landed)..landed` onto the main tip; conflict paths from `diff_tree` of the landed commit's own change intersected with main's change since that parent) and `Athena::rebase_for_landing`. Add unit tests with a real repository: clean rebase gives a tip whose parent is main, a conflict gives Conflict with the path, main already an ancestor gives Current.",
+    "In drain.rs add `Conflict`, `Rebased`, `const MAX_CONFLICT_RETURNS: u32 = 2` (doc comment: mirrors `[drain.pipeline] max_conflict_returns`, not yet read), `Steps::rebase` and `Steps::return_to_producer` with defaults, and `Lander::rebase` with a clean default.",
+    "Add State fields `queue: VecDeque<String>` and `conflicts: BTreeMap<String,u32>`. Enqueue in `run_job` when the run ends `RunStep::Passed`. In `Drain::land`, wait for the head with `pause`, take the `landing` mutex, call `steps.rebase`, and dequeue through a drop guard.",
+    "On `Rebased::Conflict` in `attempts`: do not call `steps.land`; log the conflict line and set the job line's `landing` to 'returned to producer: ...'; increment the item's counter. If within `MAX_CONFLICT_RETURNS`, call `steps.return_to_producer`, feed the Read to `run_job` as `Source::Given`, and loop. The counter does not touch `failures`. Otherwise end the item as `ItemEnd::Thrashed`: set the job line's `landing` to 'thrashing: ...' with the paths, add a note, and let `finish` treat it like `Skipped` (no stop).",
+    "Implement `PrLander::rebase` (calls `athena.rebase_for_landing` and maps `Rebase` to `Rebased`; an error becomes `NotLanded` via the land path, never a silent clean). Implement `RealSteps::rebase` and `RealSteps::return_to_producer` per the decision on open question 2, setting the row's stage to the producer through `TableSink::enter`.",
+    "Check by reading that every existing `Steps` and `Lander` implementer (`Stub`, `RecordingLander`, the drain.rs unit-test worlds) compiles with only default methods.",
+    "In tests/drain.rs add the Sync `QueueWorld` (Mutex log, Condvar gates, a main counter, configurable conflicts) and three tests: `landing_queue_lands_in_verified_order_each_on_the_previous_main`, `landing_queue_conflict_returns_to_producer_and_next_candidate_lands`, `landing_queue_thrash_stop_reports_thrashing_and_does_not_retry`. Also add one serial case showing `drain::drain` with the same world lands in order with no extra calls.",
+    "Update docs/design/async-drain.md job 6 and add the CHANGELOG.md Unreleased entry.",
+    "Run cargo fmt --all --check, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked; confirm `git diff` for tests/drain.rs has only added lines."
+  ],
+  "risks": [
+    {
+      "risk": "Changing `Drain::land` alters the serial path that existing tests pin.",
+      "mitigation": "Every new Steps/Lander method defaults to 'clean' / 'refuse'. With one worker the job is always the queue head. `Rebase::Current` is returned whenever main is already an ancestor of the landed commit, so nothing moves. Criterion 4 runs the whole existing suite and checks the diff for removed lines."
+    },
+    {
+      "risk": "A job that leaves without dequeuing (stop, panic, budget end) blocks the queue head and deadlocks the workers behind it.",
+      "mitigation": "Dequeue in a drop guard so every exit (landed, not landed, panic, stop) removes the job. `pause` already wakes every 20 ms and waiters check `stopped()`, so a stop never leaves a worker waiting on a dead head."
+    },
+    {
+      "risk": "A non-conflict git failure is mistaken for a conflict and bounces the job.",
+      "mitigation": "`rebase_landed` returns `Conflict` only for `GitError::Refused` from `replay`; any other git error is an `Err` and becomes `NotLanded` with the error text, the existing failure path."
+    },
+    {
+      "risk": "The ordering test is timing-dependent and flaky.",
+      "mitigation": "Gate the stub with Condvars and a bounded wait that fails the test after a timeout, not a bare sleep. The order is fixed by the gates, not by timing."
+    },
+    {
+      "risk": "The size exceeds one producer run (drain.rs is 174 KB).",
+      "mitigation": "Only the landing queue is built. Real conflict-return is bounded by open question 2, and the thrash counter bounds any loop."
+    },
+    {
+      "risk": "New code trips `-D warnings` (dead code, unused parameters in default methods).",
+      "mitigation": "Prefix unused default-method parameters with `_`, read every new field in production code, add no `#[allow]`, and run clippy before finishing."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Integration test in crates/athena-cli/tests/drain.rs. Entry point: `drain::drain_concurrent(&world, limits, &Quiet, 3)`, the production function. Preconditions: three items in one plan batch (disjoint touched paths), `max_concurrency` 3. Seam: a new Sync `QueueWorld` implementing the real `Steps` trait with Mutex fields; it does not exist today, step 8 adds it. Its `run` is gated by a Condvar so the verified order (c, a, b) differs from submission order (a, b, c), and its `rebase(a)` blocks until b and c have passed. Its `rebase` returns Clean and logs the current main label 'main-N'. Its `land` appends to the log and advances main to N+1. The logic under test (queue, head wait, ordering) lives in `Drain`, not in the double.",
+      "command": "cargo test --locked -p athena-cli --test drain landing_queue_lands_in_verified_order_each_on_the_previous_main",
+      "observes": "The log shows landings in verified order c, a, b, one at a time (no overlap), and each 'rebase X onto main-N' immediately follows the 'land' of the previous job (N increases by one per landing). `report.landed == 3`.",
+      "fails_without": "Without the queue, landing order follows mutex wake-up, so the test fails when the gate makes job 'c' verify before 'b' and job 'a' is held in rebase. Without the rebase call the log has no 'rebase X onto main-N' lines, and the N asserted to follow each landing is missing."
+    },
+    {
+      "criterion": 2,
+      "method": "Integration test in tests/drain.rs through `drain::drain_concurrent` (or `drain::drain` with one worker). `QueueWorld` is configured so the first `rebase` of job 'b' returns `Rebased::Conflict` (onto 'main-1', paths ['src/x.rs'], a text). `return_to_producer` logs and returns a Read for 'b-2'. Seam: the `Steps::rebase` and `Steps::return_to_producer` methods added in step 3, and the stub added in step 8.",
+      "command": "cargo test --locked -p athena-cli --test drain landing_queue_conflict_returns_to_producer_and_next_candidate_lands",
+      "observes": "The log has no 'land b' at that point, has 'return_to_producer b', 'land c' lands next, then b's new job ('b-2') runs, is rebased cleanly and is landed behind c. `report.landed == 3`; the job line of b's first job shows landing 'returned to producer: ...'.",
+      "fails_without": "Without the conflict branch the stubbed Conflict is ignored and 'land b' is logged, or b fails the whole item. The assertion that 'land b' is absent before 'land c', and that 'return_to_producer b' appears, then fails."
+    },
+    {
+      "criterion": 3,
+      "method": "Integration test in tests/drain.rs through `drain::drain_concurrent`. `QueueWorld` makes every rebase of item 'b' (and of the jobs it is returned as) conflict; other items are clean. Limits have a large max_jobs so only the thrash rule can end b. Seam: same stub as criterion 2, added in step 8.",
+      "command": "cargo test --locked -p athena-cli --test drain landing_queue_thrash_stop_reports_thrashing_and_does_not_retry",
+      "observes": "Exactly two 'return_to_producer' calls for b; the third conflict does not return it and 'land' is never logged for b. b's job line landing starts with 'thrashing' and names the conflict paths. A note names the item. The other item lands and the drain stop is not RepeatedFailure. `report.landed` counts only the others.",
+      "fails_without": "Without the counter, the always-conflicting job is returned a third time: the log shows a third 'return_to_producer' and the test, which asserts exactly two returns and no third run, fails (or loops until the job limit)."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the whole existing suite of tests/drain.rs and the unit tests of drain.rs. The old `Stub`, `RecordingLander` and the A3/A4 in-flight tests use default `rebase` and `return_to_producer`, so they run at one worker. Entry points are the same `drain::drain` / `RealSteps` those tests already call; no seam is added for them. Separately the verifier runs `git diff -- crates/athena-cli/tests/drain.rs` and checks it has only added lines.",
+      "command": "cargo test --locked -p athena-cli --test drain",
+      "observes": "All existing tests pass with no edited body, and the diff of tests/drain.rs has no removed lines (`-` lines) in existing tests.",
+      "fails_without": "If the queue changed serial behaviour (an extra log line, a different landing retry), the unchanged assertions of existing tests such as `a_landing_failure_is_a_failure_and_no_rating_is_taken_as_success` and `the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page` would fail."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks as given, each as its own simple command: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. Entry point is the whole workspace build. No seam. New code carries no `#[allow]`; every new item must be used (the `Rebase::Moved` fields are read by `PrLander::rebase`, the `Conflict` fields by the log line and the job line), so clippy and rustc dead-code lints stay silent.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "fmt, clippy and test each exit 0 on the final tree, including the new tests and new unit tests in landing.rs.",
+      "fails_without": "Unformatted new code makes `cargo fmt --all --check` exit non-zero. A new unused field, variant or default-method parameter, or a needless clone or borrow, is a warning that `-D warnings` turns into a clippy failure. Any new test that fails, or an existing test broken by the queue, makes `cargo test --locked` exit non-zero. The change is not done until all three exit 0."
+    },
+    {
+      "criterion": 6,
+      "method": "Content check: read the diff of CHANGELOG.md.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new entry under Unreleased names the ordered landing queue, rebase onto the latest main, conflict return to the producer and the thrash stop (two returns, then the item is reported as thrashing). It follows the format of neighbouring entries.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Thrash count: the design text ('more than twice') and the reading ('returned twice ... not retried a third time') are met by stopping on the third conflict (two returns). Criterion 3 says 'conflicts twice'. This plan stops on the third conflict. If the verifier reads criterion 3 as stopping on the second conflict, change `>` to `>=` in one place; the producer should state the chosen reading in the test name and the CHANGELOG entry.",
+    "I did not find an existing path that gives a verified (landed-state) job a new producer run with conflict text: `Athena::retry` takes only rejected, failed or interrupted jobs. The producer must read `Athena::ask` and the job-state rules and either (a) make `RealSteps::return_to_producer` use an existing path, or (b) if none exists, return a Read with an error naming the conflict, so a real conflict fails the item with the conflict text and the thrash counter still bounds the loop in the Steps-driven path. Option (b) must be named in the CHANGELOG and the design text, not hidden.",
+    "Whether `athena_git` test helpers (`repo_with`, `commit_all`, lib.rs ~1044) are usable from athena-core's tests (visibility/feature). If not, the landing.rs test builds its repository with `Git::run` calls on a `tempfile` dir.",
+    "`reset_keep(tip)` moves the local branch onto the rebased commit. If the job already has an early pull request whose head is the old commit, `land_pr` refuses a head that differs (and `replace_early` only handles the early head); the producer must check this case. It cannot arise at `max_in_flight = 1`, because the rebase is then `Current`.",
+    "`Item.job` vs. the returned job id: the producer must confirm which id `Steps::land` and `item_over` receive after a return (the plan assumes the new job id from the returned Read, as retries do today)."
+  ],
+  "producer_section_sha256": "660355545c84d20b90e213243001d4819c231aabc40e730e149d16c5ab43af93"
+}

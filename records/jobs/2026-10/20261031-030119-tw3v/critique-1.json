@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-030119-tw3v",
+  "round": 1,
+  "at": "2026-10-31T03:06:59.115056776Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The fingerprint is compared at the replayed branch tip, not at the replayed image of this job's landing commit, so a later job's commit can make the head job come back NeedsRecheck by mistake.",
+      "evidence": "Decision 1 says that under max_concurrency > 1 'the second job's landing commit therefore sits on top of the first job's' on the local branch. plan_rebase replays fork..head (the whole branch) and then compares `fingerprint(git, tip, rules_commit)` with the head job's `verified_fp`. When main has moved in a way the resync did not cover (the only case where the rebase acts, by Decision 1's own account), job 1's `tip` also holds job 2's changes. If those touch governed content, job 1 is blocked although its own content was verified. `landed_commit_for(git, head, job, fingerprint)` (landing.rs:78) shows that the landing commit is found inside `head`, not at its tip. Fix: Map `landed` to its replayed commit (walk the replayed range by position, or replay fork..landed first) and compare the fingerprint there. Add a core test: two landing commits on the branch, main moved by an outside commit, the second commit changes governed content, and the first job still gives Moved.",
+      "location": "Decision 3 (plan_rebase fingerprint check) with Decision 1 (several landing commits on the local branch)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "After a rebase, land_pr pushes the new commit only when it has no link yet or the remote still holds the early head. If the pull request already holds an earlier landing commit, the rebased commit is never pushed, and land_pr then sees the remote head as foreign.",
+      "evidence": "landing.rs:199-215: `match early { Some(early_head) if head == early_head && head != job.commit => replace_early(...) , _ => head }`, then `if head != job.commit { ... commits_after(job.commit, &head) ...}`. That is the path tested by `land_pr_refuses_any_other_head_naming_each_extra_commit_and_why` (gh/tests.rs:1445). A job whose pull request was already published with its first landing commit (a NotLanded in an earlier drain, a held-back job, or the second attempt of the landing retry after the first attempt pushed) has a link and a remote head equal to the old landing commit. After `reset_keep` the job's commit is the rebased one, so land_pr refuses it. The mitigation, 'maps to Blocked', turns a case that is handled today into not landed, and the claim that 'the existing land_pr and replace_early path pushes the rebased landing commit' holds only for the first push. Fix: Choose and test a rule for a published head. Either rebase only when the remote head is the early head or there is no link, and return Unchecked with a warning otherwise. Or push the rebased commit with a lease pinned to the stored link head, the way replace_early pins the early head. Add a gh/tests.rs case that has an existing link with an old landing head and a moved main.",
+      "location": "Decision 4 / Risks item 3 (the rebased commit reaches the host only through publish or replace_early)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "No test runs the production rebase path (fetch origin's main, lock, plan_rebase, reset_keep, then land_pr pushing the rebased commit). The drain-level tests stub `rebase` and fake main as a counter, and the core tests call plan_rebase with main advanced by hand.",
+      "evidence": "Criterion 1 asks for a drain test 'each rebased onto the main left by the previous landing (git log of the test repository shows linear order)'. In layer (a), QueueWorld's `rebase` logs 'rebase X onto main-N' and returns Clean, so that layer tests a double for the rebase. Layer (b) never calls `rebase_for_landing` or `land_pr`. The plan treats a bare-origin fixture as an open question, but gh/tests.rs:1969 already has one: '`land_pr` with the real records sink, a real repository, a bare remote and a fake host' (bare init at :1996-2003). gh/tests.rs:1486-1501 also adds a bare 'origin'. Fix: Make it a firm demonstration. Use the gh/tests.rs:1969 fixture to land job 1, push an outside commit to the bare main, then call `Athena::rebase_for_landing` and `land_pr` for job 2. Assert that the bare branch head's parent is the new main tip and that the history has no merge commits. Add one case where the fetch fails and the result is Unchecked. Keep QueueWorld for the order and hold-back logic, and say so in the demonstration.",
+      "location": "Demonstrations, criterion 1 and 2 (layer a), and Open question 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The FIFO assertion is probabilistic. A non-FIFO build could pass it.",
+      "evidence": "The plan admits it: 'a probabilistic check, not a proof: std's mutex is not fair'. Fix: Also unit-test the queue directly and deterministically: push a, b, c, check that head() is a, drop a's slot, check that head() is b, and check that a waiter for c returns only after b's slot is dropped. Keep the drain-level repeat as a smoke test.",
+      "location": "Demonstration, criterion 1 (a): the order test repeated 10 times",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Athena already flagged that this file is outside the deliverables. The one-line re-export is needed, because `landing` is private (gh/mod.rs:37, re-exports at :51-52).",
+      "evidence": "gh/mod.rs:52 already re-exports `land_pr, landed_commit, landed_commit_for` from landing. Fix: Keep the line and name it in the report as a needed widening, not new scope.",
+      "location": "Files: crates/athena-core/src/gh/mod.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the reading: one FIFO landing queue, a rebase onto origin's latest main before each landing, conflicts held back without a stop, and the max_concurrency > 1 path kept and pinned. The code it relies on exists as named. I read `Drain::land` (drain.rs:1322), the retry loop in `attempts` (1368-1438), `tried` being extended per wave (2333), `Git::replay`/`reset_keep`/`fetch_remote_branch`, `resync_tip` (land.rs:99), `landed_commit_for` (landing.rs:78) and `land_pr` (landing.rs:171, 416). The queue-slot design, which keeps the slot across the retry, is sound. Three problems need a revision. First, the fingerprint check is taken at the replayed branch tip. That tip can include later jobs' landing commits, so the head job can be blocked wrongly. Second, land_pr pushes a rebased commit only on the first publish or when replacing the early head. A job whose pull request already holds an earlier landing commit would have its rebased commit refused as a foreign head, so a case that is handled today becomes not landed. Third, no test runs the production rebase path end to end, although gh/tests.rs:1969 already provides a bare-origin fixture with a fake host. The criterion-1 drain test stubs the rebase. The order test is probabilistic only, which is minor."
+}

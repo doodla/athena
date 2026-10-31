@@ -2371,7 +2371,8 @@ fn plan_with(approach: &str) -> serde_json::Value {
             "method": "run the tests",
             "command": "cargo test --locked",
             "observes": format!("criterion {n} holds"),
-            "fails_without": "the suite fails"
+            "fails_without": "the suite fails",
+            "seam": "the planned job script and its fake agents; exists"
         })
     };
     serde_json::json!({

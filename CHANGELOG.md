@@ -32,6 +32,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A required test seam on the demonstration of a behavior criterion, and a planning refusal without it. Root cause
+  of the repeated plan failure (jobs 20261018-095726-r3bn, 20261018-113512-gvcs and 20261024-115052-bzw6 stopped at
+  planning round 3): a plan demonstration carried no field for the test seam, so the planning flow never required
+  naming it, and Athena's own plan check had nothing to test; only the critic, in prose, could notice a seam that
+  did not exist. `DemonstrationOutput` and the stored `Demonstration` gain `seam`: the production entry point the
+  demonstration calls, the fake or fixture and how it is injected, and either `exists` or the plan step that adds
+  it. `admission::plan_findings` gives a major finding, naming the criterion, for a behavior criterion whose seam is
+  missing or blank, so the plan goes back to the planner with no critic call (the two mechanical passes). The
+  critic, producer and verifier briefs print it as `Test seam:` under each demonstration; the critic still checks
+  that the seam exists, which Athena does not. A plan record without `seam` still parses and is written back
+  unchanged. More plans are refused by design: those whose behavior criteria name no seam.
 - Per-job worktree start and its disk bound (async drain build job 4, `docs/design/async-drain.md` sections 5 and 12
   and decision D145). Each job's producer runs in its own worktree (`jobs/<id>/work`) with its own build directory
   (`jobs/<id>/target/produce`, its `CARGO_TARGET_DIR`). The new `JobWorktree` guard clears both when the producer

@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013555-f5qm",
+  "round": 1,
+  "at": "2026-10-31T02:50:47.449359377Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Taking the job off the queue at the end of every land call makes the existing landing retry wait forever, so an existing test hangs at max_in_flight = 1.",
+      "evidence": "`attempts` retries a landing that ends NotLanded: `passed` stays Some, `failures` goes to 1 (< ATTEMPTS = 2, line 186), and the loop calls `self.land(&job, at)` again without running the job again. The existing test `a_landing_failure_is_a_failure_and_no_rating_is_taken_as_success` (tests/drain.rs:901-911) pins this as `[\"read a\", \"run a\", \"land a\", \"land a\"]`. In the plan, the job joins the queue only in `run_job` at `RunStep::Passed`, and the drop guard takes it off at the end of the first `land`. On the second call the job is no longer in the queue, so 'wait until it is the head' never comes true. The worker spins in `pause` until a stop, so the test hangs. That breaks criterion 4, and the risk note's claim that 'with one worker the job is always the head' is wrong. Fix: Tie queue membership to the item, not to one `land` call. Dequeue only when the item leaves landing for good: it lands, its last landing attempt fails, it is returned for a conflict, or it thrashes. Or have the head check put a job that is passed but not queued back at the front. Name this retry case as a risk, and say that criterion 4 covers it through the existing test.",
+      "location": "Plan decision 1 / step 4 (`Drain::land` waits for the queue head and dequeues in a drop guard at the end of every landing); crates/athena-cli/src/drain.rs:1428-1437",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The real return to the producer is not designed; the fallback fails the item, so the requested behavior would exist only in the test double.",
+      "evidence": "The request says a conflicting candidate 'returns to its producer on conflict'. Section 6 step 3 of docs/design/async-drain.md (lines 129-131) says the producer gets the conflict text and the new main, fixes the conflict in its own worktree, and the checks run again. The plan says no existing path gives a verified job a new producer run (`athena retry` accepts only rejected, failed or interrupted jobs). It leaves the real implementation to the producer, with fallback (b): 'return a Read with an error naming the conflict, so a real conflict fails the item'. Under (b) the production drain never returns anything to a producer. Criteria 2 and 3 would pass only because the `QueueWorld` double's `return_to_producer` hands back a fresh Read. Fix: Decide the real path in the plan. One option: a send-back in athena-core that reopens a verified-but-unlanded job (or creates a follow-up job from its reading) with the conflict text and new main as producer context, reached from `RealSteps::return_to_producer`. Name the function and file, and add a test that drives `RealSteps::return_to_producer` and checks the producer brief or reading carries the conflict text. If that work is too large for one producer run, say so and narrow the request instead of leaving a silent fallback.",
+      "location": "Decision 4, step 6 and open question 2 (`RealSteps::return_to_producer`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Treating every `Refused` from replay as a conflict also catches refusals that are not conflicts.",
+      "evidence": "`Git::replay` returns `GitError::Refused` for a conflict, but also for 'commit {commit} has no parent' (line 786), and `fetch_remote_branch` uses `Refused` too (line 407). If every `Refused` maps to `Rebase::Conflict`, a non-conflict refusal sends the job back to its producer, which is the very case the mitigation claims to rule out. Fix: Tell a conflict apart from other refusals before calling it a Conflict: check before replay that the landed commit has a parent, or match the conflict message, or add a typed conflict result in athena-git. Any other refusal goes to the NotLanded path.",
+      "location": "Decision 2 and the risk 'A non-conflict git failure is mistaken for a conflict'; crates/athena-git/src/lib.rs:782-792",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After a Moved rebase, the rebased head never reaches the pull request, so `land_pr` would refuse it.",
+      "evidence": "The plan admits that after a Moved rebase the local branch points at a new commit while the early pull request's head is the old one, and that `land_pr` refuses a head that differs (landing.rs:348 'Refused head'). It leaves this to the producer. A Moved rebase is the normal case the queue exists for once two jobs are in flight, and `drain_concurrent` already runs several workers. Fix: State how the rebased head reaches the pull request: push it as the new head and let `replace_early` handle it, or rebase before the early pull request head is fixed. Otherwise make the Moved path return NotLanded with a clear reason, and note it as a follow-up for build job 10.",
+      "location": "Decision 2 / open question 4 (`reset_keep(tip)` after a Moved rebase)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The thrash count is left for the producer to settle instead of being fixed in the plan.",
+      "evidence": "Criterion 3 says 'conflicts twice'. Section 6 says 'returned ... more than twice'. The reading says 'returned twice ... not retried a third time'. The plan picks: stop on the third conflict, after two returns. That fits the design and the reading, but leaves the producer to 'state the chosen reading' and flip `>`/`>=` if the verifier disagrees. Fix: Fix the rule in the plan (two returns, the third conflict thrashes) and name it in the test (for example `..._after_two_returns`) and in the CHANGELOG entry.",
+      "location": "Open question 1 / criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The thrashing job's record is not closed as section 6 describes.",
+      "evidence": "Section 6 step 4 says the thrashing job 'closes as an environment-type stop with the reason and the paths'. The plan only sets the job line and adds a note. The job's record is not closed, so a later drain could pick the item up again. Fix: Say whether the thrashing job's record is closed (and how), or say plainly that closing it is deferred.",
+      "location": "Decision 3 (`ItemEnd::Thrashed` treated like Skipped)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request and section 6 correctly. The code it names exists: `Drain::land` and its `landing` mutex, `attempts`, `Source::Given`, `drain_concurrent`, `Git::replay`, `reset_keep`, `fetch_remote_branch` and `landed_commit_for`. Default trait methods are a sound way to keep the serial path unchanged. Two design faults need revising. First, dequeuing at the end of every `land` call breaks the existing landing retry. `attempts` calls `land` a second time for the same passed job, and the existing test pins `land a, land a`. That second call would wait forever for a head the job no longer holds, so the existing test would hang at max_in_flight = 1 and criterion 4 would fail. Second, the real conflict return to the producer is not designed: it is left as an open question whose fallback fails the item. The requested behaviour would then exist only in the test double. Smaller points: a `Refused` from replay that is not a conflict would be taken for one; the rebased head is not pushed to the early pull request; and the thrash rule and closing the thrashing job should be stated, not left to the producer."
+}
