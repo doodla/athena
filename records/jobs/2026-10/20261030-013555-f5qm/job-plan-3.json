@@ -1,0 +1,276 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-013555-f5qm",
+  "round": 3,
+  "at": "2026-10-31T02:58:46.490888548Z",
+  "invocation_seq": 8,
+  "approach": "Add a FIFO landing queue to `Drain` (drain.rs). Its slot belongs to the item. It is taken when the run passes, held through the landing retry, and released by a drop guard. Only the queue head lands. The head is first rebased onto the latest main through a new `Lander::rebase` / `Steps::rebase`, which defaults to clean. In production (landing.rs) the rebase is real: fetch origin's main, then replay the local branch tip onto it with `Git::replay`. A clean move rebuilds the local branch (`reset_keep`) so the existing `land_pr` path replaces the early pull-request head with the rebased landing commit. A conflict is never landed. It goes to `Steps::return_to_producer`, which in production is `Athena::send_back`. `send_back` first rebuilds the local branch on main without the returned job's landing commit, then calls `ask` with the conflict text. A per-item counter allows two returns; the third conflict is the thrash stop: the item is reported as thrashing and the drain moves on. At max_in_flight = 1, with main already an ancestor of the landed commit, the rebase is `Current` and the serial drain is unchanged. A rebase whose result changes the governed content that was verified is not pushed. It is reported as not landed and names build job 7 (the re-check rule), because the merge's content check would otherwise reject or accept unverified content.",
+  "decisions": [
+    {
+      "choice": "Queue membership is tied to the item. `attempts` makes a `QueueSlot` drop guard when the run returns `RunStep::Passed`, keyed by `item.job`. It is held across the landing retry loop and dropped on every exit, and released before a conflict return. `Drain::land` waits for the head (via `pause`, checking `stopped()`), then takes the existing `landing` mutex, calls `steps.rebase`, and on Clean calls `steps.land`. It returns a `LandStep` (Landed, NotLanded, Conflict, Stopped).",
+      "reason": "The retry in `attempts` calls `land` twice for one pass, and `a_landing_failure_is_a_failure_and_no_rating_is_taken_as_success` pins `[read a, run a, land a, land a]`. A slot dropped after each `land` would hang the second call. The `landing` mutex serialises but does not order, so the FIFO is needed for the order criterion.",
+      "rejected": [
+        {
+          "option": "Dequeue at the end of every `Drain::land` call",
+          "why": "Hangs the second landing attempt at max_in_flight = 1 and breaks criterion 4."
+        },
+        {
+          "option": "Rely on the `landing` mutex alone",
+          "why": "Waiters wake in no fixed order; the order test could pass by luck."
+        }
+      ]
+    },
+    {
+      "choice": "Apply the rebase in production (answers finding 1). In landing.rs a pure `plan_rebase(git, onto, head, landed, rules_commit, verified_fp, sign) -> Result<Rebase>` does: `Current` if `onto` is an ancestor of `landed`; else fork = merge-base(onto, head); error (not conflict) if any first-parent commit of fork..head has no parent; `Git::replay(onto, fork, head)`. A `GitError::Refused` from it becomes `Rebase::Conflict { onto, paths, text }`. On a clean replay, the governed fingerprint of the new tip under `rules_commit` is compared with `verified_fp`: equal gives `Rebase::Moved { onto, tip }`; different gives `Rebase::NeedsRecheck { onto }` and nothing moves. `Athena::rebase_for_landing(job_ref, runner, ui)` fetches origin's default branch, takes the repository lock, runs `plan_rebase`, and on `Moved` does `reset_keep(tip)`, as `resync_onto_merge` does. The next `Steps::land` finds the rebased landing commit by `landed_commit_for` (trailers or records survive `replay`). The existing `land_pr` then replaces the job's own early head through `replace_early` and `check_replace`, with the push guard it already uses.",
+      "reason": "This is the work job 6 owns and jobs 7 and 8 build on. It reuses `replay`, `reset_keep`, `landed_commit_for` and `replace_early`, and adds no new push path. The fingerprint check is needed because `fingerprint` covers the whole governed tree, so any governed change on main makes the verified fingerprint differ from the merged content. Merging that would be unverified. Re-running checks on a rebased tree is exactly build job 7 ('Re-check rule after rebase', depends on 6), so that case is named in the NotLanded reason, not deferred to job 10. A records-only or excluded-path move on main keeps the fingerprint and is rebased and landed.",
+      "rejected": [
+        {
+          "option": "Return Blocked for every Moved result until job 10",
+          "why": "The critic's finding: job 10 owns no push work, and the Blocked path is reachable at max_in_flight = 1 when main moves by hand."
+        },
+        {
+          "option": "Push the rebased head ignoring the fingerprint",
+          "why": "Merges content that Athena did not verify; the merged-content check only runs after the merge."
+        },
+        {
+          "option": "Map every `Refused` to Conflict without the parent pre-check",
+          "why": "`replay` also refuses for a parentless commit; that is not a conflict and must not bounce the job."
+        },
+        {
+          "option": "Match the conflict message text",
+          "why": "Fragile against wording changes."
+        },
+        {
+          "option": "Add a typed `GitError::Conflict` in athena-git",
+          "why": "Outside the listed files; the pre-check is enough."
+        }
+      ]
+    },
+    {
+      "choice": "Conflict paths come from git's own merge (answers finding 3). On a Refused replay, `Git::exit` runs `merge-tree --write-tree --name-only --no-messages --merge-base=<fork> <onto> <head>`. Exit 1 gives the conflicted files, listed after the first (tree) line. If that whole-range merge is clean (the conflict arose only in the stepwise replay), fall back to the paths both sides changed (`diff_tree(fork, head)` paths intersected with `diff_tree(fork, onto)` paths) and label them 'paths both sides changed (git named no conflicting file)'.",
+      "reason": "`Git::exit` is public (athena-git lib.rs:240) and `Exit` has `code` and `stdout`, so no athena-git change is needed. Git's list contains only files that really conflict, so the producer is not told to fix a conflict that is not there. The fallback is labelled so it is not mistaken for git's list.",
+      "rejected": [
+        {
+          "option": "Intersection of the two diffs only",
+          "why": "Lists files that merged cleanly."
+        },
+        {
+          "option": "Change `merge_tree` in athena-git to return paths",
+          "why": "Outside the listed files."
+        }
+      ]
+    },
+    {
+      "choice": "`Athena::send_back(job_ref, conflict, onto, ui) -> Result<Proposal>` (answers finding 2). Under the repository lock it finds the job's landed commit (`landed_commit_for`), then calls a pure `drop_landed(git, onto, landed, head, sign)`: `mid = replay(onto, fork, parent(landed))` carries the commits before the landing commit, then `tip = replay(mid, landed, head)` carries those after it. The landing commit itself is not carried. A conflict in either replay is an error, nothing moves, and the item fails with that text. On success it does `reset_keep(tip)`, then calls `ask` with a request built from the stored original request (`Records::load`, `jobs[id].request`), the conflicting paths, the conflict text and the new main sha. `RealSteps::return_to_producer` builds the `Read` as `RealSteps::read` does (runnable, error, cost, job). Because `RealSteps::land` removes the job's table row when it ends, no row is moved. The new job's row is made when its producer enters, as `TableSink::enter` does today.",
+      "reason": "`ask` builds on `self.head()` (reading.rs:833) and `land_pr` refuses a head that holds any commit besides the job's landing commit. A new job on a branch still holding the old conflicting commit would conflict again or be refused. `retry` accepts only rejected, failed or interrupted jobs, so `ask` is the way to make a new job with the conflict text as its brief (section 6 step 3). The old job's own reading and candidate records stay on the branch, because only its landing commit is dropped.",
+      "rejected": [
+        {
+          "option": "Call `ask` on the unmodified branch",
+          "why": "The new job starts from a head holding the old landing commit (critic finding 2)."
+        },
+        {
+          "option": "Call `Steps::read(ReadOf::Retry)`",
+          "why": "`retry` refuses a verified or landed job and carries no conflict text."
+        },
+        {
+          "option": "Reopen the verified job's record",
+          "why": "Changes record states (state.rs, records validation), out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "A failed fetch of origin's main does not block landing (answers finding 4). `rebase_for_landing` returns `Rebase::Unchecked(reason)` when origin is missing or not github, the default branch cannot be read, or the fetch fails. `PrLander::rebase` prints one warning line ('main could not be read ...; landing goes on without a rebase check') and returns `Rebased::Clean`. `land_pr` then behaves exactly as today, using its own remote-head checks and the host's up-to-date rule. Errors after a successful fetch (replay failure other than a conflict, a refused `reset_keep` because of local edits, records unreadable) become `Rebased::Blocked(reason)`, the normal NotLanded path.",
+      "reason": "Today's `land_pr` makes no fetch before landing. A short network failure must not turn into 'not landed' at max_in_flight = 1. The warning keeps it visible. The design doc and CHANGELOG state this.",
+      "rejected": [
+        {
+          "option": "Treat a fetch error as Blocked",
+          "why": "Changes today's serial behaviour on a short network failure, and no existing test would show it."
+        }
+      ]
+    },
+    {
+      "choice": "The thrash rule is two returns; the third conflict of one item thrashes. A per-item counter in `attempts` is bumped on each conflict. If it is <= `MAX_CONFLICT_RETURNS` (const 2, doc comment: mirrors `[drain.pipeline] max_conflict_returns`, which the drain does not read yet) the job is returned. Otherwise the item ends as `ItemEnd::Thrashed`: the job line landing reads 'thrashing: ...' with the paths, a note names the item, the paths and the count, and `finish` treats it as a non-stop like `Skipped`. The counter does not touch `failures`.",
+      "reason": "Section 6 step 4 says 'more than twice (max_conflict_returns, proposed 2)'. The reading says it is not retried a third time. Counting against ATTEMPTS would eat the one retry of a failed landing and change today's failure behaviour. A `Stop::Thrash` would stop the whole drain, against 'the drain moves on'. config.rs is out of scope, so a constant mirrors the setting.",
+      "rejected": [
+        {
+          "option": "Stop on the second conflict",
+          "why": "Returns the job once; contradicts 'more than twice'."
+        },
+        {
+          "option": "Count conflicts against ATTEMPTS",
+          "why": "Consumes the landing retry."
+        },
+        {
+          "option": "Add `Stop::Thrash`",
+          "why": "Stops the whole drain and changes the help-text stop list."
+        }
+      ]
+    },
+    {
+      "choice": "Do not call `Steps::item_over` on a return (answers finding 5). `RealSteps::land` already removes the job's row when it ends, and `Drain::work` calls `item_over(&last_job)` and `item_over(&item.job)` at the end, which covers the original job and the last returned job. `last_job` is updated to the new job on each return.",
+      "reason": "An extra call on return would remove the original job's row twice. Not calling it is safe whether or not removing a missing row is a no-op.",
+      "rejected": [
+        {
+          "option": "Call `item_over` on each return and rely on removal being idempotent",
+          "why": "Not confirmed in the code read; avoidable."
+        }
+      ]
+    },
+    {
+      "choice": "Closing the thrashed job's record is deferred and the design doc and CHANGELOG say so. The drain reports thrashing (job line, note) and does not work the item again in this run.",
+      "reason": "`go` already closes a verified job as landed locally and `Athena::close_with` refuses a closed job. An environment-type close needs a new record or outcome state, which means state.rs and records validation, both out of scope.",
+      "rejected": [
+        {
+          "option": "Call `Athena::close` on the thrashed job",
+          "why": "Fails with 'already closed'."
+        },
+        {
+          "option": "Add a new outcome state",
+          "why": "Touches athena-data and validation; out of scope."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "purpose": "Add `Rebase` (Current, Moved, NeedsRecheck, Conflict, Unchecked), pure `plan_rebase` (merge-base, parent pre-check, `Git::replay`, fingerprint check, conflict paths from `merge-tree --name-only`), pure `drop_landed`, `Athena::rebase_for_landing` (fetch origin's main, lock, apply with `reset_keep`) and `Athena::send_back` (drop the landing commit, then `ask`). Unit tests with a real temporary repository.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Conflict`, `Rebased`, `LandStep`, `MAX_CONFLICT_RETURNS`, default `Steps::rebase` and `Steps::return_to_producer`, `Lander::rebase`, State `queue` and `conflicts`, the `QueueSlot` guard, the head wait in `Drain::land`, the conflict, return and thrash path in `attempts`, and `ItemEnd::Thrashed` in `finish`. Implement `PrLander::rebase`, `RealSteps::rebase` and `RealSteps::return_to_producer`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add only new tests and the Sync `QueueWorld` stub: order, landing-retry place, conflict return, real `return_to_producer` request and ancestry, thrash after two returns, thrash is not a stop. No existing line is edited or removed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "purpose": "Mark build job 6 implemented (D145) in the style of jobs 3 and 4: queue order, rebase applied through replay and the existing replace path, conflict paths from git, return via `ask` after dropping the landing commit, thrash rule as built (constant 2 until config is wired), NeedsRecheck handed to job 7, fetch failure skips the check, closing a thrashed record deferred, and no change at max_in_flight = 1.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased entry naming the ordered landing queue, rebase onto the latest main, conflict return and the thrash stop, plus the notes in criterion 6.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read in drain.rs: `take_until_done`, `finish`, `Drain::new`, `State`, `pause`, `Drain::work` (the item_over calls), `run_job` (Source::Given), `RealSteps::read`, `TableSink::enter`, `move_row` (line 662). Read `resync_onto_merge` tests in land.rs for the fixture. Check that `athena_git::attrs::fingerprint` is public and how `Exit.stdout` of merge-tree is shaped. Settle open questions 1 to 3.",
+    "In landing.rs add `Rebase`, `plan_rebase` and `drop_landed` as pure functions over `&Git`. `plan_rebase`: `Current` if onto is an ancestor of landed; merge-base; error on a parentless first-parent commit; replay; Refused to Conflict with paths from `Git::exit` merge-tree `--name-only --no-messages` (fallback: labelled overlap of two `diff_tree` path sets); on a clean tip compare `fingerprint(git, tip, rules_commit)` with the verified one, giving `Moved` or `NeedsRecheck`. `drop_landed`: two replays as in decision 4.",
+    "In landing.rs add `Athena::rebase_for_landing` (resolve the job, verification and candidate as `land_pr` does; origin or default branch or fetch failure gives `Unchecked`; lock the repository; `plan_rebase`; on `Moved`, `reset_keep(tip)` and a refused move is an error) and `Athena::send_back` (lock; landed commit; `drop_landed`; `reset_keep`; build the request; `ask`). Add unit tests: clean move (parent is main, trailers kept, fingerprint equal), NeedsRecheck, Current, conflict with git's path, a parentless commit is an error, `drop_landed` ancestry and conflict-is-error.",
+    "In drain.rs add `Conflict`, `Rebased { Clean, Conflict, Blocked }`, `LandStep`, `const MAX_CONFLICT_RETURNS: u32 = 2` with its doc comment, default `Steps::rebase` and `Steps::return_to_producer`, and default `Lander::rebase` returning clean.",
+    "Add State fields `queue: VecDeque<String>` and `conflicts: BTreeMap<String, u32>` and the `QueueSlot` drop guard (remove the item, notify). In `attempts` take the slot on `RunStep::Passed`, hold it across the landing retry loop, and release it on every exit.",
+    "Change `Drain::land`: wait to be head with `pause`, abort on `stopped()`; take the `landing` mutex; call `steps.rebase`; on Clean call `steps.land`; `Blocked` becomes the NotLanded path; return a `LandStep`, and map Stopped to `ItemEnd::Stop`.",
+    "On `LandStep::Conflict` in `attempts`: do not call `steps.land`; set the job line's landing to 'returned to producer: ...'; release the slot; bump the counter. Within `MAX_CONFLICT_RETURNS`, call `steps.return_to_producer`, set `last_job` to the new job (no `item_over` on return), feed the Read to `run_job` as `Source::Given`, and loop with `failures` untouched. Otherwise end as `ItemEnd::Thrashed` ('thrashing: ...' with the paths and a note); `finish` treats it as a non-stop.",
+    "Implement `PrLander::rebase` (calls `rebase_for_landing` with `GhCli`): Current and Moved give Clean; Unchecked prints one warning line and gives Clean; NeedsRecheck gives Blocked naming build job 7; Conflict gives `Rebased::Conflict`; an error after the fetch gives Blocked. Implement `RealSteps::rebase` and `RealSteps::return_to_producer` (calls `send_back`, builds the Read as `read` does, no row move).",
+    "Check by reading that every `Steps` and `Lander` implementer (`Stub`, `RecordingLander`, the drain.rs unit-test worlds) compiles with only default methods.",
+    "In tests/drain.rs add the Sync `QueueWorld` and the new tests named in the demonstrations. Add only new lines.",
+    "Update docs/design/async-drain.md job 6 and add the CHANGELOG.md Unreleased entry.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; confirm `git diff -- crates/athena-cli/tests/drain.rs` has only added lines."
+  ],
+  "risks": [
+    {
+      "risk": "Changing `Drain::land` and `attempts` alters the serial path that existing tests pin, notably the landing retry.",
+      "mitigation": "The slot is held by the item through the retry loop, so a single worker is always head on both `land` calls. Every new method defaults to clean, and `Rebase::Current` is returned whenever main is already an ancestor of the landed commit. Criterion 4 runs the whole existing suite and checks the diff for removed lines."
+    },
+    {
+      "risk": "A slot left behind by a stop, panic, budget end or early return blocks the head and deadlocks the workers behind it.",
+      "mitigation": "`QueueSlot` is a drop guard that removes the item and notifies. `pause` wakes every 20 ms and waiters check `stopped()`, so a stop never leaves a worker waiting."
+    },
+    {
+      "risk": "A non-conflict git refusal is taken for a conflict and sends the job to its producer.",
+      "mitigation": "`plan_rebase` checks every first-parent commit's parent before `replay`, and a test pins that a parentless commit is an error. Only a `Refused` after that check is a conflict."
+    },
+    {
+      "risk": "Rebasing rewrites the local branch under the repository lock, and a refused `reset_keep` (local edits in the way) or a later `land_pr` refusal (the remote head is a previous landing, not the early head) fails the landing.",
+      "mitigation": "`reset_keep` keeps local edits and an error leaves the branch unchanged; both become NotLanded with the reason shown. The rebase runs at the queue head under the `landing` mutex, so only outside pushes to main can move it again. The design doc names the previous-landing case."
+    },
+    {
+      "risk": "Governed content changed on main means a rebased job cannot land without re-checks, so a real multi-job queue lands only those whose rebase keeps the verified fingerprint until build job 7.",
+      "mitigation": "This is reported as NotLanded with a reason naming job 7 and nothing is pushed or merged. At max_in_flight = 1 each job is made on the latest main, so the fingerprint matches. The user is asked in the open questions whether job 6 should include a re-check."
+    },
+    {
+      "risk": "After `send_back` drops the landing commit, the old job's remaining records (request, reading, candidate) stay on the branch and a later drain might pick it up as open work.",
+      "mitigation": "The new request names the old job and the design doc records the state. A test pins that the landing commit is gone and the new job's base holds the rest. The open question asks whether the old request is shown as open work."
+    },
+    {
+      "risk": "Ordering and retry tests are timing-dependent and flaky.",
+      "mitigation": "Order is fixed by Condvar gates, with a bounded wait that fails the test after a timeout instead of a bare sleep."
+    },
+    {
+      "risk": "The change is large for one producer run (drain.rs is 174 KB, plus new landing.rs code).",
+      "mitigation": "All additions have defaults, the plan keeps pure functions in landing.rs that are tested alone, and the thrash counter bounds any return loop."
+    },
+    {
+      "risk": "New code trips `-D warnings` (dead code, unused default-method parameters).",
+      "mitigation": "Prefix unused default-method parameters with `_`, read every new field and variant in production code, add no `#[allow]`, and run clippy before finishing."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two layers. (a) Integration test in crates/athena-cli/tests/drain.rs through the production function `drain::drain_concurrent(&world, limits, &Quiet, 3)`. Preconditions: three items in one plan batch with disjoint touched paths, `max_concurrency` 3, budget room. Seam: a new Sync `QueueWorld` implementing the real `Steps` trait with a Mutex log and Condvar gates. It does not exist today; step 9 adds it. Its `run` is gated so verification finishes in the order c, a, b while the items were submitted a, b, c. Its `rebase` logs 'rebase X onto main-N' and returns `Rebased::Clean`; its `land` logs 'land X' and advances the main counter. The queue, head wait and ordering are in `Drain`, not in the double. A second test, `landing_queue_landing_retry_keeps_its_place`, makes the first `land` of the head fail once while others wait, and asserts the log `land a, land a, land c` within a bounded wait. (b) Unit tests in crates/athena-core/src/gh/landing.rs on a real temporary git repository (helper style of the `resync_tip` tests in crates/athena-core/src/land.rs:383-526): main moves by a records-only commit, `plan_rebase` returns `Moved`, and the new tip's parent is the new main, it keeps the landing commit's message and trailers, and its fingerprint equals the verified one. `Athena::rebase_for_landing`'s apply step (`reset_keep`) is tested in the same file so the branch tip is the rebased commit. The test uses the existing Athena test fixture if the resync tests have one (the producer checks with Grep for `resync_onto_merge`); otherwise it asserts on `Git::reset_keep(tip)` over the pure function's result. Also a case where main moved in a governed file the job did not touch returns `NeedsRecheck`, and nothing moves.",
+      "command": "cargo test --locked -p athena-cli --test drain landing_queue && cargo test --locked -p athena-core plan_rebase",
+      "observes": "(a) The log shows 'land' entries in verified order c, a, b, never overlapping. Each 'rebase X onto main-N' follows the previous 'land', with N rising by one per landing. `report.landed == 3`. The retry test completes without a hang. (b) `Moved` with tip's parent equal to the new main; the fingerprint is unchanged; `NeedsRecheck` leaves the branch untouched.",
+      "fails_without": "Without the FIFO the order follows mutex wake-up and the gate that makes c verify first fails the order assertion. Without the rebase call the 'rebase X onto main-N' lines are missing. A slot dropped after one `land` call hangs the retry test, which fails on its bounded wait. Without the real rebase, `plan_rebase` has no result to assert on and the landing.rs tests fail to compile or fail on the parent check."
+    },
+    {
+      "criterion": 2,
+      "method": "Three tests. (a) `landing_queue_conflict_returns_to_producer_and_next_candidate_lands` in tests/drain.rs, through `drain::drain_concurrent`. `QueueWorld` makes the first `rebase` of b return `Rebased::Conflict` (onto 'main-1', paths ['src/x.rs'], text). `return_to_producer` logs and returns a Read for 'b-2', which the real `run_job` runs. Seam: `Steps::rebase` and `Steps::return_to_producer`, added in step 3. (b) `landing_queue_conflict_real_steps_send_the_conflict_text_to_the_producer` in tests/drain.rs: uses the existing `Fixture` and scripted model (as `the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page` does at tests/drain.rs:1399). It makes a verified, locally landed job. It records the landing commit. It makes a main commit in a side branch of the fixture repository. It then calls `RealSteps { lander: &RecordingLander.. }.return_to_producer(job, &Conflict{ onto: <that commit>, paths, text })`, the production method, with the script supplying one more reader reply. (c) landing.rs unit tests for `plan_rebase` conflict (two commits changing the same line, git names the file; the whole-range merge clean case uses the labelled fallback) and for `drop_landed` (tip is on the new main; it holds the commits before and after the landing commit with messages; it does not hold the landing commit; a later commit that conflicts is an error and nothing moves).",
+      "command": "cargo test --locked -p athena-cli --test drain landing_queue_conflict && cargo test --locked -p athena-core drop_landed && cargo test --locked -p athena-core plan_rebase_conflict",
+      "observes": "(a) No 'land b' before 'land c'; the log has 'return_to_producer b'; 'land c' lands next; then b-2 is rebased cleanly and lands. `report.landed == 3`. b's first job line has landing 'returned to producer: ...'. (b) The returned `Read` is runnable with a new job id. `Records::load` shows the new job's request text holds the original request, 'src/x.rs', the conflict text and the new main sha. `git merge-base --is-ancestor <old landing commit> HEAD` is false and the new main is an ancestor of HEAD. (c) The conflict carries the conflicting path from git's own list, and `drop_landed` conflicts are errors.",
+      "fails_without": "Without the conflict branch the stubbed Conflict is ignored and 'land b' is logged (or the item fails), so the 'no land b before land c' and 'return_to_producer b' assertions fail. Without `send_back`, test (b) finds no new job or a request without the conflict text. Without `drop_landed`, the ancestry assertion fails because the old landing commit is still on the branch the new job starts from."
+    },
+    {
+      "criterion": 3,
+      "method": "Integration test `landing_queue_thrash_stop_reports_thrashing_after_two_returns` in tests/drain.rs through `drain::drain_concurrent`. `QueueWorld` makes every rebase of item b, and of each job it is returned as, conflict; the other item is clean. Limits have a large max_jobs, so only the thrash rule can end b. Seam: the stub added in step 9. A second small test, `landing_queue_thrash_is_not_a_drain_stop`, asserts the stop reason is not RepeatedFailure and the drain runs on to TargetMet or Idle.",
+      "command": "cargo test --locked -p athena-cli --test drain landing_queue_thrash",
+      "observes": "Exactly two 'return_to_producer' calls for b. The third conflict does not return it, and 'land' is never logged for b. b's job line landing starts with 'thrashing' and names the paths. A note names the item and the count. The other item lands. `report.landed` counts only the others. The original job's `item_over` is called once.",
+      "fails_without": "Without the counter, the always-conflicting job is returned a third time: the log shows a third 'return_to_producer', or the drain runs to the job limit. The test asserts exactly two returns, so it fails."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the whole existing tests/drain.rs suite and the drain.rs unit tests unchanged. They use `Stub`, `RecordingLander` and the A3/A4 in-flight tests, which take the default `rebase` (clean) and `return_to_producer`, and run through the entry points they already call (`drain::drain`, `RealSteps`). No seam is added for them. The existing test `a_landing_failure_is_a_failure_and_no_rating_is_taken_as_success` covers the retry case the held queue slot must keep working. Then `git diff -- crates/athena-cli/tests/drain.rs` shows only added lines.",
+      "command": "cargo test --locked -p athena-cli --test drain",
+      "observes": "All existing tests pass unedited, including the pinned log `[read a, run a, land a, land a]`. The diff of tests/drain.rs has no '-' lines for existing tests.",
+      "fails_without": "If the queue changed serial behaviour (an extra call, or a slot dropped after one landing attempt that hangs the retry), `a_landing_failure_is_a_failure_and_no_rating_is_taken_as_success` and `the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page` fail or time out."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks on the final tree, each as its own simple command. No `#[allow]` is added. Every new field, variant and parameter is read in production code (for example `Rebase::Unchecked`, `NeedsRecheck`, `Rebased::Blocked`, `LandStep::Stopped`). Unused default-method parameters are prefixed with `_`.",
+      "command": "cargo fmt --all --check; cargo clippy --all-targets --locked -- -D warnings; cargo test --locked",
+      "observes": "fmt, clippy and test each exit 0, including the new tests.",
+      "fails_without": "Unformatted code fails fmt. An unused field, variant or parameter fails clippy under -D warnings. A failing new test or a broken existing test fails `cargo test`."
+    },
+    {
+      "criterion": 6,
+      "method": "Content check of the CHANGELOG.md diff against the neighbouring Unreleased entries.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new Unreleased entry names the ordered landing queue, rebase onto the latest main, conflict return to the producer, and the thrash stop (returned twice, thrashing on the third conflict). It also states: a rebase that changes the verified governed content is reported not landed until the re-check rule (build job 7); a failed fetch of origin's main skips the rebase check and landing goes on as before; and closing a thrashed job's record is deferred.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Fingerprint covers the whole governed tree, so with several jobs in flight most rebases over another job's landing change it and are reported NeedsRecheck (not landed) until build job 7. Should job 6 instead re-run checks, or accept rebases where main's change does not touch the job's paths? The code read does not settle this; it is a scope question for the user.",
+    "After `send_back` drops the landing commit, does the old job (request, reading and candidate records kept, verification and outcome records dropped) appear as open work to a later drain? The producer checks with `Records::load` and the status code, and states what it finds in the design doc.",
+    "After C0 the job's records are not in the landing commit (`landed_commit_from_records`). Does `drop_landed` leave orphan records commits for the old job? The unit tests cover the trailer form only; the producer reads `cutover_job_for` and states the post-C0 behaviour.",
+    "Whether the Athena test fixture used for the `resync_onto_merge` tests can also run `rebase_for_landing`'s apply step with a local bare 'origin'. If not, the move is tested through the pure functions plus `Git::reset_keep`.",
+    "Whether the scripted model in `Fixture::athena` can supply a second reader reply for the `send_back` test. If not, the producer extends the scenario script in the test file only.",
+    "After a thrash the old job's record stays closed-landed-locally and its pull request unmerged. Whether a later drain picks that item up again was not settled; closing it is deferred and stated in the design doc."
+  ],
+  "producer_section_sha256": "1d1123c677035f90dfb283b9e6cbaa5bfa227d1c6d38631ebb37a663060233f5"
+}

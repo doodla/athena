@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-013555-f5qm",
+  "round": 2,
+  "at": "2026-10-31T02:55:24.159758254Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The rebase onto latest main is never applied in production; a candidate that needs one is reported not landed and deferred to job 10, which does not own that work.",
+      "evidence": "Decision 3: on `Rebase::Moved` 'it moves nothing and `PrLander::rebase` returns `Rebased::Blocked(reason)`' 'until build job 10 can push a replaced head'. The design doc's job 10 is 'Set `max_in_flight = 3` in `athena.toml` ... watch the per-landed-job minutes', which has no rebase or push work. Job 6 is 'One queue with rebase and conflict return', and jobs 7 and 8 depend on job 6 doing real rebases. Criterion 1's 'each rebased onto the main left by the previous landing' is observed only through `QueueWorld`, whose `rebase` just logs 'rebase X onto main-N', so the rebase behavior is shown through a double. Main moves at max_in_flight = 1 too (a hand push to origin), so the Blocked path is reachable today. Fix: Apply a clean rebase in this job. In landing.rs, move the local branch to the replayed tip (as `resync_onto_merge` does with `resync_tip`) and replace the pull request head through the existing `publish`/`replace_early` path, with the push check that path already uses. Add a landing.rs test with a real temporary repository: main moves, the candidate is rebased, and the pushed head's parent is the new main. If this is too large for one run, ask the user to re-scope the request rather than deferring to job 10, and do not claim criterion 1 holds in production.",
+      "location": "Plan decision 3 and Risks item 4; docs/design/async-drain.md:270-279",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A job returned for a conflict starts from a local branch that still holds the old job's conflicting commit, so the returned job is likely to conflict again or be refused at landing. The plan dismisses this on a false premise.",
+      "evidence": "Open question 1 says the case 'cannot arise at max_in_flight = 1 (the rebase is always `Current`)'. But `rebase_landed` returns Conflict only when main is not an ancestor of the landed commit, so whenever the return path runs, main has moved and the rebase is not Current. `ask` (reading.rs:827) builds on `self.head()`, the local branch that still holds the old landed commit. `land_pr` refuses a head carrying any commit besides the job's landing commit ('plus any later commit is not a valid landing', landing.rs:~360). Test (b) checks only the new request's text, not that the new job can land. Fix: In `send_back` (or `RealSteps::return_to_producer`), first rebuild the local branch onto the fetched main without the returned job's landed commit. Use `Git::replay` of the commits after it onto main, as `resync_tip` does, and treat a conflict there as an error. Then call `ask`. Add a test that the new job's base does not contain the old landed commit. If this cannot be done safely in this job, make the conflict path fail the item with the conflict text instead of creating a job that cannot land, and say so in the design doc.",
+      "location": "Plan decision 4 (`Athena::send_back`) and Open question 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The conflict paths are guessed as files both sides changed, which lists files that merged cleanly.",
+      "evidence": "'paths = diff_tree(fork, landed) paths intersected with diff_tree(fork, main_tip) paths'. Two changes to different parts of one file merge cleanly but are still listed, and the producer is told to fix a conflict that does not exist. Fix: Take the conflicted files from git's merge itself (for example `git merge-tree --write-tree --name-only` on the commit `replay` stopped at). Use the overlap only as a fallback, and label it 'paths both sides changed'.",
+      "location": "Plan decision 2 (conflict paths)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Every landing now fetches origin first, and a failed fetch blocks a landing that today goes ahead, at max_in_flight = 1.",
+      "evidence": "Step 7: 'an error becomes `Blocked`, never a silent clean'. Today `Athena::land_pr` (landing.rs:416-538) has no fetch before `land_pr`. A short network failure now becomes 'not landed' plus a retry, a change to today's serial behavior that the existing tests (all using the default clean rebase) cannot detect. Fix: Either state this new failure mode in the design doc and CHANGELOG as an accepted change at max_in_flight = 1, or keep the fetch error separate and use the remote-head check `land_pr` already does, so today's path is unchanged when the fetch fails.",
+      "location": "Plan decision 3 and step 7 (`rebase_for_landing` fetch; an error becomes Blocked)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The item's original job may get its row-removal call twice.",
+      "evidence": "Step 6 calls `steps.item_over` for the old job on each return. `work` then calls `item_over(&last_job)` and `item_over(&item.job)` again when they differ. `RealSteps::item_over` removes a table row (drain.rs:3042). Fix: Call `item_over` on return only for jobs other than `item.job`, or confirm that removing a missing row is a no-op and say so.",
+      "location": "Plan step 6 and `Drain::work` (drain.rs:1356-1365)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes the round-1 problems well. Holding the queue slot for the whole item keeps the landing retry from hanging (checked against `attempts`, drain.rs:1368-1439). The parent check before `Git::replay` (athena-git lib.rs:773-792) separates a real conflict from the other refusal. Two returns before the thrash stop matches section 6 ('more than twice'). Two soundness problems remain. (1) The core of the request, rebasing each candidate onto the latest main and landing it if clean, is never done in production: a rebase that would move the head becomes `Blocked`/not landed, deferred to 'build job 10'. The design doc defines job 10 only as raising `max_in_flight` and measuring (async-drain.md:277-279), so no later job owns this work. Criterion 1's rebase is shown only through a double whose rebase is a log line. (2) The production conflict-return path makes a new job through `ask` on a local branch that still holds the old job's landed commit. The plan says this 'cannot arise at max_in_flight = 1', but a conflict exists only when main has moved, which is exactly when the return path runs. So the returned job is likely to conflict again or be refused by `land_pr`. Both are fixable by the planner."
+}
