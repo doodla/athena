@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-060759-7x7m",
+  "round": 2,
+  "at": "2026-10-31T06:21:18.590078767Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Auth and usage stops are classified only at the producer call site. The same 401 reaching the planner, the critic or the verifier still counts as a work failure, so the class stays open.",
+      "evidence": "Read: planning.rs:186 writes `the planner did not complete: {why}` from the same `record.detail` (claude.rs:264-280 builds it as `<subtype>: <text>`), and :332 does the same for the critic. stop_planning (planning.rs:8-14) prefixes `PLANNING_STOPPED_PREFIX` and closes through `failure()`, which sets OutcomeState::Failed (run/mod.rs:1516). attempt_of (scope_guard.rs:525-535) then gives Verdict::Failed, and `counted` (scope_guard.rs:222) counts the attempt toward T1. The planner is the first agent a job runs, so a job dispatched after the login has already expired fails at the planner, not the producer. Each retry under the expired login adds one T1 attempt. verify.rs:307 is a third site. The plan's claim that 'the producer stage is where the 401 job spent money' rests on no record I could read. The request asks for the whole class to be prevented, and the user default root-cause says not to fix one instance. Fix: Classify every agent 'did not complete' reason in the run, not just the producer's. Route planning.rs:186, planning.rs:332 and the verifier failure (verify.rs:307 or verification.rs:223) through `agent_stop_reason`. Because stop_planning prepends PLANNING_STOPPED_PREFIX, either write an environment cause without that prefix (so `is_environment_reason`'s starts_with still matches) or have the classifier accept the cause after the planning prefix. Add a test that a planner 401 closes as Verdict::Environment and does not add to T1. If these files are kept out of scope, state that in the reading as a named, proposed follow-up rather than leaving it as an open question. As written, the fix covers one instance of the class.",
+      "location": "Decision 3; Open questions item 3; crates/athena-core/src/run/planning.rs:181-188 and :332; crates/athena-core/src/verify.rs:307",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "line_pause has a second caller that the plan does not mention, and that caller now inherits a file-deleting side effect.",
+      "evidence": "Grep: `self.line_pause(&records, id.as_str())` is called at reading.rs:1036 as well as run/mod.rs:696. After this change, line_pause deletes the pause file whenever the recompute does not pause. Fix: Name the reading.rs caller in the plan. Have one test (for example a_stale_pause_is_cleared_when_nothing_fires) reach line_pause through the reading path too, or state why the reading path needs no test.",
+      "location": "Decision 6 / step 6; crates/athena-core/src/reading.rs:1036",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Widening is_environment_reason also changes settle_resume_marks. The plan asserts that a producer-stage auth stop never has a resume mark but does not check where marks are written.",
+      "evidence": "run/mod.rs:586 keeps a job's resume mark whenever `state == Failed && is_environment_reason(reason)`. After the change an auth or usage stop keeps its mark too. If routing is extended to the verifier (the major finding above), a mark could exist, and `athena retry` would then resume from a candidate built before the 401. Fix: Use the narrow `resumable_reason` in settle_resume_marks as well, or add a run/tests.rs case showing that an auth-stopped job leaves no mark, so retry and resume behaviour stays as it is.",
+      "location": "Risks: settle_resume_marks",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read scope_guard.rs, disk.rs, run/producer.rs, run/mod.rs, run/planning.rs and claude.rs. The plan's pause-derivation design is sound. One shared `line_signals` helper serves both try_watch_line and line_pause. p90 falls back to the latest request in the line that has a positive forecast, which also keeps the existing t3_pause_from_reading_forecast case paused. Deleting the file still lifts a pause. The anchored CLI-phrase matcher, with error_max_ subtypes excluded, is a reasonable narrow heuristic given the detail format I read in claude.rs. The decision to leave the TimedOut path at run/mod.rs:680 alone is justified. The demonstrations name real seams (Athena::go, line_pause, request_records, the watcher Rig, rig_with_space, low_once_verifying), and their 'fails on base' claims hold. The soundness gap is coverage: auth and usage stops are classified only where the producer writes its reason. The planner and critic (planning.rs:186 and :332) and the verifier (verify.rs:307) write 'did not complete' reasons from the same agent detail. The planner is the first agent a job runs, so it is the usual place an expired login is hit. Those stops still close as Verdict::Failed and count toward T1. That fixes one instance of the class, not the class, so the verdict is revise."
+}
