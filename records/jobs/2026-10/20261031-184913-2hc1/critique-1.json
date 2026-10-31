@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-184913-2hc1",
+  "round": 1,
+  "at": "2026-10-31T18:58:04.583148213Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The tokenizer skips tokens that start with `.`, which drops `.github` paths that the tests expect to be refused.",
+      "evidence": "Step 2 skips 'a token that starts with `/`, `.` or `~`', but decision 2 and step 3 list `.github` as a known top-level directory, and case (e) expects `.github/workflows/x.yml` to be refused. As written, the tokenizer would never return a `.github/...` token. Fix: Skip only tokens that start with `./`, `../`, `/` or `~`, or that have a `..` segment. Let a token whose first segment is a known top-level directory (including `.github`) through.",
+      "location": "Plan step 2 (path_tokens) vs Demonstration criterion 2 case (e) and decision 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The absence-phrase exemption covers the whole sentence and has no example markers, so it gives both false exemptions and false refusals.",
+      "evidence": "Words like `missing`, `creates` and `not yet` exempt every path in the sentence, even one claimed to exist ('crates/athena-core/src/design_review.rs already flags missing reviews'). Sentences split at `. ` also break on 'e.g. '. The accepted reading's own criterion 1 ('a path such as crates/athena-core/src/design_review.rs already exists') would be refused as an example. Fix: Tie the exemption to the clause or a few words around the token. Add `such as`, `for example` and `e.g.` as example markers, or decide that examples must be worded as absent, and add one test for each choice.",
+      "location": "Decision 3 (ABSENCE_PHRASES exempts the whole sentence)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The `?` chaining can deliver the reference refusal only after the reader has used its one correction.",
+      "evidence": "check_reading_acceptance (reading.rs:2856-2860) stops at the first failing check. A reading with a bad deliverable action and an absent referenced path gets only the deliverable refusal, then the reference refusal after its single correction (ReadError::Refused, line 645). Fix: Run check_reading_references even when the boundary check fails and report both in one error. Add a test with both faults that shows both are named.",
+      "location": "Decision 1 / step 4 (called after check_boundary_and_repo_files with `?`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The CHANGELOG.md exemption is dead code.",
+      "evidence": "Decision 2 only takes tokens that contain `/`, so `CHANGELOG.md` is never tokenized. Fix: Drop the exemption, or comment that it guards a future change that checks root files.",
+      "location": "Decision 3 (exempt CHANGELOG.md)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts a deterministic reference check where the fault starts: check_reading_acceptance in crates/athena-core/src/reading.rs (line 2849), which the production reader calls with Some(repo_files) at line 637. It reuses existing pieces (path_exists_in at 2742, the governed_reading, files_at_head and reading_with_deliverable fixtures at 6349, 6640 and 6648, and the ReadError::Refused one-correction path) and keys on no job id. The demonstrations for criteria 1, 2 and 4 call the real entry point with real inputs, and each would fail without the check. Case (e), a table of different absent paths, shows the fix covers the class. Criterion 5 is the gate, run as separate commands. docs/decisions.md ends at D146, so D147 is the right next number. On soundness, the path-token rule is a reasonable deterministic mechanism. Its weak spots are minor: the tokenizer skips `.github` paths although the tests expect them refused, the absence-phrase exemption covers the whole sentence and has no example markers, and the `?` chaining can push the reference refusal past the reader's one correction. None blocks a criterion. Verdict: accept, with the minors recommended."
+}

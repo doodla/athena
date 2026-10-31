@@ -1,0 +1,116 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261031-184913-2hc1",
+  "base_commit": "621ca42918590dbd08c2d3afa78c2703338e055f",
+  "base_fingerprint": "sha256:40a6181836e47e3a0e4d86819bfec7e1b7fc889369c31859ad26c213f33316d9",
+  "previous_job": "20261031-094756-8cjd",
+  "candidate_commit": "428853ac5482a70920ff896a030e021e299ff801",
+  "candidate_tree": "82ac3c1b331b7ca0279f04d5151f1476655ec6fc",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 261387
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 330475
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 316756
+    }
+  ],
+  "fingerprint": "sha256:227b0e47372be2e35a4b49b9b52062956018e1a0b6f1b7b1ef20da7db291578d",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: reading acceptance never compared the reading's references with the snapshot, so a reading saying an earlier job's file, role or prompt already exists was accepted. The earlier job could be queued, unmerged or never produced, and the critic found the gap later. I added `check_reading_references` in crates/athena-core/src/reading.rs. It runs last in `check_reading_acceptance`. It scans the summary, assumptions and acceptance criteria for repo paths under a top-level directory of the snapshot (or crates, docs, xtask, studies, .github). It refuses any path that is not in the base commit's files, not a create deliverable (or a directory above one), not CHANGELOG.md, and not in a sentence that says it is absent or to be created. The message names each path and field and tells the reader to list it as a create deliverable or say it does not exist. With no file set, or a reading that declines or asks a question, it checks nothing. It is deterministic and keys on no job id. Four new unit tests cover refusal, acceptance, different absent paths and the repair text. I added a CHANGELOG.md entry and D147 in docs/decisions.md. Clippy, fmt, the policy scan and the full test run all passed.",
+    "files": [
+      "crates/athena-core/src/reading.rs",
+      "CHANGELOG.md",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core reading::",
+        "result": "pass",
+        "note": "119 reading tests pass, including the 4 new ones"
+      },
+      {
+        "command": "cargo test -p athena-core a_reading_that_relies_on_an_absent_path",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 tests; no banned word"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "after replacing a complex fn-pointer type in a test with a local type alias"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run once on the finished tree. It returned no error exit; I could not open the saved output to count results, since it sits outside the working directory."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run cargo test -p athena-core: a new unit test in crates/athena-core/src/reading.rs gives a reading whose assumption says a path such as crates/athena-core/src/design_review.rs already exists, with a repo_files set lacking it, and shows check_reading_acceptance refuses it naming the path; the same test fails when the check is removed.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core a_reading_that_relies_on_an_absent_path`: passes. The test puts the claim in an assumption, the summary and a criterion against a file set without design_review.rs. It asserts the error names the path and the field, and that the reading is accepted once the path is in the set. Without the call, check_reading_acceptance would return Ok and the unwrap_err would panic. I did not run it with the check removed."
+      },
+      {
+        "criterion": "Run cargo test -p athena-core: tests show the same reading is accepted when the path is in repo_files, when it is a create deliverable, when the text says it does not exist, and when repo_files is None; the refusal is for the class (any path), not for one job id.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core reading::`: all 119 pass. `the_reference_rule_accepts_a_present_created_or_declared_absent_path_and_no_file_set` covers present file/dir, create deliverable, 'does not exist' sentence (a second absent path in another sentence is refused), None, glob/URL/absolute/relative/ellipsis/slash-less text, and question/decline. `the_reference_rule_refuses_any_absent_path_not_one_job_or_file` refuses 6 different absent paths, and a text that names a job id does not change the outcome."
+      },
+      {
+        "criterion": "Grep of crates/athena-core/src/reading.rs shows the new check called from check_reading_acceptance, and a doc comment naming the root cause (reading acceptance never compared the reading's references with the snapshot) and jobs 20261026-042558-5p65, 20261026-064950-38jx and 20261026-065228-02zf.",
+        "status": "met",
+        "evidence": "check_reading_acceptance now ends with `check_boundary_and_repo_files(reading, repo_files)?; check_reading_references(reading, repo_files)`. The doc comment on check_reading_references has 'Root cause: reading acceptance never compared the reading's references with the snapshot' and the three job ids. I wrote it; I did not run the grep."
+      },
+      {
+        "criterion": "The refusal message tells the reader how to repair it: list the missing artifact as a create deliverable, or say it does not exist; CHANGELOG.md has an entry for the new check.",
+        "status": "met",
+        "evidence": "The test `the_reference_refusal_tells_the_reader_how_to_repair_it` passes. It asserts the message contains the path, 'create deliverable' and 'does not exist'. CHANGELOG.md has a Fixed entry under Unreleased naming check_reading_references. docs/decisions.md has D147."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test --locked all pass; the verifier runs them.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; none returned an error."
+      }
+    ],
+    "open_issues": [
+      "Bare root file names (Cargo.lock) and slash-less basenames are deliberately not checked, as the plan said. Say so if the user wants them checked.",
+      "The share of readings newly refused (expected about 3%) was not measured: there is no stored-reading replay set with file sets.",
+      "The absence-phrase list is a judgment, and one phrase in a sentence exempts every path in that sentence.",
+      "I did not run `cargo test --locked` with the check removed, so the claim that the new tests fail without it rests on reading the code."
+    ],
+    "mistakes": [
+      "The first tokenizer checked for `..` after trimming trailing dots, so an ellipsis path (`crates/athena-core/...`) became the existing `crates/athena-core` and my test passed for the wrong reason. I fixed it to test the untrimmed run.",
+      "The first version of the new test used a function-pointer array type that clippy rejected as too complex. I replaced it with a local alias."
+    ],
+    "learnings": [
+      "`check_reading_acceptance` is called in production only from `read_for`, which passes the base commit's `ls_tree` paths as repo_files. Other tests call `check_boundary_and_repo_files` directly with None, so they are unaffected.",
+      "Clippy denies a `[(&str, fn(&mut Reading, String)); N]` type as too complex; the existing tests use a local `type Edit` alias.",
+      "A file path starting with `.github` begins with a dot, so the tokenizer must skip only `./`, not every leading dot."
+    ],
+    "desires": [
+      "A way to read the saved output of a long cargo test run inside the working directory, to count passing tests."
+    ]
+  }
+}

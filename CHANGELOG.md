@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A reading that relies on a repo path absent from the snapshot is now refused at reading acceptance. Root
+  cause: reading acceptance never compared the reading's references with the snapshot. It checked only the
+  deliverable paths, so a reading that said an earlier job's file, role or prompt already exists was accepted
+  although that job was queued, unmerged or never produced, and the critic or the producer found the gap later
+  (failure class `reading-assumes-prior-job-deliverable-exists-unverified`). Fix: the new
+  `reading::check_reading_references`, called last from `check_reading_acceptance`, takes each repo path in the
+  summary, the assumptions and the acceptance criteria and refuses one that is not in the base commit's files,
+  not a `create` deliverable, and not in a sentence that says it does not exist. The refusal names the path and
+  the field and tells the reader to list the artifact as a create deliverable or say it does not exist.
+  Globs, placeholders, URLs, absolute paths and slash-less names are not judged, and a replay with no file set
+  checks nothing. It is deterministic, keys on no job id and calls no model. Recorded as D147.
 - A producer that stopped on an expired login (API error 401) or a usage limit (429) no longer counts as spend
   on its line, and a stored pause is no longer trusted when the attempts no longer reach it. Root cause: the
   scope guard learned why an attempt stopped from a free-text prefix of the closing reason, and two lists of
