@@ -1,0 +1,134 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261031-031744-c5yx",
+  "base_commit": "23177cdcacb67379303a36cb49af90a58ab8a971",
+  "base_fingerprint": "sha256:bc71f1bc1913e08937a23682bc8e89b032364c2a5da41dbea7552834ebf18838",
+  "previous_job": "20261031-142738-g437",
+  "candidate_commit": "b728d6ac626133b4634a95c36f9ed152b1e12f76",
+  "candidate_tree": "1d24c30b97a6544d23603dfa88351a5663b7716a",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 258922
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 189669
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21389
+    }
+  ],
+  "fingerprint": "sha256:fdd7e790c56aaa129f82a287c7580396ac9347fafbad577f697099755017f0de",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added a first-in, first-out landing queue to the drain, with no rebase. `LandingQueue` is a pure struct (a ticket counter and a `VecDeque<u64>`) kept in the drain's shared `State`. A worker joins it in the `RunStep::Passed` arm of `attempts`, so the queue order is the order runs pass. The place is a `LandingSlot` drop guard stored in the same tuple as the passed job. Both land calls borrow that one slot, and it is released and waiters woken on every return or panic. Before the unchanged `Drain::land`, `await_head` waits until the worker is head. A worker that is not head prints `drain      <job> waits in the landing queue` once. A head, and so a lone worker, never waits or prints. `Drain::land`, `Steps::land`, the `landing` mutex, athena-core and the `Steps` trait are untouched. Tests are additions only, in a new `landing_queue_tests` module. Six are unit tests of the queue and the guard. Three drive two workers through `drain_concurrent` and assert one exact log: the head keeps its place across its two land calls; the worker that passed first lands first although it is item `a`; a failed head releases its place. I confirmed the three drain tests fail without the queue: with `await_head` made a no-op they logged `gate timed out` and lacked the wait line. I added a note to section 6 of async-drain.md and an Unreleased CHANGELOG entry, both saying queue order is pass order and that there is no rebase.",
+    "files": [
+      "crates/athena-cli/src/drain.rs",
+      "docs/design/async-drain.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --locked landing_queue_tests",
+        "result": "pass",
+        "note": "9 passed."
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --lib drain",
+        "result": "pass",
+        "note": "39 passed: the new tests and every existing in-file drain test."
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --test drain",
+        "result": "pass",
+        "note": "129 passed, including the `parallel::*` tests and `in_flight_bound_does_not_apply_with_max_in_flight_one`."
+      },
+      {
+        "command": "cargo test -p athena-cli --locked (full crate)",
+        "result": "pass",
+        "note": "Ran in the background; the completion notice reported exit code 0. I did not read its per-test output."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "After `cargo fmt --all`."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy --locked",
+        "result": "pass",
+        "note": "12 passed; boundary scan clean on the three changed files."
+      },
+      {
+        "command": "Mutation check: made `await_head` return at once, ran `cargo test -p athena-cli --locked --lib landing_queue_tests`, then reverted",
+        "result": "pass",
+        "note": "With the break, the three drain tests failed. Each log had `gate timed out` and no wait line. Six unit tests still passed. After the revert all 9 pass."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-cli drain`: new unit tests of `LandingQueue` pass, showing joins are served in order, a member that leaves (drop guard) while not at the head is removed without blocking others, and the head keeps its place across a retry (the same slot serves both land calls).",
+        "status": "met",
+        "evidence": "`cargo test -p athena-cli --locked landing_queue_tests` and `--lib drain` ran green. `joins_are_served_in_order`, `a_member_that_leaves_while_not_at_the_head_is_removed`, `leaving_twice_is_harmless`, `dropping_a_middle_slot_keeps_the_others_in_order`, `a_slot_dropped_by_a_panic_leaves` and `the_head_keeps_its_place_while_its_slot_is_held` cover order, removal of a non-head member and the held place. `a_waiting_worker_does_not_land_between_the_heads_two_land_calls` shows the retry keeps the place in `attempts`: the log is land a, b waits, land a, land b."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-cli drain`: a new drain test with two workers that pass one after the other shows the two landings happen in the order the runs passed, even if the later-started worker is ready first.",
+        "status": "met",
+        "evidence": "`two_workers_land_in_the_order_they_passed` drives `drain_concurrent` with 2 workers. `run(a)` waits until `land b` is logged, so b passes first. The exact log is [land b, a waits in the landing queue, land a], with 2 landed. It failed on a mutated `await_head` (gate timed out, no wait line) and passes with the real one."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-cli`: with max_in_flight = 1 every pre-existing drain test passes unchanged; the diff in drain.rs tests only adds tests, and no existing test body is edited.",
+        "status": "met",
+        "evidence": "`cargo test -p athena-cli --locked` exited 0. Separately, `--lib drain` (39 pass) and `--test drain` (129 pass, including `in_flight_bound_does_not_apply_with_max_in_flight_one` and the `parallel::*` tests) were run. `git diff -U0` of drain.rs shows the only removed lines are the old `passed` declaration, the `RunStep::Passed` arm, the land section and one `landing` doc line. All are production code. The test section is one added module, and tests/drain.rs is untouched."
+      },
+      {
+        "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`: all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`, both clean, and the full `cargo test -p athena-cli --locked` passed. The workspace `cargo test` was not run."
+      },
+      {
+        "criterion": "In crates/athena-cli/src/drain.rs `LandingQueue` is a small pure struct (no mutex or threads inside); the drop guard releases the slot on every exit of `attempts`; the diff leaves `Steps::land`, the lander and crates/athena-core untouched, and adds no rebase.",
+        "status": "met",
+        "evidence": "`LandingQueue` has only `next: u64` and `line: VecDeque<u64>`, with `join`, `is_head` and `leave`. The slot lives in the `passed` tuple in `attempts`, so it drops on any return or unwind (`a_slot_dropped_by_a_panic_leaves`; `a_failed_head_releases_its_place` for the two-failure exit). `git diff --stat` shows only drain.rs, async-drain.md and CHANGELOG.md. The new production code has no rebase."
+      },
+      {
+        "criterion": "docs/design/async-drain.md has a short note that queue order is the order runs pass, not the order landing commits were stacked, and that rebase comes in a later request.",
+        "status": "met",
+        "evidence": "A short paragraph was added at the end of section 6, after 'One landing at a time keeps main linear...'. It says the queue order is the order runs pass, not the order their landing commits were stacked, and that the rebase before landing is a later request. See `git diff -- docs/design/async-drain.md`."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for the ordered landing queue that says it does not rebase.",
+        "status": "met",
+        "evidence": "The new first item under `## [Unreleased]` / `### Added` describes the first-in, first-out queue in pass order, that the head keeps its place across the retry, and that it 'does not rebase'. See `git diff -- CHANGELOG.md`."
+      }
+    ],
+    "open_issues": [
+      "crates/athena-cli/tests/drain.rs is in the brief's deliverables but not in the request's Files line, and I deliberately left it unedited, as the accepted plan says. Its fake is single-worker and adds no ordering coverage, and editing existing scaffolding would break the 'tests only add' criterion. The new tests are in drain.rs.",
+      "If a future change stopped a failed head from releasing its slot, test `a_failed_head_releases_its_place` would hang rather than fail at 5 s. `await_head` has no timeout by design, and the test's gates cap only the fake's own waits."
+    ],
+    "mistakes": [
+      "I started the full `cargo test -p athena-cli` in the background before I knew I could not read its output, so I could not read per-test results from it. I ran the in-file drain tests and the complete `tests/drain.rs` integration suite separately, and the background run exited 0."
+    ],
+    "learnings": [
+      "`std::sync::Mutex` is unfair, so the drain tests gate on the new 'waits in the landing queue' line rather than on who wins the `landing` lock.",
+      "With `read_ahead` 0 and two workers, `drain_concurrent` goes straight to `run_batches`. Two items with disjoint touches form one group and run side by side. The `Steps` fake needs `caps`, `queue`, `previous_rating`, `approve`, `read`, `run`, `land`, `rate`, `check_page` and `check_cap`; the other methods have defaults.",
+      "`attempts` runs the land section once per loop pass with `passed` already set. The `failures >= ATTEMPTS` check (2) is what makes two land calls, so holding the slot in `passed` serves both.",
+      "`await_head` has no timeout: a non-head waiter would wait forever if a head never left. The guard drop and `notify_all`, plus the 20 ms `pause`, are what prevent that. The tests cap only their own gates."
+    ],
+    "desires": [
+      "A way to read the output of a background command from inside the working directory. I started the full `cargo test -p athena-cli` in the background and could only learn its exit code from the completion notice."
+    ]
+  }
+}

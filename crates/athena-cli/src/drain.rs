@@ -991,6 +991,8 @@ struct State {
     passed_over: BTreeSet<String>,
     /// What each new plan of this run needs to remember from the ones before.
     carry: Carry,
+    /// Workers whose run passed and whose job is not landed yet, in the order the runs passed.
+    queue: LandingQueue,
 }
 
 /// What a drain keeps from one plan to the next, merged into each fresh queue view by `Drain::prepare`. A
@@ -1020,6 +1022,57 @@ impl Drop for FlagOnDrop<'_> {
     }
 }
 
+/// The first-in, first-out line of workers whose run passed and whose job is not yet landed. It is a plain
+/// value: it holds no lock and starts no thread, so it is driven by the state lock of the drain and by unit
+/// tests alike. The line is ordered by `join`, which a worker calls when its run passes, so the order is the
+/// order runs passed.
+#[derive(Default)]
+struct LandingQueue {
+    /// The ticket the next join gets.
+    next: u64,
+    /// The tickets in line, the head first.
+    line: VecDeque<u64>,
+}
+
+impl LandingQueue {
+    /// Takes a place at the back of the line and returns its ticket.
+    fn join(&mut self) -> u64 {
+        let ticket = self.next;
+        self.next += 1;
+        self.line.push_back(ticket);
+        ticket
+    }
+
+    /// Whether `ticket` is first in line.
+    fn is_head(&self, ticket: u64) -> bool {
+        self.line.front() == Some(&ticket)
+    }
+
+    /// Gives up the place of `ticket`, wherever it is in the line. A ticket that is not in line is ignored.
+    fn leave(&mut self, ticket: u64) {
+        self.line.retain(|t| *t != ticket);
+    }
+}
+
+/// A place in the [`LandingQueue`] of a drain. Dropping it gives the place up and wakes every waiter, so the
+/// next in line goes on whichever way the holder leaves its scope, a panic included.
+struct LandingSlot<'a> {
+    state: &'a Mutex<State>,
+    wake: &'a Condvar,
+    ticket: u64,
+}
+
+impl Drop for LandingSlot<'_> {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .queue
+            .leave(self.ticket);
+        self.wake.notify_all();
+    }
+}
+
 /// What the read-ahead does next.
 enum Pick {
     /// Nothing is left to read ahead.
@@ -1037,7 +1090,8 @@ struct Drain<'a, S: ?Sized, U: ?Sized> {
     limits: Limits,
     state: Mutex<State>,
     /// Held while a job is landed and while the page is rated: landings and ratings go one at a time even
-    /// when jobs run side by side, because each pushes a branch and rates the page as it then stands.
+    /// when jobs run side by side, because each pushes a branch and rates the page as it then stands. Workers
+    /// join the landing queue when their run passes, and only the head of the queue takes this lock.
     landing: Mutex<()>,
     /// Woken when a reading made ahead is stored, a job ends or a landing is recorded.
     wake: Condvar,
@@ -1327,6 +1381,30 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         }
     }
 
+    /// Takes the next place in the landing queue. The place is kept until the returned slot is dropped.
+    fn enter_queue(&self) -> LandingSlot<'_> {
+        let ticket = self.st().queue.join();
+        LandingSlot {
+            state: &self.state,
+            wake: &self.wake,
+            ticket,
+        }
+    }
+
+    /// Returns when `slot` is the head of the landing queue. A worker that has to wait says so once, outside
+    /// the state lock; the head returns at once and says nothing.
+    fn await_head(&self, job: &str, slot: &LandingSlot<'_>) {
+        if self.st().queue.is_head(slot.ticket) {
+            return;
+        }
+        self.ui
+            .line(&format!("drain      {job} waits in the landing queue"));
+        let mut st = self.st();
+        while !st.queue.is_head(slot.ticket) {
+            st = self.pause(st);
+        }
+    }
+
     fn land(&self, job: &str, at: usize) -> bool {
         let _one_at_a_time = self.landing.lock().unwrap_or_else(PoisonError::into_inner);
         match self.steps.land(job) {
@@ -1379,7 +1457,9 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         let item = &mut item;
         // An interrupted job has no finished attempt to run: its first attempt reads it again.
         let mut retry = item.interrupted;
-        let mut passed: Option<(String, usize)> = None;
+        // The job that passed, its line, and its place in the landing queue. The place is kept through both
+        // land calls below and given up when this function returns or unwinds.
+        let mut passed: Option<(String, usize, LandingSlot<'_>)> = None;
         let mut failures = 0;
         // Reads that gave no reading. One is read again; a second skips the item.
         let mut unread = 0;
@@ -1416,7 +1496,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                         }
                         continue;
                     }
-                    RunStep::Passed(job, at) => passed = Some((job, at)),
+                    RunStep::Passed(job, at) => passed = Some((job, at, self.enter_queue())),
                     RunStep::Failed {
                         job,
                         retry: again,
@@ -1433,11 +1513,12 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     }
                 }
             }
-            if let Some((job, at)) = passed.clone()
-                && self.land(&job, at)
-            {
-                self.st().landed.push(item.job.clone());
-                return ItemEnd::Landed;
+            if let Some((job, at, slot)) = &passed {
+                self.await_head(job, slot);
+                if self.land(job, *at) {
+                    self.st().landed.push(item.job.clone());
+                    return ItemEnd::Landed;
+                }
             }
             failures += 1;
             if failures >= ATTEMPTS {
@@ -1855,6 +1936,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 tried: BTreeSet::new(),
                 passed_over: BTreeSet::new(),
                 carry: Carry::default(),
+                queue: LandingQueue::default(),
             }),
             landing: Mutex::new(()),
             wake: Condvar::new(),
@@ -4184,5 +4266,330 @@ mod read_ahead_tests {
             stale_paths(&p(&["src/dir/"]), &p(&["src/dir/x.rs", "src/other.rs"])),
             ["src/dir/x.rs"]
         );
+    }
+}
+
+/// The landing queue: the pure [`LandingQueue`], the [`LandingSlot`] guard, and two workers driven through
+/// [`drain_concurrent`]. The drain tests share one ordered log between the fake [`Steps`] and the recording
+/// [`Ui`], and assert the whole log. A worker that is held back says so on the [`Ui`] ("waits in the landing
+/// queue"), and the fake's land calls wait for that line, so the order does not depend on how the `landing`
+/// lock is won. A wait is capped at 5 s and then logs "gate timed out", so a missing behavior fails the
+/// assertion on the log instead of hanging the test.
+#[cfg(test)]
+mod landing_queue_tests {
+    use super::*;
+    use athena_data::roles::Ladder;
+    use std::time::Instant;
+
+    const WAITS: &str = "waits in the landing queue";
+
+    #[test]
+    fn joins_are_served_in_order() {
+        let mut queue = LandingQueue::default();
+        let (a, b, c) = (queue.join(), queue.join(), queue.join());
+        assert!(queue.is_head(a) && !queue.is_head(b) && !queue.is_head(c));
+        queue.leave(a);
+        assert!(!queue.is_head(a) && queue.is_head(b) && !queue.is_head(c));
+        queue.leave(b);
+        assert!(queue.is_head(c));
+        queue.leave(c);
+        assert!(!queue.is_head(c), "an empty line has no head");
+    }
+
+    #[test]
+    fn a_member_that_leaves_while_not_at_the_head_is_removed() {
+        let mut queue = LandingQueue::default();
+        let (a, b, c) = (queue.join(), queue.join(), queue.join());
+        queue.leave(b);
+        assert!(queue.is_head(a), "the head is not disturbed");
+        queue.leave(a);
+        assert!(queue.is_head(c), "the member that left is not served");
+        assert!(!queue.is_head(b));
+    }
+
+    #[test]
+    fn leaving_twice_is_harmless() {
+        let mut queue = LandingQueue::default();
+        let (a, b) = (queue.join(), queue.join());
+        queue.leave(b);
+        queue.leave(b);
+        assert!(queue.is_head(a));
+        queue.leave(a);
+        queue.leave(a);
+        let c = queue.join();
+        assert!(queue.is_head(c), "tickets are never reused");
+    }
+
+    /// Entries in the order they happened, shared by the fake steps and the recording ui.
+    #[derive(Default)]
+    struct Log(Mutex<Vec<String>>);
+
+    impl Log {
+        fn push(&self, entry: impl Into<String>) {
+            self.0.lock().unwrap().push(entry.into());
+        }
+
+        fn entries(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+
+        /// Waits until `entry` is in the log; after 5 s logs "gate timed out" and goes on.
+        fn wait_for(&self, entry: &str) {
+            let give_up = Instant::now() + Duration::from_secs(5);
+            while !self.entries().iter().any(|e| e == entry) {
+                if Instant::now() >= give_up {
+                    self.push("gate timed out");
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    /// A ui that logs the drain's "waits in the landing queue" lines, as "<job> waits in the landing queue".
+    struct Watch<'a>(&'a Log);
+
+    impl Ui for Watch<'_> {
+        fn line(&self, text: &str) {
+            if text.contains(WAITS) {
+                self.0.push(text.trim_start_matches("drain").trim());
+            }
+        }
+    }
+
+    /// One scripted land call: the log entry to wait for before it returns (if any), and whether it lands.
+    type LandCall = (Option<&'static str>, bool);
+
+    /// Steps for two items, a and b, with disjoint touched paths, so one group and two workers. Each `run`
+    /// passes, after waiting for its gate. Each `land` logs "land <job>" and follows its script.
+    struct Lane {
+        log: Log,
+        run_gate: BTreeMap<&'static str, &'static str>,
+        lands: BTreeMap<&'static str, Vec<LandCall>>,
+        calls: Mutex<BTreeMap<String, usize>>,
+    }
+
+    impl Lane {
+        fn new() -> Lane {
+            Lane {
+                log: Log::default(),
+                run_gate: BTreeMap::new(),
+                lands: BTreeMap::new(),
+                calls: Mutex::new(BTreeMap::new()),
+            }
+        }
+
+        fn run_waits_for(mut self, job: &'static str, entry: &'static str) -> Lane {
+            self.run_gate.insert(job, entry);
+            self
+        }
+
+        fn land_calls(mut self, job: &'static str, calls: &[LandCall]) -> Lane {
+            self.lands.insert(job, calls.to_vec());
+            self
+        }
+    }
+
+    impl Steps for Lane {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Ok(Caps {
+                read: 0.5,
+                run: 1.0,
+                rate: 0.5,
+            })
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            let entry = |id: &str| PlanEntry {
+                goal: format!("goal of {id}"),
+                rung: Some(Ladder::Implementation),
+                acceptance: vec![format!("{id} works")],
+                touches: vec![format!("src/{id}.rs")],
+                ..PlanEntry::bare(id, &format!("title of {id}"))
+            };
+            Ok(QueueView {
+                items: vec![Item::queued("a", "t"), Item::queued("b", "t")],
+                plan: vec![entry("a"), entry("b")],
+                ..QueueView::default()
+            })
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn read(&self, what: ReadOf<'_>) -> Read {
+            let ReadOf::Queued(item) = what else {
+                panic!("only a first reading is expected, got {what:?}");
+            };
+            Read {
+                job: Some(item.to_string()),
+                cost: 0.1,
+                runnable: true,
+                error: None,
+                held: false,
+            }
+        }
+        fn run(&self, job: &str) -> Run {
+            if let Some(entry) = self.run_gate.get(job) {
+                self.log.wait_for(entry);
+            }
+            Run {
+                outcome: Some(OutcomeState::Landed),
+                cost: 0.3,
+                ..Run::default()
+            }
+        }
+        fn land(&self, job: &str) -> Landing {
+            self.log.push(format!("land {job}"));
+            let call = {
+                let mut calls = self.calls.lock().unwrap();
+                let n = calls.entry(job.to_string()).or_default();
+                *n += 1;
+                *n - 1
+            };
+            let (gate, lands) = self.lands[job][call];
+            if let Some(entry) = gate {
+                self.log.wait_for(entry);
+            }
+            if lands {
+                Landing::Landed {
+                    changed: vec![format!("src/{job}.rs"), "CHANGELOG.md".into()],
+                }
+            } else {
+                Landing::NotLanded("scripted".into())
+            }
+        }
+        fn rate(&self) -> Rate {
+            Rate {
+                rating: Some(1),
+                ..Rate::default()
+            }
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("fake")
+        }
+        fn check_cap(&self) -> f64 {
+            0.5
+        }
+    }
+
+    fn limits() -> Limits {
+        Limits {
+            budget_usd: 20.0,
+            target_rating: 4,
+            max_jobs: 20,
+        }
+    }
+
+    /// Drives the lane with two workers and returns how many items landed.
+    fn two_workers(lane: &Lane) -> usize {
+        let ui = Watch(&lane.log);
+        let report = drain_concurrent(lane, limits(), &ui, 2).unwrap();
+        report.landed as usize
+    }
+
+    #[test]
+    fn the_head_keeps_its_place_while_its_slot_is_held() {
+        let lane = Lane::new();
+        let ui = Watch(&lane.log);
+        let d = Drain::new(&lane, &ui, lane.caps().unwrap(), limits());
+        let first = d.enter_queue();
+        let second = d.enter_queue();
+        // The same slot serves both land calls of a retry; the member behind it never becomes head.
+        for _call in 0..2 {
+            assert!(d.st().queue.is_head(first.ticket));
+            assert!(!d.st().queue.is_head(second.ticket));
+        }
+        drop(first);
+        assert!(d.st().queue.is_head(second.ticket));
+    }
+
+    #[test]
+    fn dropping_a_middle_slot_keeps_the_others_in_order() {
+        let lane = Lane::new();
+        let ui = Watch(&lane.log);
+        let d = Drain::new(&lane, &ui, lane.caps().unwrap(), limits());
+        let first = d.enter_queue();
+        let middle = d.enter_queue();
+        let last = d.enter_queue();
+        let middle_ticket = middle.ticket;
+        drop(middle);
+        assert!(d.st().queue.is_head(first.ticket));
+        drop(first);
+        assert!(d.st().queue.is_head(last.ticket));
+        assert!(!d.st().queue.is_head(middle_ticket));
+    }
+
+    #[test]
+    fn a_slot_dropped_by_a_panic_leaves() {
+        let lane = Lane::new();
+        let ui = Watch(&lane.log);
+        let d = Drain::new(&lane, &ui, lane.caps().unwrap(), limits());
+        let waiting = d.enter_queue();
+        let gone = d.enter_queue();
+        let gone_ticket = gone.ticket;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _held = gone;
+            panic!("a worker panics while it holds a place");
+        }));
+        assert!(outcome.is_err());
+        assert!(!d.st().queue.is_head(gone_ticket));
+        drop(waiting);
+        let next = d.enter_queue();
+        assert!(d.st().queue.is_head(next.ticket), "nothing is left in line");
+    }
+
+    #[test]
+    fn a_waiting_worker_does_not_land_between_the_heads_two_land_calls() {
+        // a passes first and its first land call is refused. b passes while a is in that call, so b is behind
+        // a: it says so, and a's first land call returns only after that. b lands after a's second call.
+        let lane = Lane::new()
+            .run_waits_for("b", "land a")
+            .land_calls(
+                "a",
+                &[(Some("b waits in the landing queue"), false), (None, true)],
+            )
+            .land_calls("b", &[(None, true)]);
+        let landed = two_workers(&lane);
+        assert_eq!(
+            lane.log.entries(),
+            ["land a", "b waits in the landing queue", "land a", "land b"]
+        );
+        assert_eq!(landed, 2);
+    }
+
+    #[test]
+    fn two_workers_land_in_the_order_they_passed() {
+        // a is the first item and starts first, but its run ends only once b is in its first land call, so b
+        // passed first. a passes behind b, says it waits, and lands after b.
+        let lane = Lane::new()
+            .run_waits_for("a", "land b")
+            .land_calls("a", &[(None, true)])
+            .land_calls("b", &[(Some("a waits in the landing queue"), true)]);
+        let landed = two_workers(&lane);
+        assert_eq!(
+            lane.log.entries(),
+            ["land b", "a waits in the landing queue", "land a"]
+        );
+        assert_eq!(landed, 2);
+    }
+
+    #[test]
+    fn a_failed_head_releases_its_place() {
+        // Both of a's land calls fail. b waits behind a, then lands once a has left.
+        let lane = Lane::new()
+            .run_waits_for("b", "land a")
+            .land_calls(
+                "a",
+                &[(Some("b waits in the landing queue"), false), (None, false)],
+            )
+            .land_calls("b", &[(None, true)]);
+        let landed = two_workers(&lane);
+        assert_eq!(
+            lane.log.entries(),
+            ["land a", "b waits in the landing queue", "land a", "land b"]
+        );
+        assert_eq!(landed, 1);
     }
 }

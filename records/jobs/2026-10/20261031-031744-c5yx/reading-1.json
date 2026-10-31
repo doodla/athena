@@ -1,0 +1,149 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-031744-c5yx",
+  "n": 1,
+  "at": "2026-10-31T15:32:48.7990536Z",
+  "invocation_seq": 1,
+  "base_commit": "a5a3fc9fbee12ddfad5a7b5b6ccbac66c761397d",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add FIFO LandingQueue to Drain landing, without rebase",
+  "summary": "Retry of failed jobs 20261030-013555-f5qm and 20261031-030119-tw3v, cut to the queue only: a pure FIFO `LandingQueue` in drain.rs, joined when a run passes, held through the two land calls in `attempts`, left via a drop guard; only the head takes the `landing` mutex. No rebase, no landing change. Audience: Sri and the verifier of the build jobs.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New unit and drain tests; fmt, clippy -D warnings and cargo test criterion."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criteria check landing order and unchanged serial behavior by running the tests."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Order, drop and retry-place criteria run real code through tests."
+    },
+    {
+      "id": "small",
+      "how": "Queue only; rebase left to a later request."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc note and CHANGELOG entry written for an outside reader."
+    },
+    {
+      "id": "rust",
+      "how": "All code is Rust."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Prior jobs 20261030-013555-f5qm and 20261031-030119-tw3v produced no candidate (failed in planning for size); nothing from them is kept, so no files of theirs are carried over. Their findings are addressed by the split: 20261030-013555-f5qm's rebase, send_back/drop_landed, thrash and landing.rs findings no longer apply because this half has none of that; its max_concurrency > 1 finding is addressed by leaving landing unchanged and keeping that path otherwise as is. 20261031-030119-tw3v's left-behind records-loss finding and gh/mod.rs finding no longer apply (no rebase, no landing.rs or gh changes); its pass-order-vs-stacking-order finding is fixed by the design-doc note the request asks for; its size finding is addressed by the small scope.",
+    "Code survey: crates/athena-cli/src/drain.rs: `Drain` has `landing: Mutex<()>` (line ~1041, built ~1859); `Drain::land` (~1330) takes the mutex then calls `steps.land`; `attempts` (~1376) loops, sets `passed` on `RunStep::Passed` and calls `self.land` once per loop pass, up to ATTEMPTS, which are the two land calls. The queue is joined once `passed` is set, kept through both calls, and left through a drop guard on every exit of the section. Waiting uses the existing `wake` condvar or a new Condvar paired with the state mutex. No record or data file is added, so no records validation or AnyRecord change.",
+    "Queue order is the order runs pass (join order), not landing-commit stacking order; stated in a short note in docs/design/async-drain.md section 6, which also marks that the rebase is a later request.",
+    "The drain test uses the existing test Steps fakes in drain.rs's tests module and drives two workers via the real drain entry, with the second worker's run passing first or gating by channel so pass order is deterministic.",
+    "No change to athena.toml, defaults.toml or workflows is needed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-cli drain`: new unit tests of `LandingQueue` pass, showing joins are served in order, a member that leaves (drop guard) while not at the head is removed without blocking others, and the head keeps its place across a retry (the same slot serves both land calls).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli drain`: a new drain test with two workers that pass one after the other shows the two landings happen in the order the runs passed, even if the later-started worker is ready first.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli`: with max_in_flight = 1 every pre-existing drain test passes unchanged; the diff in drain.rs tests only adds tests, and no existing test body is edited.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`: all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In crates/athena-cli/src/drain.rs `LandingQueue` is a small pure struct (no mutex or threads inside); the drop guard releases the slot on every exit of `attempts`; the diff leaves `Steps::land`, the lander and crates/athena-core untouched, and adds no rebase.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/design/async-drain.md has a short note that queue order is the order runs pass, not the order landing commits were stacked, and that rebase comes in a later request.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the ordered landing queue that says it does not rebase.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.08
+    }
+  ],
+  "out_of_scope": [
+    "Rebase before landing, conflict return to the producer, send_back/drop_landed, thrash stop (the separate dependent request)",
+    "Any change to crates/athena-core (gh/landing.rs, gh/mod.rs, run/) or how landing itself works",
+    "Raising max_in_flight above 1 (build job 10) and the `[parallel] max_concurrency` path beyond the queue",
+    "athena.toml, defaults.toml, .github/workflows, crates/athena-data/src/config.rs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1700.0,
+        "p90": 3600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.718716577540107,
+      "p_verification_passes": 0.6706586826347305,
+      "p_user_intervenes": 0.09184782608695652,
+      "cost_usd": {
+        "p10": 0.5301577999999999,
+        "p50": 1.2331751999999998,
+        "p90": 3.3508176
+      },
+      "wall_time_s": {
+        "p10": 531.8921143870002,
+        "p50": 1721.929119169,
+        "p90": 3691.4805612319988
+      }
+    }
+  },
+  "departures": "Threaded drain code with deterministic ordering tests is harder than average, so verification pass is a little lower than reference.",
+  "hard_reason": "Changes the drain's landing path (who may land and when), a run-pipeline rule that gates landing, so mistakes are costly.",
+  "producer_effort": "high"
+}

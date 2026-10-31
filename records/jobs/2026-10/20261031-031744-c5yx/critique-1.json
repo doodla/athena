@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-031744-c5yx",
+  "round": 1,
+  "at": "2026-10-31T15:36:25.521098378Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The drain-order test passes on the base code, so it does not show that the queue does anything.",
+      "evidence": "In `attempts`, `RunStep::Passed` sets `passed` (1419) and the code goes straight to `self.land` (1436-1437), which takes `self.landing` first (1331). With no queue, the plan's fake has run(b) return first, so b calls land first and holds the mutex while its fake land(b) waits for \"end a\". a then blocks on the mutex and lands second, so the log is [b, a] and the test passes. The claim \"if workers joined at start ... a would be head\" describes another wrong implementation, not the absence of the queue. The only place the queue changes behavior is between the head's two land calls (the retry gap). The plan says it does not test that gap at drain level (open question 3). So no drain-level test fails without the queue. Fix: Add a drain-level test that fails on the base code, using a seam that exists: the injected `Ui` (`&(dyn Ui + Sync)` in `drain_concurrent`). Have a waiting worker print one line (for example `drain      <job> waits in the landing queue behind <head>`) the first time `await_head` finds it is not the head. In the test, use a recording Ui. a passes first. The fake's first land(a) call waits, with the 5 s cap, until the recording Ui shows b waiting, then returns `NotLanded`. The second land(a) call lands, then land(b) lands. Assert the land log is [a, a, b] and `report.landed == 2`. On the base code the wait line never appears, so the first land(a) call times out and the test fails. Keep the existing two-worker pass-order test as a regression guard, but correct its 'fails without' text.",
+      "location": "Plan, Demonstrations, criterion 2 (two_workers_land_in_the_order_they_passed); drain.rs 1330-1331 and 1419-1437",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Retry-place test (c) checks only the pure struct and guard. It does not check that `attempts` waits before each land call.",
+      "evidence": "Test (c) holds a guard and calls `is_head` twice with 'simulated land calls'. Whether `attempts` keeps one slot across both `self.land` calls is shown only by reading the code under criterion 5. Fix: Keep (c) as the unit test the request asks for. Point to the new drain-level retry test from the major finding as the behavioral proof that the head keeps its place across the retry in `attempts`.",
+      "location": "Plan, Demonstrations, criterion 1 (c)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The await call has to go inside the `if let ... && self.land(..)` chain. Using `expect` on the slot depends on a fact that holds elsewhere in the code.",
+      "evidence": "Line 1436 is `if let Some((job, at)) = passed.clone() && self.land(&job, at)`. The plan offers `slot.as_ref().expect(..)` 'or restructure'. `slot` is always Some when `passed` is Some only because both are set in the same arm. Fix: Bind both together: set `passed = Some((job, at, self.enter_queue()))`, or match on `(passed.clone(), slot.as_ref())`. Then call `await_head` inside the `if let` before `self.land`, and no `expect` is needed. Say explicitly that the base code clones `passed` only so the retry can reuse it, and that the slot is not cloned.",
+      "location": "Plan, Step 3; drain.rs 1436-1438",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The brief lists crates/athena-cli/tests/drain.rs as a deliverable, but the plan does not edit it.",
+      "evidence": "The request's Files line names only drain.rs, async-drain.md and CHANGELOG.md. The brief's deliverables add tests/drain.rs. The plan flags this and leaves the file untouched, so criterion 5's `git diff --stat` would show three files. Fix: Keep the choice, since the request's Files line is authoritative. State it as a decision rather than an open question so the verifier does not count a missing deliverable.",
+      "location": "Plan, Open questions 1 and Files; brief Expected deliverables",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The design is sound and fits the request. A pure `LandingQueue` sits in `State` behind the existing state lock. Waiters use the existing `pause`/`wake`. A drop guard local to `attempts` is created in the `RunStep::Passed` arm, the head waits before each `self.land`, and `Drain::land` is left untouched. I read the snapshot to check what the plan names. `State` (946), `FlagOnDrop` (1010), `landing`/`wake` (1041/1043), `Drain::land` (1330), `attempts` (1376–1447), `pause` (1983), `drain_concurrent` (2202) and `ATTEMPTS = 2` (194) all exist as described. The one major problem is the criterion-2 drain test: it would also pass on today's code. In the base code nothing runs between the `Passed` arm and `self.land`. So the order in which workers ask for the `landing` mutex already matches the order their runs pass. In the planned scenario, b holds the mutex while it waits for a, so the base code also logs [b, a]. The plan's \"fails without\" argument compares against a different wrong design (joining at start), not against the code without a queue. The queue only changes behavior in the gap between the head's two land calls, and nothing at drain level shows that gap is closed. The other findings are minor."
+}

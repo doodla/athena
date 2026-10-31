@@ -1,0 +1,233 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-031744-c5yx",
+  "round": 3,
+  "at": "2026-10-31T15:39:48.726908171Z",
+  "invocation_seq": 6,
+  "approach": "In drain.rs add a pure `LandingQueue` (a ticket counter and a `VecDeque<u64>` with `join`, `is_head`, `leave`), stored in `State` behind the existing state lock. Add a drop guard `LandingSlot` (like `FlagOnDrop`) that removes its ticket and calls `wake.notify_all()`. In `attempts`, `passed` becomes `Option<(String, usize, LandingSlot<'_>)>`. The `RunStep::Passed` arm joins the queue. The land section borrows `passed` (no clone), calls `await_head`, then the unchanged `self.land`. The one slot serves both land calls and drops on every return or unwind. `await_head` prints one line the first time a worker finds it is not head (`drain      {job} waits in the landing queue`), then waits with the existing `pause` loop. `Drain::land`, `Steps::land`, the `landing` mutex, rebuild and rating are untouched. Tests are additions only, in a new module with its own small `Steps` fake and a recording `Ui`. Revision: the fake and the `Ui` write to one shared ordered log, and the two drain tests assert the exact log. The head's first land call is gated on the wait line, and a gate timeout writes a `gate timed out` entry. So on the base code, where no wait line exists, both tests fail every time, whatever the `landing` mutex does.",
+  "decisions": [
+    {
+      "choice": "The queue lives in `State` behind the existing state mutex. Waiters use `Drain::pause` on the existing `wake` condvar. `LandingQueue` holds only `u64` and `VecDeque<u64>`.",
+      "reason": "State is already shared by all workers and `wake` is already notified on landings and job ends. The queue stays a plain value that unit tests drive without threads. No new lock order: the wait holds only the state lock, which `pause` releases, and the head takes `landing` only inside `Drain::land` as today. The 20 ms `pause` timeout makes a missed wake-up harmless.",
+      "rejected": [
+        {
+          "option": "A separate `Mutex<LandingQueue>` plus its own `Condvar` on `Drain`",
+          "why": "More fields and a second lock for no gain over State and `wake`."
+        },
+        {
+          "option": "Ticket logic inside `Drain::land`, joining and leaving per call",
+          "why": "The head would lose its place between the two land calls, which is the retry gap the request closes."
+        }
+      ]
+    },
+    {
+      "choice": "Join in the `RunStep::Passed` arm and carry the slot in the same tuple as the job: `passed: Option<(String, usize, LandingSlot<'_>)>`. The land section borrows it with `if let Some((job, at, slot)) = &passed`.",
+      "reason": "Joining there is literally 'when its run passes'. Tying slot to job makes 'slot present whenever passed is present' hold by construction. The base code cloned `passed` only so the retry could reuse it; borrowing does the same without cloning, and the guard is never cloned. The guard drops with `passed` on every return (Landed, Failed after two land calls, or any early exit) and on panic. Nothing holds the state guard at return, so the drop can lock. The base loop skips the run when `passed` is set (line 1387), so the retry reuses the same slot.",
+      "rejected": [
+        {
+          "option": "Separate `slot: Option<LandingSlot>` with `expect` before `self.land`",
+          "why": "Correct only because two variables are set in one arm; the tuple removes that dependency."
+        },
+        {
+          "option": "Join at claim or worker start",
+          "why": "Orders by start, not by pass, and a head that has not passed would block passed workers behind it."
+        },
+        {
+          "option": "Guard in `Drain::work`",
+          "why": "The slot would be held through `item_over` and the retry reread, wider than the landing section."
+        }
+      ]
+    },
+    {
+      "choice": "`await_head(&self, job, slot)` returns at once if the ticket is head. Otherwise it prints once `drain      {job} waits in the landing queue` outside the state lock, then loops on `pause` until head.",
+      "reason": "It is a useful operator line, and it gives the drain tests an observable through the injected `Ui` that the base code never produces. The tests gate on it, so the base code fails them deterministically and no test depends on who wins the `landing` mutex. A head never prints and never waits, so one-worker output is unchanged.",
+      "rejected": [
+        {
+          "option": "Silent wait, tested only by unit tests",
+          "why": "No drain-level test would fail on the base code."
+        },
+        {
+          "option": "A test-only hook or counter on `Drain`",
+          "why": "Adds production surface for tests; the existing `Ui` seam serves."
+        },
+        {
+          "option": "Keep the retry test as a pure ordering assertion on the land log",
+          "why": "Critic finding 1: on the base code `std::sync::Mutex` is unfair, so the running head usually retakes the lock and the log still reads [a, a, b]. The test would pass on the base code."
+        }
+      ]
+    },
+    {
+      "choice": "Make both drain tests assert one exact ordered log. The fake's `Steps` methods and the recording `Ui` append to the same `Mutex<Vec<String>>`. The `Ui` records only lines containing `waits in the landing queue`. A gate that times out (5 s cap) appends `gate timed out` and returns the scripted outcome anyway. Tests assert the whole log, so a timeout entry or a missing wait line fails them.",
+      "reason": "Answers finding 1 with option (a) and (b) together. On the base code no wait line is ever printed, so the gate always times out and the log always contains `gate timed out` and lacks the wait line. The failure no longer depends on a lock race.",
+      "rejected": [
+        {
+          "option": "Assert only the land order [a, a, b]",
+          "why": "Passes on the base code most of the time, as the critic showed."
+        },
+        {
+          "option": "Gate on sleeps",
+          "why": "Timing-dependent and no proof the wait happened."
+        }
+      ]
+    },
+    {
+      "choice": "New tests go in a new `#[cfg(test)] mod landing_queue_tests` in drain.rs. `crates/athena-cli/tests/drain.rs` is not edited, and the producer's output states this.",
+      "reason": "The request's Files line names drain.rs, async-drain.md and CHANGELOG.md and is authoritative over the longer deliverables list (finding 2: kept, to be stated so the verifier does not flag a missing deliverable). The in-file `World` fake is private to `read_ahead_tests`, and editing it would break criterion 3. The integration file uses real steps and one worker, so it adds nothing for ordering.",
+      "rejected": [
+        {
+          "option": "Add gating fields to `World`",
+          "why": "Edits existing test scaffolding, against criterion 3."
+        },
+        {
+          "option": "Add tests to tests/drain.rs",
+          "why": "No multi-worker fake there; a real-steps fixture is heavy for no added coverage."
+        }
+      ]
+    },
+    {
+      "choice": "`LandingQueue` API is `join() -> u64`, `is_head(u64) -> bool`, `leave(u64)`. `leave` removes the ticket wherever it sits and is idempotent.",
+      "reason": "These are the three operations the drain uses, so there is no dead code under `-D warnings`. Tests check order through `is_head` after `leave`.",
+      "rejected": [
+        {
+          "option": "Extra `len`/`head` accessors",
+          "why": "Used only by tests, and clippy denies dead code."
+        }
+      ]
+    },
+    {
+      "choice": "The panic test wraps its closure in `std::panic::AssertUnwindSafe` for `catch_unwind` (finding 3).",
+      "reason": "`Drain` holds `&S` and `&U` trait objects and lock references, so `UnwindSafe` is not guaranteed. The wrapper is sound here because the test only reads the queue after the unwind, through a mutex that the guard's drop already handles with `PoisonError::into_inner`.",
+      "rejected": [
+        {
+          "option": "Scoped thread that panics and check after `join`",
+          "why": "Also works but needs more scaffolding; `AssertUnwindSafe` is the smaller change."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `LandingQueue`, the `LandingSlot` guard, `queue` in `State` (set in `Drain::new`), `Drain::enter_queue` and `Drain::await_head`, and the changed `passed` tuple in `attempts`. Add the test module `landing_queue_tests` (additions only).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "purpose": "Short note in section 6: queue order is the order runs pass, not the order landing commits were stacked; the rebase is a later request.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the ordered landing queue, saying it does not rebase.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In drain.rs near `FlagOnDrop` (~line 1010), add `struct LandingQueue { next: u64, line: VecDeque<u64> }` with `Default`, `join(&mut self) -> u64`, `is_head(&self, id: u64) -> bool` and `leave(&mut self, id: u64)` (removes the ticket anywhere, idempotent). Doc comments: FIFO, pure, ordered by join, which is the order runs pass.",
+    "Add `queue: LandingQueue` to `State` (~946) and `queue: LandingQueue::default()` where `Drain::new` builds State (~1859). Add `struct LandingSlot<'a> { state: &'a Mutex<State>, wake: &'a Condvar, id: u64 }`. Its `Drop` locks the state with `unwrap_or_else(PoisonError::into_inner)`, calls `queue.leave(id)`, releases the lock, then calls `wake.notify_all()`. Add `Drain::enter_queue(&self) -> LandingSlot<'_>`, which joins under the state lock. Add `Drain::await_head(&self, job: &str, slot: &LandingSlot<'_>)`: return at once if head; otherwise print one line outside the lock and loop on `pause` until head.",
+    "In `attempts` (~1376) change `passed` to `Option<(String, usize, LandingSlot<'_>)>`. The `RunStep::Passed(job, at)` arm becomes `passed = Some((job, at, self.enter_queue()))`. Replace the section at ~1436 with `if let Some((job, at, slot)) = &passed { self.await_head(job, slot); if self.land(job, *at) { self.st().landed.push(item.job.clone()); return ItemEnd::Landed; } }`. Keep the `failures` count and `ATTEMPTS` check. Leave `Drain::land`, the `landing` mutex and the retry loop alone.",
+    "Add one sentence to the doc comment of the `landing` field (~1039): workers join the landing queue when their run passes, and only the head takes this lock.",
+    "Read the `World` fake and the read-ahead tests in `read_ahead_tests` for how items with disjoint touches form one group under `drain_concurrent(.., 2)`. Model on them without editing them. Add `#[cfg(test)] mod landing_queue_tests` at the end of the file with: a shared log `Mutex<Vec<String>>`; a recording `Ui` (`Sync`) that appends only lines containing `waits in the landing queue` to that log; a `Steps + Sync` fake whose `run` and `land` append entries to the same log, can gate by polling the log (5 s cap, appending `gate timed out` on timeout, never hanging), and count land calls per job. The fake holds no queue logic.",
+    "Write the tests. Pure: `joins_are_served_in_order`, `a_member_that_leaves_while_not_at_the_head_is_removed`, `leaving_twice_is_harmless`. Guard, through `Drain::new` and `enter_queue`: `the_head_keeps_its_place_while_its_slot_is_held`, `a_slot_dropped_by_a_panic_leaves` (using `catch_unwind(AssertUnwindSafe(..))`), `dropping_a_middle_slot_keeps_the_others_in_order`. Drain, each asserting the exact log: `a_waiting_worker_does_not_land_between_the_heads_two_land_calls`, `two_workers_land_in_the_order_they_passed` (first-passed b is held in its first land call until the wait line for a appears), `a_failed_head_releases_its_place`. Do not edit any existing test.",
+    "In docs/design/async-drain.md section 6 (after the rebase steps, ~line 135) add a short note: queue order is the order runs pass, not the order their landing commits were stacked; this first half adds the queue alone and the rebase before landing is a later request.",
+    "In CHANGELOG.md under `## [Unreleased]` / `### Added`, add an entry: with `[parallel] max_concurrency` above 1 the drain lands passed jobs first in, first out through a landing queue; the order is the order runs passed; the head keeps its place across the landing retry; the slot is released on every exit; it does not rebase; landing and one-job-at-a-time behaviour are unchanged.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Check with `git diff` that test code has only added lines and that no file besides the three named is touched. State in the output that tests/drain.rs is deliberately not edited."
+  ],
+  "risks": [
+    {
+      "risk": "A non-head waiter hangs if the head never leaves.",
+      "mitigation": "The guard drops on return and on unwind and calls `notify_all`. `pause` times out every 20 ms. The head leaves after at most ATTEMPTS = 2 land calls. Test (3) checks that a failed head releases its place."
+    },
+    {
+      "risk": "The head waits on the state lock while another worker holds `landing`.",
+      "mitigation": "The wait holds only the state lock, and `pause` releases it. `landing` is taken only in `Drain::land`, so there is no new lock order. The slot's `Drop` takes the state lock only after `attempts` holds no guard."
+    },
+    {
+      "risk": "The drain tests are timing-dependent.",
+      "mitigation": "Gates poll the shared log with a 5 s cap. The asserted order depends on gate conditions, not on sleep length. A timeout appends `gate timed out`, so the whole-log assertion fails; the test never hangs."
+    },
+    {
+      "risk": "Changing `passed` from a cloned tuple to a borrowed one alters the single-worker flow.",
+      "mitigation": "A lone ticket is always head, so it never waits or prints. The land call, the `landed` push and the return values are unchanged. The full athena-cli suite runs for criterion 3."
+    },
+    {
+      "risk": "Two test items might not run side by side in `drain_concurrent(.., 2)`, making the tests pass or fail for the wrong reason.",
+      "mitigation": "The producer copies the disjoint-touch setup of the existing read-ahead tests. Tests (1) and (2) only pass if the second item passes while the first is in its land section, and the exact-log assertion fails loudly otherwise."
+    },
+    {
+      "risk": "Clippy dead-code, needless-lifetime or `mut` warnings under -D warnings.",
+      "mitigation": "Keep the API to the three used methods. Run clippy with `--all-targets`."
+    },
+    {
+      "risk": "Printing a new operator line changes output that existing tests assert on.",
+      "mitigation": "Only a non-head worker prints it, and existing tests run one worker. The line is new text, so any tests that scan all Ui output by prefix are checked when the suite runs."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in `landing_queue_tests`. Pure tests call `LandingQueue::join/is_head/leave`. Guard tests build a real `Drain::new(&fake, &ui, caps, limits)`, join through `Drain::enter_queue` and read `d.st().queue`. (a) Join three tickets: only the first is head; after it leaves the second is, then the third. (b) Join three, drop the middle guard: head and last stay in order, the middle ticket is gone, nobody is blocked. (c) The head's guard is held across two simulated land calls: `is_head` stays true for it and false for the one behind; dropping it makes the next one head. (d) A guard dropped by `catch_unwind(AssertUnwindSafe(..))` around a panic also leaves. (e) `leave` twice is harmless. The drain-level proof that `attempts` keeps one slot across both land calls is the retry test under criterion 2.",
+      "command": "cargo test -p athena-cli landing_queue_tests",
+      "observes": "Joins are served in order. A member that leaves while not at the head is removed and the others keep their order. The head's place holds until its guard drops, including on panic.",
+      "fails_without": "Without the queue the module does not compile. If `leave` only popped the front, (b) leaves the dropped middle ticket and fails. If the guard did not release on drop, (c) and (d) fail.",
+      "seam": "Production entry points `LandingQueue::{join,is_head,leave}`, `Drain::enter_queue` and the `LandingSlot` drop, all added by plan steps 1 and 2. `Drain::new` exists (~1859). The only doubles are the small `Steps` fake and recording `Ui` added by plan step 5. They hold no queue logic and are injected as `&S` and `&U` into `Drain::new`."
+    },
+    {
+      "criterion": 2,
+      "method": "Three tests through the public `drain_concurrent(&fake, limits, &ui, 2)`. The fake's `Steps` methods and the recording `Ui` append to one shared ordered log. The `Ui` records only lines containing `waits in the landing queue`. Every gate polls the log with a 5 s cap and, on timeout, appends `gate timed out`. (1) `a_waiting_worker_does_not_land_between_the_heads_two_land_calls`: items a and b with disjoint touches form one group, two workers. `run(a)` passes at once. First `land(a)` logs `land a`, waits for the wait line for b, then returns `NotLanded`. `run(b)` waits until the log holds the first `land a`, then passes. Second `land(a)` logs `land a` and lands. `land(b)` logs `land b` and lands. Assert the whole log equals [`land a`, `b waits in the landing queue`, `land a`, `land b`] and `report.landed == 2`. (2) `two_workers_land_in_the_order_they_passed`: a starts first but `run(a)` waits for `run(b)` to end. b passes first, becomes head and enters `land(b)`, whose first call waits for the wait line for a, and then returns Landed. a passes later, waits, then lands. Assert the whole log equals [`land b`, `a waits in the landing queue`, `land a`] with `landed == 2`, so a, the earlier-started worker, lands second. (3) `a_failed_head_releases_its_place`: both `land(a)` calls return `NotLanded` while b waits. b then lands, `landed == 1`, and the log has no `gate timed out`.",
+      "command": "cargo test -p athena-cli landing_queue_tests",
+      "observes": "The head keeps its place through the retry: b passes while a is between its two land calls, b waits and says so, and b lands only after a's second call. The worker that passed first lands first although it started second, and the later worker is held back and says so. A failed head's guard releases its place.",
+      "fails_without": "On the base code no wait line is ever printed, so the gate in tests (1) and (2) always times out. The log then contains `gate timed out` and lacks the wait entry, so the whole-log assertion fails every time. This does not depend on how the unfair `landing` mutex is won. If a failed head did not release its place, test (3)'s b would wait forever and fail at the 5 s cap, with `gate timed out` or `landed` wrong. If the head lost its place between its two land calls, b would land between them and the log in (1) would differ.",
+      "seam": "Production entry point `drain_concurrent` (public, exists ~2202). It uses `Drain::attempts`, `enter_queue` and `await_head` (added by steps 2 and 3). The `Steps` fake and the recording `Ui` are new in the test module (step 5), passed as `&(dyn Steps + Sync)` and `&(dyn Ui + Sync)` and sharing one `Mutex<Vec<String>>`. They only log, poll the log and return scripted outcomes; the queue logic stays in production code. Guard: `max_concurrency` 2 gives two workers, and the two items must form one group (step 5 copies the disjoint-touch setup from `read_ahead_tests`; a wrong grouping makes the gates time out and the tests fail loudly)."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the whole athena-cli suite, including the in-file drain tests and tests/drain.rs. They use `drain` with one worker, so the queue has one member that is always head, never waits and never prints. Then read `git diff` for drain.rs and check that existing test modules show only added lines and that tests/drain.rs is absent from the diff.",
+      "command": "cargo test -p athena-cli",
+      "observes": "Every pre-existing test passes unchanged. The test diff is additions only.",
+      "fails_without": "If the queue blocked a lone worker, or the slot were not released after Landed or Failed, existing drain tests would hang or fail.",
+      "seam": "Existing entry points `drain` and `drain_concurrent` with the existing fakes (exist today). Nothing is added."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three CI checks together.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "Exit 0 for all three. Clippy raises no dead-code, needless-lifetime or mut warning for `LandingQueue` or `LandingSlot`.",
+      "fails_without": "A fmt or clippy failure, a dead method on `LandingQueue`, or a failing test makes the command fail.",
+      "seam": "None. These are repository gates."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff. `LandingQueue` has only `u64` and `VecDeque<u64>` fields and no `Mutex`, `Condvar` or thread. `LandingSlot` is carried in the `passed` tuple in `attempts`, so it drops on every return. Nothing changes in crates/athena-core, `Steps::land` (~477, impl ~2996) or `Drain::land` (~1330), and no rebase code is added.",
+      "command": "git diff --stat",
+      "observes": "Only drain.rs, async-drain.md and CHANGELOG.md appear. A search of the added code lines finds no `rebase`. The queue struct is pure.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of the design doc. Under section 6 a short note says queue order is the order runs pass, not the order landing commits were stacked, and that the rebase before landing comes in a later request.",
+      "command": "git diff -- docs/design/async-drain.md",
+      "observes": "The note exists, is short, and names both points.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff of the changelog. Under `## [Unreleased]` there is an entry for the ordered landing queue saying it lands first in, first out in pass order, that the head keeps its place across the landing retry, and that it does not rebase.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "An entry exists in Unreleased and its text says there is no rebase.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "I did not run the code, so the claim that two disjoint-touch items run side by side in `drain_concurrent(.., 2)` rests on reading `run_parallel` and the existing read-ahead tests. The producer confirms it when writing the drain tests; a wrong grouping makes the gates time out and the tests fail loudly.",
+    "The exact shape of `QueueView`, `Caps` and the `Ui` trait for the new fake was not read in full. The producer models them on the existing `World` fake and the other `Ui` impls in drain.rs tests.",
+    "crates/athena-cli/tests/drain.rs is listed in the brief's deliverables but not in the request's Files line; this plan leaves it unedited and the producer must say so."
+  ],
+  "producer_section_sha256": "2c3359e3564bc0c8a6f244dc564f9aa61ddea75d5579296b53341ae9bb40d5b5"
+}

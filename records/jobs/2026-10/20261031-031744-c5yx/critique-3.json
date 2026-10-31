@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-031744-c5yx",
+  "round": 3,
+  "at": "2026-10-31T15:40:51.390659162Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Test (2)'s gate on 'run(b) ended' leaves a short window in which a can join the queue before b, so the test can fail spuriously.",
+      "evidence": "In the plan, `run(a)` waits for `run(b)` to end. But in `attempts` (drain.rs 1401–1419) the join happens only after `run_job` returns `RunStep::Passed`, and `run_job` does more work after the fake `steps.run` returns. So once b's run ends, a can be released, pass and join the queue before b joins. a then becomes head and lands without waiting, and b's gate never sees `a waits in the landing queue`. The test then fails with `gate timed out` even though the code is correct. The base code still fails this test, so the demonstration stays valid. Fix: Gate `run(a)` on the log holding `land b`. That entry proves b has joined and is head, so the order of joins is fixed. The existing `World.gate` already gates on log entries, so the pattern is there to copy.",
+      "location": "Demonstrations, criterion 2, test (2) `two_workers_land_in_the_order_they_passed`",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The asserted wait-line entries leave out the `drain      ` prefix that the printed line carries.",
+      "evidence": "The recording `Ui` stores the whole line `drain      {job} waits in the landing queue`, but the asserted logs list `b waits in the landing queue`. Fix: Say whether the `Ui` trims the prefix before logging, or assert the full line, so the exact-log comparison matches.",
+      "location": "Demonstrations, criterion 2, expected log entries",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Test (3) does not say how b is gated, or what its exact log is.",
+      "evidence": "The plan does not say how b is made to pass while a is still head. Without a gate, b may pass after a has already left, and the test would not show a release. Fix: Gate a's first `land` on b's wait line, as in test (1), and assert the exact log, as for the other two tests.",
+      "location": "Demonstrations, criterion 2, test (3) `a_failed_head_releases_its_place`",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against drain.rs by reading it; I ran nothing. The places the plan names exist and work as it says: `ATTEMPTS` = 2 (line 194), `FlagOnDrop` (1010), the `landing` mutex and `wake` condvar (1041/1043, built at 1859–1860), `Drain::land` (1330), `attempts` (1376) with `passed.clone()` at 1436, `pause` with a 20 ms timeout (1983), the public `drain_concurrent` (2202), and the `read_ahead_tests` `World` fake that gates `run` on log entries. The change sits where the fault starts: the join is in the `RunStep::Passed` arm, the guard is carried in the `passed` tuple so one slot covers both land calls, and `Drain::land` and the lander are untouched. The lock design is sound: the wait holds only the state lock, which `pause` releases, `landing` is still taken only inside `Drain::land`, and the guard's drop takes the state lock only once nothing else holds it. The drain tests now fail on the base code for a reason that does not depend on the lock race. On the base code no 'waits in the landing queue' line is ever printed, so the gate times out and the exact-log assertion fails. That answers the earlier finding about the unfair mutex. The unit tests cover in-order joins, leaving from the middle, and the head keeping its place, and a broken `leave` or drop would make them fail. The plan keeps to the request's Files line and says why tests/drain.rs is left unedited. It changes no athena.toml field. The work fits one producer run. One minor issue: test (2) gates on the end of b's run rather than on b having joined, so it can fail spuriously. The fix is to gate on `land b`. Two nits are left."
+}
