@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A producer that stopped on an expired login (API error 401) or a usage limit (429) no longer counts as spend
+  on its line, and a stored pause is no longer trusted when the attempts no longer reach it. Root cause: the
+  scope guard learned why an attempt stopped from a free-text prefix of the closing reason, and two lists of
+  environment reasons disagreed (the guard's own `environment:` prefix and `is_environment_reason`, which named
+  only low disk and a check timeout). A producer that died on an expired login was closed as `the producer did
+  not complete: ...`, matched neither, and was counted as a failure of the work: it raised the retry, cost and
+  time signals and paused the line, and nothing checked the pause again. Fix: one classifier,
+  `disk::StopCause::of`, which `athena retry` (`resumable_stop`) and the guard (`scope_guard::verdict_of`) both
+  use; the producer stage closes an API error 401 or 429 as an environment stop through the same parser
+  (`disk::producer_stop_reason`), and older records are read by it too. `Athena::line_pause` and `athena
+  status` recompute the signals from the line's attempts under the current rule, with the forecast of the last
+  finished attempt, and return a stored pause only while it still holds. The pause file is left as it is.
 - A job budget too small for the whole path no longer reaches the repository. Root cause: `[budget] job_usd` was
   never required to cover the reader, every planning round (`max_rounds` of planner plus critic), the producer
   and the verifier, and nothing refused an `athena.toml` that set it too low, so a job started under it stopped

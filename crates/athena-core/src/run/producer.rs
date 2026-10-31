@@ -202,10 +202,8 @@ impl Athena {
             if output.outcome != InvocationOutcome::Success {
                 closing.happened = self.failure(
                     ctx,
-                    &format!(
-                        "the producer did not complete: {}",
-                        record.detail.clone().unwrap_or_default()
-                    ),
+                    // An expired login or a usage limit is closed as an environment stop, not as work.
+                    &crate::disk::producer_stop_reason(&record.detail.clone().unwrap_or_default()),
                 );
                 return Ok(Flow::Stop);
             }

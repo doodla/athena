@@ -1756,7 +1756,8 @@ impl Athena {
                 _ => {}
             }
         }
-        let lines = crate::scope_guard::list_lines(&self.state);
+        // Marks that no longer hold under the current attempts are not shown.
+        let lines = self.live_marks(&records);
         for l in lines.iter().filter(|l| l.is_pause()) {
             next.push(format!(
                 "line {} is paused ({})   # {}",
