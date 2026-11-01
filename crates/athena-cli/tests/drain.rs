@@ -6411,3 +6411,516 @@ fn in_flight_bound_holds_a_start_in_a_drain_without_a_failure_and_a_later_drain_
     assert_eq!(second.jobs[0].job, job, "the same job, not a new one");
     assert_eq!(second.landed, 1);
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// Records are committed right after each landing (async-drain.md section 8, decision D145, build job 8)
+
+mod records_order {
+    use super::*;
+    use athena_core::commits::NewFile;
+    use athena_core::state::StateDir;
+    use athena_git::Git;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// A stub world that can be shared between threads and keeps the default `Steps::commit_records` (it
+    /// commits nothing). Each read costs 0.1, each run 0.5 and each rating 0.2; their caps are 0.2, 1.0 and
+    /// 0.3. Every run and every landing is logged as `run <job>`, `end <job>` and `land <job>`.
+    #[derive(Default)]
+    struct World {
+        items: Vec<&'static str>,
+        plan: Vec<PlanEntry>,
+        /// Jobs whose run is rejected (a retry is `<job>-retry`).
+        failing: Vec<&'static str>,
+        /// How long a run takes, in milliseconds; 5 for a job not listed.
+        run_ms: Vec<(&'static str, u64)>,
+        /// The first runs of the items wait, for up to five seconds, until this many runs are in flight.
+        meet: usize,
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        log: Mutex<Vec<String>>,
+    }
+
+    impl World {
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+    }
+
+    impl Steps for World {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Ok(Caps {
+                read: 0.2,
+                run: 1.0,
+                rate: 0.3,
+            })
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            Ok(QueueView {
+                items: self
+                    .items
+                    .iter()
+                    .map(|j| Item::queued(j, &format!("title of {j}")))
+                    .collect(),
+                plan: self.plan.clone(),
+                ..QueueView::default()
+            })
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn read(&self, what: ReadOf<'_>) -> Read {
+            let job = match what {
+                ReadOf::Queued(j) => j.to_string(),
+                ReadOf::Retry(j) => format!("{j}-retry"),
+            };
+            Read {
+                job: Some(job),
+                cost: 0.1,
+                runnable: true,
+                error: None,
+                held: false,
+            }
+        }
+        fn run(&self, job: &str) -> Run {
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            self.log.lock().unwrap().push(format!("run {job}"));
+            if self.items.contains(&job) {
+                // A barrier that gives up, so a serial drain falls through instead of hanging.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while self.active.load(Ordering::SeqCst) < self.meet && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            let ms = self
+                .run_ms
+                .iter()
+                .find(|(j, _)| *j == job)
+                .map_or(5, |(_, ms)| *ms);
+            std::thread::sleep(Duration::from_millis(ms));
+            self.log.lock().unwrap().push(format!("end {job}"));
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            let outcome = if self.failing.iter().any(|f| job.starts_with(f)) {
+                OutcomeState::Rejected
+            } else {
+                OutcomeState::Landed
+            };
+            Run {
+                outcome: Some(outcome),
+                reason: String::new(),
+                cost: 0.5,
+                ..Run::default()
+            }
+        }
+        fn land(&self, job: &str) -> Landing {
+            self.log.lock().unwrap().push(format!("land {job}"));
+            Landing::Landed {
+                changed: vec!["README.md".into()],
+            }
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("stub")
+        }
+        fn check_cap(&self) -> f64 {
+            0.0
+        }
+        fn rate(&self) -> Rate {
+            Rate {
+                rating: Some(2),
+                cost: 0.2,
+                error: None,
+            }
+        }
+    }
+
+    /// The same world, plus a records step that commits a real priority record of the landed job through the
+    /// real committer (the gated commit, at the record's canonical path) into the fixture's repository.
+    struct Recording {
+        world: World,
+        git: Git,
+        state: StateDir,
+        /// `(job, until)`: the records step of `job` waits (up to five seconds) until the run of `until` has
+        /// ended, then a little longer, so `until` is queued behind `job` when `job`'s records are made.
+        hold: Option<(&'static str, &'static str)>,
+        /// Jobs whose records commit is refused.
+        refuse: Vec<&'static str>,
+    }
+
+    impl Recording {
+        fn new(fx: &Fixture, world: World) -> Recording {
+            Recording {
+                world,
+                git: Git::at(fx.root()),
+                state: StateDir::new(fx.state.path().join("repo"))
+                    .with_free_space(athena_core::test_support::plenty_of_space),
+                hold: None,
+                refuse: Vec::new(),
+            }
+        }
+    }
+
+    /// The job id of a stub job: fixed, so the record paths are the same on every run.
+    fn id_of(job: &str) -> athena_data::JobId {
+        let bits = u32::from(job.as_bytes()[0]);
+        athena_data::JobId::Id(RecordId::from_parts(
+            "2026-10-30T10:00:00Z".parse().unwrap(),
+            bits,
+        ))
+    }
+
+    impl Steps for Recording {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            self.world.caps()
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            self.world.queue()
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn approve(&self, proposal: &str) -> Approval {
+            self.world.approve(proposal)
+        }
+        fn read(&self, what: ReadOf<'_>) -> Read {
+            self.world.read(what)
+        }
+        fn run(&self, job: &str) -> Run {
+            self.world.run(job)
+        }
+        fn land(&self, job: &str) -> Landing {
+            self.world.land(job)
+        }
+        fn check_page(&self) -> Check {
+            self.world.check_page()
+        }
+        fn check_cap(&self) -> f64 {
+            0.0
+        }
+        fn rate(&self) -> Rate {
+            self.world.rate()
+        }
+        fn commit_records(&self, job: &str) -> Result<(), String> {
+            if let Some((waiter, until)) = self.hold
+                && waiter == job
+            {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !self.world.log().contains(&format!("end {until}"))
+                    && Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            self.world
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("records {job}"));
+            if self.refuse.contains(&job) {
+                return Err("the records commit was refused".into());
+            }
+            let id = id_of(job);
+            let file = NewFile::record(&priority_record(&id, "low"));
+            Committer {
+                git: &self.git,
+                state: &self.state,
+            }
+            .commit_records(
+                std::slice::from_ref(&file),
+                &message(
+                    &format!("Records of {job}"),
+                    "The records of a landed job.",
+                    &[("Athena-Job", id.as_str().to_string())],
+                ),
+            )
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"))
+        }
+    }
+
+    fn independent(ids: &[&str]) -> Vec<PlanEntry> {
+        ids.iter()
+            .map(|id| planned(id, Ladder::Implementation, &[&format!("src/{id}.rs")], &[]))
+            .collect()
+    }
+
+    /// a, then b after a, then c after b: the plan runs them in that order, one at a time.
+    fn chain() -> Vec<PlanEntry> {
+        vec![
+            planned("a", Ladder::Implementation, &["src/a.rs"], &[]),
+            planned("b", Ladder::Implementation, &["src/b.rs"], &["a"]),
+            planned("c", Ladder::Implementation, &["src/c.rs"], &["b"]),
+        ]
+    }
+
+    /// The entries of `log` that begin with one of `verbs`, in order.
+    fn only(log: &[String], verbs: &[&str]) -> Vec<String> {
+        log.iter()
+            .filter(|e| verbs.iter().any(|v| e.starts_with(&format!("{v} "))))
+            .cloned()
+            .collect()
+    }
+
+    /// The job names of the entries that begin with `verb`, in order, such as `c a b`.
+    fn jobs_of(log: &[String], verb: &str) -> String {
+        only(log, &[verb])
+            .iter()
+            .map(|e| e[verb.len() + 1..].to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Three jobs in flight at once; a ends second, c first, b last. Their runs start in the order the plan
+    /// gives, and finish c, a, b.
+    fn three_in_flight() -> World {
+        World {
+            items: vec!["a", "b", "c"],
+            plan: independent(&["a", "b", "c"]),
+            run_ms: vec![("c", 50), ("a", 150), ("b", 300)],
+            meet: 3,
+            ..World::default()
+        }
+    }
+
+    fn subjects_since(fx: &Fixture, base: &str) -> Vec<String> {
+        let out = fx
+            .git
+            .run(["log", "--reverse", "--format=%s", &format!("{base}..HEAD")])
+            .unwrap();
+        out.lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn records_commit_after_each_landing_in_landing_order_with_jobs_in_flight_together() {
+        let fx = Fixture::new();
+        let base = fx.head();
+        let mut steps = Recording::new(&fx, three_in_flight());
+        // c lands first; its records step waits until a has finished running, so a is queued behind c while
+        // c's records are made. A records step made after c gave up its place would let a land first.
+        steps.hold = Some(("c", "a"));
+        let report = drain::drain_concurrent(&steps, limits(9.0), &Quiet, 3).unwrap();
+        let log = steps.world.log();
+
+        let started = jobs_of(&log, "run");
+        let ended = jobs_of(&log, "end");
+        let landed = jobs_of(&log, "land");
+        let recorded = jobs_of(&log, "records");
+        println!(
+            "runs started:      {started}  (all three in flight: peak {})",
+            steps.world.peak.load(Ordering::SeqCst)
+        );
+        println!("runs ended:        {ended}");
+        println!("landing sequence:  {landed}");
+        println!("records sequence:  {recorded}");
+        println!(
+            "landing and records, as they happened: {:?}",
+            only(&log, &["land", "records"])
+        );
+
+        assert_eq!(steps.world.peak.load(Ordering::SeqCst), 3, "{log:?}");
+        assert_eq!(ended, "c a b", "{log:?}");
+        assert_eq!(report.landed, 3, "{log:?}");
+        // Each landing is followed at once by its own records, and the next landing comes after them.
+        assert_eq!(
+            only(&log, &["land", "records"]),
+            [
+                "land c",
+                "records c",
+                "land a",
+                "records a",
+                "land b",
+                "records b"
+            ],
+            "started {started}, ended {ended}: {log:?}"
+        );
+        // The records are in the repository in the same order, one commit each.
+        assert_eq!(
+            subjects_since(&fx, &base),
+            ["Records of c", "Records of a", "Records of b"]
+        );
+    }
+
+    #[test]
+    fn append_only_with_interleaved_jobs_and_no_records_for_a_job_that_did_not_land() {
+        let fx = Fixture::new();
+        // An earlier job's record is already in the repository.
+        let old = id_of("old");
+        let earlier = priority_record(&old, "high");
+        commit_records_to(&fx, std::slice::from_ref(&earlier), "An earlier record");
+        let base = fx.head();
+        let earlier_path = earlier.canonical_path();
+        let blob = |rev: &str| {
+            fx.git
+                .run(["rev-parse", &format!("{rev}:{earlier_path}")])
+                .unwrap()
+        };
+        let earlier_blob = blob(&base);
+        let earlier_text = fx
+            .git
+            .run(["show", &format!("{base}:{earlier_path}")])
+            .unwrap();
+
+        // a, b, c land; d is in flight with them, is rejected (and again on its retry) and never lands.
+        let mut world = three_in_flight();
+        world.items.push("d");
+        world.plan = independent(&["a", "b", "c", "d"]);
+        world.run_ms.push(("d", 20));
+        world.failing = vec!["d"];
+        world.meet = 4;
+        let mut steps = Recording::new(&fx, world);
+        steps.hold = Some(("c", "a"));
+        let report = drain::drain_concurrent(&steps, limits(20.0), &Quiet, 4).unwrap();
+        let log = steps.world.log();
+        println!("landing sequence:  {}", jobs_of(&log, "land"));
+        println!("records sequence:  {}", jobs_of(&log, "records"));
+
+        assert_eq!(report.landed, 3, "{log:?}");
+        assert_eq!(report.failed_item.as_deref(), Some("d"), "{log:?}");
+        assert_eq!(jobs_of(&log, "records"), "c a b", "{log:?}");
+
+        // Only record files were added: no line of the diff is a change or a removal.
+        let diff = fx
+            .git
+            .run(["diff", "--name-status", &base, "HEAD"])
+            .unwrap();
+        let lines: Vec<&str> = diff.lines().collect();
+        println!("git diff --name-status {{base}}..HEAD:\n{diff}");
+        assert_eq!(lines.len(), 3, "{diff}");
+        for line in &lines {
+            assert!(
+                line.starts_with("A\t") && line.contains("/priority-1.json"),
+                "{diff}"
+            );
+        }
+        assert_eq!(
+            blob("HEAD"),
+            earlier_blob,
+            "the earlier record is unchanged"
+        );
+        assert_eq!(
+            fx.git
+                .run(["show", &format!("HEAD:{earlier_path}")])
+                .unwrap(),
+            earlier_text
+        );
+        let commits = fx
+            .git
+            .run(["rev-list", "--count", &format!("{base}..HEAD")])
+            .unwrap();
+        assert_eq!(commits.trim(), "3");
+
+        // The jobs that landed have their record; the one that did not has none.
+        let records = Records::load(&fx.git, "HEAD").unwrap();
+        for job in ["a", "b", "c"] {
+            assert_eq!(
+                records.jobs[id_of(job).as_str()].priorities.len(),
+                1,
+                "{job}"
+            );
+        }
+        assert!(!records.jobs.contains_key(id_of("d").as_str()));
+        assert!(!log.iter().any(|e| e.starts_with("records d")), "{log:?}");
+    }
+
+    #[test]
+    fn a_failed_records_commit_is_noted_and_does_not_undo_the_landing() {
+        let fx = Fixture::new();
+        let world = World {
+            items: vec!["a", "b", "c"],
+            plan: chain(),
+            ..World::default()
+        };
+        let mut steps = Recording::new(&fx, world);
+        steps.refuse = vec!["b"];
+        let report = drain::drain_concurrent(&steps, limits(9.0), &Quiet, 3).unwrap();
+        assert_eq!(report.landed, 3, "{:?}", steps.world.log());
+        assert_eq!(jobs_of(&steps.world.log(), "records"), "a b c");
+        let note =
+            "job b landed but its records were not committed: the records commit was refused";
+        assert!(report.notes.iter().any(|n| n == note), "{:?}", report.notes);
+        // a and c have their records; b has none.
+        let records = Records::load(&fx.git, "HEAD").unwrap();
+        assert!(records.jobs.contains_key(id_of("a").as_str()));
+        assert!(!records.jobs.contains_key(id_of("b").as_str()));
+        assert!(records.jobs.contains_key(id_of("c").as_str()));
+    }
+
+    #[test]
+    fn with_one_job_at_a_time_each_landing_is_followed_by_its_records_as_before() {
+        let expected = [
+            "run a",
+            "land a",
+            "records a",
+            "run b",
+            "land b",
+            "records b",
+            "run c",
+            "land c",
+            "records c",
+        ];
+        // [parallel] max_concurrency 1, then the serial entry point.
+        for bound in [Some(1), None] {
+            let fx = Fixture::new();
+            let base = fx.head();
+            let world = World {
+                items: vec!["a", "b", "c"],
+                plan: chain(),
+                ..World::default()
+            };
+            let steps = Recording::new(&fx, world);
+            let report = match bound {
+                Some(n) => drain::drain_concurrent(&steps, limits(9.0), &Quiet, n).unwrap(),
+                None => drain::drain(&steps, limits(9.0), &Quiet).unwrap(),
+            };
+            let log = steps.world.log();
+            println!(
+                "bound {bound:?}: landing {} / records {}",
+                jobs_of(&log, "land"),
+                jobs_of(&log, "records")
+            );
+            assert_eq!(
+                only(&log, &["run", "land", "records"]),
+                expected,
+                "bound {bound:?}"
+            );
+            assert_eq!(steps.world.peak.load(Ordering::SeqCst), 1);
+            assert_eq!(report.landed, 3);
+            assert_eq!(
+                subjects_since(&fx, &base),
+                ["Records of a", "Records of b", "Records of c"]
+            );
+        }
+    }
+
+    #[test]
+    fn steps_that_keep_the_default_see_no_records_step_at_a_bound_of_two() {
+        // [parallel] max_concurrency 2, and a stub that does not override `commit_records`: the drain
+        // behaves as it did before the records step existed.
+        let world = World {
+            items: vec!["a", "b"],
+            plan: vec![
+                planned("a", Ladder::Implementation, &["src/a.rs"], &[]),
+                planned("b", Ladder::Implementation, &["src/b.rs"], &["a"]),
+            ],
+            ..World::default()
+        };
+        let report = drain::drain_concurrent(&world, limits(9.0), &Quiet, 2).unwrap();
+        let log = world.log();
+        assert_eq!(
+            log,
+            ["run a", "end a", "land a", "run b", "end b", "land b"]
+        );
+        assert_eq!(report.landed, 2);
+        assert_eq!(report.stop, Stop::QueueEmpty);
+        assert!(
+            report.notes.iter().all(|n| !n.contains("records")),
+            "{:?}",
+            report.notes
+        );
+    }
+}
