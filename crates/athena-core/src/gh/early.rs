@@ -313,7 +313,87 @@ fn https_github_repository(url: &str) -> Option<String> {
     parse_remote(url).ok().map(|(_, repository)| repository)
 }
 
+/// The start of the name of a job's CI branch.
+pub const CI_BRANCH_PREFIX: &str = "athena/ci/";
+
+/// The branch a job's candidate is pushed to so the repository's CI runs on it: `athena/ci/<job id>`. The CI
+/// workflow runs on pushes to `athena/ci/**`, and the branch is deleted when the job closes.
+pub fn ci_branch(job: &JobId) -> String {
+    format!("{CI_BRANCH_PREFIX}{}", job.as_str())
+}
+
+/// Puts `commit` on `branch` of the remote. A missing branch is pushed; a branch that already holds `commit`
+/// is left alone; a branch left by an earlier run of the same job (a rebuilt candidate) is replaced, pinned
+/// to the head found, so the push is never a blind overwrite.
+fn publish_ci_branch(remote: &dyn Remote, branch: &str, commit: &str) -> Result<()> {
+    match remote.remote_head(branch)? {
+        None => remote.push(branch, commit),
+        Some(head) if head == commit => Ok(()),
+        Some(old) => remote.replace(branch, commit, &old),
+    }
+}
+
 impl Athena {
+    /// The `owner/name` of the origin remote when it is an https URL on github.com; `None` for no origin or
+    /// any other kind.
+    fn github_repository(&self) -> Option<String> {
+        let url = self.git.run(["remote", "get-url", "origin"]).ok()?;
+        https_github_repository(&url)
+    }
+
+    /// Runs `act` on the remote the CI branch lives on: origin, or, in tests, the fake in the early seam.
+    fn with_ci_remote<T>(&self, act: impl FnOnce(&dyn Remote) -> Result<T>) -> Result<T> {
+        #[cfg(test)]
+        if let Some((remote, _)) = early_seam::current() {
+            return act(&*remote);
+        }
+        act(&GitRemote {
+            git: &self.git,
+            name: "origin",
+        })
+    }
+
+    /// Pushes the admitted candidate `commit` to the job's CI branch ([`ci_branch`]) on origin, so the
+    /// repository's CI runs on it. Nothing reads the CI result yet. With no GitHub origin (none, or not an
+    /// https URL on github.com) nothing is pushed and one line says so. A nested run says nothing. A push
+    /// failure is one warning line and does not change the job's outcome.
+    pub(crate) fn push_ci_branch(&self, job: &JobId, commit: &str, ui: &dyn Ui) {
+        if self.nested.is_some() {
+            return;
+        }
+        if self.github_repository().is_none() {
+            ui.line("ci         CI branch push is skipped because there is no GitHub origin");
+            return;
+        }
+        let branch = ci_branch(job);
+        if let Err(problem) =
+            self.with_ci_remote(|remote| publish_ci_branch(remote, &branch, commit))
+        {
+            ui.line(&format!(
+                "warning: could not push the CI branch {branch}: {problem:#}"
+            ));
+        }
+    }
+
+    /// Deletes the job's CI branch from origin when the job closes, whatever the outcome. It does nothing
+    /// when there is no GitHub origin (the push said so) or the remote does not hold the branch. A failure is
+    /// one warning line and does not change the job's outcome.
+    pub(crate) fn delete_ci_branch(&self, job: &JobId, ui: &dyn Ui) {
+        if self.nested.is_some() || self.github_repository().is_none() {
+            return;
+        }
+        let branch = ci_branch(job);
+        let deleted = self.with_ci_remote(|remote| match remote.remote_head(&branch)? {
+            Some(_) => remote.delete_branch(&branch),
+            None => Ok(()),
+        });
+        if let Err(problem) = deleted {
+            ui.line(&format!(
+                "warning: could not delete the CI branch {branch}: {problem:#}"
+            ));
+        }
+    }
+
     /// The early step of `go`: at verification start, opens or updates the job's pull request through the
     /// host (see [`open_early_pr`]) so CI caches by the candidate's fingerprint. Never merges. A missing
     /// origin, or one that is not an https URL on github.com, is skipped without a word. Any failure is one
@@ -322,10 +402,7 @@ impl Athena {
         if self.nested.is_some() {
             return;
         }
-        let Ok(url) = self.git.run(["remote", "get-url", "origin"]) else {
-            return;
-        };
-        let Some(repository) = https_github_repository(&url) else {
+        let Some(repository) = self.github_repository() else {
             return;
         };
         if let Err(problem) = self.early_pr_to(job, commit, title, &repository) {

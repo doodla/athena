@@ -922,8 +922,8 @@ impl Athena {
         // seeds the closing with its invocations, plan and critique, so the producer's invocation is
         // numbered after them and the budget check below counts what planning cost (review F1).
         if let Some(seed) = resume_from {
-            let closing = self.resume_candidate(&ctx, &accepted, seed, Closing::new())?;
-            return self.close_dispatched(&ctx, closing);
+            let run = self.resume_candidate(&ctx, &accepted, seed, Closing::new());
+            return self.finish_dispatched(&ctx, run);
         }
         let mut closing = Closing::new();
         let mut producer_prompt = brief.clone();
@@ -945,8 +945,17 @@ impl Athena {
                 return self.close_dispatched(&ctx, closing);
             }
         }
-        let closing = self.produce_and_verify(&ctx, &producer_prompt, &accepted, closing)?;
-        self.close_dispatched(&ctx, closing)
+        let run = self.produce_and_verify(&ctx, &producer_prompt, &accepted, closing);
+        self.finish_dispatched(&ctx, run)
+    }
+
+    /// Closes a job whose run can have pushed its CI branch (the resume path and the produce-and-verify
+    /// path), then deletes that branch. The delete runs whatever the run ended in: a verdict of any outcome,
+    /// a stop, or an error; a failed delete is a warning line only (see [`Athena::delete_ci_branch`]).
+    fn finish_dispatched(&self, ctx: &RunContext<'_>, run: Result<Closing>) -> Result<GoResult> {
+        let closed = run.and_then(|closing| self.close_dispatched(ctx, closing));
+        self.delete_ci_branch(ctx.id(), ctx.ui);
+        closed
     }
 }
 
@@ -1195,6 +1204,11 @@ impl Athena {
         {
             return Err(self.hold_for_disk(ctx, closing, low));
         }
+
+        // The admitted candidate goes to the job's CI branch, so the repository's CI runs on it. The branch is
+        // deleted when the job closes (`finish_dispatched`). Nothing reads the CI result yet, and a failure is
+        // a warning line only.
+        self.push_ci_branch(&id, &c, ctx.ui);
 
         // Verification starts: open or update the job's pull request now, so the host's checks run on the
         // candidate while the verifier works. It never merges, and a failure is a warning line only.

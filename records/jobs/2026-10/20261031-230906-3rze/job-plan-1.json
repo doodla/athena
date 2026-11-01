@@ -1,0 +1,251 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-230906-3rze",
+  "round": 1,
+  "at": "2026-11-01T01:23:49.760952546Z",
+  "invocation_seq": 3,
+  "approach": "Add `Remote::delete_branch` (default error, `GitRemote` runs `git push <name> --delete <branch>`). In gh/early.rs add `ci_branch(job)` (`athena/ci/<job id>`) and two `Athena` methods that share one origin check with `early_pr`: `push_ci_branch` (log one skip line when there is no https github.com origin; otherwise `push` the admitted candidate, or `replace` pinned to the head a killed earlier run left) and `delete_ci_branch` (silent without origin; deletes only if `remote_head` shows the branch). Both go through the existing `early_seam` under `cfg(test)`. Failures are one warning line each. In run/mod.rs, `check_and_verify` calls `push_ci_branch` right before `early_pr`. A new `finish_dispatched` wraps the two admission-capable run paths (resume and produce_and_verify) and calls `delete_ci_branch` after `close_dispatched`, on every outcome including an Err. Delete goes in mod.rs because close.rs is not a listed file. ci.yml gets `athena/ci/**` in the push trigger and a rewritten comment. Tests: `EarlyFake` records CI-branch calls in a separate list so the existing run_pin_tests assertions stay valid. New Athena::go tests in run/tests.rs always install the seam. One real-git test covers `GitRemote::delete_branch`.",
+  "decisions": [
+    {
+      "choice": "Route CI-branch calls through the existing early_seam and the same Remote used by early_pr, with a shared origin check.",
+      "reason": "Brief requires the existing gh::Remote push and the early_seam pattern. One origin check and one seam guarantee a test with an https github.com origin never reaches the network.",
+      "rejected": [
+        {
+          "option": "A second seam only for the CI branch",
+          "why": "More test machinery; a test could install one seam and miss the other, reaching the network."
+        },
+        {
+          "option": "Call `git push` directly from run/mod.rs",
+          "why": "Bypasses gh::Remote, which the request requires, and cannot be faked."
+        }
+      ]
+    },
+    {
+      "choice": "Delete lives in a wrapper `finish_dispatched` in run/mod.rs that runs after `close_dispatched` and also on an Err from the run.",
+      "reason": "close.rs is not a listed file, and a wrapper covers every outcome (landed, rejected, failed, error) with one call. It wraps only the resume and produce_and_verify paths, the only ones that can have pushed, so plan-stop closes make no network call.",
+      "rejected": [
+        {
+          "option": "Edit close_dispatched in run/close.rs",
+          "why": "File not listed; larger blast radius."
+        },
+        {
+          "option": "Delete only on Landed",
+          "why": "Criterion 3 and the request say delete whatever the outcome."
+        }
+      ]
+    },
+    {
+      "choice": "Delete only when `remote_head` shows the branch; a missing branch is a no-op, a failure is one warning.",
+      "reason": "Avoids a false warning when the job closed before admission or the push failed, and the job's outcome never changes.",
+      "rejected": [
+        {
+          "option": "Delete unconditionally",
+          "why": "A missing branch makes `git push --delete` fail, giving a spurious warning."
+        },
+        {
+          "option": "Track 'pushed' in process memory",
+          "why": "Lost when the process dies; remote_head also cleans a branch left by an earlier run."
+        }
+      ]
+    },
+    {
+      "choice": "Push with `push` when the branch is absent, nothing when it already holds the commit, and `replace` pinned to the found head when it holds another commit.",
+      "reason": "`Remote::push` has no force option, and a resumed job rebuilds its candidate, so a killed run's leftover would otherwise be refused. `replace` is the existing pinned form.",
+      "rejected": [
+        {
+          "option": "Add a force flag to push",
+          "why": "The trait documents no force; widens a safety-relevant API."
+        }
+      ]
+    },
+    {
+      "choice": "The skip line is emitted by the push site only and carries no 'warning' text; the delete site is silent without a GitHub origin. Nested runs skip both silently.",
+      "reason": "Gives exactly one line per job, and existing run_pin_tests helpers that filter lines containing 'warning' stay valid.",
+      "rejected": [
+        {
+          "option": "Log at both sites",
+          "why": "Two lines per job for the same cause."
+        }
+      ]
+    },
+    {
+      "choice": "`EarlyFake` (test_support.rs) records calls on branches starting `athena/ci/` in a separate `ci_calls` list with its own head and its own failure flag.",
+      "reason": "Keeps existing run_pin_tests assertions (`pushes.len()==1`, kinds `[push, open_pr]`, one warning when push fails) true without edits, and lets the new tests assert CI calls separately from the early pull request's. The routing is only recording; the code under test makes every decision.",
+      "rejected": [
+        {
+          "option": "Record everything in `calls` and edit run_pin_tests.rs",
+          "why": "Touches many unrelated assertions."
+        },
+        {
+          "option": "A new fake in run/tests.rs only",
+          "why": "Existing run_pin_tests would still send CI pushes into EarlyFake and break."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh/remote.rs",
+      "action": "modify",
+      "purpose": "Add `Remote::delete_branch(&self, branch)` with a default that bails, and implement it for `GitRemote` as `git push <name> --delete <branch>`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/early.rs",
+      "action": "modify",
+      "purpose": "Add `CI_BRANCH_PREFIX` and `ci_branch(job)`; factor the origin check out of `early_pr`; add `Athena::push_ci_branch` and `Athena::delete_ci_branch` with the cfg(test) seam lookup, the skip line and warning lines.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/mod.rs",
+      "action": "modify",
+      "purpose": "Re-export `ci_branch` and `CI_BRANCH_PREFIX` from early (pub use) so run/ and test_support.rs can name them.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Call `push_ci_branch` just before `early_pr` in `check_and_verify`; add `finish_dispatched` that closes then deletes the CI branch (also on Err), used at the resume and produce_and_verify sites in `dispatch`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Push trigger `branches: [main, \"athena/ci/**\"]`; rewrite the comment above it. The job named 'fmt, clippy, tests' is untouched.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Not in the brief's file list but needed: extend `EarlyFake` to record calls on `athena/ci/` branches in `ci_calls` with its own head and `fail_ci`, and implement `delete_branch`. Existing `calls`/`head`/`fail_push` behavior is unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the `ci_run` helper (always installs the seam) and the tests for push and delete order, the no-origin skip, and delete after Rejected and Failed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Add a real-git test: `GitRemote::delete_branch` removes a pushed branch from a local bare remote (`remote_head` goes from Some to None), and the default `delete_branch` of the test `FakeRemote` returns an error.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under [Unreleased] / Added for the CI branch push and delete, saying nothing reads the CI result yet.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read gh/remote.rs and add `delete_branch` with the default bail! and the `GitRemote` impl (`git push <name> --delete <branch>`).",
+    "In gh/early.rs add `pub const CI_BRANCH_PREFIX: &str = \"athena/ci/\"` and `pub fn ci_branch(job: &JobId) -> String`. Extract from `early_pr` a helper returning the `owner/name` of an https github.com origin (None when `nested` is set, there is no origin, or it is not https github.com). Re-export `ci_branch` and `CI_BRANCH_PREFIX` in gh/mod.rs.",
+    "In gh/early.rs add `Athena::push_ci_branch(job, commit, ui)`. With no repository it emits one `ui.line(\"ci         CI branch push is skipped because there is no GitHub origin\")` (nothing when nested). Otherwise it looks up the remote (under cfg(test) `early_seam::current()` first, else `GitRemote { git: &self.git, name: \"origin\" }`), reads `remote_head(branch)`, then does `push` when None, nothing when it equals the commit, and `replace(branch, commit, old)` otherwise. Any Err is one `warning: could not push the CI branch ...` line. Add `Athena::delete_ci_branch(job, ui)`: silent when there is no repository; if `remote_head` is Some, call `delete_branch`; an Err is one `warning: could not delete the CI branch ...` line.",
+    "In test_support.rs extend `EarlyFake` with `ci_head`, `ci_calls`, `fail_ci` and `ci_of(kind)`. For branches starting with `CI_BRANCH_PREFIX`, `remote_head`, `push`, `replace` and a new `delete_branch` use those fields (recording kind push, replace or delete with the probe) and leave `calls`, `head` and `fail_push` alone.",
+    "In run/mod.rs call `self.push_ci_branch(&id, &c, ctx.ui)` immediately before `self.early_pr(...)` in `check_and_verify`. Add `fn finish_dispatched(&self, ctx, run: Result<Closing>) -> Result<GoResult>`: `let closed = run.and_then(|c| self.close_dispatched(ctx, c)); self.delete_ci_branch(ctx.id(), ctx.ui); closed`. Use it at the resume site (`self.resume_candidate(...)`) and the final `self.produce_and_verify(...)` site in `dispatch`; leave the plan-stop `close_dispatched` calls alone.",
+    "Edit ci.yml: `branches: [main, \"athena/ci/**\"]`, and extend the comment above `push:` to say pushes to athena/ci/** are Athena candidate CI runs, pushed by Athena for each job and deleted when it closes. Do not touch the `name: fmt, clippy, tests` job.",
+    "In run/tests.rs (module produce_and_verify_order_tests) add `ci_run(origin, check, setup)` that creates the repo, adds `origin` if given, builds `athena_with(.., counting(..))`, creates the `EarlyFake` with a probe over the agent counts, installs `early_seam`, runs `go`, and returns the fake, UI lines, state and job id. Add the three tests: order and candidate commit (criterion 1), no origin or non-GitHub origin (criterion 2), and Rejected/Failed plus a failing delete or push (criterion 3).",
+    "In gh/tests.rs add a real-git test with a local bare remote: push `athena/ci/x`, call `GitRemote::delete_branch`, assert `remote_head` is None; and assert the default `Remote::delete_branch` of the test `FakeRemote` returns an error.",
+    "Add the CHANGELOG.md bullet under [Unreleased] / Added: written for an outside reader, it names the branch pattern, the ci.yml trigger, the one-line skip with no GitHub origin, and that nothing reads the CI result yet.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any existing test that asserts exact UI lines for a no-origin run."
+  ],
+  "risks": [
+    {
+      "risk": "A test with a github.com origin reaches the real network through `GitRemote` or `gh`.",
+      "mitigation": "Every new test goes through the one `ci_run` helper that installs the seam. Existing tests that add an https github.com origin already install it (run_pin_tests.rs). The fake keeps all CI calls in-process."
+    },
+    {
+      "risk": "Existing run_pin_tests assertions change because CI-branch calls reach the same fake.",
+      "mitigation": "The CI-branch routing in EarlyFake is separate from `calls`, `head` and `fail_push`; the skip line contains no 'warning' text. Run the full `cargo test --locked`."
+    },
+    {
+      "risk": "A close path skips the delete and leaves branches on the host.",
+      "mitigation": "Delete is wrapped so it runs after `close_dispatched` and on an Err from the run, and its own failure is only a warning. A test covers Landed, Rejected and Failed."
+    },
+    {
+      "risk": "Two skip lines per job, or none.",
+      "mitigation": "The skip line is emitted only at the push site; the delete site is silent. The test counts matching lines."
+    },
+    {
+      "risk": "The new push trigger makes a CI run for every candidate (cost) and the cache scope differs from the pull_request run.",
+      "mitigation": "The comment explains that Athena's candidate pushes are CI runs; the push runs the same job names, so the required check name is unchanged. The comment also says these runs are not on a pull request and their results are not read yet."
+    },
+    {
+      "risk": "A killed job leaves a stale `athena/ci/<id>` that a plain push is refused on.",
+      "mitigation": "Pin it with `replace` to the head found by `remote_head`; if that fails, one warning and the job's outcome is unchanged."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A test in run/tests.rs (module produce_and_verify_order_tests) builds the repo with `origin` = https://github.com/owner/repo, installs `early_seam` with an `EarlyFake` (probe = agents run so far), and drives `Athena::go`. It asserts: `ci_calls` kinds are [push, delete]; the push branch is `athena/ci/<job>` with the same commit as the early push; that commit exists in the repository and is a candidate, not the landed one; the push's probe is 1 (only the producer had run) and the delete's is 2 (the verifier had finished); the early `open_pr` call exists; the fake's CI head ends None.",
+      "command": "cargo test -p athena-core ci_branch_is_pushed_after_admission_and_deleted_at_close",
+      "observes": "Recorded CI push and delete calls in order with the candidate commit, plus the separate early push and open_pr.",
+      "fails_without": "Without the push in check_and_verify the fake records no CI push; without the delete in finish_dispatched it records no CI delete; if the CI push reused the early pull request's push, the CI-branch list would be empty and `of(\"push\")` would hold one non-CI push.",
+      "seam": "Production entry `Athena::go` (exists). The guards are a github.com https origin and `nested` None. The fake is `test_support::EarlyFake`, injected through `crate::gh::early_seam::install(fake.clone(), fake.clone())` (exists, used in run_pin_tests.rs). Step 4 extends `EarlyFake` with CI-branch recording and `delete_branch`; steps 2 and 3 add the production calls."
+    },
+    {
+      "criterion": 2,
+      "method": "A test in run/tests.rs loops origins [none, a local path, https://gitlab.example.com/owner/repo, https://example.com/github.com/owner/repo], each with the seam installed and a `Lines` UI. It runs `Athena::go` to completion and asserts: the fake's `ci_calls` and `calls` are empty, and exactly one UI line contains 'CI branch push is skipped because there is no GitHub origin'.",
+      "command": "cargo test -p athena-core no_github_origin_pushes_no_ci_branch",
+      "observes": "No recorded calls on the fake, and one skip line in the UI.",
+      "fails_without": "Without the origin check the push site would reach the fake (a recorded call) or git; without the skip line the line count is 0, and a second log site would make it 2.",
+      "seam": "`Athena::go` (exists); `EarlyFake` plus `early_seam::install` as in criterion 1; the origin differs per iteration by `git remote add origin` on the test repo (the pattern in run_pin_tests.rs `early_run`)."
+    },
+    {
+      "criterion": 3,
+      "method": "A test in run/tests.rs drives `Athena::go` twice with a github origin and the seam. First with check `FAILS_ON_EDIT`, which ends Rejected. Second with `check_seam::install` returning `killed_at_the_deadline`, which ends Failed. For each it asserts the final state, that `ci_calls` kinds are [push, delete], and that the fake's CI head is None. It also checks a delete that fails (fake `fail_ci`) gives one warning line and the same state.",
+      "command": "cargo test -p athena-core ci_branch_is_deleted_when_the_job_is_rejected_or_fails",
+      "observes": "A recorded CI delete after a Rejected and a Failed close.",
+      "fails_without": "If delete ran only on success, the rejected and failed runs would end with a push and no delete, and the remote head would still be set.",
+      "seam": "`Athena::go`; `athena_with(.., FAILS_ON_EDIT, ..)` and `check_seam::install` both exist in run/tests.rs; `EarlyFake` and `early_seam` as above."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff of the workflow.",
+      "command": "git diff -- .github/workflows/ci.yml",
+      "observes": "`push: branches: [main, \"athena/ci/**\"]`, a comment above it saying pushes to athena/ci/** are Athena candidate CI runs, and no change to the line `name: fmt, clippy, tests`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff. Every new test builds its run through one helper, `ci_run(origin, check, ..)`, which installs `early_seam` with an `EarlyFake` before calling `Athena::go` and holds the guard until the end. No new test calls `go` another way, and nothing sets a github origin without that helper. `cargo test -p athena-core ci_` runs without network access.",
+      "command": "git diff -- crates/athena-core/src/run/tests.rs",
+      "observes": "The one helper that adds an origin also installs the seam; no `GhCli` or `GitRemote` path is reachable in the new tests.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks. This also runs the existing run_pin_tests.rs tests, which must keep passing unchanged.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three commands exit 0.",
+      "fails_without": "A missing `delete_branch` impl, an unused import, or an existing test broken by the skip line (a no-origin test that asserts exact UI lines) fails the suite.",
+      "seam": "All tests as they run under `cargo test`; no new seam."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff of CHANGELOG.md.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new bullet under `## [Unreleased]` / `### Added` saying each candidate is pushed to athena/ci/<job id> and the branch deleted at close, that ci.yml runs on those pushes, that with no GitHub origin it logs one line and does nothing, and that nothing reads the CI result yet.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "crates/athena-core/src/test_support.rs is not in the brief's Files list, but the existing run_pin_tests.rs tests (pushes.len()==1, kinds [push, open_pr], one warning) cannot stay green without the CI-branch routing in EarlyFake. Is the producer allowed to touch it?",
+    "A new skip line appears in every `go` test that has no origin. Any test that asserts exact UI lines for such a run would fail; I did not search all tests for that. The producer must run the full suite and adjust only if one asserts exact lines.",
+    "The push happens after the disk gate in check_and_verify (the same spot as the early pull request), not immediately after admission. A job held for low disk is not pushed until it is resumed.",
+    "The Blocked-job landing retry and the manual `athena close` path do not delete the CI branch; they come after a close that already deleted it, or they apply to jobs that never pushed."
+  ],
+  "producer_section_sha256": "11a873b69acc1987484df7db8f7d0ea0d329cb15b4ce17da377e6857bbaf177a"
+}

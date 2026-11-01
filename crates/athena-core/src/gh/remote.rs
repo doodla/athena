@@ -16,6 +16,11 @@ pub trait Remote {
     fn replace(&self, _branch: &str, _commit: &str, _expected_old: &str) -> Result<()> {
         bail!("this remote cannot replace a branch head")
     }
+    /// Deletes `branch` from the remote. It is for the job's own CI branch (`athena/ci/<job id>`), removed
+    /// when the job closes. A remote that cannot do this returns an error.
+    fn delete_branch(&self, _branch: &str) -> Result<()> {
+        bail!("this remote cannot delete a branch")
+    }
     /// The commits after `landed` up to `head`, oldest first, as (full sha, subject). Empty when `head` is
     /// `landed` or does not descend from it. A head is replaced only through [`Remote::replace`], and only
     /// the job's own early-pushed head.
@@ -59,6 +64,16 @@ impl Remote for GitRemote<'_> {
             &format!("{pinned}=refs/heads/{branch}:{expected_old}"),
             self.name,
             &format!("{commit}:refs/heads/{branch}"),
+        ])?;
+        Ok(())
+    }
+
+    fn delete_branch(&self, branch: &str) -> Result<()> {
+        self.git.run([
+            "push",
+            self.name,
+            "--delete",
+            &format!("refs/heads/{branch}"),
         ])?;
         Ok(())
     }
