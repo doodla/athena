@@ -295,6 +295,17 @@ pub struct Budget {
     pub producer_timeout_s: u64,
     pub verifier_timeout_s: u64,
     pub check_timeout_s: u64,
+    /// The longest, in seconds, the checks stage waits for the CI run of the candidate before it runs the
+    /// checks locally. The run is read once every 20 seconds, so 1500 is 76 reads; 0 is one read and no wait.
+    #[serde(default = "default_ci_wait_s")]
+    pub ci_wait_s: u64,
+}
+
+/// The CI wait bound when `[budget]` does not set `ci_wait_s`.
+pub const DEFAULT_CI_WAIT_S: u64 = 1500;
+
+fn default_ci_wait_s() -> u64 {
+    DEFAULT_CI_WAIT_S
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1125,6 +1136,24 @@ pub(crate) mod tests {
     fn default_configuration_loads() {
         // M9 (allows): the default configuration, whose verifier is outside the producer set, loads.
         assert!(Config::parse(REPO_CONFIG).is_ok());
+    }
+
+    #[test]
+    fn the_repository_config_sets_the_ci_wait_bound_to_1500_seconds() {
+        let config = Config::parse(REPO_CONFIG).unwrap();
+        assert_eq!(config.budget.ci_wait_s, 1500);
+        assert!(REPO_CONFIG.contains("\nci_wait_s = 1500\n"));
+    }
+
+    #[test]
+    fn a_budget_without_ci_wait_s_loads_with_the_default_and_a_set_value_is_kept() {
+        let without = REPO_CONFIG.replacen("ci_wait_s = 1500\n", "", 1);
+        assert!(!without.contains("ci_wait_s"));
+        let config = Config::parse(&without).unwrap();
+        assert_eq!(config.budget.ci_wait_s, DEFAULT_CI_WAIT_S);
+        assert_eq!(DEFAULT_CI_WAIT_S, 1500);
+        let other = REPO_CONFIG.replacen("ci_wait_s = 1500", "ci_wait_s = 60", 1);
+        assert_eq!(Config::parse(&other).unwrap().budget.ci_wait_s, 60);
     }
 
     #[test]

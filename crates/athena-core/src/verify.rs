@@ -313,13 +313,15 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
         .iter()
         .flat_map(|c| simple_commands(c))
         .collect();
-    // Athena's own passing record for this very tree counts as a command run (D115). Skipped checks and
-    // nested-run placeholders carry no exit code and never count.
+    // Athena's own passing record for this very tree counts as a command run (D115). So does a passing
+    // record reused from a green CI run for the candidate commit: it has no exit code but is marked
+    // `reused`. Skipped checks and nested-run placeholders carry no exit code and are not reused, so they
+    // never count.
     if inputs.candidate_tree.is_some() && inputs.candidate_tree == inputs.checks_tree {
         for check in inputs
             .checks
             .iter()
-            .filter(|c| c.passed && c.exit_code == Some(0))
+            .filter(|c| c.passed && (c.exit_code == Some(0) || (c.reused && c.exit_code.is_none())))
         {
             ran.extend(simple_commands(&check.command.join(" ")));
         }
@@ -734,6 +736,18 @@ mod tests {
             output_tail: String::new(),
             note: None,
             failed_tests: Vec::new(),
+            reused: false,
+        }
+    }
+
+    /// A `test` check whose result was reused from a green CI run: no exit code, marked `reused`.
+    fn reused_from_ci(passed: bool) -> CheckRun {
+        CheckRun {
+            exit_code: None,
+            passed,
+            reused: true,
+            note: Some("result reused from the CI run for abc".into()),
+            ..check(true)
         }
     }
 
@@ -957,6 +971,77 @@ mod tests {
         placeholder.exit_code = None;
         let j = judge_recorded(&[placeholder], Some("abc"), Some("abc"), vec!["cargo test"]);
         assert!(!j.criteria[1].met);
+        assert!(d43_finding(&j).is_some());
+    }
+
+    #[test]
+    fn a_passing_check_reused_from_ci_on_the_same_commit_counts_as_run() {
+        let j = judge_recorded(
+            &[reused_from_ci(true)],
+            Some("abc"),
+            Some("abc"),
+            vec!["cargo test"],
+        );
+        assert!(j.criteria[1].met);
+        assert!(j.criteria[1].commands_verified);
+        assert!(d43_finding(&j).is_none());
+        // fmt and clippy reused from CI count the same way, by their command text.
+        let named = |name: &str, command: &[&str]| CheckRun {
+            name: name.into(),
+            command: command.iter().map(|s| s.to_string()).collect(),
+            ..reused_from_ci(true)
+        };
+        let recorded = [
+            named("fmt", &["cargo", "fmt", "--all", "--check"]),
+            named("clippy", &["cargo", "clippy", "--all-targets"]),
+            named("test", &["cargo", "test", "--locked"]),
+        ];
+        for cited in ["cargo fmt --all --check", "cargo clippy --all-targets"] {
+            let j = judge_recorded(&recorded, Some("abc"), Some("abc"), vec![cited]);
+            assert!(j.criteria[1].commands_verified, "{cited}");
+            assert!(d43_finding(&j).is_none(), "{cited}");
+        }
+    }
+
+    #[test]
+    fn a_check_reused_from_ci_for_another_commit_does_not_count_as_run() {
+        for checks_tree in [Some("def"), None] {
+            let j = judge_recorded(
+                &[reused_from_ci(true)],
+                Some("abc"),
+                checks_tree,
+                vec!["cargo test"],
+            );
+            assert!(!j.criteria[1].met, "{checks_tree:?}");
+            assert!(!j.criteria[1].commands_verified);
+            assert!(d43_finding(&j).is_some());
+        }
+    }
+
+    #[test]
+    fn a_failed_check_reused_from_ci_does_not_count_as_run() {
+        let j = judge_recorded(
+            &[reused_from_ci(false)],
+            Some("abc"),
+            Some("abc"),
+            vec!["cargo test"],
+        );
+        assert!(!j.criteria[1].met);
+        assert!(!j.criteria[1].commands_verified);
+        assert!(d43_finding(&j).is_some());
+    }
+
+    #[test]
+    fn a_skipped_check_that_was_not_reused_does_not_count_as_run() {
+        let skipped = CheckRun {
+            exit_code: None,
+            note: Some("not run: CI was not green for abc".into()),
+            ..check(true)
+        };
+        assert!(!skipped.reused);
+        let j = judge_recorded(&[skipped], Some("abc"), Some("abc"), vec!["cargo test"]);
+        assert!(!j.criteria[1].met);
+        assert!(!j.criteria[1].commands_verified);
         assert!(d43_finding(&j).is_some());
     }
 

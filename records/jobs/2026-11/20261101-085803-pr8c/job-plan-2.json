@@ -1,0 +1,307 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261101-085803-pr8c",
+  "round": 2,
+  "at": "2026-11-01T09:06:06.454120583Z",
+  "invocation_seq": 4,
+  "approach": "Same design as round 1 for the producer loop, with three changes from the findings. (a) Admission publishes one table of refusal phrases, keyed by rule name, and one function `refusal_kinds(text)`. Admission's messages are built from those constants, so they cannot drift. `narrow_cases` admits an earlier case when its job's outcome reasons and the new event share a refusal kind, not only the email one. (b) `Records.job_reasons` keeps every outcome reason of a job. (c) The end-to-end introspection test gives the three jobs different classes of work, so it fails on base code. In the producer loop, a pure function in athena-gate finds the added lines that hold a disallowed address, by comparing each changed file's new blob with its base blob. The email findings join the existing single send-back, which names file:line. If findings remain after that send-back, the run fails with a reason naming file:line and the shared phrase. One named admission test shows the in-loop result is a subset of what admission flags. Add the one producer.md line, the CHANGELOG entry, and the docs/system-facts.md budget line.",
+  "decisions": [
+    {
+      "choice": "Find added email lines with a pure function over (old text, new text, allow-list) in athena-gate content.rs, next to disallowed_emails. A second function walks `DiffEntry` values with an injected blob reader `&dyn Fn(&str) -> Result<Vec<u8>>`. The producer passes `|oid| snapshot.blob(oid)`; the admission test passes `|oid| git.cat_blob(oid)`. A line counts as added only if the old text has no identical line left to match it (line multiset). The walk skips entries with status 'D' or new_mode == \"160000\" (finding 6: DiffEntry has old_mode/new_mode, no `mode`). It reads the old blob only when status != 'A' and old_oid is not all zeros. It skips blobs with a NUL byte.",
+      "reason": "Admission's Git::added_lines returns no line numbers, and athena-git is not a deliverable. Counting a line as added only when the base lacks an identical line makes the scan a subset of what admission flags. One shared function means the production path and the subset test run the same code.",
+      "rejected": [
+        {
+          "option": "Change athena-git added_lines to return line numbers",
+          "why": "Touches an unlisted crate and every caller."
+        },
+        {
+          "option": "Parse `git diff -U0` hunk headers",
+          "why": "Needs a new Git method and more parsing than a blob comparison."
+        },
+        {
+          "option": "Run admission::admit on a temporary candidate inside the loop",
+          "why": "Needs the user's repo, a built commit and the secret scan, and gives no line numbers."
+        }
+      ]
+    },
+    {
+      "choice": "Fold email findings into the existing single send-back (PRODUCER_SEND_BACKS = 1). The loop exits as before only when unmet, unchanged and emails are all empty. If emails remain once `send_backs >= PRODUCER_SEND_BACKS`, set `closing.happened = self.failure(ctx, \"email scan refused the change: <path>:<line> adds an email address outside the allow-list; ...\")` and return Flow::Stop. The reason, UI lines and send-back text carry file:line only, never the address.",
+      "reason": "The criterion says one send-back, then failure. A disallowed address can never be admitted, so continuing wastes a candidate, checks and a verifier run. Leaving the address out of text keeps the personal-data scan of records clean.",
+      "rejected": [
+        {
+          "option": "Fail at the first sighting with no send-back",
+          "why": "The producer can repair it in one pass and the loop already offers one."
+        },
+        {
+          "option": "Warn only and let admission refuse",
+          "why": "That is root cause 1: the producer learns only at admission."
+        },
+        {
+          "option": "Break out with report_gaps",
+          "why": "Report gaps go on to the verifier, which cannot help here."
+        }
+      ]
+    },
+    {
+      "choice": "Keep send_back_text(brief, unmet, unchanged) unchanged. Add send_back_text_with_emails(brief, unmet, unchanged, emails: &[String]) and have the old function call it with an empty slice. Re-export it in mod.rs line 68.",
+      "reason": "run_pin_tests.rs, which is not a deliverable, calls send_back_text with three arguments at lines 1030 and 1177.",
+      "rejected": [
+        {
+          "option": "Add a fourth parameter to send_back_text",
+          "why": "Breaks those two callers."
+        }
+      ]
+    },
+    {
+      "choice": "Answer finding 2: generalise the matching rule. In admission.rs add one table `REFUSAL_PHRASES: [(&str rule, &str phrase)]` and `pub fn refusal_kinds(text: &str) -> BTreeSet<&'static str>`, which returns the rule names whose phrase occurs in `text`. The table holds the fixed-phrase rules of admit_without_secrets: personal-data (`adds an email address outside the allow-list`, also exported as `EMAIL_REFUSAL`), gitlink (`is a submodule or gitlink`), size (`bytes, over the limit of`), records (`is under records/, which only Athena writes`), owner-private (`is private to the repository owner`), owner-maintained (`is the owner's own document; no job may change it`), classification (`path(s) are classified (athena-* declarations)`). The messages in admit_without_secrets are rebuilt from these constants with byte-identical output, for example `format!(\"{path} is {} {SIZE_PHRASE}{}\", size, limit)`. The in-loop message is `{path}:{line} {EMAIL_REFUSAL}`, so it has kind personal-data too. Gitleaks secret details and the governance/configuration messages are variable text and stay out of the table (named under open questions).",
+      "reason": "The fault is that the earlier-case search did not recognise the admission refusal reason. The same fault affects every fixed-phrase admission refusal, not only email. Building the messages from the table constants stops the message and the matcher drifting apart.",
+      "rejected": [
+        {
+          "option": "Match only EMAIL_REFUSAL (round 1)",
+          "why": "A repeat of a gitlink, size or records refusal in another class of work would still be recorded as a new class."
+        },
+        {
+          "option": "Require equality of a single kind",
+          "why": "One reason joins several violations with '; ', so the matcher uses a non-empty intersection of kind sets."
+        },
+        {
+          "option": "Match the model-written CaseRow.what text",
+          "why": "The model's prose may not carry the phrase."
+        }
+      ]
+    },
+    {
+      "choice": "In introspect.rs, OutcomeRow gains `#[serde(default)] reason: String`. Records gains `pub job_reasons: BTreeMap<String, Vec<String>>`, filled in read_records from every `outcome*.json` file of a job (finding 5). A case matches a job if ANY of that job's reasons shares a kind with the event. narrow_cases keeps a case when class_of_work and category both match, OR when `refusal_kinds(&event.what)` is non-empty and intersects `refusal_kinds` of the joined reasons of `job_reasons[case.job]`. Order stays newest first and the cap stays CASE_CAP. apply_answer's logic is unchanged. Doc comments on narrow_cases and apply_answer name root cause 2: neither matched on the admission refusal reason, so the passed-in case list lacked the earlier cases and apply_answer dropped the model's ids.",
+      "reason": "Outcome records store the reason as the `reason` field (athena_data::records::Outcome.reason). Event.what is built from the same reason in event_of_job (introspect.rs line 1275). The comparison is therefore deterministic. A blocked job's later outcome-landed.json or outcome-abandoned.json can add a reason; keeping all of them avoids depending on read order. No CaseRow field is added, so the prompt keys the existing test pins at introspection.rs lines 975-999 stay the same.",
+      "rejected": [
+        {
+          "option": "BTreeMap<String, String> keeping the last outcome file read",
+          "why": "Order-dependent when a job has more than one outcome file."
+        },
+        {
+          "option": "Add a reason field to CaseRow",
+          "why": "Changes what crosses to the model, and an existing test pins the key list."
+        },
+        {
+          "option": "Make apply_answer overwrite a 'new' answer with the matched class",
+          "why": "A silent repair, against the module's rule of dropping and logging. The cases list is what was missing."
+        }
+      ]
+    },
+    {
+      "choice": "Prove the 'no stricter than admission' claim with one named test in admission.rs's tests module, `the_in_loop_email_scan_flags_only_what_admission_flags` (finding 4). It reuses the existing `admit_files` fixture style (base commit, candidate commit, `admit_without_secrets`). For each input form it computes admission's personal-data violation paths and the in-loop scan's flagged paths (via git.diff_tree and git.cat_blob). It asserts every in-loop path is in admission's set, and that the two sets are equal for the plain-new-address form.",
+      "reason": "`admit_without_secrets` is private, so only a test inside admission.rs can call it, and that module already has the fixture. A named test replaces the hedged 'where practical'.",
+      "rejected": [
+        {
+          "option": "Re-use the criterion 2 loop tests for criterion 7",
+          "why": "Those test the loop's outcome, not the comparison with admission."
+        }
+      ]
+    },
+    {
+      "choice": "Update the producer budget line in docs/system-facts.md to the computed value (finding 1). The new prompt line is under 100 bytes (about 33 tokens), and 43 tokens are left (1257 of 1300).",
+      "reason": "athena-context embeds the file (SYSTEM_FACTS in briefs.rs line 1223) and `system_facts_budgets_match_computed` in crates/athena-cli/tests/budgets.rs fails when the line differs, so criterion 6 cannot hold without this one-line edit. It is a mechanical consequence of the listed producer.md change, not a scope widening. The budget itself is not touched. Out-of-list only by necessity, and flagged under open questions.",
+      "rejected": [
+        {
+          "option": "Leave docs/system-facts.md untouched",
+          "why": "cargo test fails."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-gate/src/content.rs",
+      "action": "modify",
+      "purpose": "Add `pub fn added_email_lines(old, new, allow) -> Vec<usize>` and `pub fn email_lines_in_changes(entries, blob, allow) -> Result<Vec<(String, usize)>>`. Both reuse disallowed_emails. Unit tests for the criterion 2 forms.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Add REFUSAL_PHRASES, EMAIL_REFUSAL, `refusal_kinds` and `email_refusal_at(path, line)`. Rebuild the fixed-phrase messages from the constants with identical output. Add the criterion 7 subset test and a kinds test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Scan the snapshot's changes after each report, fold findings into the single send-back, and fail naming file:line if findings remain. Comment naming root cause 1.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add send_back_text_with_emails with a 'file:line' section. send_back_text delegates with an empty slice.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Re-export send_back_text_with_emails beside send_back_text (line 68).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "OutcomeRow gains `reason`. Records gains job_reasons: BTreeMap<String, Vec<String>>. read_records fills it. narrow_cases adds the refusal-kind clause. Doc notes naming root cause 2 on narrow_cases and apply_answer.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-change/prompts/producer.md",
+      "action": "modify",
+      "purpose": "One new line: identities come from config or git settings, never from literals in code.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cap-change/src/lib.rs",
+      "action": "modify",
+      "purpose": "Test that the producer section contains the new line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Tests for criteria 1 and 2 (send-back then failure naming file:line; allow-listed and pre-existing addresses leave the run alone).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "purpose": "Criterion 3 tests: narrow_cases unit test with the second-kind positive and the two controls, and the end-to-end different-classes test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under [Unreleased] Fixed naming both root causes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Update '- budget producer: 1257 of 1300' to the computed value after the prompt line. Not in the brief's list, but system_facts_budgets_match_computed fails without it.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Grep the callers of send_back_text and `Records {` literals, and the tests that assert the admission messages. Read admission.rs lines 348-420 and athena-gate content.rs around line 176.",
+    "In athena-gate content.rs add added_email_lines (a multiset of old lines; return the 1-based numbers of new lines with no identical old line left and a disallowed address) and email_lines_in_changes (skip status 'D' and new_mode '160000'; read the old blob only when status != 'A' and old_oid is not all zeros; skip blobs with a NUL byte). Add unit tests.",
+    "In admission.rs add REFUSAL_PHRASES, EMAIL_REFUSAL, refusal_kinds and email_refusal_at. Rebuild the fixed-phrase messages from the constants with identical output. Add the subset test `the_in_loop_email_scan_flags_only_what_admission_flags` and a kinds test (each rule's real message maps to its kind; two kinds do not match).",
+    "In send_back.rs add send_back_text_with_emails (an 'Email addresses outside the allow-list' section of file:line items, plus a sentence that identities come from config or git settings); send_back_text delegates with an empty slice. Re-export it in mod.rs.",
+    "In producer.rs, after unmet and unchanged are computed, call email_lines_in_changes(&snapshot.change_list()?, &|oid| snapshot.blob(oid), &jc.config.personal_data), mapped to email_refusal_at strings. Add `&& emails.is_empty()` to the break condition and add a problem entry. Pass the findings to send_back_text_with_emails. When `send_backs >= PRODUCER_SEND_BACKS` and findings remain, set closing.happened via self.failure with the file:line list and return Flow::Stop. Add the comment naming root cause 1.",
+    "In introspect.rs add `#[serde(default)] reason: String` to OutcomeRow and `job_reasons` to Records. Fill it for every outcome*.json in read_records. Extend narrow_cases with the refusal-kind clause using crate::admission::refusal_kinds. Write the doc notes naming root cause 2 on narrow_cases and apply_answer.",
+    "Add the producer.md line (no @ character) and the cap-change test. Run `cargo test -p athena-cli --test budgets`, read the computed producer value from the failure and write it into docs/system-facts.md.",
+    "Add the run/tests.rs tests (criteria 1 and 2) and the introspection.rs tests (criterion 3, with the per-job class wrapper). Confirm criteria 1 and 3 fail without the change by disabling the scan call and the narrow_cases clause locally, then restore.",
+    "Add the CHANGELOG.md entry under [Unreleased] Fixed naming both root causes. Run cargo fmt --all, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, and `cargo test -p athena-core --test refusal_corpus`."
+  ],
+  "risks": [
+    {
+      "risk": "The in-loop scan flags something admission would accept, so the run fails wrongly.",
+      "mitigation": "A line counts only when no identical base line is left to match it, and the scan reuses disallowed_emails and the same PersonalData. The named subset test `the_in_loop_email_scan_flags_only_what_admission_flags` covers moved, duplicated, deleted, allow-listed and pre-existing forms."
+    },
+    {
+      "risk": "Rebuilding admission's messages from constants changes their text and breaks tests that assert them.",
+      "mitigation": "Each message is built so the output is byte-identical. The criterion 7 test asserts the email message. Grep the repository for each phrase in tests before editing and run the whole suite."
+    },
+    {
+      "risk": "A wide refusal-kind match crowds out class and category cases or matches unrelated events.",
+      "mitigation": "Cases need a shared kind in both the event text and the job's outcome reasons. Order and CASE_CAP are unchanged. Control tests cover an event with no refusal text and an event with a different kind."
+    },
+    {
+      "risk": "Adding a send_back_text parameter or a Records field breaks callers in unlisted files such as run_pin_tests.rs.",
+      "mitigation": "send_back_text keeps its signature. Grep callers and `Records {` literals first (Records derives Default)."
+    },
+    {
+      "risk": "The prompt line pushes the producer set over 1300 tokens.",
+      "mitigation": "The line is under 100 bytes. Run the budgets test and write the computed figure to docs/system-facts.md; never change the budget."
+    },
+    {
+      "risk": "A test source file with an email-like literal fails the personal-data scan, or the failure text leaks an address.",
+      "mitigation": "Build test addresses at runtime from parts, on an unrelated domain. The reason, UI lines and send-back text carry file:line only."
+    },
+    {
+      "risk": "Large or binary files make the scan slow or misread.",
+      "mitigation": "Read blobs only for non-deleted, non-gitlink entries and skip blobs with a NUL byte. Read errors propagate with ?, like change_list."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new test in run/tests.rs drives the real producer loop with a disallowed address on a known line. The test runs the job through Athena::ask and Athena::go and reads the failure reason.",
+      "command": "cargo test -p athena-core a_producer_that_adds_a_disallowed_email_is_sent_back_once_then_fails_naming_file_and_line",
+      "observes": "The job ends Failed. The reason contains 'README.md:3' and 'adds an email address outside the allow-list'. The producer ran twice, the second user_prompt contains 'README.md:3', no verifier ran, and neither the reason nor the prompt contains the address. A unit test in athena-gate content.rs asserts the 1-based numbers for added_email_lines.",
+      "fails_without": "Without the in-loop scan the producer runs once, the job reaches admission, and the reason is 'admission refused the change: README.md adds an email address ...' with no ':3'. The assertions for 'README.md:3', for two producer invocations and for the second prompt fail.",
+      "seam": "Entry point: Athena::ask then Athena::go(job, AcceptedBy::User, &ui), which reaches producer_loop. Exists. Fixtures: athena_with(repo, state, PASSES, plenty_of_space, script), repo(), finished() and Lines in run/tests.rs. The script is a FakeAgentDriver closure. A wrapper for Role::Producer sets the turn's `edits` field (existing fake behaviour) to README.md with the address on line 3, built at runtime from two parts so no email-like literal enters the source. The scan reads the real athena.toml [personal_data] allow-list, which repo_with_config copies. Nothing in the double contains scan logic. The only new part is the wrapper closure; the scan code is added by plan step 4."
+    },
+    {
+      "criterion": 2,
+      "method": "New tests in run/tests.rs run the loop with a clean change. (a) The producer adds a line holding an allow-listed address (a noreply local part at a documentation domain, built at runtime). (b) The base README is committed through commit_file with a disallowed address before ask; the producer's edit keeps that line and adds a clean one. Unit tests in content.rs cover: no address; an allow-listed address by local part, by domain and by suffix; the same address on an unchanged line; a moved line; a duplicated line (only the second copy counts); a deleted file; a gitlink; a binary blob with a NUL byte.",
+      "command": "cargo test -p athena-core the_email_scan_leaves_allow_listed_and_pre_existing_addresses_alone",
+      "observes": "Both jobs reach Landed with one producer invocation and no 'sent back' UI line. The unit tests return empty vectors for those forms, except that a duplicated line blames only the added copy.",
+      "fails_without": "If the scan blamed any address in a changed file, or ignored the allow-list, case (b) would be sent back and then failed. Case (a) would fail the same way. The Landed and producer-count assertions would fail.",
+      "seam": "Same as criterion 1: Athena::go with athena_with, repo() and commit_file (all exist in run/tests.rs). The pure functions are called directly with literal strings and a PersonalData parsed from athena.toml. The double only supplies edits."
+    },
+    {
+      "criterion": 3,
+      "method": "Two tests in crates/athena-cli/tests/introspection.rs. (a) Unit: build Past::default() with job_reasons for two earlier jobs holding 'admission refused the change: README.md adds an email address outside the allow-list', and two CaseRow entries for those jobs whose class_of_work and category differ from the event's. An Event with that refusal in `what` and a different class_of_work. Assert narrow_cases returns both, newest first. Controls: an event with no refusal text returns none; an event with a different kind (gitlink phrase) returns none of the email cases. A positive for the second kind (size) with matching job_reasons returns its case. (b) End to end with the real Model and Fixture: three jobs fail in the producer loop with the same edit and the same refusal reason, but with classes of work docs, code and config. A wrapper script around Scenario::script() sets reading[\"class_of_work\"] per job, chosen by counting Role::Reader calls. The first model answer is 'new'. The second and third answers read the class id from prompt[\"class_registry\"][0] and all case ids from prompt[\"earlier_cases\"] (collected without unwrap, so failures are assertion failures). Assert the second record's earlier_cases is [first.id]. Assert the third record's earlier_cases equals [first.id, second.id], its new_class is false, its status is Recorded, and the registry holds one class.",
+      "command": "cargo test -p athena-cli --test introspection admission_refusal",
+      "observes": "narrow_cases returns both cases for the email event. The third introspection record is Recorded with non-empty earlier_cases listing both earlier introspection ids and new_class false, with one class in the registry. Both tests have 'admission_refusal' in their names: earlier_cases_by_admission_refusal_are_found_across_classes_of_work and a_repeat_admission_refusal_in_another_class_of_work_is_not_a_new_class.",
+      "fails_without": "Without the refusal-kind match, narrow_cases filters on class_of_work and category only. The three jobs differ in class of work, so (a) returns no cases and (b) lists none in the prompt. apply_answer drops the ids the model returns, earlier_cases is empty, and the earlier_cases and new_class assertions fail. This answers finding 3: round 1 used one class of work, which the old filter already matched.",
+      "seam": "Entry points: narrow_cases(&Records, &Event) (pub, exists) and Athena::introspect_job via go (exists). Fixtures: setup(), Model::say and say_with, Scenario (exist). The new parts are the pub field Records.job_reasons (plan step 5, set directly in (a) and filled by read_records from the outcome files the fixture writes in (b)) and the per-job reading wrapper added in the test. The refusal text in (b) comes from the real in-loop failure, not from a double."
+    },
+    {
+      "criterion": 4,
+      "method": "Add one line to producer.md: 'Identities (names, emails) come from config or git settings, never from literals in code.' It has no @ character. A test in athena-cap-change/src/lib.rs asserts the producer section contains it. The budgets test checks the updated docs/system-facts.md producer line.",
+      "command": "cargo test -p athena-cap-change && cargo test -p athena-cli --test budgets",
+      "observes": "The cap-change test passes only when the producer section contains 'literals'. `grep -n literals crates/athena-cap-change/prompts/producer.md` finds the one new line. system_facts_budgets_match_computed passes with the new producer figure, under 1300.",
+      "fails_without": "Without the line the cap-change test fails and grep finds nothing. A stale budget line fails the budgets test.",
+      "seam": "Entry point: Change.producer_section() (exists), text from include_str! of prompts/producer.md. No double. Budget check: crates/athena-cli/tests/budgets.rs (exists)."
+    },
+    {
+      "criterion": 5,
+      "method": "Comments name both root causes. At the scan call in producer.rs: the producer learned of the address only at admission because there was no in-loop scan. On narrow_cases and apply_answer in introspect.rs: earlier cases were not found because neither matched on the admission refusal reason. A CHANGELOG.md entry under [Unreleased] Fixed names both. Nothing is added under records/.",
+      "command": "grep -n \"no in-loop scan\\|admission refusal reason\" CHANGELOG.md crates/athena-core/src/run/producer.rs crates/athena-core/src/introspect.rs",
+      "observes": "All three files show text naming the two causes, and CHANGELOG.md has the entry under [Unreleased].",
+      "fails_without": "Without the comments and the entry the grep finds nothing in those files.",
+      "seam": "None needed: content criterion, checked by reading the files."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs. Before editing, grep the callers of send_back_text and the `Records {` literals (Records derives Default, and Past::default() is used in tests).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The run includes the refusal_corpus tests, the budgets test and run_pin_tests.rs.",
+      "fails_without": "A formatting, lint or test failure anywhere (a changed send_back_text caller, a missing field initialiser, a stale budget line, an email-like literal in a test) fails the command.",
+      "seam": "Not a double: the repository's own checks."
+    },
+    {
+      "criterion": 7,
+      "method": "The named test `the_in_loop_email_scan_flags_only_what_admission_flags` in admission.rs's tests module. It builds a base commit and a candidate commit in a temp repo, with the same style as `admit_files`. Forms: a plain new address; an allow-listed address; an address on an unchanged line; a moved line; a duplicated line; a deleted file. It runs admission::admit_without_secrets and collects the paths of the 'personal-data' violations. It runs the athena-gate walk over git.diff_tree(base, candidate) with a git.cat_blob reader. It asserts the in-loop paths are a subset of admission's, and equal for the plain new address. A second assertion checks the in-loop message text equals `{path}:{line} ` plus EMAIL_REFUSAL, and that admission's message for the same file is byte-identical to the old '<path> adds an email address outside the allow-list'. The 5% figure is an estimate, not measured here.",
+      "command": "cargo test -p athena-core the_in_loop_email_scan_flags_only_what_admission_flags",
+      "observes": "For every form the in-loop flagged paths are inside admission's flagged paths. Admission's message text is unchanged.",
+      "fails_without": "If the scan added a rule beyond admission's, such as blaming a pre-existing or allow-listed address, the subset assertion fails for that form. If the message text drifted from the shared constant, the text assertion fails.",
+      "seam": "Entry points: admit_without_secrets (private; reachable only from this in-module test, which already exists with the admit_files fixture) and the new athena-gate walk function (added in step 1). Fixtures: Git::isolated, BASE_CONFIG, reading() (exist). The reader closure is the real git.cat_blob, so no double contains scan logic."
+    }
+  ],
+  "open_questions": [
+    "docs/system-facts.md is not a listed deliverable, yet the budgets test requires its producer line to match. The plan edits that one line (finding 1). If the maintainer refuses, the prompt line cannot be added without failing cargo test.",
+    "The brief says 146 tokens are left in the producer set, but docs/system-facts.md says 1257 of 1300, which leaves 43. The plan assumes 43.",
+    "crates/athena-core/src/run/candidate.rs is a listed deliverable but needs no change: the admission stage and its message are unchanged in effect. It stays untouched unless the producer finds a reason.",
+    "Gitleaks secret findings and the governance/configuration messages have variable text and are not in REFUSAL_PHRASES, so a repeat of those refusals is still matched only by class of work and category. Extending the table needs those messages split into a fixed phrase and variable parts.",
+    "A model that answers 'new' despite listed matching cases still creates a class. The plan leaves apply_answer's logic alone; whether code should override that is for the maintainer.",
+    "The refusal corpus (crates/athena-core/tests/refusal_corpus.rs) tests reading, plan and acceptance checks (parser_cases, request_citing_cases, reading_check_cases, every_acceptance_check_has_a_refusing_corpus_case). I read its function names, not its case ids. The new scan is a producer-loop rule and the new matcher is an introspection filter. Neither is a reading or plan refusal, and this change adds no check to reading.rs, so no corpus case maps to it and none is added. `cargo test -p athena-core --test refusal_corpus` is still run as a regression check.",
+    "On the in-loop failure the producer's work tree is not kept, as with the 'producer returned no valid report' path. Whether to keep it as keep_timed_out_work does is not settled by the code I read."
+  ],
+  "producer_section_sha256": "18a3602dcab05771beeea0f7bad3201e7fb1cc03a385aeab038c2abe54652470"
+}

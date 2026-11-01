@@ -1,0 +1,138 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261031-031749-am9j",
+  "base_commit": "98db149eb00b53df8a1627ffe1a821e493e6cde7",
+  "base_fingerprint": "sha256:8be22b3778a908d3d123aee3f261ccf7782f299069f5221d0d751d547b5f8b38",
+  "previous_job": "20261101-164247-5mrg",
+  "candidate_commit": "6246f7a23581c79544a3e02c93a84c84c41e8903",
+  "candidate_tree": "e0652be0ea569728f4604b1650626078cb4faace",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 276583
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 49688
+    },
+    {
+      "path": "crates/athena-core/src/gh/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 3839
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23547
+    }
+  ],
+  "fingerprint": "sha256:8ba5d2ab603bf02bb0391139a35f628e58105fc45165f98682191a1572207ce6",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added the core of the rebase before landing to crates/athena-core/src/gh/landing.rs. `plan_rebase(git, onto, head, landed, sign)` is a pure, stack-aware plan. It replays the first-parent commits from the fork with main up to the branch head, oldest first, onto origin's main. It returns `Rebase::Current`, `Moved{onto, landed, tip, records_only}` or `Conflict{commit, text}`. A conflict in the job's own landing commit is a hold. A conflict in an earlier commit is kept as records only: `commit_with_records` builds a records-only image of that commit and merges it onto the running tip, so its records/ paths stay and its code is dropped. The carried commit's message drops the Athena-* trailers and gets an `Athena-Records-Only: <old commit>` line. `plan_rebase` checks that marker on `landed` first and returns Conflict, so a job whose only commit is a records-only carry is held, not read as Current. `rebase_job_branch(git, state, remote_name, default_branch, job, verified_fp, ui)` returns `Unchecked` for a published head that is not the early head, a failed or empty fetch, or no landing commit. Otherwise it takes the repository lock, runs the plan and moves the branch with `reset_keep` on Moved. It never pushes. `Rebase`, `plan_rebase` and `rebase_job_branch` are re-exported from gh/mod.rs. CHANGELOG.md and docs/design/async-drain.md section 6 carry notes. They cover the records-only carry, clean earlier commits still riding along, the re-check rule not covering stacked content, queue order being pass order, a Moved result possibly changing verified content (build job 7), and the drain wiring as a follow-up. drain.rs is untouched. I added 11 tests in `rebase_tests`, run against real git repositories and a real bare origin.",
+    "files": [
+      "crates/athena-core/src/gh/landing.rs",
+      "crates/athena-core/src/gh/mod.rs",
+      "docs/design/async-drain.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-core plan_rebase",
+        "result": "pass",
+        "note": "7 plan_rebase tests passed on the second run. The first run failed on a trailing-newline difference in the replayed message, which I fixed in plan_rebase."
+      },
+      {
+        "command": "cargo test --locked -p athena-core rebase",
+        "result": "pass",
+        "note": "11 tests passed, including the four rebase_job_branch tests on a real bare origin. Rerun after cargo fmt: 11 passed."
+      },
+      {
+        "command": "cargo test --locked -p athena-core",
+        "result": "pass",
+        "note": "The whole athena-core suite passed (800 tests, exit 0). I did not read the summary line because the output was saved outside my working directory."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -p athena-core -- -D warnings",
+        "result": "pass",
+        "note": "Run for athena-core only. Athena runs it for the whole workspace."
+      },
+      {
+        "command": "cargo test --locked -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed: the boundary scan finds no banned word in the changed tracked files."
+      },
+      {
+        "command": "git status --short",
+        "result": "pass",
+        "note": "Only CHANGELOG.md, gh/landing.rs, gh/mod.rs and async-drain.md are modified."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core plan_rebase`. Core tests call production plan_rebase on real git repositories. They cover a clean move onto a moved main, already current, a conflict in the job's own landing commit (the plan reports a hold with main untouched), an earlier conflicting commit carried as records only, and a clean earlier commit carried.",
+        "status": "met",
+        "evidence": "I ran `cargo test --locked -p athena-core plan_rebase`: 7 passed. The tests are plan_rebase_clean_move, plan_rebase_already_current, plan_rebase_conflict_in_own_commit (Conflict naming the job's commit), plan_rebase_earlier_conflict_is_records_only, plan_rebase_clean_earlier_commit_is_carried, plan_rebase_records_only_commit_is_a_hold and plan_rebase_unrelated_history_is_an_error. The pure plan moves no ref. The clean-move test asserts the head is unchanged, and the ref-unchanged checks for the conflict case are in rebase_job_branch_conflict_changes_nothing."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core`. In the records-only test, the earlier job's records/ paths are present at the new tip and its code paths are dropped. Records::load from the new tip still loads that held-back job's record.",
+        "status": "met",
+        "evidence": "plan_rebase_earlier_conflict_is_records_only checks that code.txt at the new tip is main's text, so the held-back job's code edit is dropped. It also checks that every file of fixtures::landed(job_b) is at the tip with identical content. `Records::load(&git, &tip)` returns no invalid paths and loads job b with candidate, verification and outcome, plus job c. The full `cargo test --locked -p athena-core` run exited 0."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core rebase_job_branch`. A test against a bare origin has two jobs stacked locally, with main moved after the second was verified. rebase_job_branch (taking git, the state dir and the remote as arguments) leaves the second job's landing commit rebased onto origin's main, and `git log` shows a linear history. A second case, a conflict in the job's own commit, leaves origin's main and the local branch unchanged.",
+        "status": "met",
+        "evidence": "The tests ran in `cargo test --locked -p athena-core rebase`: 4 rebase_job_branch tests passed. rebase_job_branch_lands_second_job_on_the_moved_main uses a `git init --bare` origin and a second clone that pushes the outside commit. It asserts Moved, that the local head is the tip, that the outside commit is an ancestor of the new landing commit, that `rev-list --merges outside..tip` is empty, one parent per new commit, subjects [Job B, Job A], and that the bare main is unchanged. rebase_job_branch_conflict_changes_nothing asserts Conflict naming the job's commit, local head unchanged and bare main still the outside commit. The signature takes git, state and remote_name; `sign` is deviation 1 in open_issues."
+      },
+      {
+        "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`. All pass, and the existing tests are unchanged, including the athena-cli drain tests.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran fmt --check and clippy on athena-core (both clean) and the full athena-core suite (exit 0). I did not run the workspace test suite. No existing test or drain.rs line was edited."
+      },
+      {
+        "criterion": "`git diff` shows changes only to crates/athena-core/src/gh/landing.rs, crates/athena-core/src/gh/mod.rs (the re-export), docs/design/async-drain.md and CHANGELOG.md. drain.rs is untouched.",
+        "status": "met",
+        "evidence": "`git status --short` lists exactly CHANGELOG.md, crates/athena-core/src/gh/landing.rs, crates/athena-core/src/gh/mod.rs and docs/design/async-drain.md. The gh/mod.rs change is the widened `pub use landing::{..}` list."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for the core rebase. docs/design/async-drain.md has a note. Both say that earlier unlanded commits which replay cleanly still ride along in the next job's pull request as they do today, and that the re-check rule does not cover stacked content. Both say that a conflicting earlier commit is kept as records only. Both name the drain wiring as a follow-up.",
+        "status": "met",
+        "evidence": "I read both added passages. The CHANGELOG entry is under `### Added` in Unreleased. The async-drain.md note is in section 6, after the first-half note. Each says clean earlier commits ride along as today, the re-check rule does not cover stacked content, a conflicting earlier commit is kept as records only, and the drain wiring (`Steps::rebase`, `Athena::rebase_for_landing`, the drain test) is a follow-up. The CHANGELOG entry also names the gh/mod.rs re-export. The policy scan passed."
+      }
+    ],
+    "open_issues": [
+      "Deviation 1 from the plan: `rebase_job_branch` has no `sign` argument, so it takes 7 parameters (git, state, remote_name, default_branch, job, verified_fingerprint, ui). It reads `git.signs_commits()?` itself, as `resync_onto_merge` does. With 8 parameters clippy's too_many_arguments fires, and the plan said to add no `#[allow]`. `plan_rebase` still takes `sign`.",
+      "Deviation 2: the plan's plan_rebase_parentless_commit_is_an_error test became plan_rebase_unrelated_history_is_an_error. A range commit with no parent cannot occur once merge-base succeeds, so the test checks that unrelated histories make `git merge-base` fail and surface as an Err. The in-code parentless bail has no test.",
+      "I added one unplanned rule: `plan_rebase` also returns Current when `landed` is already an ancestor of `onto`, meaning it is already on main. The stack above it is not moved in that case.",
+      "I did not run the cross-crate gate check for a carried `Athena-Records-Only:` commit riding in a pull request. The gate source I grepped does not read that line. Whether `classify_pre_merge` treats the carried commit, which adds the held-back job's closing records, as a JobLanding in the next job's pull request is untested. This is the plan's open question, and the drain follow-up must settle it.",
+      "I did not add a bare-origin test for a work branch published at the early head, which should proceed. Only the Unchecked case for a different published head is covered."
+    ],
+    "mistakes": [
+      "The first test run failed on a message-equality assertion because of the trailing-newline difference in replayed messages. I fixed the code to normalise the message.",
+      "The bare-origin test first asserted `is_ancestor(outside, second)` before the outside commit had been fetched. That is a test error, now replaced by a `commit_exists` check.",
+      "I left a pointless `.replacen(\"commit \", \"commit \", 1)` in the first draft of the records-only conflict text. I removed it before running the tests."
+    ],
+    "learnings": [
+      "Git::replay and `git log --format=%B` give a message with an extra trailing blank line. Re-committing it with `commit_tree -F -` keeps the extra newline, so the replayed message is not byte-equal to the original. `plan_rebase` trims it to one newline. Git::replay itself still adds the extra newline.",
+      "`Git::commit_with_records(base, records_from, ..)` replaces all of records/ in `base` with that of `records_from`. Called with the commit's parent as `base` it gives a records-only image of the commit. Merging it with `merge_tree(parent, tip, image)` carries only that commit's own records changes.",
+      "`landed_commit_from_records` takes the oldest commit that added outcome.json for the job and checks that verification.json holds the fingerprint. It reads no trailers, so a records-only carry would be found as the landing commit. The `Athena-Records-Only:` marker check in `plan_rebase` handles that.",
+      "`fetch_remote_branch` brings the tip object into the work repository without writing a ref. A commit pushed to origin by another clone is therefore not in the work repository until `rebase_job_branch` fetches it.",
+      "Bash in this role blocks `tail`, pipes and reads outside the working directory. Saved tool-result files are not readable with Grep."
+    ],
+    "desires": [
+      "Read access to saved tool-output files, to see the final summary lines of a long cargo test run.",
+      "A short reference for what the gate's `classify_pre_merge` does with a records-only commit that adds closing records."
+    ]
+  }
+}

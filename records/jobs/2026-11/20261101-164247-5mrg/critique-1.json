@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-164247-5mrg",
+  "round": 1,
+  "at": "2026-11-01T16:48:21.862295156Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Fixtures get a name but no id. If the verdict picks the required run through parse_check_run, which requires an id, the named fakes still read as Pending and land_pr stays Open.",
+      "evidence": "parse_check_run keeps a run only if it has an id: `.filter_map(|r| Some(CiRunState { id: r[\"id\"].as_u64()?, ... }))`. The plan says it takes 'the highest-id run with that name ... (as parse_check_run does)'. The fixture at external_calls.rs:90 is `{\"status\": \"completed\", \"conclusion\": \"success\"}`, and step 6 adds only a name. gh/tests.rs:86, :675, :680 and :2192 also have no id. With the obvious reuse, the required run is missing, the verdict is Pending, and criterion 1 fails exactly as in job 9bxs. Fix: Say explicitly that picking the required run in classify_checks must not need an id: treat a missing id as 0 and pick the highest. Do not reuse parse_check_run as it stands. Otherwise, add an \"id\" to every renamed fixture in step 6. Either way, add a classify_checks table case with a named, id-less, completed-success run that must be Green, and say in the demonstration for criterion 1 that it would catch this.",
+      "location": "Plan decision 2 / step 2 / step 6; crates/athena-core/src/gh/client.rs:121-135; crates/athena-cli/tests/external_calls.rs:90",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Step 4 says wait_for_checks has three `job.host.checks(head)` looks. There are two, and in the re-run loop the read that counts depends on `restarted`.",
+      "evidence": "early.rs:135 `seen = job.host.checks(head)?;` and early.rs:181 `let read = job.host.checks(head)?;` followed by `seen = if restarted { read } else { Checks::Pending };`. When `restarted` is false, the notes from `read` belong to a read that was thrown away. Fix: Name the two call sites. Keep the notes only from the read that produced the final `seen`. When `restarted` is false, keep the earlier notes, or none, and do not take the notes from the discarded read.",
+      "location": "Plan step 4; crates/athena-core/src/gh/early.rs:135 and :181",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The held-job shape no longer needs to rest on D146. The code confirms it, but the plan's test builds a different record type from the one a hold writes.",
+      "evidence": "hold_for_disk calls push_closing_records, which writes AnyRecord::Candidate2 and a Verification only if `closing.verification` is Some, and never writes an outcome. The commit subject is 'Held: ...'. The plan's test (a) commits `AnyRecord::Candidate`. Fix: Cite close.rs hold_for_disk and push_closing_records as the source of the shape and close the open question. Build test (a) with the record a hold actually writes (Candidate2, or the helper that produces it), so the test matches production.",
+      "location": "Plan open question 2 and criterion 5 demonstration (a); crates/athena-core/src/run/close.rs:177-201, :531-561",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Every repository's PRs are judged by one fixed job name. A target repository whose CI has no 'fmt, clippy, tests' job would wait forever (Pending) rather than land.",
+      "evidence": "Under the new rule a missing required run is Pending. The comment on EARLY_RUN_JOB says 'It must match the job name in the CI workflow'. Until now, a missing early run only ended the early wait (early.rs:72-73), so landing did not depend on the name. Fix: The accepted reading chose this, so do not change the design. Write the assumption down in the classify_checks doc comment and in the decision entry, and name the general fix as a follow-up: read the branch's required checks from the host.",
+      "location": "Plan decision 2; crates/athena-core/src/gh/client.rs:516",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The held-job exemption makes the existing closing_jobs doc line false. The plan says only that it will 'update the doc comments'.",
+      "evidence": "invariant.rs:230 says: 'A job with no outcome record at all stays in, so that the landing check can refuse it.' After the change, a candidate-only job with no verification is left out. Fix: Step 5 should rewrite that sentence: a held job (a candidate with no verification and no outcome) is not a closing job. The decision entry should say why main's landing check is still safe: a candidate-only commit that changes governed content falls through to GovernedChange.",
+      "location": "Plan decision 4 / step 5; crates/athena-gate/src/invariant.rs:227-230",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan does what was asked. It redoes both fixes from the base: the required-check-only verdict, with notes returned by the same read through PrHost::check_report and its default, and the held-job exemption in closing_jobs. It also names every unnamed check-run fake. A Grep over all *.rs files confirms the five unnamed fakes the plan lists: external_calls.rs:90 and gh/tests.rs:86, :675, :680 and :2192. The code it names exists and behaves as described: classify_checks at client.rs:766, CI_AGGREGATE_JOB at :516, EARLY_RUN_JOB at early.rs:25, and closing_jobs and not_landed in invariant.rs. Reading close.rs hold_for_disk and push_closing_records confirms a held job commits a candidate with no outcome. The demonstrations name real seams and would fail without the change. One gap repeats the failure that sank the last attempt. The plan says the required run is picked by highest id 'as parse_check_run does'. parse_check_run (client.rs:121-135) drops any run without an id, and no fixture, renamed or not, carries one. If the producer reuses that helper, the external_calls test stays Open again. This needs fixing before the plan is accepted."
+}

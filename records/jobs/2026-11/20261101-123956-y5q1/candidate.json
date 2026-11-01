@@ -1,0 +1,159 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261101-123956-y5q1",
+  "base_commit": "d647159c394260825bf9c7c260731d0fb23f1aff",
+  "base_fingerprint": "sha256:d2d489fec89a73c241622e4a979cd04f35a426015ff23630590cddd114466d90",
+  "previous_job": "20261101-114004-358q",
+  "candidate_commit": "d9fa9a4354ce5b42105cbf7c789c3c8d61b07e7f",
+  "candidate_tree": "56039e7eded139887007d838e4ba30c4bc7757e7",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 272555
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 191326
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 221435
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 77008
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 26824
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 73120
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 108318
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 30873
+    }
+  ],
+  "fingerprint": "sha256:c9989cc9f8eb60521f6875d13f27c45bbdb60a1aa74fa3979c5a4e43dfa1bbd9",
+  "violations": [],
+  "producer_report": {
+    "summary": "Athena now removes the target/ of interrupted jobs at the start of every drain and before each run. It also holds a job as an environment stop (low disk) before the producer starts when free space is short. An interrupted job is one the records show as Dispatched, with no registry entry and a free job lock. The sweep calls StateDir::remove_target, so work trees, kept candidates, resume marks and records stay. A job another command is running keeps its target/. New code: disk::reclaim_interrupted_targets plus Athena::reclaim_interrupted, and a Steps::reclaim_interrupted default method that RealSteps implements. Drain calls it at the start of drain_with and before steps.run. The new gate in run/mod.rs produce_and_verify sits after the baseline stage and before the producer's work tree. It runs the existing disk_gate and, if space is still low, returns hold_for_disk. The job is left Dispatched with a hold marker, no candidate and no resume mark. The status shows it as interrupted with the low-disk text, and the producer is never started. Docs updated in disk.rs, drain.rs and close.rs, plus a CHANGELOG entry. Tests added: a core unit test for the sweep, a core test for the pre-producer hold (using a new free-space reader, low_once_baselined), and a drain entry-point integration test. fmt, clippy and the full test suite all passed.",
+    "files": [
+      "CHANGELOG.md",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "crates/athena-core/src/disk.rs",
+      "crates/athena-core/src/run/close.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "crates/athena-core/src/test_support.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --lib -- low_disk_before interrupted_targets",
+        "result": "pass",
+        "note": "new pre-producer hold test, new sweep unit test and the two existing late-hold tests"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain -- drain_start_reclaims",
+        "result": "pass",
+        "note": "first run failed on a log-line assertion I then removed; the file/dir assertions passed. Not re-run after removing it, but the full suite below ran it."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after cargo fmt --all"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "full suite, exit 0"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "boundary scan, 12 tests"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new integration test in crates/athena-cli/tests/drain.rs, run with `cargo test -p athena-cli --test drain`, enters through the drain entry point with an interrupted Dispatched job's target/ present and asserts target/ is gone after drain start while the job's work tree and candidate remain.",
+        "status": "met",
+        "evidence": "Added drain_start_reclaims_the_build_directory_of_an_interrupted_job_and_keeps_its_work_and_candidate. It interrupts a job, plants target/, work/main.rs and a stand-in file at the resume mark path, calls drain::drain with a zero budget, then asserts target/ is gone, the work tree and the mark file remain, the job is still Dispatched, and a registry-held job's target/ is kept. It passed in the full suite."
+      },
+      {
+        "criterion": "A new test, run with `cargo test`, makes a job's lock held or its process alive (registry entry) and asserts its target/ is kept, and asserts a sweep before a later run reclaims a newly interrupted job's target/.",
+        "status": "met",
+        "evidence": "disk::tests::interrupted_targets_are_reclaimed_but_running_jobs_keep_theirs: a locked job and a registry-entry job keep target/; a second sweep reclaims a job whose target/ appeared after the first sweep. Ran with cargo test -p athena-core --lib and in the full suite, pass."
+      },
+      {
+        "criterion": "A new test, run with `cargo test`, simulates low free disk only at the pre-producer point (via with_free_space) and asserts the job is held as an environment stop for low disk, the status says so, and the producer is never started.",
+        "status": "met",
+        "evidence": "run::tests::low_disk_before_the_producer_holds_the_job_and_never_starts_the_producer uses with_free_space(low_once_baselined), which is low only once the baseline check has left a marker. It asserts LowDisk is returned, the producer count is 0, there is no candidate or resume mark, the job is Dispatched with a hold, and athena.status() shows the open job as interrupted with hold text 'environment: low disk: ...'. Passed."
+      },
+      {
+        "criterion": "`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` all pass when run from the repository root.",
+        "status": "met",
+        "evidence": "left to Athena's checks; I also ran all three from the repository root and each passed (cargo test --locked exit 0)."
+      },
+      {
+        "criterion": "Grep of the diff shows a disk gate before the producer is invoked in crates/athena-core/src/run/producer.rs or run/mod.rs that holds through hold_for_disk, and no test fixture is pulled into a src unit test by #[path] from tests/common.",
+        "status": "met",
+        "evidence": "run/mod.rs produce_and_verify: after baseline_stage and before job_worktree/producer_snapshot, `if let Some(low) = self.disk_gate(...) { return Err(self.hold_for_disk(ctx, closing, low)); }`. No #[path] was added anywhere; the new fixture low_once_baselined is in test_support.rs."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry on reclaiming interrupted jobs' build directories and the pre-producer disk check; module docs in drain.rs and disk.rs describe the new behavior.",
+        "status": "met",
+        "evidence": "New Fixed entry at the top of Unreleased in CHANGELOG.md. drain.rs module docs gained an 'Interrupted jobs give up their build directories' bullet and pre-producer text in the low-disk bullet. disk.rs module docs list the fourth gate and have a 'Reclaiming interrupted jobs' paragraph. The policy scan passed."
+      },
+      {
+        "criterion": "The diff does not touch athena.toml or defaults.toml, does not change the min_free_gb default, and does not delete work trees or candidates.",
+        "status": "met",
+        "evidence": "git status shows only CHANGELOG.md, drain.rs, tests/drain.rs, disk.rs, run/close.rs, run/mod.rs, run/tests.rs and test_support.rs modified. The sweep calls StateDir::remove_target, which removes only jobs/<id>/target."
+      }
+    ],
+    "open_issues": [
+      "A job held before the producer has no resume mark, so a later drain retries it with a fresh plan and producer run, and a retry that is also held before the producer counts toward the drain's usual two attempts. I did not change retry policy (out of scope).",
+      "The drain integration test calls drain with a zero budget, so it exercises the drain-start sweep only. The sweep before each run is covered by the core unit test, not by an entry-point test."
+    ],
+    "mistakes": [
+      "My first run of the new drain integration test failed because I asserted a sweep log line the test's ui never sees. I removed that assertion; the file and directory assertions are the check."
+    ],
+    "learnings": [
+      "StateDir::try_lock_job creates the job directory and job.lock if absent, so a sweep must check target/ exists before locking, or it creates empty directories for jobs that have none.",
+      "The free-space hook is a plain fn pointer, so a test cannot capture state. low_once_baselined reads a marker file the baseline check leaves in the job directory (the baseline check runs in <job dir>/baseline).",
+      "RealSteps in the drain integration tests writes to its own ui (Quiet in real_steps), so log lines from the drain-start sweep are not visible to a test's Lines.",
+      "The baseline checks run after planning, so the new gate sits after baseline_stage."
+    ],
+    "desires": [
+      "A way to read a backgrounded command's output file. The path was outside the working directory, so I could only wait for the completion notice."
+    ]
+  }
+}

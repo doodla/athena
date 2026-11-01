@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-031749-am9j",
+  "round": 2,
+  "at": "2026-11-01T17:49:58.275397581Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The bare-origin test never says which landing-commit lookup it exercises, so it may get Unchecked instead of Moved.",
+      "evidence": "rebase_job_branch finds the landing commit with landed_commit_for. Without a [history] cutover_job, that calls landed_commit, which needs Athena-Job and Athena-Verified-Content trailers in the commit message. The land::fixtures helpers (land.rs:317-336) write no trailers; they commit with whatever message the caller passes. Fix: State the lookup the test uses. Either write the two trailers (fingerprint \"f\"*64, as the fixture verification record holds) into the stacked commits' messages, or set a cutover job in the fixture's athena.toml so the records lookup runs.",
+      "location": "Plan step 4 / Criterion 3 demonstration; crates/athena-core/src/gh/landing.rs:32-84",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "When the job's own commit replays to an empty change, Moved.landed has no value.",
+      "evidence": "Step 2 skips a clean merge whose tree equals the tip's (as Git::replay does, lib.rs:794). If the job's change is already on main, no new commit exists for `landed`, yet Moved.landed is 'the new hash of the job's replayed commit'. Fix: Define the result for this case (for example Current, or landed = the running tip at that point) and add a one-line test or say so in the plan.",
+      "location": "Plan step 2 / decision 4 (Moved.landed)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The landing commit is looked up before the repository lock is taken.",
+      "evidence": "Step (3) runs landed_commit_for on the local head. Step (4) then takes lock_repository and re-reads the head. If the branch moved in between, plan_rebase gets a `landed` found on a stale head. Fix: Take the lock first, then re-read the head and run landed_commit_for and plan_rebase on that head.",
+      "location": "Plan decision 6, flow steps (3)-(4)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Conflict means two different things: a hold of the job itself, or a records conflict in another job's commit.",
+      "evidence": "A conflict in the records-only merge of an earlier commit returns Conflict naming that earlier commit. The drain follow-up is told to treat Conflict as a hold of the head job. It would then hold the head job for another job's records conflict without being able to tell the cases apart. Fix: Document that a caller compares Conflict.commit with the job's landing commit, or add a separate variant for the earlier-commit case, so the follow-up can tell them apart.",
+      "location": "Plan decision 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Before the cutover, a held-back carried job reads as Unchecked, not as a hold.",
+      "evidence": "The carried message drops the Athena-* trailers, so the trailer-based landed_commit finds no commit and rebase_job_branch returns Unchecked. Decision 2 says a carried job is a hold (Conflict). Fix: State this outcome in the async-drain.md note, or confirm that pre-C0 history can no longer reach rebase_job_branch.",
+      "location": "Plan risk 1 / decision 1 (pre-C0 path)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan relies on. The Git helpers it uses exist in athena-git (lib.rs:208-800). commit_with_records keeps the base's code and replaces only records/ (lib.rs:625-659), so the records-only carry is sound. The post-C0 lookup landed_commit_from_records ignores trailers (landing.rs:55-75), so the Athena-Records-Only marker, checked before the Current check, is the right way to hold back a carried job. GitRemote::remote_head exists for the published-head rule, and load_early exists (pr.rs:150). Dropping the drain wiring matches the accepted reading. Letting the bare-origin conflict case be reported as a read-only check matches the size allowance in the request. Each demonstration calls production plan_rebase, rebase_job_branch or Records::load on real repositories, including a real bare origin, and each would fail without the behavior. Assertions are placed where they can fail. The plan names the risk that a cleanly replayed commit depending on a held-back commit's code changes verified content, defers the re-check to job 7, and keeps land_pr's merged-content check as the safety net. That is acceptable for this half. The findings are minor: the bare-origin fixture must carry trailers (or set a cutover) for landed_commit_for to find the commit; Moved.landed is undefined when the job's own commit replays empty; the lookup should happen under the lock; Conflict for an earlier commit's records conflict is not distinguished from the job's own hold; and before the cutover a carried job reads as Unchecked, not as a hold. No blocker or major finding, so the verdict is accept."
+}

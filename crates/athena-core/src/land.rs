@@ -131,7 +131,9 @@ pub struct PrCommit {
 ///    truth for "this commit lands a job"): [`LandingKind::JobLanding`], carrying that job and its
 ///    verification record, which must be in the commit's tree. A job whose recorded outcome is not landed
 ///    does not count, so the commit that adds a blocked outcome is records only, and the later commit that
-///    adds `outcome-landed.json` is the landing. Closing records of more than one job are an error.
+///    adds `outcome-landed.json` is the landing. The records of a held job (a candidate with no
+///    verification and no outcome) do not count either: they claim no landing. Closing records of more
+///    than one job are an error.
 /// 2. It adds an intervention record (`records/interventions/<month>/<id>.json`):
 ///    [`LandingKind::DeclaredIntervention`].
 /// 3. Otherwise, if the governed fingerprint changed, nothing covers the change: an error.

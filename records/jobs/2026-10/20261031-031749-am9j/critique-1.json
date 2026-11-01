@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-031749-am9j",
+  "round": 1,
+  "at": "2026-11-01T17:47:31.839189573Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Removing trailers does not stop the post-C0 lookup from choosing the records-only commit as the held-back job's landing commit, so rebase_job_branch would return Current for that job with no code.",
+      "evidence": "Read in landing.rs:61-70: landed_commit_from_records runs `git log --diff-filter=A` on outcome-landed.json/outcome.json and returns the oldest commit that added the file, as long as verification.json contains the fingerprint. Trailers are never checked. The records-only commit adds b's outcome.json and keeps b's verification.json, which holds the verified fingerprint (fixtures::verification, land.rs:273-291), so it qualifies. System facts say C0 has happened, and landed_commit_for (landing.rs:78-80) uses this path after C0. Queue order is pass order, so b can still be queued. When b reaches the head, step (3) of rebase_job_branch finds the carried commit, and plan_rebase's ancestor check returns Current. Fix: Put a fixed marker line in the carried message, for example `Athena-Records-Only: <old commit>`. In rebase_job_branch, or in plan_rebase when `landed` is given, return Conflict (a hold) when the landing commit found is a records-only carry. Add one plan_rebase or rebase_job_branch case: after the earlier-conflict rebase, looking up b gives a hold, not Current. Alternatively, compare the found commit's tree fingerprint with the verified fingerprint. Either way, the risk text must stop claiming that the trailer change covers the current mode.",
+      "location": "Decision 1 and Risks (records-only commit mistaken for a landing); gh/landing.rs:55-75",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "content_changed compares the whole replayed tree's fingerprint with the verified one, so it is true on nearly every Moved result and adds little beyond 'Moved'.",
+      "evidence": "Demonstration (a) itself expects content_changed to be true after any outside commit lands on main. Once main moves, the governed fingerprint of the rebased tree differs whenever the outside commit touched governed files. Fix: Define the flag as 'the job's own change differs from what was verified', for example by comparing the diff from the job commit's parent to the commit before and after the replay. Or drop the flag and say in the docs that every Moved result changes verified content until job 7.",
+      "location": "Decision 4 (content_changed)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`git log --first-parent` is linear by construction, so this check would pass even if the rebuilt branch had merge commits.",
+      "evidence": "The plan observes linearity with `git log --first-parent --format=%H`. Fix: Assert that `git rev-list --merges <bare main>..<tip>` is empty, and that each new commit has exactly one parent.",
+      "location": "Demonstration for criterion 3 (linear history)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'Main ref and branch tip unchanged' cannot fail for a pure plan_rebase that moves no refs. The real check is the Conflict variant naming the job's commit.",
+      "evidence": "Decision 2 and step 2 make plan_rebase pure. Only rebase_job_branch calls reset_keep. Fix: Keep the Conflict assertion as the check for 1(c). Keep the ref-unchanged assertion only in the rebase_job_branch conflict test, where a wrong reset could actually move refs.",
+      "location": "Demonstration for criterion 1(c)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Falling back to show_file assertions would leave criterion 2 unshown, because the criterion requires Records::load to load the held-back job's record.",
+      "evidence": "Criterion 2: 'Records::load from the new tip still loads that held-back job's record.' The fixtures write records through AnyRecord::canonical_path and to_json (land.rs:254-256), and store.rs tests call Records::load(&git, \"HEAD\") on such commits, so the load is likely to work. Fix: State that if Records::load fails on the fixtures, the producer fixes the fixture setup or reports criterion 2 as not met. Do not swap in a path-only check.",
+      "location": "Open questions (Records::load fallback)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "There is a typo, and a decision is cited by the wrong number.",
+      "evidence": "`rebase_job_barnch` in the gh/mod.rs entry. Step 4 says 'the flow of decision 5', but the flow is in decision 6. Fix: Spell it `rebase_job_branch`, and cite decision 6.",
+      "location": "Files (gh/mod.rs) and Step 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the accepted reading, which narrows the request to the core mechanism and leaves the drain wiring as a follow-up. The APIs it names exist in the snapshot: Git::merge_tree, commit_tree, commit_with_records, reset_keep, fetch_remote_branch, run, is_ancestor, show_file and ls_tree (athena-git lib.rs); landed_commit_for and landed_commit_from_records (gh/landing.rs:55, 78); load_early (pr.rs:150); lock_repository (state.rs:129); land::fixtures (land.rs:243); and the pub use list (gh/mod.rs:51-54). The records-only carry works as described. commit_with_records(parent, commit) builds the parent's tree with the commit's full records/ snapshot, so a three-way merge from that parent applies only the commit's own record changes. The demonstrations use real repositories and a real bare origin, not doubles. One soundness problem needs a fix. The plan relies on dropping Athena-* trailers to stop a records-only commit being taken as the held-back job's landing commit. That only protects the pre-C0 lookup. The live post-C0 lookup, landed_commit_from_records, picks the commit that added outcome.json and only checks that verification.json contains the fingerprint, so it would return the code-less carried commit. Inside landing.rs, rebase_job_branch would then report Current for that job and hand a code-less commit on to landing. The plan notices this in an open question but defers it, and the fix is cheap and within scope. The other findings are minor: the content_changed flag carries almost no information, the linear-history check passes trivially, a pure-function check passes trivially, the Records::load fallback would leave criterion 2 unshown, and there is a typo."
+}

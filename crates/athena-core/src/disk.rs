@@ -1,7 +1,13 @@
-//! Free disk space: the check before a job is dispatched, before its checks run and before its verifier runs.
+//! Free disk space: the check before a job is dispatched, before its producer runs, before its checks run and
+//! before its verifier runs.
 //!
 //! A full disk makes builds fail in ways that look like faults in the work. So `[disk] min_free_gb` (default
-//! [`athena_data::config::DEFAULT_MIN_FREE_GB`]) is enforced in code at three places:
+//! [`athena_data::config::DEFAULT_MIN_FREE_GB`]) is enforced in code at four places:
+//!
+//! - Before the producer, after the baseline checks (which build on the base commit). The same cleanup runs;
+//!   if space is still low the job is held as an environment stop, with its planning and baseline records and
+//!   no candidate and no resume mark. The producer is never started. A later drain retries the job, which
+//!   plans and produces again, as any interrupted job without a candidate does.
 //!
 //! - At dispatch, before anything is committed. If space is low, the build directories (`target/`) of idle jobs
 //!   are removed; if it is still low, the job is held: it stays queued, a local marker records the amounts,
@@ -42,9 +48,18 @@
 //! limit (API error 429). These say nothing about the work either. [`StopCause`] is the one classifier of all
 //! of them; the scope guard and `athena retry` both use it, so no second list of environment reasons exists.
 //!
-//! Freeing and resuming. The producer's build directory (`target/produce`) is idle once Athena's checks have
-//! passed, since the checks build in their own directory; it is removed then, before the gate that runs
-//! before the verifier, and kept when a check fails (the send-back needs it). A job that stops for an
+//! Reclaiming interrupted jobs. A job whose process died is dispatched with no closing record and keeps its
+//! build directory, which can be several gigabytes, until someone closes it. At the start of `athena drain`
+//! and before each run, [`Athena::reclaim_interrupted`] removes `target/` of every such job: the records show
+//! it dispatched, the process registry has no entry for it and its job lock is free
+//! ([`reclaim_interrupted_targets`]). Work trees, kept candidates, resume marks and records stay, so the
+//! retry resumes as before. A job with a registry entry or a held lock is running and is not touched.
+//!
+//! Freeing and resuming. The producer's build directory (`target/produce`) is idle once the producer has
+//! finished, since Athena's checks build in their own directory; it is removed before the first check starts,
+//! after the gate that runs before the checks, whether the checks then pass or fail. The job so never holds
+//! two full builds while the checks run. A failed check keeps the last 200 lines of its output in the
+//! job's verification record, and the `checks` log line names its failing tests. A job that stops for an
 //! environment cause after its candidate is built, or that is interrupted, leaves a resume mark
 //! ([`crate::state::ResumeMark`]) outside its job directory; [`resumable_stop`] says which stopped jobs
 //! `athena retry` resumes from that candidate, with no new planner or producer run.
@@ -178,6 +193,51 @@ pub fn sweep_idle_targets(state: &StateDir, keep: &JobId, ui: &dyn Ui) -> u64 {
             }
             Err(why) => ui.line(&format!(
                 "warning: could not remove the build directory of job {id}: {why}"
+            )),
+        }
+    }
+    total
+}
+
+/// Removes the `target/` of each job in `dispatched` that is interrupted: it has no entry in the process
+/// registry and its job lock is free. Work trees, snapshots, kept candidates and resume marks stay, so an
+/// interrupted job resumes as before; only the build directory, which a later build recreates, goes. A job
+/// with a registry entry or a held lock is running and keeps its build directory. Returns the bytes removed.
+///
+/// `dispatched` is the jobs the records show as dispatched with no closing record; the caller picks them, so
+/// this function reads no records. It is meant to run when no build is wanted from the interrupted job, at
+/// the start of a drain and before each run, so interrupted jobs never hold the disk until it is full.
+pub fn reclaim_interrupted_targets(state: &StateDir, dispatched: &[JobId], ui: &dyn Ui) -> u64 {
+    let running: Vec<String> = state
+        .registry()
+        .entries()
+        .into_iter()
+        .map(|e| e.job)
+        .collect();
+    let mut total = 0;
+    for id in dispatched {
+        if running.iter().any(|job| job == id.as_str()) {
+            continue;
+        }
+        // Nothing to reclaim; locking would only create a directory for a job that has none.
+        if !state.job_dir(id).join("target").exists() {
+            continue;
+        }
+        // Held by a running command: its build directory is in use.
+        let Ok(Some(_lock)) = state.try_lock_job(id) else {
+            continue;
+        };
+        match state.remove_target(id) {
+            Ok(0) => {}
+            Ok(bytes) => {
+                total += bytes;
+                ui.line(&format!(
+                    "disk       reclaimed build directory of interrupted job {id}: {}",
+                    format_bytes(bytes)
+                ));
+            }
+            Err(why) => ui.line(&format!(
+                "warning: could not remove the build directory of interrupted job {id}: {why}"
             )),
         }
     }
@@ -445,6 +505,27 @@ impl Athena {
     /// all use. See [`gate`].
     pub(crate) fn disk_gate(&self, required_gb: u64, job: &JobId, ui: &dyn Ui) -> Option<LowDisk> {
         gate(&self.state, required_gb, job, ui)
+    }
+
+    /// Reclaims the build directories of interrupted jobs: those the records show as dispatched with no
+    /// closing record, no registry entry and a free job lock (see [`reclaim_interrupted_targets`]). The
+    /// drain calls it at its start and before each run. It reads the records at `HEAD` once per call, so a job
+    /// that another command dispatches in that instant is protected by its job lock, not by the read. A
+    /// records read that fails reclaims nothing. Returns the bytes removed.
+    pub fn reclaim_interrupted(&self, ui: &dyn Ui) -> u64 {
+        let Ok(head) = self.head() else {
+            return 0;
+        };
+        let Ok(records) = Records::load(&self.git, &head) else {
+            return 0;
+        };
+        let dispatched: Vec<JobId> = records
+            .jobs
+            .values()
+            .filter(|j| j.state() == JobState::Dispatched)
+            .map(|j| j.id().clone())
+            .collect();
+        reclaim_interrupted_targets(&self.state, &dispatched, ui)
     }
 }
 
@@ -985,6 +1066,55 @@ mod tests {
         let said = ui.0.lock().unwrap().join("\n");
         assert!(said.contains(idle.as_str()), "{said}");
         assert!(!said.contains(locked.as_str()), "{said}");
+    }
+
+    #[test]
+    fn interrupted_targets_are_reclaimed_but_running_jobs_keep_theirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        let (dead, locked, alive, later) = (id(1), id(2), id(3), id(4));
+        let make = |job: &JobId| {
+            let dir = state.job_dir(job);
+            std::fs::create_dir_all(dir.join("target/produce")).unwrap();
+            std::fs::write(dir.join("target/produce/big"), vec![1u8; 50_000]).unwrap();
+            std::fs::create_dir_all(dir.join("work")).unwrap();
+            std::fs::write(dir.join("work/main.rs"), b"fn main() {}").unwrap();
+        };
+        for job in [&dead, &locked, &alive] {
+            make(job);
+        }
+        let _held = state.try_lock_job(&locked).unwrap().expect("lock is free");
+        state
+            .registry()
+            .register(i32::MAX - 1, alive.as_str(), "producer")
+            .unwrap();
+        let all = [dead.clone(), locked.clone(), alive.clone(), later.clone()];
+
+        let ui = Said::default();
+        let removed = reclaim_interrupted_targets(&state, &all, &ui);
+        assert!(removed >= 50_000, "{removed}");
+        assert!(!state.job_dir(&dead).join("target").exists());
+        assert!(state.job_dir(&dead).join("work/main.rs").exists());
+        assert!(state.job_dir(&locked).join("target/produce/big").exists());
+        assert!(state.job_dir(&alive).join("target/produce/big").exists());
+
+        // A job interrupted after the first sweep is reclaimed by the next one; the running ones still keep.
+        make(&later);
+        let removed = reclaim_interrupted_targets(&state, &all, &ui);
+        assert!(removed >= 50_000, "{removed}");
+        assert!(!state.job_dir(&later).join("target").exists());
+        assert!(state.job_dir(&later).join("work/main.rs").exists());
+        assert!(state.job_dir(&locked).join("target/produce/big").exists());
+        assert!(state.job_dir(&alive).join("target/produce/big").exists());
+        let said = ui.0.lock().unwrap().join("\n");
+        assert!(
+            said.contains(dead.as_str()) && said.contains(later.as_str()),
+            "{said}"
+        );
+        assert!(
+            !said.contains(locked.as_str()) && !said.contains(alive.as_str()),
+            "{said}"
+        );
     }
 
     fn plenty(_: &Path) -> std::io::Result<u64> {

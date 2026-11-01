@@ -41,16 +41,17 @@ mod remote;
 mod transport;
 
 pub use client::{
-    CI_WORKFLOW, Checks, CiRunState, EARLY_RUN_WAIT, GhClient, MergeMethod, MergeMethods, NewPr,
-    PrDraft, PrHost, classify_checks, failing_test_name, parse_check_run, parse_ci_run,
-    parse_ci_runs, parse_merged_pr, parse_remote,
+    CI_WORKFLOW, CheckReport, Checks, CiRunState, EARLY_RUN_WAIT, GhClient, MergeMethod,
+    MergeMethods, NewPr, PrDraft, PrHost, classify_checks, failing_test_name, parse_check_run,
+    parse_ci_run, parse_ci_runs, parse_merged_pr, parse_remote,
 };
 #[cfg(test)]
 use early::EARLY_RUN_JOB;
 pub use early::{CI_BRANCH_PREFIX, EarlyPr, ci_branch, open_early_pr};
 pub use landing::{
-    LandPr, Poll, PrReport, confirm_existing_merge, land_pr, landed_commit, landed_commit_for,
-    landed_commit_from_records, squash_text_for, work_branch,
+    LandPr, Poll, PrReport, Rebase, confirm_existing_merge, land_pr, landed_commit,
+    landed_commit_for, landed_commit_from_records, plan_rebase, rebase_job_branch, squash_text_for,
+    work_branch,
 };
 pub use pages::{
     PAGES_WAIT_DELAY, PAGES_WAIT_LOOKS, PAGES_WORKFLOW, PagesHost, PagesReport, PagesRun,

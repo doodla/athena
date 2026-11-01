@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-061448-sdya",
+  "round": 1,
+  "at": "2026-11-01T07:30:37.584508354Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The new Athena::go tests use the Docs test capability, whose single 'probe' check turns CI reuse off, so the CI path is never reached",
+      "evidence": "run/tests.rs Docs::checks returns one CheckSpec named \"probe\". routing::route sets reuse = kind != Build && covers_all, where covers_all needs every name in ci_result::STEPS (fmt, clippy, test). run_routed returns run_local(...) at once when !route.reuse, so the CiSource is never called. A ci_reuse_run built 'from the pieces of ci_run' (which uses athena_with and so Docs) would call the recording executor for 'probe' and never ask the runner fake. The green, red, fallback and verifier-statement tests would fail. The no-origin test (criterion 4) would pass even without the origin check, so its 'fails without the behavior' claim is false. The plan also says the executor 'ran fmt, clippy and test', which the Docs fixture does not have. Fix: In step 8, add a test capability (or a Docs variant) whose checks() returns specs named fmt, clippy and test, and build ci_reuse_run on it, with the recording check_seam answering each. Have the helper assert route reuse is on, or assert the runner was called in the green case, so a test cannot pass through the local path. Revise the criterion 4 demonstration to use the same capability, so a missing origin check would show runner or sleeper calls.",
+      "location": "Plan step 8 and demonstrations for criteria 1-5; crates/athena-core/src/run/tests.rs:134-141; crates/athena-core/src/routing.rs:85,100,190-192",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A failed or skipped CI-branch push still starts the full 1500 s wait",
+      "evidence": "push_ci_branch returns () and only prints a warning on a push failure. with_ci_source picks the GitHub source and ci_polls(1500) = 76 reads whatever the push did. read_ci keeps polling on Ok(None), so a candidate that was never pushed costs about 25 minutes before local checks run. Fix: Name this in the risks. Propose, as a follow-up since early.rs is out of scope, that push_ci_branch report whether the candidate is on the branch, so with_ci_source can use NoCi when it is not. Otherwise check once in with_ci_source, through the same remote seam, that the branch holds the candidate before choosing a wait.",
+      "location": "Plan step 5 (with_ci_source); crates/athena-core/src/gh/early.rs:360-376; run/mod.rs:1211",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The '\\u{40}' escape works around a scan rather than meeting a rule",
+      "evidence": "A single at-sign character is not an email address. Escaping it avoids the diff scan but adds an unusual-looking literal that the next reader may 'fix' back. Fix: Keep the escape, but add a one-line comment saying why (admission scans added lines for at-sign forms).",
+      "location": "Plan decision 3, step 3 (gh/client.rs https_origin_repository)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and reading, and its design is sound. It chooses the source and wait together in Athena::with_ci_source and paces the wait with a Paced wrapper so ci_result.rs stays untouched. Budget.ci_wait_s gets a serde default and its schema field. A test-only ci_seam falls back to NoCi, and no at-sign text is added. The code it names exists: NoCi at run/mod.rs:1283, check_seam, the direct sleep in read_ci, GhClient::ci_source and CiBranchSource, verify::reuse_statement(&CiRecord, &str), the private https_github_repository in early.rs, and the \"not a check\" entries in verification.rs. The CI branch is pushed at run/mod.rs:1211, before the checks run, so a candidate run can exist. The one major gap: the new Athena::go tests build on the ci_run helper and its Docs capability, which has a single check named \"probe\". routing::route sets reuse only when the checks cover fmt, clippy and test, and run_routed runs local checks without asking the CI source when reuse is off. So the criterion 1, 2, 3 and 5 tests cannot see a CI result, and criterion 4 passes trivially. The plan needs a test capability with those three checks."
+}
