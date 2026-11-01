@@ -1,0 +1,245 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-031934-8vyd",
+  "round": 3,
+  "at": "2026-11-01T20:18:36.631022555Z",
+  "invocation_seq": 7,
+  "approach": "Add a small defaulted seam to the drain's `Steps` trait: `rebase(job) -> Rebased` (default `Unchanged`), `rerun_checks(job) -> Check` (default pass) and `rerun_cap() -> f64` (default 0.0). Existing stubs and tests stay as they are, so max_in_flight = 1 behaves as today. `Rebased` has two arms, `Unchanged` and `Moved{candidate, touched}`. A rebase conflict is an A6 matter and is not built. In `Drain::land`, under the landing lock and before `steps.land`, ask `rebase`. A pure `rebase_needs_recheck(candidate, touched)` decides. It uses the existing `stale_paths` rule, plus any touched path whose file name is Cargo.toml or Cargo.lock. Every moved rebase is counted, and so is every one that needed a re-check. A per-run set `owing` keeps a failed re-check owed across the landing retry. A re-check whose cap does not fit the budget ends the item through a new `LandStep::Budget`, which `attempts()` maps to the existing `ItemEnd::Budget`. That gives the pass-over line and `Stop::BudgetSpent`, not repeated-failure. The share is `Report.rebases` plus a notes line that names the rule. Real steps keep the defaults, because the A6 wiring (`Steps::rebase` and `Athena::rebase_for_landing`) is absent. The CHANGELOG, the design doc and the final report say the share is not yet measured in a live drain. `landing.rs` is not touched: the earlier `rebase_paths` helper is dropped. Tests drive `drain_concurrent` and `drain` with scripted steps. Criterion 4's demonstration now names its seam: the three cargo check commands on the real workspace.",
+  "decisions": [
+    {
+      "choice": "Two defaulted `Steps` methods (`rebase`, `rerun_checks`) plus a defaulted `rerun_cap`. `Rebased` has only two arms: `Unchanged` and `Moved{candidate, touched}`. The overlap decision is a pure function in drain.rs.",
+      "reason": "The drain reaches the world only through `Steps`. `read_ahead`, `plan_cap` and `recheck` (drain.rs about 541-557) are the precedent for defaulted methods, so existing stubs compile unchanged. The test double only answers with scripted path lists. The overlap rule runs in production code. The method is named `rerun_checks` because `Steps::recheck` already means the stale-reading check.",
+      "rejected": [
+        {
+          "option": "Call `rebase_job_branch` straight from `Drain::land`",
+          "why": "It needs a real Git, StateDir and fingerprint, which the loop does not see, so a stub could not test it."
+        },
+        {
+          "option": "Add a `Held` arm for a rebase conflict",
+          "why": "The design says a conflict holds the job with no retry and no drain stop. That needs a new `LandStep` and `ItemEnd` mapping and the send-back. These are A6 matters; the producer reports them. Conflict handling stays with A6."
+        },
+        {
+          "option": "Rebuild A6's `Steps::rebase`, `rebase_for_landing`, thrash stop and send-back",
+          "why": "Out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Keep `owing: BTreeSet<String>` in `State`. A job enters it when a re-check is decided and leaves only when `rerun_checks` passes. `Drain::land` re-runs the check for any job in the set, whatever `rebase` answers.",
+      "reason": "`attempts()` (drain.rs 1568-1584, ATTEMPTS = 2) calls `land` again after `NotLanded`. In the real world the second `rebase` finds the branch current and answers `Unchanged`. Without the debt the candidate would land unchecked. A job that fails its re-check twice ends as `ItemEnd::Failed`, like any landing that fails twice today.",
+      "rejected": [
+        {
+          "option": "Rely on the second `rebase` returning Moved again",
+          "why": "The branch is already moved, so it answers Unchanged."
+        },
+        {
+          "option": "Add a new end for a failed re-check",
+          "why": "It touches retry accounting for no gain; the existing failure path fits."
+        }
+      ]
+    },
+    {
+      "choice": "Hold `rerun_cap()` against the budget before `rerun_checks` (`st.budget.fits`, then `hold`), then `release` and `add(check.cost)`. If the cap does not fit, `land` sets `jobs[at].landing` and `jobs[at].reason` to 'not landed: the re-check after the rebase does not fit the budget' and returns a new `LandStep::Budget`, which `attempts()` maps to `ItemEnd::Budget` with no retry and no failure counted. The job stays in `owing`.",
+      "reason": "`ItemEnd::Budget` already gives `pass_over` (using `last_reason`) and `set_stop(Stop::BudgetSpent, None)` (drain.rs 2049-2055). The budget stop sees the money before it is spent, in the same order as `check_page`/`check_cap`.",
+      "rejected": [
+        {
+          "option": "Return NotLanded on a budget refusal",
+          "why": "The retry fails the same way and the run stops as repeated-failure with `failed_item` set. Wrong stop."
+        },
+        {
+          "option": "Add the cost after the call only",
+          "why": "A re-check could run past the budget unseen."
+        }
+      ]
+    },
+    {
+      "choice": "`rebase_needs_recheck(candidate, touched)` is true when `stale_paths(candidate, touched)` is non-empty, or when any touched path has the file name Cargo.toml or Cargo.lock at any depth. The note names the rule: 'measured by candidate paths and any Cargo.toml or Cargo.lock'. The design doc states the same rule.",
+      "reason": "The design (async-drain.md line 127, section 6 step 2) names the workspace manifests, and a member crate's manifest can break a candidate that never touched it. `stale_paths` and `overlap` (drain.rs 775-805) are the existing 'touches' notion; shared append-only files are ignored there. A unit arm pins the member-crate case.",
+      "rejected": [
+        {
+          "option": "Candidate paths only, as the request reads literally",
+          "why": "A manifest change could break a candidate that never touched it. Kept as an open question; dropping the clause is a small edit."
+        },
+        {
+          "option": "Root Cargo.toml and Cargo.lock only",
+          "why": "Misses member manifests the design means."
+        },
+        {
+          "option": "A new overlap function in landing.rs",
+          "why": "It would drift from the rule the plan and read-ahead use."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the share in memory: `State` counters, `Report.rebases` ({total, rechecked}), and the note 'rebases: R of N needed a re-check (measured by candidate paths and any Cargo.toml or Cargo.lock)', pushed only when N > 0. No record file.",
+      "reason": "The request asks for the share in the drain summary. display.rs already prints `report.notes`, so no file outside the deliverables is touched. No `check_record_file` or `AnyRecord` change is needed.",
+      "rejected": [
+        {
+          "option": "A new summary line in display.rs",
+          "why": "Not a deliverable, and notes already render."
+        },
+        {
+          "option": "Persist the share to records",
+          "why": "Not asked for; it would touch record schemas."
+        }
+      ]
+    },
+    {
+      "choice": "Only `Moved` counts toward the share. `Unchanged` (a current or unchecked branch) is not a rebase and is not counted.",
+      "reason": "Counting a rebase that did not happen would distort the share. `Unchecked` says nothing about the job, so landing proceeds as today, with the merged-content check in `land_pr`.",
+      "rejected": [
+        {
+          "option": "Count Current or Unchecked in the denominator",
+          "why": "The figure would no longer be the share of rebases."
+        }
+      ]
+    },
+    {
+      "choice": "Drop the `rebase_paths` helper. landing.rs is not changed.",
+      "reason": "Nothing would call it, and A6 may shape its feed differently. The request's Files line lists only drain.rs and CHANGELOG.md. The limit that the real steps do not turn the rebase on yet is stated in the CHANGELOG, the design doc, the drain.rs module docs and the final report.",
+      "rejected": [
+        {
+          "option": "Keep `rebase_paths` with a doc comment",
+          "why": "It is speculative, unused and untested through a live path: untested production code."
+        }
+      ]
+    },
+    {
+      "choice": "Demonstrate criterion 4 with the three Athena check commands run unchanged on the real workspace, with no fake or fixture, and name them as the seam.",
+      "reason": "The criterion is about the workspace passing the checks, so the real cargo commands are the entry point. The new tests from steps 2 and 7 are part of what `cargo test --locked` runs.",
+      "rejected": [
+        {
+          "option": "Leave the seam blank because no fake is used",
+          "why": "The brief requires every behavior demonstration to name its seam."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Rebased` (Unchanged, Moved) and `RebaseTally`; defaulted `Steps::rebase`, `rerun_checks` and `rerun_cap`; the pure `rebase_needs_recheck`; `LandStep::Budget` and its `ItemEnd::Budget` mapping in `attempts()`; the `owing` set and counters in `State`; the rebase and re-check block in `Drain::land`; `Report.rebases` and the note in `drain_with`; module docs; unit tests per arm.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "New `mod rebase_recheck` with scripted Sync `Rebasing` steps and tests through `drain_concurrent`/`drain`: overlap re-checks before landing, no overlap lands without a re-check, the 1 of 2 share in the report and rendered summary, a failed re-check kept through the retry, a budget-short re-check ending in `Stop::BudgetSpent`, and the max_concurrency 2 pin. No existing test is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "purpose": "Section 6 and build job 7: record the rule as built (candidate paths plus any Cargo.toml or Cargo.lock at any depth), the counted share and its note, the owed re-check across the landing retry, and the budget stop. State that conflict handling and the real `Steps::rebase` wiring are A6's, and that the share is not measured in a live drain until then.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One Unreleased Added bullet citing D145 and build job 7, with the live-drain limit stated.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In drain.rs add `pub enum Rebased { Unchanged, Moved { candidate: Vec<String>, touched: Vec<String> } }` and `pub struct RebaseTally { pub total: u32, pub rechecked: u32 }` (Default, Serialize, Clone, PartialEq, Debug). Add three defaulted methods to `Steps`: `rebase(&self, job: &str) -> Rebased` (Unchanged), `rerun_checks(&self, job: &str) -> Check` (`Check::pass`) and `rerun_cap(&self) -> f64` (0.0). Document them, saying the real steps keep the defaults until A6's wiring, and that conflicts belong to A6.",
+    "Add the pure `rebase_needs_recheck(candidate, touched) -> bool`: true when `stale_paths(candidate, touched)` is non-empty or any touched path has the file name Cargo.toml or Cargo.lock (any depth, matched on the last path component). Add unit tests in the existing tests module, one per arm: exact path, directory holding a path, root Cargo.toml, root Cargo.lock, `crates/x/Cargo.toml`, no overlap, only shared append-only files, and an empty candidate list with a non-shared touched path.",
+    "Add `rebases: RebaseTally` and `owing: BTreeSet<String>` to `State`, and `rebases` to `Report`. Set it in `drain_with` and push the note 'rebases: R of N needed a re-check (measured by candidate paths and any Cargo.toml or Cargo.lock)' only when N > 0.",
+    "Add `LandStep::Budget` and, in `attempts()`, `LandStep::Budget => return ItemEnd::Budget` (no failure counted).",
+    "In `Drain::land`, after the landing lock is taken and before `self.steps.land(job)`, match `self.steps.rebase(job)`. For `Moved`, count the rebase; if `rebase_needs_recheck`, count it and insert the job in `owing`. For `Unchanged`, do nothing. Then, if the job is in `owing` (whatever `rebase` answered): under the state lock check `fits(rerun_cap)` and `hold`. If it does not fit, set `jobs[at].landing` to 'not landed: the re-check after the rebase does not fit the budget' and `jobs[at].reason = Some(<same text>)`, print the line, and return `LandStep::Budget` (the job stays in `owing`). Otherwise call `rerun_checks` outside the lock, then `release(cap)` and `add(check.cost)`. A pass removes the job from `owing` and goes on to `steps.land`. A failure sets 'not landed: checks failed after rebase: <detail>', prints the line, and returns `NotLanded` without calling land.",
+    "Update the drain.rs module docs: a bullet on the re-check rule, the owed re-check, the budget stop, the share and its rule, and the line that the real steps do not turn the rebase on yet.",
+    "In tests/drain.rs add `mod rebase_recheck` with the scripted Sync `Rebasing` steps (scripted queues of `Rebased` answers, check results and caps, plus a call log) and the tests for criteria 1 to 3: overlap, no overlap with the 1 of 2 share in report and rendered summary, failed re-check kept through the retry (first Moved, later Unchanged, never 'land a'), failed then passing re-check lands, failing twice ends as repeated-failure, budget-short re-check (stop is BudgetSpent, failed_item None), and the max_concurrency 2 pin. Do not edit any existing test.",
+    "Edit docs/design/async-drain.md (section 6 and build job 7) and add the CHANGELOG.md bullet under Unreleased / Added, citing D145 and build job 7 and stating the live-drain limit. Leave landing.rs untouched.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Check with `git diff --stat` and `git diff` that no existing test was edited and no governance file was touched. In the final report, state that the share is not yet measured in a live drain and that conflict handling and the real rebase wiring are A6's."
+  ],
+  "risks": [
+    {
+      "risk": "Adding a field to `Report` or methods to `Steps` breaks existing code.",
+      "mitigation": "The methods have defaults. `Report` is built in one place (drain_with). The producer greps for other constructions and runs the whole suite."
+    },
+    {
+      "risk": "The landing retry calls land twice, so one job could be counted as two rebases or re-checked twice.",
+      "mitigation": "The second `rebase` of a job already moved answers Unchanged and is not counted. The re-check runs again on the retry only if the first one failed (the `owing` set). A test shows the counts."
+    },
+    {
+      "risk": "A new `LandStep::Budget` arm is missed in a match, or the pass-over line has no reason.",
+      "mitigation": "Rust's exhaustive match makes the compiler flag the match in `attempts()`. `land` sets `jobs[at].reason`, and the budget test asserts the stop, `failed_item` and the line text."
+    },
+    {
+      "risk": "A rebase that touches no candidate path still breaks the build through generated files or stacked commits.",
+      "mitigation": "The merged-content check in `land_pr` and the host CI remain the safety net. A manifest change forces a re-check. The doc states the limit."
+    },
+    {
+      "risk": "Re-running checks under the landing lock holds up the queue.",
+      "mitigation": "This matches the design (one landing at a time keeps main linear), and the check runs only on overlap."
+    },
+    {
+      "risk": "The change is invisible in a live drain because the real steps keep the defaults.",
+      "mitigation": "The CHANGELOG, the design doc, the module docs and the producer's report say so plainly."
+    },
+    {
+      "risk": "drain.rs is about 198 KB, so the edit can go wrong in the module text and the tests.",
+      "mitigation": "Keep the diff to additions plus one block in `Drain::land`, one arm in `attempts`, and one block in `drain_with`. Run fmt, clippy and the tests. Check the diff for edited existing tests."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Integration tests in a new `mod rebase_recheck`, plus unit tests of the pure function. (a) Overlap: scripted `Rebasing` steps answer `rebase` with `Moved` whose candidate and touched lists both hold `src/a.rs`, then `drain_concurrent(steps, limits, &Quiet, 1)` runs. (b) Failed re-check kept through the retry: the first `rebase` answer is Moved with overlap and the first `rerun_checks` fails; every later `rebase` answer is `Unchanged`. A passing variant lets the second `rerun_checks` pass. (c) A re-check that fails twice ends the run with `Stop::RepeatedFailure`. Unit tests in drain.rs `tests` pin `rebase_needs_recheck` per arm: exact path, a directory holding a path, root Cargo.toml, root Cargo.lock, `crates/x/Cargo.toml`, no overlap, only shared append-only files, and an empty candidate list with a non-shared touched path.",
+      "command": "cargo test -p athena-cli --test drain rebase_recheck && cargo test -p athena-cli --lib drain::tests::rebase",
+      "observes": "(a) The log reads 'rebase a', 'rerun a', 'land a' in that order; report.landed is 1 and report.rebases is {total: 1, rechecked: 1}. (b) With the failing re-check the log has 'rerun a' twice and never 'land a', and the job line says 'not landed: checks failed after rebase'; report.landed is 0 although the second `rebase` answered Unchanged. In the passing variant the log is 'rerun a' (fail), 'rerun a' (pass), 'land a'. (c) The stop is RepeatedFailure. Each unit arm passes.",
+      "fails_without": "Without the re-check call in `Drain::land`, 'rerun a' is never logged and the order assertion fails. Without the `owing` set, the retry lands (the log shows 'land a' after the failed re-check), so the never-lands assertion fails. Without the overlap rule, a path both sides share triggers no re-check. Without the any-depth manifest rule, the `crates/x/Cargo.toml` unit arm fails.",
+      "seam": "Production entry points `drain::drain_concurrent` and `drain::drain` (exist; drain_concurrent at about drain.rs 2342). Guards: item read, run passed, head of the landing queue, landing lock held in `Drain::land`. Fixture: a Sync scripted `Rebasing` struct modelled on `Shared` in tests/drain.rs `mod parallel`, passed as the `steps` argument. It answers `Steps::rebase` from a Mutex<VecDeque<Rebased>> of scripted path lists, answers `rerun_checks` from a scripted pass/fail list, and logs calls. `Steps::rebase`, `rerun_checks`, `rerun_cap` and `Rebased` are added with defaults by plan step 1. The overlap decision and the owing set run in production code, not in the fixture."
+    },
+    {
+      "criterion": 2,
+      "method": "Two independent jobs a and b with disjoint plan paths. a's candidate changed `src/a.rs` and its rebase touched only `docs/other.md`; b's candidate changed `src/b.rs` and its rebase touched `src/b.rs`. Run `drain_concurrent` with bound 1 and render the report with `display::drain(&report)`. A second test uses no rebase at all. A third gives `rerun_cap` a value above the remaining budget, with an overlapping rebase.",
+      "command": "cargo test -p athena-cli --test drain rebase_recheck",
+      "observes": "The log has no 'rerun a' and has 'rerun b' before 'land b'. report.rebases is {total: 2, rechecked: 1}. report.notes holds 'rebases: 1 of 2 needed a re-check (measured by candidate paths and any Cargo.toml or Cargo.lock)', and the rendered `display::drain` text contains that line. With no rebase the notes have no 'rebases' line and rebases is {0, 0}. In the budget case the log has no 'rerun' and no 'land', report.stop is `Stop::BudgetSpent`, `failed_item` is None, the job line says the re-check does not fit the budget, and the plan pass-over line carries that reason.",
+      "fails_without": "If every rebase were re-checked, 'rerun a' would be logged and rechecked would be 2. If the tally were not recorded, the field and the note would be missing and the rendered text would lack the line. Without the cap hold the over-budget case would run the re-check. Without the `LandStep::Budget` mapping, the budget test would see `Stop::RepeatedFailure` and a `failed_item`, so the stop assertions fail.",
+      "seam": "Production entry points `drain::drain_concurrent` and `display::drain` (both exist). Fixture: the scripted Sync `Rebasing` steps, injected as the `steps` argument, with a scripted `rerun_cap` for the budget case. `Report.rebases`, the `State` counters and the note are added by plan step 3. The cap hold and `LandStep::Budget` are added by step 4. The counting, the note and the budget decision run in production code."
+    },
+    {
+      "criterion": 3,
+      "method": "The existing suite runs unedited. A new test runs `drain_concurrent` with max_concurrency 2 and two jobs a and b in one plan group (disjoint paths). The scripted steps answer `Unchanged` for a and a `Moved` whose touched paths miss b's candidate paths for b. The verifier reads `git diff` for removed or edited existing test lines.",
+      "command": "cargo test -p athena-cli && git diff -- crates/athena-cli/src/drain.rs crates/athena-cli/tests/drain.rs",
+      "observes": "Both jobs land (report.landed is 2). 'land a' is logged before 'land b'. The log has no 'rerun' entry. report.rebases is {total: 1, rechecked: 0}. The whole existing suite passes. The diff shows only added test lines, and the only changed existing lines in drain.rs are in `Drain::land`, `attempts`, `State`, `Report`, `drain_with` and the module docs.",
+      "fails_without": "If the re-check ran for a non-overlapping rebase, or the parallel path landed the second job differently, the log assertions fail. If the new `Steps` methods had no defaults, every existing stub (Stub, Housekeeping, World, Lane and the tests/drain.rs Stub and Replay) would fail to compile.",
+      "seam": "Production entry point `drain::drain_concurrent` with max_concurrency 2 (exists). Fixture: the scripted Sync `Rebasing` steps, injected as the `steps` argument. The defaults come from plan step 1. The landing order and the re-check decision run in production code."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three Athena checks on the whole workspace, unchanged from how Athena runs them. They compile and run every test, including the new `rebase_recheck` integration tests (step 7) and the `rebase_needs_recheck` unit tests (step 2), and lint all code including the new code.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0: no formatting difference, no clippy warning, and every test passes, including the new drain tests and the unit tests for the pure function.",
+      "fails_without": "A formatting difference, a clippy warning, or any failing or non-compiling test (for example an existing `Steps` stub broken by a method without a default) makes the command exit non-zero.",
+      "seam": "Production entry points: the real commands `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, the same three Athena runs. They are run at the workspace root, which injects the real source tree as their input. No fake or fixture is used. The commands exist today; the new tests they run come from plan steps 2 and 7."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the CHANGELOG.md diff under the Unreleased section, Added.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One added bullet citing D145 and build job 7. It says that after a rebase the drain re-runs checks only when the rebase touched paths the candidate changed (or any Cargo.toml or Cargo.lock), and that the share of rebases that needed it is counted and shown in the drain summary as 'N of M' with the rule named. It also says the real steps do not turn the rebase on yet, because A6's drain wiring is absent, so the share is not measured in a live drain yet.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "List the changed files and check that none is a governance file.",
+      "command": "git diff --stat",
+      "observes": "Only crates/athena-cli/src/drain.rs, crates/athena-cli/tests/drain.rs, docs/design/async-drain.md and CHANGELOG.md appear (landing.rs is unchanged by design). None of athena.toml, defaults.toml or .github/workflows is listed. The only new behavior is re-running checks, plus the budget stop that already exists. No parser, stem list or refusal rule is added, so no refusal-corpus case and no refusal-rate figure applies.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The tree has no drain wiring of `Rebase`: drain.rs never calls `rebase_job_branch`, and async-drain.md (about lines 164-165) lists `Steps::rebase` and `Athena::rebase_for_landing` as an A6 follow-up. The plan adds the seam and leaves the real steps on the defaults, so the rule and the share run only in tests. Is that acceptable, or should the producer stop and report?",
+    "landing.rs and the async-drain.md are on the expected-deliverables list, but this plan leaves landing.rs untouched because the only candidate change (`rebase_paths`) had no caller. Is that acceptable?",
+    "Should any Cargo.toml or Cargo.lock force a re-check (design section 6 step 2), although the request names only candidate paths? The plan includes them and names the rule beside the figure; dropping the clause is a small edit.",
+    "The share counts moved rebases only. If Current should be in the denominator, the tally changes.",
+    "A re-check that fails twice ends the item as repeated-failure, like any landing that fails twice today. Is that right for a check that fails only after a rebase?"
+  ],
+  "producer_section_sha256": "47236a031c7e517d42c908afb41d47e5de21be0e4f16393c6221fb868368e22b"
+}

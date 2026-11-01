@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-031934-8vyd",
+  "round": 1,
+  "at": "2026-11-01T20:14:05.609489827Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "A failed re-check is retried by the landing loop and then lands with no check, because the second rebase returns Unchanged.",
+      "evidence": "After `LandStep::NotLanded`, `attempts` counts one failure and, because ATTEMPTS is 2, loops with `passed` still Some and calls `self.land(job, at)` again. In the real world the first call already moved the branch, so the second `Steps::rebase` finds it current and returns `Unchanged` (the plan's own Risks item says so). `Drain::land` then goes straight to `steps.land`, so a candidate whose re-check failed lands on the retry with no check run. The demonstration for criterion 1 only shows 'land a' missing when every rebase call is scripted to return Moved, so it would not catch this. Fix: Keep per-job state in `State`, for example a set of jobs that still owe a passing re-check. Fill it when a needed re-check is decided. In `Drain::land`, a job in that set re-runs `rerun_checks` (or is refused) even when `rebase` returns Unchanged, and its entry is cleared only on a pass. Another option: make a failed re-check end the item (a failure with no land retry) instead of NotLanded. Add a test through `drain_concurrent` where the first `rebase` returns Moved with overlap and the re-check fails, the second `rebase` returns Unchanged, and the test asserts that 'land a' is never logged.",
+      "location": "Plan step 4 and Decision 4 (failed re-check gives NotLanded, 'the landing retry then rebases again'); crates/athena-cli/src/drain.rs attempts() lines 1568-1584, ATTEMPTS = 2 at line 208",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The re-check cost is added after the call instead of being held against the budget first.",
+      "evidence": "Every other paid step in drain.rs reserves its cap before calling out: `st.budget.hold(...)` at lines 1289, 1315, 1885, 1929, 2259 and 2298, using a cap such as `check_cap` or `plan_cap`. The plan adds the cost only after `rerun_checks` returns. A re-check can therefore run past the budget, and the budget-spent stop does not see it coming. Fix: Add a defaulted `rerun_cap()` (0.0) next to `rerun_checks`. Hold it before the call, as `check_page`/`check_cap` do, and settle afterwards. Decide what happens when the cap does not fit: not landed, with the reason 'budget'.",
+      "location": "Plan step 4 ('add its cost to the budget')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The rule and the share never run in a live drain, and `rebase_paths` has no production caller.",
+      "evidence": "Nothing in crates/athena-cli/src calls `rebase` or `rebase_job_branch` (Grep found no match), and async-drain.md lines 164-165 list the drain wiring as an A6 follow-up. With `RealSteps` on the defaults, a live drain never rebases, never re-checks and never prints the share. The request's measurement of the share therefore happens only in tests. The reading allows this and the read-ahead precedent exists, but it is the main limit of the change. Fix: Keep the seam, but say plainly in the CHANGELOG entry, in the doc and in the producer's report that the share is not yet measured in a live drain because A6's drain wiring is absent. Either drop `rebase_paths` until there is a caller, or state that it is the building block for the A6 wiring, so it is not mistaken for live code.",
+      "location": "Approach and Open question 1 (real steps keep the defaults); new `rebase_paths` in landing.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Including the manifests changes what the measured share means; record the rule next to the figure.",
+      "evidence": "The request says 'only when the rebase touched paths the candidate changed'. Design section 6 step 2 (async-drain.md line 126) adds the workspace manifests. The plan follows the design doc and raises the question, which is reasonable, but the choice changes the measured share. Fix: In the drain note or the doc, name the rule the share was measured under (candidate paths plus Cargo.toml and Cargo.lock), so the figure can be read correctly later.",
+      "location": "Decision 2 (manifests always force a re-check)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's claims against the snapshot: the trait `Steps` with its defaulted methods, `Drain::land` under the landing lock, `stale_paths`/`overlap` and SHARED_APPEND_ONLY, `Report` built only in `drain_with`, `display::drain` rendering notes, and `drain_concurrent`. All exist as described, and the demonstrations drive the real entry points while the overlap rule runs in production code. The plan should still be revised for one major soundness fault. A failed re-check returns NotLanded, but the drain's retry (ATTEMPTS = 2) calls `Drain::land` again. By then the branch is already rebased, so `rebase` returns Unchanged and the job lands without the checks that just failed. The planned test would not catch this, because it scripts every `rebase` call as Moved. Smaller points: the re-check cost should be held against the budget before the call, as every other paid step does. The CHANGELOG, the doc and the producer's report should say plainly that the share is not yet measured in a live drain, because the real steps keep the defaults. The share should name the rule it was measured under (manifests included)."
+}

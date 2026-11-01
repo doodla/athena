@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-031934-8vyd",
+  "round": 2,
+  "at": "2026-11-01T20:16:31.372848295Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "A rebase conflict (Rebased::Held) becomes NotLanded, so it is retried and then stops the whole drain as repeated-failure. The design says a conflict is held back with no retry and no drain stop.",
+      "evidence": "In `attempts()`, a `LandStep::NotLanded` does `failures += 1` and loops back to `land` while `passed` is still set. The second NotLanded returns `ItemEnd::Failed`, and line 2048 maps that to `set_stop(Stop::RepeatedFailure, ...)`. async-drain.md lines 151-153: 'A conflict in the job's own landing commit: the job is held back. Nothing is landed ... there is no retry and no drain stop; the next queued candidate still lands.' The plan's 'held rebase' test would pin the opposite behavior. Fix: Either leave the Held arm out of A7 (it belongs to A6, which the reading says the producer reports rather than builds), or give it a proper end. That means a `LandStep::Held` in `Drain::land` that `attempts()` maps to `ItemEnd::Held` (a pass-over line, line 2074), not to a failure. The held-rebase test should then assert that the drain does not stop and that a later candidate still lands.",
+      "location": "Plan decision 6 and step 4 (Held arm); crates/athena-cli/src/drain.rs lines 1577-1583 and 2048; docs/design/async-drain.md lines 151-153",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "A re-check that does not fit the budget becomes NotLanded, so after the retry the drain stops with repeated-failure instead of budget-spent.",
+      "evidence": "The budget-short branch returns NotLanded and keeps the job in `owing`. The retry fails the same way, `attempts()` returns `ItemEnd::Failed`, and the run ends with `Stop::RepeatedFailure` and `failed_item` set. Yet `ItemEnd::Budget` already exists and maps to a pass-over plus `Stop::BudgetSpent` (lines 2049-2055). The criterion 2 budget test only checks that no 'recheck' or 'land' is logged and what the job line says, so it passes even with the wrong stop. Fix: Add a `LandStep::Budget` arm that `attempts()` maps to `ItemEnd::Budget`. That is a few lines, and it reuses the existing budget stop and pass-over line. Extend the budget-case test to assert `report.stop == Stop::BudgetSpent` and `failed_item == None`.",
+      "location": "Plan decision 3, step 4 (budget branch), criterion 2 demonstration (budget case), open question 5; drain.rs lines 2048-2055",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The manifest rule matches only the root Cargo.toml and Cargo.lock, while the design names 'the workspace manifests'.",
+      "evidence": "Step 2 tests whether `touched` holds `Cargo.toml` or `Cargo.lock`. A change to crates/<x>/Cargo.toml (dependency or feature edits) would not force a re-check unless the candidate's paths overlap that crate's directory. Fix: State in the design-doc text, and pin in a unit-test arm, whether a member crate's Cargo.toml counts. The simplest consistent rule is any path whose file name is Cargo.toml or Cargo.lock. Put the chosen rule in the note text.",
+      "location": "Plan decision 4 and step 2; docs/design/async-drain.md line 127",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The feature is inert in a live drain, and `rebase_paths` is added with no caller.",
+      "evidence": "`RealSteps` keeps the defaults. drain.rs never calls `rebase_job_branch` (my grep found it only in landing.rs and gh/mod.rs). async-drain.md lines 164-165 list `Steps::rebase` and `Athena::rebase_for_landing` as a follow-up. The accepted reading allows this as long as the gap is reported, and the plan does report it. But `rebase_paths` is speculative code that A6 may shape differently. Fix: Keep the plain statement of the limit in the changelog, the doc and the report. Consider dropping `rebase_paths` unless its signature is agreed with the A6 follow-up. If it is kept, keep its doc comment explicit that nothing calls it yet.",
+      "location": "Plan decision 7, step 6, open question 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly and is mostly sound. It adds defaulted `Steps` methods, following the existing `read_ahead`/`plan_cap`/`recheck` pattern (drain.rs lines 541-557). It puts the overlap decision in a pure function that reuses `stale_paths`/`overlap` (lines 775-805). It keeps an `owing` set so the landing retry cannot skip a failed re-check. I confirmed the retry by reading the code: `attempts()` calls `land` again after `NotLanded` while `passed` is still set (lines 1568-1584). `Report` is built in only one place (line 2541), so adding a field is safe. The tests go through `drain_concurrent`/`drain`, and the production code makes the decision, not the test double. One design fault remains. Two of the new outcomes are sent through `LandStep::NotLanded`: a rebase conflict (`Held`) and a re-check that does not fit the budget. `attempts()` counts that as a failure and lands again. On the second `NotLanded` it returns `ItemEnd::Failed`, which `set_stop(Stop::RepeatedFailure)` turns into a stop for the whole drain (line 2048). For a conflict, this contradicts docs/design/async-drain.md lines 151-153: the job is held back with no retry and no drain stop, and the next candidate still lands. For a budget refusal, the stop reason is wrong: it should be `BudgetSpent`. The plan's own tests for both cases would pin this wrong behavior and would not notice it. Smaller points: the plan builds an A6 seam whose live wiring is absent, and the manifest rule matches only the root Cargo.toml and Cargo.lock. Verdict: revise."
+}

@@ -321,6 +321,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   for each class of work with at least four landed jobs, the median minutes per landed job in the older half
   against the newer half, the classes improving, and, for a class that got worse, the earlier landed job after
   which it rose. The line is absent until a class has enough landed jobs.
+- Path-scoped re-check after a rebase in the drain (async drain build job 7, `docs/design/async-drain.md` section 6
+  and decision D145). Under the landing lock, before a verified job lands, the drain now asks the new
+  `Steps::rebase` what rebasing the job onto the latest main moved. It runs the checks again
+  (`Steps::rerun_checks`) only when a path the rebase touched overlaps a path the candidate changed (by the plan's
+  rule: a path equals another or lies inside it; `CHANGELOG.md`, `docs/decisions.md` and `README.md` are ignored)
+  or is a `Cargo.toml` or `Cargo.lock` at any depth; any other rebase lands with no checks run again. The
+  re-check's cap is held against the budget first, and a cap that does not fit ends the run as budget spent
+  with no failure counted. A re-check that fails stays owed on the landing retry, so a candidate never lands on
+  failed checks; failing it twice ends like any landing that fails twice. The drain counts every rebase that
+  moved a branch and every one that needed a re-check, and its summary prints the share as a number, for example
+  `rebases: 1 of 2 needed a re-check (measured by candidate paths and any Cargo.toml or Cargo.lock)`; the count is
+  kept for the run only and no record is written. The new `Steps` methods have defaults (no rebase, checks pass,
+  cap 0), so with `max_in_flight = 1` the drain behaves as before. The real steps keep those defaults, because
+  the drain wiring of the landing rebase (`Steps::rebase`, `Athena::rebase_for_landing`, conflict handling)
+  does not exist yet, so the share is not measured in a live drain until that wiring lands; the rule and the
+  share are shown by tests with scripted steps.
 - Read-ahead and the stale-reading re-check in the drain (async drain build job 5, `docs/design/async-drain.md`
   section 4 and decision D145). When more than one job runs at once, `drain_concurrent` now also reads, and for a
   hard job plans, up to `read_ahead` items ahead of the running batch, on one extra thread. An item is read ahead
