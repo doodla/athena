@@ -1226,3 +1226,72 @@ fn a_middle_job_that_already_landed_is_refused_in_a_history_walk() {
     let found = invariant::check(&git, &change, &judged, Some(&state)).unwrap();
     only_refusal(found, &format!("job {} has already landed", CHAIN_IDS[1]));
 }
+
+/// The pre-merge classification of `HEAD`.
+fn pre_merge(git: &Git) -> Result<invariant::PreMergeCommit, invariant::Uncovered> {
+    let head = git.head().unwrap().unwrap();
+    invariant::classify_pre_merge(git, &head).unwrap()
+}
+
+/// The records of a job held for low disk: a candidate and an invocation, and neither a verification nor an
+/// outcome yet.
+fn held_records(fp: &str) -> Vec<AnyRecord> {
+    vec![
+        AnyRecord::Invocation(Box::new(invocation(
+            2,
+            Role::Producer,
+            PRODUCER,
+            "2026-10-10T15:03:00Z",
+            "2026-10-10T15:05:00Z",
+        ))),
+        AnyRecord::Candidate(Box::new(candidate(fp))),
+    ]
+}
+
+#[test]
+fn held_job_records_without_a_verification_pass_the_pre_merge_rule_as_records_only() {
+    let (dir, git) = owner_repo();
+    let base = git.head().unwrap().unwrap();
+    let fp = landed_fingerprint(&git, &base);
+    write_records(dir.path(), &held_records(&fp));
+    commit(&git, "Hold job for low disk\n");
+    let covered = pre_merge(&git).expect("a held job's records claim no landing");
+    assert_eq!(covered.kind, athena_data::history::LandingKind::RecordsOnly);
+    assert_eq!(covered.job, None);
+}
+
+#[test]
+fn a_finished_job_without_a_verification_still_has_none_covering_it() {
+    let (dir, git) = owner_repo();
+    let base = git.head().unwrap().unwrap();
+    let fp = landed_fingerprint(&git, &base);
+    let mut records = held_records(&fp);
+    records.push(AnyRecord::Outcome(Box::new(outcome())));
+    write_records(dir.path(), &records);
+    commit(&git, "Finish job without verifying\n");
+    let uncovered = pre_merge(&git).expect_err("a finished job needs its verification");
+    assert_eq!(uncovered, invariant::Uncovered::NoVerification(job_id()));
+    assert!(uncovered.clause().contains("without its verification"));
+}
+
+#[test]
+fn a_held_jobs_records_with_a_governed_change_are_still_refused() {
+    let (dir, git) = owner_repo();
+    let base = git.head().unwrap().unwrap();
+    let fp = landed_fingerprint(&git, &base);
+    write_records(dir.path(), &held_records(&fp));
+    write(dir.path(), &[("src/lib.rs", NEW_CODE)]);
+    commit(&git, "Hold job and edit code\n");
+    assert_eq!(pre_merge(&git), Err(invariant::Uncovered::GovernedChange));
+}
+
+#[test]
+fn a_verified_job_landing_is_still_a_job_landing() {
+    let (dir, git) = owner_repo();
+    let base = git.head().unwrap().unwrap();
+    stage_landing(dir.path(), &git, &base, &HONEST);
+    commit(&git, "Land job\n");
+    let covered = pre_merge(&git).expect("a verified landing is covered");
+    assert_eq!(covered.kind, athena_data::history::LandingKind::JobLanding);
+    assert_eq!(covered.job, Some(job_id()));
+}

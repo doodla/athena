@@ -3460,6 +3460,62 @@ fn drain_lists_and_retries_an_interrupted_job_and_leaves_one_on_another_channel_
 }
 
 #[test]
+fn drain_start_reclaims_the_build_directory_of_an_interrupted_job_and_keeps_its_work_and_candidate()
+{
+    let fx = Fixture::new();
+    let kill = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let athena = fx.athena(killing_producer(kill.clone()));
+    let (cli, _) = athena.queue(FIRST).unwrap();
+    let cli = cli.as_str().to_string();
+    interrupt(&fx, &athena, &cli);
+    let id = athena_data::JobId::parse(&cli).unwrap();
+
+    // What the dead process left: a build directory, a producer work tree and a kept candidate (its resume
+    // mark; a stand-in file here, since the drain must not read it).
+    let dir = athena.state.job_dir(&id);
+    std::fs::create_dir_all(dir.join("target/produce/debug")).unwrap();
+    std::fs::write(dir.join("target/produce/debug/big"), vec![7u8; 100_000]).unwrap();
+    std::fs::create_dir_all(dir.join("work")).unwrap();
+    std::fs::write(dir.join("work/main.rs"), b"fn main() {}").unwrap();
+    let mark = athena.state.resume_file(&id);
+    std::fs::create_dir_all(mark.parent().unwrap()).unwrap();
+    std::fs::write(&mark, b"candidate stand-in").unwrap();
+    // A job that is still running keeps its build directory: a process of the registry works on it.
+    let running = "20260101-000100-abcd";
+    let running_dir = athena
+        .state
+        .job_dir(&athena_data::JobId::parse(running).unwrap());
+    std::fs::create_dir_all(running_dir.join("target/produce")).unwrap();
+    std::fs::write(running_dir.join("target/produce/big"), b"x").unwrap();
+    athena
+        .state
+        .registry()
+        .register(std::process::id() as i32, running, "producer")
+        .unwrap();
+
+    // The budget leaves no room for a run, so the drain ends after its start.
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    let ui = Lines::default();
+    drain::drain(&steps, limits(0.0), &ui).unwrap();
+
+    assert!(!dir.join("target").exists(), "the build directory is gone");
+    assert_eq!(
+        std::fs::read(dir.join("work/main.rs")).unwrap(),
+        b"fn main() {}",
+        "the work tree is kept"
+    );
+    assert_eq!(
+        std::fs::read(&mark).unwrap(),
+        b"candidate stand-in",
+        "the candidate's mark is kept"
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&cli].state(), JobState::Dispatched);
+    assert!(running_dir.join("target/produce/big").exists());
+}
+
+#[test]
 fn a_job_a_work_decision_approved_is_listed_once() {
     let fx = Fixture::new();
     seeded_proposals(&fx);

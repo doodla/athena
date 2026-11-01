@@ -3986,3 +3986,36 @@ should replace those estimates with its figures.
   `crates/athena-context/prompts/planner.md`. Measured: `cargo test -p athena-core --test refusal_corpus`,
   `cargo test -p athena-context planner_prompt_and_brief_carry_the_refusal_corpus_rule`,
   `cargo test -p athena-cli --test budgets`.
+
+## D149 · A pull request is judged by the checks main requires, and a held job's records claim no landing
+
+- **Case:** Two blockers stopped drain landings on the disk fix's pull request. The drain reported
+  `not landed: pull request is Open, checks Red` when the only red check was the pull request head check,
+  which `ci.yml` marks not yet required, and then stopped the run for a repeated failure. The pull request head
+  check also refused the records a job writes when it is held for low disk (`adds the records of job ... without
+  its verification`).
+- **Root cause:** (1) `classify_checks` turned any failed check run into red, with no notion of which checks
+  main requires. (2) `classify_pre_merge` took every job with closing records in a commit as a claim to land,
+  and a held job (D146) has a candidate and invocations but neither a verification nor an outcome.
+- **Decision:** (1) `classify_checks` looks only at the check run named `CI_AGGREGATE_JOB` (`fmt, clippy,
+  tests`), the one constant that `EARLY_RUN_JOB` also refers to: failed is red, missing or unfinished is pending,
+  passed is green; statuses are not judged. `PrHost::optional_failures` (default: none; `GhClient` reads the
+  same two replies) names the failed checks that are not required, and `land_pr` adds each to the report's
+  `warnings` as a note. (2) `classify_pre_merge` counts a closing job as a landing only when the commit's tree
+  holds a verification or an outcome for it; otherwise the commit falls through to the intervention,
+  fingerprint and records-only rules. A finished job without a verification still returns `NoVerification`.
+- **Alternatives:** (a) A drain-side exception for the optional red: the wait would still re-run and report red,
+  and the thrash-stop rule is out of scope. (b) Read the local hold marker: it is outside the commit tree and
+  absent in a pull request check. (c) Change `closing_jobs`: the landing check relies on it keeping outcome-less
+  jobs.
+- **Tradeoff:** A required check that is missing reads as pending, so a repository whose workflow renames the
+  job waits and never merges until the constant follows. A job that lost its outcome record can add records
+  without a verification, but any governed change still needs a landing or an intervention.
+- **Limit:** With `merge_via_rest` off, an open pull request with green checks is still reported as not landed
+  by the drain, as before; the thrash-stop rule is unchanged.
+- **Reversal cost:** Low. Restore the any-failure rule in `classify_checks` and the unconditional job claim in
+  `classify_pre_merge`.
+- **Provenance:** Read: `crates/athena-core/src/gh/client.rs`, `gh/landing.rs`, `gh/early.rs`,
+  `crates/athena-gate/src/invariant.rs`. Measured: `cargo test -p athena-core a_red_optional_check`,
+  `cargo test -p athena-core required_check`, `cargo test -p athena-gate`. No reading refusal changes, so
+  0% newly refused readings is expected.

@@ -2,6 +2,7 @@
 //! verification start, and landing waits, boundedly, for the early commit's run and for the pull request's
 //! checks.
 
+use super::client::CI_AGGREGATE_JOB;
 #[cfg(test)]
 use super::early_seam;
 use super::{
@@ -21,8 +22,8 @@ use std::time::Duration;
 /// How often land looks at the early commit's runs while it waits.
 const EARLY_RUN_STEP: Duration = Duration::from_secs(20);
 /// The check run land waits for on the early commit: the job of the CI workflow whose pass the host caches.
-/// It must match the job name in the CI workflow.
-pub(super) const EARLY_RUN_JOB: &str = "fmt, clippy, tests";
+/// It is the required check of the CI workflow, whose name has one source: [`CI_AGGREGATE_JOB`].
+pub(super) const EARLY_RUN_JOB: &str = CI_AGGREGATE_JOB;
 
 /// Replaces the job's early-pushed head `early_head` with the landing commit: allowed by [`check_replace`]
 /// for the job's own branch only, and pinned to `early_head` on the remote. Forgets the early head after.

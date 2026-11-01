@@ -274,7 +274,8 @@ pub struct PreMergeCommit {
 pub enum Uncovered {
     /// It adds the closing records of more than one job.
     SeveralJobs(usize),
-    /// It adds the records of a job without that job's verification.
+    /// It adds the records of a finished job (one with an outcome) without that job's verification. A held
+    /// job, which has no outcome yet, is not covered by this.
     NoVerification(JobId),
     /// It changes governed content without landing a verified job or declaring an intervention.
     GovernedChange,
@@ -303,8 +304,11 @@ impl Uncovered {
 /// of a pull request head that are not on main yet. Messages are never read. The commit is judged against its
 /// first parent, under the first parent's exclusion rules, by the first rule that applies:
 ///
-/// 1. It adds the closing records of a job ([`closing_jobs`]): a job landing, which needs that job's
-///    verification record in the commit's tree. Closing records of more than one job are [`Uncovered`].
+/// 1. It adds the closing records of a job ([`closing_jobs`]) that has a verification or an outcome in the
+///    commit's tree: a job landing, which needs that job's verification record there. Closing records of
+///    more than one such job are [`Uncovered`]. A job with neither a verification nor an outcome is a held
+///    job (for example held for low disk): its records claim no landing, so they fall through to the rules
+///    below and a commit that only records the hold or its progress is records only.
 /// 2. It adds an intervention record: a declared intervention.
 /// 3. Otherwise, if the governed fingerprint changed, nothing covers the change: [`Uncovered::GovernedChange`].
 /// 4. Otherwise it touched only records and excluded paths: records only.
@@ -315,15 +319,25 @@ pub fn classify_pre_merge(
     use athena_data::history::LandingKind;
     let change = Change::of_commit(git, sha)?;
     let judged = Judged::new(git, &change)?;
-    let jobs = closing_jobs(git, &change, &judged)?;
+    // A job claims a landing only when its records in the commit's tree say it ran to an end: a
+    // verification, or an outcome. A held job (held for low disk) has a candidate and invocations but
+    // neither, so its records are judged like any other records.
+    let mut jobs = BTreeSet::new();
+    let mut verified = BTreeSet::new();
+    for job in closing_jobs(git, &change, &judged)? {
+        let files = JobFiles::load(git, &change.tree, &job)?;
+        if files.verification.is_some() {
+            verified.insert(job.clone());
+        } else if files.outcome.is_none() && files.later_outcome.is_none() {
+            continue;
+        }
+        jobs.insert(job);
+    }
     let (kind, job) = if let Some(job) = jobs.iter().next() {
         if jobs.len() > 1 {
             return Ok(Err(Uncovered::SeveralJobs(jobs.len())));
         }
-        if JobFiles::load(git, &change.tree, job)?
-            .verification
-            .is_none()
-        {
+        if !verified.contains(job) {
             return Ok(Err(Uncovered::NoVerification(job.clone())));
         }
         (LandingKind::JobLanding, Some(job.clone()))

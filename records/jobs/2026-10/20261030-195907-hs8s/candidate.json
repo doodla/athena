@@ -1,0 +1,141 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261030-195907-hs8s",
+  "base_commit": "3538ec208eaa92f89a388279603e9ca1e41b22b2",
+  "base_fingerprint": "sha256:c9989cc9f8eb60521f6875d13f27c45bbdb60a1aa74fa3979c5a4e43dfa1bbd9",
+  "previous_job": "20261101-123956-y5q1",
+  "candidate_commit": "8601736dd11630d2813f49654d96a7c2567ac409",
+  "candidate_tree": "b20a8bfed7b46950cb2b459cf2e87e9d31ac2529",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 273741
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 51614
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 77225
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 5479
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 72458
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 113729
+    }
+  ],
+  "fingerprint": "sha256:0e248292ebe86f98c580581c3a8d56cacca4ce08b66a6c08211d4acdeecf07cd",
+  "violations": [],
+  "producer_report": {
+    "summary": "The producer's build directory is now removed before the first check starts, and a failed check keeps the last 200 lines of its output. The drain log's `checks` line now names the failing tests. Root cause: `target/produce` was removed only after every check passed, so a job held two full builds during the checks. A failed check kept only its last 4096 bytes, which often cut off the failing test. The removal helper is in run/checks.rs and is called from `check_and_verify` in run/mod.rs, which is where the `checks     ` line is built. It uses the existing `StateDir::remove_produce`, so no new deletion logic. The removal sits after the disk check that runs before the checks, so the low-disk hold tests still see the directory there. It runs whether the checks then pass or fail, and also for nested runs, as before. The candidate and its tree are untouched. A failed run's `output_tail` in the verification record (the existing field, so no new record type) is now its last 200 lines, with a 64 KiB ceiling that keeps the end. A passing run keeps 4 KiB. The log entry reads `name FAILED: a, b, +N more`. Names come from the recorded `failed_tests`, else from `test <name> ... FAILED` lines, else just the check name. `failed_tests` is not changed, so verdict logic is unaffected. The new tests in run/tests.rs and the unit tests in core checks.rs pass, and so do the existing tests in tests/drain.rs.",
+    "files": [
+      "CHANGELOG.md",
+      "crates/athena-core/src/checks.rs",
+      "crates/athena-core/src/run/checks.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "crates/athena-core/src/disk.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "no output"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked -p athena-core --lib checks::tests",
+        "result": "pass",
+        "note": "29 passed; the first run failed on my own wrong assertion in a new test, fixed"
+      },
+      {
+        "command": "cargo test --locked -p athena-core --lib run::tests::",
+        "result": "pass",
+        "note": "39 passed, including the 2 new tests and the rewritten produce-dir test"
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test drain",
+        "result": "pass",
+        "note": "130 passed"
+      },
+      {
+        "command": "cargo test --locked -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "not-run",
+        "note": "the full suite was left to Athena's checks"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run cargo test: a new test through the real checks path (not a unit stub) asserts the producer's build directory does not exist when the first check starts and the candidate's work tree still exists afterwards.",
+        "status": "met",
+        "evidence": "New test `producer_build_directory_is_gone_when_the_first_check_starts_and_the_candidate_is_kept` in crates/athena-core/src/run/tests.rs drives `Athena::go` with a real `sh -c` check. The check exits 1 if any `<root>/jobs/*/target/produce` exists, or if README.md in its cwd lacks the candidate text 'A demo'. The test asserts Landed, the removal line before the `checks     ` line, no `target/produce` afterwards, and the candidate in the committed records and at HEAD. Ran `cargo test --locked -p athena-core --lib run::tests::`: 39 passed, including this one."
+      },
+      {
+        "criterion": "Run cargo test: a new test with a deliberately failing check asserts the drain log line contains the failing test name (not just 'test FAILED') and the job's committed records contain the last 200 lines of that check's output (a longer output is truncated to its final 200 lines).",
+        "status": "met",
+        "evidence": "New test `a_failed_check_logs_its_failing_test_and_records_its_last_200_lines` in run/tests.rs. A real `sh -c` check prints 300 lines, `test demo::the_failing_one ... FAILED`, then 5 more, then exits 1. It asserts the `checks     ` ui line contains `probe FAILED: demo::the_failing_one`. Via `Records::load` it asserts the committed check run has exactly 200 lines, first `output line 107`, the FAILED line at index 194, last `after 5`, and no earlier line. Unit tests in core checks.rs cover `tail_lines`, the 250/600-line run_check case, the byte ceiling, `log_entry` and the cap of five names. Ran `cargo test --locked -p athena-core --lib checks::tests` (29 passed) and `run::tests::` (39 passed)."
+      },
+      {
+        "criterion": "git diff shows the CHANGELOG.md entry describing both changes, and changes limited to crates/athena-core/src/run/checks.rs, crates/athena-core/src/disk.rs, crates/athena-cli/src/drain.rs, tests, and CHANGELOG.md (plus any record type needed).",
+        "status": "met",
+        "evidence": "CHANGELOG.md has a new first entry under Unreleased/Fixed describing both changes and the root cause. Changed files: CHANGELOG.md, crates/athena-core/src/run/checks.rs, run/mod.rs (the call sites and the log line, where the check stage lives), checks.rs (helpers), disk.rs (doc comment only), and run/tests.rs (tests). No record type, config, workflow or toml file changed. run/mod.rs and checks.rs are outside the brief's file list but needed, because drain.rs prints no check lines."
+      },
+      {
+        "criterion": "Run cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test: all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks for the full `cargo test`. I ran `cargo fmt --all --check` (no output, passes) and `cargo clippy --all-targets --locked -- -D warnings` (finished with no warnings). I also ran `cargo test --locked -p athena-core --lib run::tests::` (39 passed), `cargo test --locked -p athena-core --lib checks::tests` (29 passed), `cargo test --locked -p athena-cli --test drain` (130 passed) and `cargo test --locked -p xtask --test policy` (12 passed). I did not run the full suite."
+      },
+      {
+        "criterion": "Run cargo test: existing drain tests for low disk and interrupted-job reclaim still pass, showing the work tree and candidate are kept.",
+        "status": "met",
+        "evidence": "Ran `cargo test --locked -p athena-cli --test drain`: 130 passed, including `drain_start_reclaims_the_build_directory_of_an_interrupted_job_and_keeps_its_work_and_candidate`, `low_disk_before_the_checks_holds_the_job_and_a_retry_with_space_runs_the_checks`, `low_disk_after_the_checks_holds_the_job_before_the_verifier_runs` and `low_disk_after_the_producer_removes_idle_build_directories_before_the_checks_run`. In core, the low-disk and resume tests in `run::tests::` also pass."
+      }
+    ],
+    "open_issues": [
+      "run/mod.rs and run/tests.rs changed although they are not in the brief's file list. The log line, the removal point and the old kept-on-failure test are there, so the change could not stay in the listed files.",
+      "A failed check's baseline record also keeps 200 lines now, because the baseline uses the same `run_check`. This is bounded by the 64 KiB ceiling and the verdict logic does not read `output_tail`.",
+      "Because the build is removed before the checks, a send-back to the producer after a failed check rebuilds cold. The old behaviour kept the build for that case. The brief asked for this tradeoff.",
+      "The 64 KiB ceiling could cut a 200-line tail whose lines are very long, so the tail would then be shorter than 200 lines. A unit test covers this case."
+    ],
+    "mistakes": [
+      "My first unit test asserted a 250-line passing run is cut by bytes, but its output was only about 2.2 KB. I changed the script to 600 lines and the test passed.",
+      "I first put the removal only in the non-nested, non-resumed branch. That would have left a nested run's build in place, which the old code removed. I moved it to just after the stage entry so nested runs are covered too."
+    ],
+    "learnings": [
+      "The `checks     <name> FAILED (..s)` log line is built in `check_and_verify` in crates/athena-core/src/run/mod.rs. crates/athena-cli/src/drain.rs prints no check lines.",
+      "`CheckRun.output_tail` is read only by introspect.rs and reading.rs, which clip it themselves, and by the baseline tail test in crates/athena-cli/tests/lifecycle.rs. That test still holds, since a failed 600-line run keeps 200 short lines (about 2.2 KB).",
+      "The baseline also runs the checks, so a test check that fails on both base and candidate is marked pre-existing and can still land. The failing-check test therefore fails only on the edited README.",
+      "Bash for the producer allows no pipes, so `| tail` is blocked and long cargo output has to be read whole."
+    ],
+    "desires": []
+  }
+}

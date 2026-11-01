@@ -4229,6 +4229,7 @@ mod tests {
             output_tail: output.into(),
             note: None,
             failed_tests: Vec::new(),
+            reused: false,
         }
     }
 

@@ -1,0 +1,209 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261101-114004-358q",
+  "round": 1,
+  "at": "2026-11-01T11:43:16.624968471Z",
+  "invocation_seq": 3,
+  "approach": "Add `reused: bool` (serde default, skipped when false) to `CheckRun` in records.rs. `checks::runs_from_record` sets it to true on the records it builds from a CI result; every other CheckRun literal gets `reused: false`. In `judge()` (verify.rs), the existing D115 loop keeps its guard (`candidate_tree` is Some and equals `checks_tree`), and each passing record now counts if it has exit code 0, or if it has no exit code and `reused` is set. Commit match needs no new field. The run passes the candidate commit as both `candidate_tree` and `checks_tree` (verification.rs:336-338). `run_routed_with_record` is called with that commit, and `runs_from_record` returns nothing for another sha. Skipped and nested-run placeholders have no exit code and `reused` false, so they still do not count. Failed records are excluded by `passed`. Tests go in verify.rs, records.rs, checks.rs and routing.rs, plus a CHANGELOG entry.",
+  "decisions": [
+    {
+      "choice": "Mark reused records with a new `CheckRun.reused: bool` (`#[serde(default, skip_serializing_if = \"is_false\")]`), set in `runs_from_record`; judge() reads only the field.",
+      "reason": "The brief asks for a field instead of note-text matching. Skipping serialization when false keeps old records byte-identical, and the default lets old records load under `deny_unknown_fields`. Setting it where the record is built fixes the fault at its source.",
+      "rejected": [
+        {
+          "option": "Match the note text 'result reused from the ...' in judge()",
+          "why": "Brittle, and the brief and criterion 3 forbid it."
+        },
+        {
+          "option": "Count any passing record with no exit code",
+          "why": "Skipped and nested-run placeholders also have no exit code, so unrun commands would count as seen. The existing test `a_placeholder_record_without_an_exit_code_does_not_count_as_run` forbids it."
+        },
+        {
+          "option": "Loosen the criterion check (D43) so reuse is ignored",
+          "why": "Wrong layer. The fault is in judge()'s seen-command rule."
+        }
+      ]
+    },
+    {
+      "choice": "Take the commit match from the existing `candidate_tree == checks_tree` guard, with no sha field on CheckRun.",
+      "reason": "`run/mod.rs` passes the candidate commit `c` to `run_routed_with_record`, and `runs_from_record` yields nothing when `record.sha != sha`. `verification.rs` passes the same `c` as both `candidate_tree` and `checks_tree`, with `checks_tree` None for nested runs. A reused record is therefore for the candidate commit exactly when the guard holds. Criterion 2's test varies `checks_tree` to show a different commit stays unmet.",
+      "rejected": [
+        {
+          "option": "Record the sha on each reused CheckRun and compare it in judge()",
+          "why": "A second field and a wider schema change for no extra safety: the sha already equals the candidate commit by construction."
+        }
+      ]
+    },
+    {
+      "choice": "Add `reused: false` to every CheckRun literal and add no `Default` impl.",
+      "reason": "The smallest change and consistent with the existing style. The compiler finds each literal.",
+      "rejected": [
+        {
+          "option": "Derive or implement Default for CheckRun and use `..Default::default()` everywhere",
+          "why": "A larger refactor than the goal needs, and Quantity would need a default."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `reused: bool` to CheckRun with a doc comment, `#[serde(default, skip_serializing_if = ...)]` and a small `is_false` helper. Add `reused: false` to the sample_baseline literal. Add the two new tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "`runs_from_record` sets `reused: true`. `reused: false` in skipped_run, run_check (351, 417, 444) and the test helpers (~913). Extend the test near ~1096 to assert the flag.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "judge(): count a passing record with exit code 0, or with no exit code and `reused` set, under the existing tree guard. Update the doc comment. Add `reused: false` to the check()/failing() literals. Add the criterion 1 and criterion 2 tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "purpose": "Add `reused: false` at the CheckRun literal near ~517. Add assertions in the reuse tests that CI-built records carry `reused` and local or skipped ones do not. The `..skipped_run` fallback at ~279 inherits false.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add `reused: false` to the CheckRun literals at ~1517 and ~2216. Optionally assert in the reuse test near ~2370 that the stored check records carry `reused`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Add `reused: false` to the nested-run placeholder CheckRun literal (~1404). Compile fix only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add `reused: false` to the CheckRun literal at ~237. Compile fix only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add `reused: false` to the test_run literal at ~2826. Compile fix only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Add `reused: false` to the test helper literal at ~1728. Compile fix only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `reused: false` to the test helper literal at ~4222. Compile fix only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/status_durations.rs",
+      "action": "modify",
+      "purpose": "Add `reused: false` to the CheckRun literal at ~12. Compile fix only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a Fixed bullet under [Unreleased] for the CI-reuse count (D43, D115).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs: add `reused: bool` to CheckRun (doc comment, `#[serde(default, skip_serializing_if = ...)]`). Add `reused: false` to every CheckRun literal across the crates (re-run a Grep for `CheckRun {`; files listed above) so the workspace compiles.",
+    "checks.rs: set `reused: true` in `runs_from_record`; extend its test (~1096) to assert the flag on reused records and its absence on `skipped_run`.",
+    "routing.rs: assert the flag in a reuse-path test (CI-built records true; locally run and skipped false). run/tests.rs: add `reused: false` to the two literals.",
+    "verify.rs judge(): change the filter to `c.passed && (c.exit_code == Some(0) || (c.reused && c.exit_code.is_none()))`, and update the comment (D115 and CI reuse). Do not match on note text.",
+    "verify.rs tests: add the criterion 1 test and the three criterion 2 tests (different tree or None, failed reused, skipped), reusing `judge_recorded`, `check()` and `d43_finding`.",
+    "records.rs tests: add the old-shape CheckRun load test (reused false) and the reused-record round-trip through AnyRecord/check_record_file.",
+    "CHANGELOG.md: add a Fixed bullet under [Unreleased]. Name the root cause (judge() counted only exit code 0, reused CI records carry none), jobs rejected by D43, the new `CheckRun.reused` field (optional, absent in older records), and that skipped, failed and other-commit records still do not count.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. Add no refusal or matching rule, so `cargo test -p athena-core --test refusal_corpus` is not needed for this change."
+  ],
+  "risks": [
+    {
+      "risk": "A CheckRun literal is missed and the build breaks, since the new field has no struct-update default.",
+      "mitigation": "Run `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. A missed literal fails to compile, which names the file. The file list above comes from a Grep for `CheckRun {` over crates/*.rs. The producer should re-run that Grep and cover any construction by another pattern."
+    },
+    {
+      "risk": "A skipped or nested placeholder wrongly counts as a command run.",
+      "mitigation": "The count requires `passed`, `exit_code.is_none()` and `reused`. The existing placeholder and skipped tests, plus the new criterion 2 tests, pin this. Routing keeps a skipped check as `skipped_run` (reused false) unless CI is red."
+    },
+    {
+      "risk": "Older records or tooling that reads check records break on the new field.",
+      "mitigation": "`skip_serializing_if` omits the field when false, and the criterion 4 test asserts the old JSON shape is unchanged."
+    },
+    {
+      "risk": "Drift into fetch or baseline logic, which is out of scope.",
+      "mitigation": "The brief puts these out of scope, and the plan changes only whether judge() counts the record. The fetch, wait and baseline logic is untouched."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New unit test `a_passing_check_reused_from_ci_on_the_same_commit_counts_as_run` in verify.rs. It builds a `check(true)` with `exit_code: None`, `reused: true` and note 'result reused from the CI run ...', and passes it through `judge_recorded(&[reused], Some(\"abc\"), Some(\"abc\"), vec![\"cargo test\"])`. It also covers all three checks (`cargo fmt --all --check`, `cargo clippy ...`, `cargo test --locked`) with one reused record each and cited commands that match the check's command text.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "`criteria[1].met` and `commands_verified` are true and no D43 finding exists.",
+      "fails_without": "On today's code the filter `exit_code == Some(0)` drops the reused record. `ran` stays empty, the criterion is unmet, commands_verified is false and a D43 finding appears, so the test's assertions fail.",
+      "seam": "Production entry point: `verify::judge(&VerdictInputs)`. Guard: `candidate_tree` Some and equal to `checks_tree`. Fixture: records built by the existing `check()` helper with fields overridden, injected via the existing `judge_recorded` helper (verify.rs ~817, exists). The `check()` literal needs `reused: false` (step 1). The judge logic is not in the test."
+    },
+    {
+      "criterion": 2,
+      "method": "Three unit tests in verify.rs, same helper. (a) A reused passing record with candidate 'abc' and checks_tree 'def' or None is unmet with a D43 finding. (b) A reused record with `passed: false` and `exit_code: None` is unmet. (c) A skipped record (no exit code, passed true, `reused: false`, a 'not run: ...' note, like `checks::skipped_run`) is unmet. The existing placeholder test stays and passes.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "`criteria[1].met` and `commands_verified` are false and `d43_finding` is Some.",
+      "fails_without": "If judge() counted every reused record regardless of tree, passed state or the reuse flag, the different-tree, failed and skipped cases would be met and these assertions would fail.",
+      "seam": "`verify::judge`, via `judge_recorded` (exists). Fixtures are built by `check()` with overrides. A skipped record may also come from `checks::skipped_run` (exists) if that is reachable from the test module."
+    },
+    {
+      "criterion": 3,
+      "method": "Inspect records.rs `CheckRun`, which gains `pub reused: bool` with serde default. In checks.rs, extend the test around line 1096 to assert `reused` is true on every record built from a CiRecord and false on `skipped_run` and locally run records. Extend one routing.rs test (reuse path, ~534 or ~672) to assert reused records have `reused` true and locally run or skipped ones false. A Grep of verify.rs for the note text (non-test code) finds nothing.",
+      "command": "Grep pattern 'result reused' on crates/athena-core/src/verify.rs (expect no match in judge()); then cargo test -p athena-core runs_from_record  and  cargo test -p athena-core routing",
+      "observes": "The field exists with `#[serde(default)]`, `runs_from_record` and the routing reuse path set it, and judge() has no note-text matching.",
+      "fails_without": "If `runs_from_record` did not set the flag, the assertion `runs.iter().all(|r| r.reused)` in the checks.rs test (~1096) and the routing.rs reuse tests would fail. The unit tests in criterion 1 only prove judge()'s rule; this proves the producer sets the flag.",
+      "seam": "Production entry points: `checks::runs_from_record` and `routing::run_routed_with_record`. Fixtures: existing CiRecord and fake CiSource/Exec doubles in those test modules (exist). The doubles supply input only, not the logic under test."
+    },
+    {
+      "criterion": 4,
+      "method": "Two new tests in records.rs, patterned on `a_baseline_written_before_failed_tests_existed_still_parses_and_validates` and `failing_test_names_round_trip_and_are_read_per_check`. (a) Build a Baseline JSON from `sample_baseline()`, assert it does not contain \"reused\", and parse it back. Also deserialize a literal CheckRun JSON string with no `reused` key via `serde_json::from_str::<CheckRun>`; assert `reused == false`. (b) Set `b.checks[0].reused = true`, `exit_code = None`, `passed = true`, serialize with `AnyRecord::to_json` and assert it contains \"reused\", `AnyRecord::parse` equals the original, and `check_record_file(<job dir>/baseline.json, bytes)` is Ok.",
+      "command": "cargo test -p athena-data",
+      "observes": "The old record loads with `reused` false, and the reused record round-trips and validates.",
+      "fails_without": "Without `#[serde(default)]` the old-shape JSON fails with a missing-field error. Without the field on the struct, `deny_unknown_fields` rejects the serialized reused record, so check_record_file fails.",
+      "seam": "`AnyRecord::parse`, `AnyRecord::to_json`, `check_record_file` (exist). Fixture: `sample_baseline()` (exists, ~4187). The literal there needs `reused: false` (step 1)."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the new bullet under `## [Unreleased]` / `### Fixed`.",
+      "command": "Grep pattern '^- .*reused' on CHANGELOG.md under '## [Unreleased]' / '### Fixed'",
+      "observes": "One bullet states that checks reused from a green CI run for the candidate commit now count as commands run in the verdict. It names D43 and D115, the root cause (judge() counted only records with exit code 0, and reused records carry none), and the new `CheckRun.reused` field, optional in old records.",
+      "fails_without": "Not a behavior criterion."
+    }
+  ],
+  "open_questions": [
+    "The brief's deliverables list only some of the files that construct CheckRun. The other literals (run/mod.rs, send_back.rs, status.rs, introspect.rs, reading.rs, athena-cli/tests/status_durations.rs) are listed in `files` as compile fixes of `reused: false`. Is that acceptable, or should a Default impl avoid touching them?",
+    "`checks_tree` actually holds the candidate commit id, despite its name. The plan relies on that by reading verification.rs:336-338 and run/mod.rs:1384-1387, and does not rename it.",
+    "Whether records.rs already has an `is_false` helper for skip_serializing_if was not checked. The producer should reuse one if present, otherwise add a private fn."
+  ],
+  "producer_section_sha256": "6b980b7b3ff038c920f0429671af6208a0fec480258d822f6527c16cfa379fae"
+}
