@@ -61,8 +61,15 @@
 //!   channel only ([`athena_core::steward::interrupted_work`]). Its first attempt is `athena retry`, which
 //!   reads the request again as a new job; that job is then run. The interrupted job is left as it is, but a
 //!   job that a retry already names is not listed again. A job whose process is still running is never listed.
-//!   A job held for low disk space after its candidate was built (see "Low disk holds a job") is listed the
-//!   same way, so the next pass resumes it with no one running `athena retry`.
+//!   A job held for low disk space (see "Low disk holds a job") is listed the same way, so the next pass
+//!   resumes it with no one running `athena retry`.
+//!   Its build directory is reclaimed: at the start of the drain, and again before each run, the `target/` of
+//!   every interrupted job (dispatched in the records, no process in the registry, job lock free) is removed
+//!   while its lock is held ([`athena_core::Athena::reclaim_interrupted`]). Only `target/` goes; work trees,
+//!   candidates and records stay. The drain's own jobs are skipped: the job about to run and the jobs this
+//!   drain already ran or held. An interrupted job that a retry re-read is not on that list, so its old
+//!   directory is reclaimed. A command run by hand on a job (`athena retry`, `athena go`) while the sweep
+//!   holds its lock fails with "already running"; running it again works.
 //! - **The in-flight table.** The real steps keep a local file, `in-flight.json` in the state directory, with
 //!   one row per job being worked: job id, stage and worktree ([`InFlight`]). The stage is reported by the run
 //!   itself where it enters a stage (`athena_core::state::StageSink`, called by `Athena::go_with_stages`):
@@ -138,7 +145,8 @@
 //!   left queued with the reason (outcome `needs accepting`, plus a note); that is not a failure and stops
 //!   nothing.
 //! - **Low disk holds a job.** When free disk space is below `[disk] min_free_gb` (default 10) at dispatch,
-//!   before the checks or before the verifier, even after idle jobs' build directories are removed,
+//!   before the producer, before the checks or before the verifier, even after idle jobs' build directories
+//!   are removed,
 //!   `athena go` returns [`athena_core::disk::LowDisk`]. The item ends held (outcome `environment: low disk`,
 //!   with the free and required amounts, plus a note); that is not a failure, uses no attempt, and stops
 //!   nothing. A hold at dispatch leaves the job queued, and a later drain runs it. A hold after the candidate
@@ -146,7 +154,9 @@
 //!   resumes it from its kept candidate by itself, with no planner or producer run and no one running `athena
 //!   retry`. That skips the rebuild only while the main branch has changed nothing outside `records/` since
 //!   the job's base; otherwise the retry plans and produces again, as any retry does. Space that stays short
-//!   holds the job again.
+//!   holds the job again. A hold before the producer (the baseline builds just filled the disk) leaves no
+//!   candidate and no resume mark: the next pass reads the job again as a new job from the base, and that
+//!   retry clears the old hold marker. The producer is never started under low disk.
 //! - **A short budget holds a job.** A job's own budget (`[budget] job_usd`) must cover everything still to run
 //!   (`athena_core::reading::budget_reserve`). When it does not, `athena go` returns
 //!   [`athena_core::reading::BudgetShort`] before spending anything. The item is left queued (outcome
@@ -474,6 +484,13 @@ pub trait Steps {
     /// Approves an in-limit open proposal by its id, as `athena approve-work` does. Refuses one that is not.
     fn approve(&self, proposal: &str) -> Approval;
     fn run(&self, job: &str) -> Run;
+    /// Removes the build directory (`target/`) of every interrupted job (dispatched, no process, job lock free),
+    /// keeping work trees and candidates, except the jobs in `own`. The drain calls it at its start with an
+    /// empty list and before each run with `own` = the job about to run plus the jobs this drain already ran
+    /// or held. The queue key of a retried item is not on the list: the interrupted source of a retry is dead
+    /// weight, since the retry starts from the base or from commits, never from its directory. The default
+    /// removes nothing.
+    fn reclaim_interrupted(&self, _own: &[String]) {}
     fn land(&self, job: &str) -> Landing;
     fn rate(&self) -> Rate;
     /// Checks every text input of the page against the pinned source, with a model call per study. It is asked
@@ -1322,6 +1339,11 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             self.push(line);
             return RunStep::Budget;
         }
+        // Build directories of jobs a restart interrupted are dead weight; the job about to run and the jobs
+        // this drain already ran or held are not touched.
+        let mut own: Vec<String> = self.st().jobs.iter().map(|l| l.job.clone()).collect();
+        own.push(job.clone());
+        self.steps.reclaim_interrupted(&own);
         let run = self.steps.run(&job);
         {
             let mut st = self.st();
@@ -2344,6 +2366,9 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     for line in steps.in_flight() {
         d.note(line);
     }
+    // Before the queue is read: a restart left the build directories of interrupted jobs behind, and the
+    // disk they fill would hold or fail the next job. No job of this drain exists yet, so none is skipped.
+    steps.reclaim_interrupted(&[]);
     let view = steps.queue()?;
     let previous = steps.previous_rating();
     let mut view = view;
@@ -2865,6 +2890,14 @@ impl<'a> RealSteps<'a> {
 impl Steps for RealSteps<'_> {
     fn review_passes(&self) -> Vec<String> {
         self.athena.review_passes(self.ui)
+    }
+
+    fn reclaim_interrupted(&self, own: &[String]) {
+        let keep: Vec<athena_data::JobId> = own
+            .iter()
+            .filter_map(|j| athena_data::JobId::parse(j).ok())
+            .collect();
+        self.athena.reclaim_interrupted(&keep, self.ui);
     }
 
     fn caps(&self) -> anyhow::Result<Caps> {

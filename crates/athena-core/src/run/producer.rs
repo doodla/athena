@@ -72,6 +72,14 @@ impl Athena {
         closing.baseline = Some(baseline);
     }
 
+    /// The disk check just before the producer: after the baseline checks (whose builds are what fill the
+    /// disk) and before the producer's work tree and first invocation. Low space after the idle build
+    /// directories are removed returns the hold; the caller holds the job through
+    /// [`Athena::hold_for_disk`], so the producer never starts in an environment that cannot build.
+    pub(super) fn producer_disk_gate(&self, ctx: &RunContext<'_>) -> Option<crate::disk::LowDisk> {
+        self.disk_gate(ctx.jc.config.min_free_gb(), ctx.id(), ctx.ui)
+    }
+
     /// Stage S2: the producer's detached snapshot of the base, with the grant, brief frame and environment
     /// its invocations use. The caller holds the [`crate::state::JobWorktree`] that cleared a stale work tree
     /// before this runs and removes the work tree and build directory when the job's run ends.

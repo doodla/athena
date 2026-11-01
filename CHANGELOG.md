@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The build directories of interrupted jobs are now reclaimed, and the disk is checked again just before the
+  producer. Root cause: a job whose process died (a restart, a crash) stayed dispatched and kept its `target/`
+  until the disk was already low, and the baseline builds then filled what was left, so the next job's
+  producer started on a full disk and failed (job 20261030-185437-1tbs asked for the fix). A drain now
+  removes the `target/` of every interrupted job (dispatched in the records, no process in the registry, job
+  lock free, held while the directory goes) at its start and before each run (`Athena::reclaim_interrupted`,
+  `Steps::reclaim_interrupted`). Only `target/` goes: work trees, kept candidates and records stay, and the
+  drain's own jobs are skipped. The new check (`Athena::producer_disk_gate`) runs after the baseline checks
+  and before the producer; low space after the usual cleanup holds the job as an environment stop through
+  `hold_for_disk` (`environment: low disk`, no attempt used, the producer never starts). That hold leaves no
+  candidate, so the next drain reads the job again, and that retry clears the old hold marker; `athena go`
+  on such a held job says it is read again, not resumed. A command run by hand on an interrupted job while
+  the sweep holds its lock may say "already running"; running it again works. `min_free_gb` is unchanged.
 - A failing check is now compared to the base test by test, so a new failing test is no longer excused by a
   check that already failed on the base. Root cause: the baseline kept one pass/fail bit per check name
   (`Baseline::failed_before` matched by name and `verify::is_pre_existing` used it), with no per-test comparison,

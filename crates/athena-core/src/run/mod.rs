@@ -344,6 +344,12 @@ impl Athena {
                     bail!("job {id} is running");
                 }
                 if let Some(low) = crate::disk::read_hold(&self.state, &id) {
+                    if self.state.read_resume(&id).is_none() {
+                        bail!(
+                            "job {id} is held: {}. It was held before its producer ran, so no candidate exists. A drain reads it again once space is free; `athena retry {id}` does the same by hand, or `athena close {id} --why \"...\"` records what happened",
+                            low.text()
+                        )
+                    }
                     bail!(
                         "job {id} is held: {}. A drain resumes it from its kept candidate once space is free; `athena retry {id}` does the same by hand, or `athena close {id} --why \"...\"` records what happened",
                         low.text()
@@ -593,6 +599,29 @@ impl Athena {
         }
         if !(state == OutcomeState::Failed && crate::disk::is_environment_reason(reason)) {
             self.state.remove_resume(id);
+        }
+    }
+
+    /// Spends the hold marker of the job a retry replaces, when that hold left no resume mark. A job held
+    /// before its producer ran has no candidate and so no resume mark; the closing of a resumed job clears
+    /// the marker of the job it resumed from, but nothing would clear this one. The request must be "try
+    /// again on <job>" for a job that is dispatched, has no process, has a hold marker and no resume mark. A
+    /// hold with a resume mark (a late hold whose seed was rejected) is left as it is.
+    fn release_superseded_hold(&self, records: &Records, request: &str, new: &JobId) {
+        let Some(old) = retried_job(records, request) else {
+            return;
+        };
+        let held_dispatched = records
+            .jobs
+            .get(old.as_str())
+            .is_some_and(|job| job.state() == JobState::Dispatched);
+        if &old != new
+            && held_dispatched
+            && !self.running(old.as_str())
+            && self.state.read_resume(&old).is_none()
+            && crate::disk::read_hold(&self.state, &old).is_some()
+        {
+            crate::disk::clear_hold(&self.state, &old);
         }
     }
 
@@ -926,6 +955,7 @@ impl Athena {
             return self.finish_dispatched(&ctx, run);
         }
         let mut closing = Closing::new();
+        self.release_superseded_hold(records, request_text, &id);
         let mut producer_prompt = brief.clone();
         if planned {
             let seed = planning_resume_seed(records, request_text).map(|s| PlanRevision {
@@ -1205,6 +1235,8 @@ impl Athena {
     /// The stages of a job after the reading is accepted, in order:
     ///
     /// 1. `baseline_stage` takes the baseline checks before the producer runs.
+    ///    1b. `producer_disk_gate` checks free disk space; low space holds the job (`hold_for_disk`) before
+    ///    the producer's work tree exists.
     /// 2. `producer_snapshot` and `producer_loop` run the producer and collect its report; a stop in
     ///    the loop closes the job here. The producer's worktree and build directory are a
     ///    [`crate::state::JobWorktree`], held until this function returns by any path.
@@ -1228,6 +1260,11 @@ impl Athena {
         let seq = ctx.next_seq(&closing);
 
         self.baseline_stage(ctx, &job_dir, seq, &mut closing);
+        // The baseline's builds fill the disk, so free space is checked again before the producer. Low space
+        // holds the job as an environment stop: no work tree exists yet and no producer has run.
+        if let Some(low) = self.producer_disk_gate(ctx) {
+            return Err(self.hold_for_disk(ctx, closing, low));
+        }
         // The producer's worktree and build directory belong to this call: cleared now, removed on every way
         // out of the function (a verdict, a stop or an error), so a finished job leaves neither behind.
         let _worktree = self.state.job_worktree(&id);
