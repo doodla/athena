@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The producer's build directory is now removed before the checks start, and a failed check keeps the last
+  200 lines of its output. Root cause: the build directory was removed only after every check passed, so a
+  job held two full builds (about 20 GB) while the checks compiled in their own directory, and a disk
+  allowance of about 40 GB ran out mid-test; and when a check failed, only the last 4096 bytes of its output
+  were kept, which often cut off the failing test, so neither a retry nor a person could tell a real failure
+  from an environment one. The build directory (`target/produce`) now goes after the disk check that runs
+  before the checks and before the first check, whether the checks pass or fail; the candidate and its work
+  tree stay. A failed check's record (`output_tail` in the verification) now holds its last 200 lines (with a
+  64 KiB ceiling, keeping the end), and the drain's `checks` line names the failing tests, for example
+  `test FAILED: athena_core checks::tests::x`, read from the recorded failing tests or the harness's
+  `test <name> ... FAILED` lines, and showing only the check name when none are known. A passing check
+  still keeps 4 KiB.
 - Interrupted jobs no longer keep their build directories, and low disk now holds a job before its producer
   runs. Root cause: a job whose process died stayed dispatched with its `target/` (several gigabytes) until
   someone closed it, and the disk check ran only at dispatch, before the checks and before the verifier, so
