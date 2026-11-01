@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-185437-1tbs",
+  "round": 1,
+  "at": "2026-11-01T10:11:10.515147574Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The drain-level pre-producer gate repeats the dispatch gate that `go` already runs before any agent, so it adds no real check before the producer, and the criterion-2 test passes only because the double skips `go`.",
+      "evidence": "crates/athena-core/src/run/mod.rs:746-753: `// Free disk space, before anything is committed or any agent runs` then `self.disk_gate(jc.config.min_free_gb(), &id, ui)` followed by write_hold, a `held` line and `Err(low)`. drain.rs:3072 already treats a `LowDisk` error from go as held. The new hook calls the same `gate` with the same threshold for the same job, just before `go`. In production, a low-disk job at this point is already held today as `environment: low disk` with no producer run. The plan's 'fails without' for criterion 2 holds only because the double's `run` does not model go's dispatch gate. Planning stages run between dispatch and the producer, and the plan admits that producer reruns are not covered. Fix: Choose one of two options and say which in the plan. (a) Ask to add crates/athena-core/src/run/mod.rs to the file list and add one `disk_gate` call right before the producer starts (and before each producer rerun), with a test through `go`. (b) If the file list stays fixed, keep `Steps::before_producer` only for the interrupted sweep. State plainly that the existing dispatch gate (run/mod.rs:749) is what checks disk before `go`, and that no check runs right before the producer. Do not present the duplicate as a new pre-producer check. Then rewrite criterion 2's demonstration so it fails without the change that was actually made.",
+      "location": "Decision 3 / Step 3 (Drain::run_job before `steps.run`) / Demonstration for criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "No test runs the production definition of 'interrupted' (Records Dispatched, registry reap, `running`) or the RealSteps wiring. The tests use a closure the test supplies, and the reason given (no Athena fixture) is wrong.",
+      "evidence": "crates/athena-core/src/disk.rs:1345-1358 already has `fn repo_with_lock() -> (TempDir, TempDir, Athena)`, built on `crate::code_health::tests::set_up()`, and reads `Records::load(&athena.git, &athena.head())`. Criterion 1 calls for 'an interrupted Dispatched job', but in Demonstration 1 the double passes 'a closure the test passes as the interrupted predicate', so no Dispatched record is involved. Demonstration 3 says 'The Athena::running registry predicate is not exercised'. If the plan mixed up the Dispatched and closed filters, or reaped the registry wrongly, every test would still pass. Fix: Add a disk.rs unit test built on `code_health::tests::set_up`. It records one job as Dispatched with no registry entry, one as Dispatched with a live registry entry or held lock, and one closed job, each with `target/` and `work/`. It calls `Athena::reclaim_interrupted` and asserts that only the first job's `target/` is removed and that all `work/` dirs and the resume mark remain. Drop open question 2.",
+      "location": "Step 2 (`Athena::reclaim_interrupted` / `pre_producer_gate`), Demonstrations 1 and 3, Open question 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The lock and registry guard depends on a running job holding its job lock or registry entry from before it is recorded Dispatched until it ends. The plan asserts this but does not cite where `go` takes the lock.",
+      "evidence": "The plan says 'Under drain_concurrent, running jobs hold the lock (the lock is per open file description...)', but no step names where `go` takes `try_lock_job`/`lock_job`, or whether the registry entry is written before the Dispatched record is committed. I did not check this. Fix: Name the call site in run/mod.rs or state.rs where a job's lock and registry entry are taken, and confirm that both come before the Dispatched record. Otherwise, a concurrent worker's sweep could remove a build directory that a job has just started using.",
+      "location": "Risks: concurrent workers / Step 1 lock check",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is sound in most of its parts. It removes only `target/`, through the existing `StateDir::remove_target`, so the work tree and candidate stay. It defines \"interrupted\" as Dispatched with no registry entry and a free job lock, which matches `Athena::state_name` and `steward::interrupted_work`. It also correctly rejects `interrupted_work` itself because of its channel and retry filters. Two parts are not sound. First, the new \"before the producer\" gate is a drain hook that runs before `go`. But `go` already runs the same `disk_gate`, with the same `min_free_gb` and the same job, at dispatch, before any agent runs (run/mod.rs:746-753). Drain already turns that `LowDisk` error into an `environment: low disk` hold (drain.rs:3072). So the new gate repeats an existing check a moment earlier, and the criterion-2 test fails without it only because the test double's `run` does not model `go`. Second, the real \"interrupted\" check in `Athena::reclaim_interrupted` (Records state Dispatched, registry reap, `running`) and the RealSteps wiring are left untested. The plan says no fixture exists, but disk.rs already builds an `Athena` over a temp repo (`repo_with_lock`, which uses `crate::code_health::tests::set_up`, at disk.rs:1346). The planner can fix both. Nothing else blocks the plan."
+}
