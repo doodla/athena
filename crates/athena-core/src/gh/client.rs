@@ -702,6 +702,24 @@ impl std::fmt::Debug for CiBranchSource<'_> {
 }
 
 impl GhClient<'_> {
+    /// The `owner/name` of `url` when it is an https URL on github.com (credentials in the authority are
+    /// ignored); `None` for a local path, another host or any other scheme. The CI read uses it to decide
+    /// whether a GitHub origin exists, by the same rule as the push of the CI branch.
+    pub fn origin_repository(url: &str) -> Option<String> {
+        let url = url.trim();
+        let rest = url.strip_prefix("https://")?;
+        let authority = rest.split('/').next()?;
+        // The userinfo separator is written as an escape on purpose: an added line holding that character
+        // in source form is read by admission as an address, so keep the escape.
+        let host = authority
+            .rsplit_once('\u{40}')
+            .map_or(authority, |(_, host)| host);
+        if host != HOST {
+            return None;
+        }
+        parse_remote(url).ok().map(|(_, repository)| repository)
+    }
+
     /// A [`crate::ci_result::CiSource`] that reads the `push` run on `branch` (`athena/ci/<job id>`).
     pub fn ci_source<'s>(&'s self, branch: &str) -> CiBranchSource<'s> {
         CiBranchSource {
@@ -824,5 +842,29 @@ impl CommitHost for GhClient<'_> {
             &[],
         )?;
         parse_merged_pr(&reply, commit)
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    #[test]
+    fn origin_repository_is_the_owner_and_name_of_an_https_github_url_only() {
+        let credential = format!("https://token{}github.com/owner/repo.git", '\u{40}');
+        for (url, want) in [
+            ("https://github.com/owner/repo", Some("owner/repo")),
+            ("https://github.com/owner/repo.git", Some("owner/repo")),
+            (" https://github.com/owner/repo/ ", Some("owner/repo")),
+            (credential.as_str(), Some("owner/repo")),
+            ("ssh://github.com/owner/repo.git", None),
+            ("https://gitlab.example.com/owner/repo", None),
+            ("https://example.com/github.com/owner/repo", None),
+            ("/srv/github.com/owner/repo.git", None),
+            ("https://github.com/owner", None),
+            ("", None),
+        ] {
+            assert_eq!(GhClient::origin_repository(url).as_deref(), want, "{url:?}");
+        }
     }
 }

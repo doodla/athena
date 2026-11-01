@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-054305-mgvj",
+  "round": 2,
+  "at": "2026-11-01T06:28:00.245714075Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The scan runs after the producer loop as a hard stop, so the producer still gets no feedback. This does not fix the root cause the plan names, and it ignores 'inside the producer loop'.",
+      "evidence": "Root cause 1 is 'the producer got no feedback', and the request asks for 'a required check inside the producer loop'. The plan runs the scan once, after producer_loop has returned (mod.rs:1145), and stops the job on any finding. The producer never learns of the address. Compared with today's admission refusal (candidate.rs:149-161), the only gains are the line number and not building the candidate commit. producer_loop already has a self-check that sends work back (producer.rs:238-289: problems are sent back up to PRODUCER_SEND_BACKS times). The only reason the plan gives for not using it is that producer.rs is not in the reading's deliverables list, but the request's scope is crates/. Fix: Run working_diff_email_violations in producer_loop's self-check, next to unmet and unchanged. Report each '<path>:<line> adds an email address outside the allow-list' as a problem that is sent back and recorded in the attempt detail. If the address is still there when the send-backs run out, stop with failure('admission refused the change: ...'). Add producer.rs to the files. Extend criterion 1's test to show both a send-back naming README.md:3 and a final Failed state when the address persists. If the after-loop stop is kept, stop claiming it gives the producer feedback and justify it.",
+      "location": "Plan Approach root cause 1 and Decision 1; crates/athena-core/src/run/mod.rs:1145-1163; crates/athena-core/src/run/producer.rs:238-289",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "refusal_keys guesses which token is a path. It fails on file names with no '.' or '/', and size refusals would rarely match.",
+      "evidence": "Admission details are format!(\"{path} ...\") (admission.rs:385, :400). For 'LICENSE adds an email address outside the allow-list' the file name stays in the key, so it does not match 'gh.rs adds ...'. The size detail puts byte counts in its key. Fix: Key on admission's own rule constants. refusal_keys returns the constant that a segment ends with or contains; a segment that matches none gives no key. Add a test with a path that has no '.' or '/'.",
+      "location": "Decision 5 (refusal_keys)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Unconfirmed that read_records sees outcome files in production. If it does not, job_reasons is empty and the fix has no effect.",
+      "evidence": "introspect() reads past records with read_records(self.git.dir()), which walks records/ on disk, while event_of_job uses GitRecords::load from git. Per the system facts, records live on the athena/records branch after the cutover. Fix: Add a step for the producer to confirm what self.git.dir() holds during introspection. If outcomes are not on disk there, fill job_reasons from GitRecords (already loaded as known at introspect.rs:1325).",
+      "location": "Decision 4 / Open question 3; crates/athena-core/src/introspect.rs:1322-1327, :1256-1257",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The no-base case of the snapshot is not handled.",
+      "evidence": "Snapshot::base() returns Option<&str> (snapshot.rs:131), and change_list refuses when it is None. Fix: State the None case and match change_list's behavior.",
+      "location": "Files: run/candidate.rs working_diff_scan",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code at the points the plan names: produce_and_verify, producer_loop and its self-check, candidate_stage, admit's email scan, disallowed_emails, the Snapshot API, and narrow_cases, read_records, event_of_job and introspect(). They exist as the plan describes, and its analysis of root cause 2 is correct: narrow_cases filters only on class_of_work and category, with a cap of 5. The introspection fix is mostly sound. The main problem is the scan: the plan names 'the producer got no feedback' as root cause 1, then runs the scan after producer_loop returns as a hard stop. That repeats admission with a line number added, and the producer still cannot fix the address. producer_loop's existing self-check with send-backs is the natural place for it, and the request's scope (crates/) covers producer.rs. Smaller issues: refusal_keys guesses which token is a path when admission already owns the rule texts, and it is unconfirmed that read_records sees outcome files in production. Verdict: revise."
+}

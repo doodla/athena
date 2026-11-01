@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-085803-pr8c",
+  "round": 1,
+  "at": "2026-11-01T09:02:59.712218076Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "docs/system-facts.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/system-facts.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The earlier-case match only works for one refusal message (the email phrase), not for admission refusal reasons in general.",
+      "evidence": "narrow_cases currently filters on class_of_work == event.class_of_work && category == event.category. The plan adds an OR clause that fires only when both the event's `what` and the case's job reason contain the EMAIL_REFUSAL constant. Admission has other refusals with the same '<path> <phrase>' shape: '{path} is a submodule or gitlink', '{path} is {} bytes, over the limit of {}', and the gitleaks secret and classification refusals (admission.rs lines 3-19 and 370-419). Each violation already has a rule name ('personal-data', 'gitlink', 'size'). Under the plan, a repeat of any of those refusals in a different class of work is still recorded as a new class, which is the same root cause the reading asks to fix ('match the admission refusal reason'). Fix: Generalise the match. Have admission.rs expose its refusal phrases (or the rule name) through one function, for example `admission::refusal_kind(reason: &str) -> Option<&'static str>`. It strips the 'admission refused the change: ' prefix and the path or path:line, then returns the matched phrase or rule. narrow_cases then admits a case when refusal_kind(event what) and refusal_kind(case job reason) are both Some and equal. EMAIL_REFUSAL becomes one entry in that table. Add a unit test that uses a second refusal kind, plus a control test showing that two different kinds do not match.",
+      "location": "Plan decision 5 / step 5; crates/athena-core/src/introspect.rs:841-850",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The end-to-end test would pass on the old code, so its 'fails without the behavior' claim is false.",
+      "evidence": "Part (b) uses the existing setup() and Scenario for all three jobs, so they share a class_of_work and the category 'failed'. narrow_cases already returns cases that share both (introspect.rs:845). The existing test at crates/athena-cli/tests/introspection.rs:925-965 shows the second event already receiving the first case through that filter. On the old code the third job's prompt would therefore list both earlier cases, and earlier_cases would be non-empty with new_class false. The plan's claim that 'the end-to-end part then has an empty earlier_cases list' does not hold. The criterion requires the record-level assertion to fail on the old code. Fix: Give the three end-to-end jobs different classes of work (for example code, docs, config), using whatever Scenario or plan field sets class_of_work, while the refusal reason stays the same. Then on the old code narrow_cases returns no case, apply_answer drops the model's ids, and the earlier_cases assertion fails. State that setup explicitly in the demonstration.",
+      "location": "Demonstrations, criterion 3, part (b) end-to-end",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The check that the in-loop scan flags only lines admission would flag is hedged ('where practical'), and the command named for it runs the criterion 2 test.",
+      "evidence": "'A unit test checks that for each input form the in-loop result is a subset ... using the existing AdmissionInput path on a small fixture repo where practical.' The Run line names the_email_scan_leaves_allow_listed_and_pre_existing_addresses_alone, which is the criterion 2 test. Fix: Commit to one named test. It builds a base and a candidate commit in a temporary repo, runs admission::admit_without_secrets, runs the new added_email_lines over the same files, and asserts that every flagged path also appears in admission's personal-data violations. Name that test in the Run line.",
+      "location": "Demonstrations, criterion 7",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "When a job has more than one outcome file, the plan does not say which reason job_reasons keeps.",
+      "evidence": "read_records reads every file in a job directory whose name starts with 'outcome' (introspect.rs:327-340). A blocked job later has a second file, outcome-landed.json or outcome-abandoned.json (records.rs:841-843). A map from job to one reason keeps whichever file is read last. Fix: Keep every reason for each job (BTreeMap<String, Vec<String>>) and match if any of them matches, or state which outcome file wins and why.",
+      "location": "Plan decision 5 / step 5 (Records.job_reasons)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "DiffEntry has no `mode` field; it has old_mode and new_mode.",
+      "evidence": "crates/athena-git/src/lib.rs:129-137 defines old_mode, new_mode, old_oid, new_oid, status and path. Fix: Skip entries where new_mode == \"160000\" (and status 'D'), and read the old blob only when old_oid is not all zeros.",
+      "location": "Step 4 (skip mode 160000)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The in-loop email scan holds up against the code I read. The new-versus-base blob comparison works with the real Snapshot::change_list and Snapshot::blob, and DiffEntry has old_oid, new_oid and status. The scan plugs into the producer loop at producer.rs lines 221-289 and reuses disallowed_emails and the same allow-list, so it is never stricter than admission. Keeping send_back_text's signature avoids breaking its callers in run_pin_tests.rs. Two major problems remain. (1) The introspection fix hard-codes the email phrase into narrow_cases. That is a special case: every other admission refusal (secret found, size, gitlink, classification) still goes unmatched, and the root-cause default asks for the fix where the fault starts. (2) Criterion 3's end-to-end test reuses setup() and Scenario, so all three jobs share a class of work and the category \"failed\". The existing filter at introspect.rs:845 already finds those cases on the old code, so that test would pass without the change, and the plan's 'fails without' claim is wrong. Smaller points: criterion 7's comparison test is hedged with 'where practical', and job_reasons does not say which outcome wins when a job has more than one. The budget figure is handled correctly: the plan uses the 43 tokens the system facts give, not the 146 in the brief. Athena's own finding about docs/system-facts.md stands; editing it is required for the budgets test to pass, so the deliverable list should include it."
+}

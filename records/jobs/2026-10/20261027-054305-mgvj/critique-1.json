@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-054305-mgvj",
+  "round": 1,
+  "at": "2026-11-01T06:21:49.907203244Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/producer.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/producer.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/system-facts.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/system-facts.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Root cause 2 is a guess, and the test is built to fit the guess, not the real case.",
+      "evidence": "event_of_job sets category to \"failed\" or \"rejected\" and class_of_work to the job's class. Jobs 9e8t, akwq and the job behind 4nff were all failed code jobs refused at admission, so their class_of_work and category are very likely equal. If those two jobs had Recorded introspections in a class, base narrow_cases would already have passed them in. The plan's cause holds only if their class_of_work differs. The criterion-3 test makes it differ on purpose (\"The cases' class_of_work differs from the new event's, which is the base-code gap\"). There is another cause the plan never weighs: read_records makes a CaseRow only from a Recorded introspection that has a failure_class, what_happened and cause. If 9e8t and akwq were never introspected, or their introspections failed, there is no case to find. Then the planned refusal-reason match over CaseRows changes nothing, and 4nff would still record new_class=true with empty earlier_cases. The plan's open question lists two possible causes and leaves out this one. Fix: Name the condition each cause depends on, and design for the one the code makes likely. Either show from code that 9e8t/akwq's class_of_work or category differs from 4nff's event (and say so), or handle jobs that have no CaseRow: let the earlier-case search match job outcomes on the refusal reason. For example, give the model those jobs' introspection cases when they exist, and otherwise the outcome rows, so the search can return a matched case. Also make the criterion-3 test model the realistic scenario: same class_of_work and category, plus one shape the base code cannot match. A test whose only base-code gap is an artificial class_of_work mismatch does not show that the reported fault is fixed.",
+      "location": "Approach (2), Decision 3, Demonstration for criterion 3; crates/athena-core/src/introspect.rs:1256-1290 (event_of_job), :390-412 (cases come only from Recorded introspections in a class), :841-850 (narrow_cases)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The event's refusal key is parsed out of event.what, which also carries the job title and appended verification details.",
+      "evidence": "event.what is format!(\"{title}: {reason}{failure_details}\"). Splitting on 'admission refused the change: ' and then '; ' can pull verification detail text into the last segment, and a title that holds the prefix would also confuse it. Fix: Take the event's key from the outcome reason itself. For example, look up records.job_reasons[event.job], or add the reason to Event in event_of_job. Do not re-parse the composed what string.",
+      "location": "Decision 4 / admission.rs refusal_reasons; introspect.rs event_of_job what format",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After an in-loop failure, a retry may lose the producer's work. The plan defers this to the producer.",
+      "evidence": "The plan says the in-loop failure leaves closing.candidate empty, while an admission refusal keeps a candidate. It has not read how tree_seed, resume_seed or keep_timed_out_work (run/mod.rs:642) seed a retry. Fix: Decide this in the plan. Keep the work the way keep_timed_out_work does, or state that the retry starts fresh with the file:line reason, and test whichever is chosen.",
+      "location": "Open questions 2; run/candidate.rs working_diff_scan",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The '5% of newly refused readings' figure is neither measured nor estimated.",
+      "evidence": "The demonstration reruns criterion 1's test and gives no measurement or estimate of how often the refusal fires. Fix: Label 5% as an estimate. Optionally, count the past admission email refusals that would now fail inside the loop.",
+      "location": "Demonstration for criterion 7",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The in-loop scan is sound and lands where the fault starts. It runs in producer_loop on the snapshot's working diff and uses line numbers from hunk headers. It reuses disallowed_emails and the real [personal_data], and its seam (athena_with, base_script, FakeTurn.edits, the real athena.toml) exists in run/tests.rs. Adding producer.rs and the system-facts budget line is justified despite Athena's scope notes. The introspection half is the problem, and it is major. event_of_job gives every failed code job the same class_of_work and category, so base narrow_cases would already pass in introspected earlier cases for 9e8t and akwq. The plan's cause holds only if their classes differ, and its test forces that difference on purpose. The plan does not consider that those jobs may have no Recorded, classed introspection at all. In that case a refusal-reason match over CaseRows cannot help, and the reported fault would remain. Revise: name and design for the cause the code makes likely, and test that scenario."
+}
