@@ -1,0 +1,301 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261101-222517-3kgp",
+  "round": 3,
+  "at": "2026-11-01T22:39:51.204448349Z",
+  "invocation_seq": 7,
+  "approach": "Move the job's Score out of the close-time landing commit and commit it from the landing queue, as a records-only commit made right after that job's host landing, under the drain's landing lock. The Score is the one closing record the queue can rebuild from records already at head. `expected_score` recomputes it, so no spool is needed. The other closing records are held in memory in `Closing` until close. Three of them (candidate, verification, Outcome Landed) are read by `land_pr` and `landed_commit_from_records` at or before the landing commit. That is out of scope (gh/landing.rs). Invocations feed reconcile and the Score. The doc states this narrower scope as a fixed limit. It is raised below as the first open question, which the user must accept. The caller chooses deferral: a new `Athena::go_for_queue` sets a `defer_score` flag, and only the real drain at max_in_flight > 1 uses it. `go`, `go_with_stages` and max_in_flight = 1 are unchanged. `RealSteps::land` calls the new `Athena::commit_landed_records` in the `Landing::Landed` arm only. `athena land` calls it after a Landed report so a deferred job landed outside the drain still gets its Score. Append-only is enforced by the gate's existing `Rule::AppendOnly` in every Athena commit. The commits.rs change adds only the skip of identical bytes and the no-empty-commit rule. Criterion 3 is shown through the production commit path (`Committer::commit_records`) and by the check that every queue records commit shows only 'A' lines.",
+  "decisions": [
+    {
+      "choice": "Defer only the Score, and state the reason correctly. The Score can be rebuilt after landing from records already at head (athena_gate::jobs::expected_score loads the job's invocations, candidate, verification and outcome from the tree). Nothing has to be stored between close and landing. Its value does not depend on the head; with `at` = the close time it is the same value as at close. The move is chosen for ordering and storage, not value: the Score is the only closing record that is derived and so needs no spool. The doc says exactly this.",
+      "reason": "Invocations, plans, critiques and baseline live only in memory in `Closing` (close.rs push_closing_records), so deferring them would need a per-job spool in the state directory, and invocations feed reconcile (Rule::Reconciliation). Candidate, verification and Outcome Landed are read by `land_pr` at head, and `landed_commit_from_records` finds the landing commit as the one that introduced outcome-landed.json (landing.rs 55-75, 708-718). None of that can move while gh/landing.rs is out of scope. The gate has no rule that requires the Score in the same commit as Outcome Landed (jobs.rs check judges only scores a commit adds, against expected_score of that commit's tree).",
+      "rejected": [
+        {
+          "option": "Defer all closing records",
+          "why": "Breaks `land_pr` (verification and candidate read at head) and the landed-commit lookup (outcome-landed.json). It needs gh/landing.rs changes, which are out of scope, and a spool for the in-memory records."
+        },
+        {
+          "option": "Defer invocations, plans, critiques, baseline and Score through a state-directory spool",
+          "why": "New persistence and crash recovery (recovery is out of scope), and invocations feed reconcile that `land_pr` runs first. The gain over Score-only is not shown, and the risk is high for one producer run."
+        },
+        {
+          "option": "Describe the Score-only move as the full section 8 design",
+          "why": "It narrows the accepted reading without saying so. Finding 4 is answered by saying it in the doc and in open question 1, not by hiding it."
+        },
+        {
+          "option": "A Steps::commit_records hook with a no-op default, as the dropped candidate had",
+          "why": "Hook only; the brief forbids a default no-op as the only implementation."
+        }
+      ]
+    },
+    {
+      "choice": "The caller chooses deferral. `Athena::go_for_queue` sets `defer_score`, carried through `Outputs` and `RunContext` in run/mod.rs and read in `land_or_block`. Only `RealSteps::run` passes it, and only when `[drain.pipeline] max_in_flight` > 1. `go` and `go_with_stages` pass false.",
+      "reason": "A config switch inside close.rs would leave jobs closed by plain `athena go` and landed by `athena land` with no Score. The threading must go through run/mod.rs because `Outputs`, `RunContext` and the `go*` entry points are defined only there (lines ~267-330, 964-987). Findings 1 and 2 (run/mod.rs and main.rs are outside the deliverables) are answered: both files stay in the plan, each with one small, stated change, and open question 2 asks the user to accept them. No smaller file set works, as the rejected options show.",
+      "rejected": [
+        {
+          "option": "Defer whenever config max_in_flight > 1, whoever calls go",
+          "why": "Jobs closed by `go` outside the drain would end Landed with no Score. Existing tests that call `athena.go` under pipelined(2) would hit this."
+        },
+        {
+          "option": "A default method on the StageSink trait (state.rs)",
+          "why": "A default-only trait method with one override is the shape the brief forbids. A plain per-call field needs no trait change."
+        },
+        {
+          "option": "A mutable flag on `Athena` in lib.rs",
+          "why": "Still a file outside the list, and wider than a per-call option."
+        },
+        {
+          "option": "Skip the main.rs call",
+          "why": "A deferred job landed by a manual `athena land` would end Landed with no Score; the idempotent call is cheaper than that gap."
+        },
+        {
+          "option": "Commit the Score inside land_pr",
+          "why": "gh/landing.rs is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Where the Score commit is published (finding 3): it is a records-only commit on the local branch directly after its job's landing commit. This change does not push it. It travels the way `plan_rebase` (landing.rs 573-591) already carries records-only commits that follow a landing commit on the first-parent chain: it is rebased onto the host's main with the next landing's `rebase_job_branch`. The last Score of a drain therefore stays local until the next landing or a sync. The doc states this. The criterion 1 test asserts what can be checked locally: each Score commit is a descendant of its own landing commit on the first-parent chain, and it adds only its own job's Score. Pushing it needs landing.rs, so it is a stated limit and open question 3, not a silent local-only commit.",
+      "reason": "Both the local landing commit and any later records-only commit already live only on the local branch until a landing carries them. The plan reads that as the existing publication path and adds no push in a file that is out of scope. I read `plan_rebase` and `land_pr`; I did not run a rebase over a Score commit, so whether it carries cleanly is checked by the producer's spike (step 1).",
+      "rejected": [
+        {
+          "option": "Push the Score commit from RealSteps::land",
+          "why": "`land_pr` and `check_push` own pushes and allow only the work branch; a new push path is landing.rs territory."
+        },
+        {
+          "option": "Write the Score to the athena/records branch through the landing-records sink",
+          "why": "The sink is built inside `land_pr` (landing.rs 745-772) and is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "`commit_landed_records(job, ui)` recomputes the Score with `expected_score` at head, using the closing Outcome's `at` and `RulesVersion::CURRENT`. It returns None when the job has no Outcome Landed at head or already has a Score. The call site is the guard against committing before the host landing (finding 6): Outcome Landed is written at close, so the function cannot tell a host-landed job from a locally closed one. Its doc comment says so, and the criterion 2 test pins that a NotLanded job gets no Score commit.",
+      "reason": "The gate accepts a Score equal to `expected_score` for its own `at`. The close time keeps an intervention made between close and landing out of the closing Score. No channel between `go` and the drain is needed, and the call is idempotent. I did not find a cheap host-state check in core that does not read the link state in landing.rs.",
+      "rejected": [
+        {
+          "option": "`at` = the landing time",
+          "why": "Folds an intervention made between close and landing into the closing Score instead of leaving it for a re-score."
+        },
+        {
+          "option": "Carry the close-time Score from go to the drain",
+          "why": "Needs a new channel."
+        },
+        {
+          "option": "Check the pull request link state inside commit_landed_records",
+          "why": "Couples core records code to landing.rs link types; the call-site guard plus the criterion 2 test is enough for this slice."
+        }
+      ]
+    },
+    {
+      "choice": "Append-only (finding 5): the enforcement is the gate's existing `Rule::AppendOnly`, run by `build_commit_in` for every Athena commit. Add one helper, `Committer::commit_new_records`, that drops files whose bytes at head are identical (they would be empty or no-op commits) and returns head with no commit when none remain; it passes every other file to the normal gated commit, so a same-path different-bytes write is refused by the gate. The doc states the confirmed reading: record paths are unique per record (records/<kind>/<month>/<id>.json and records/jobs/<id>/...), so two jobs in one month shard add different files and never conflict, and a same-path conflict is refused, never merged or rewritten. Criterion 3 is shown through the production path, `Committer::commit_records`.",
+      "reason": "The rule already exists and is tested (content.rs); a second check would duplicate it. The identical-bytes skip is the only thing the queue needs that the gate does not give, because a retried or repeated call must not fail or make an empty commit.",
+      "rejected": [
+        {
+          "option": "A second refusal check of the helper's own, with the conflict planted by raw plumbing",
+          "why": "Duplicates Rule::AppendOnly. The in-process gate would refuse first, so the extra check could not be reached."
+        },
+        {
+          "option": "Resolve a same-path conflict by keeping both sides",
+          "why": "The queue's commits are plumbing commits on head under the repository lock and never rebase. Distinct paths do not conflict; a same-path conflict is refused."
+        }
+      ]
+    },
+    {
+      "choice": "store.rs stays unchanged unless step 2 shows a loader helper is needed (finding 4 of round 1).",
+      "reason": "`Records::load` already gives the job's records at a commit.",
+      "rejected": [
+        {
+          "option": "Edit store.rs for its own sake",
+          "why": "No need found."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "purpose": "`land_or_block` leaves the Score out of the Plan::Tree success commit when `ctx.defer_score`; Stale, Failed and Blocked keep it. Add `Athena::commit_landed_records` with a doc comment saying the call site is the landing guard.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Outside the brief's deliverables list. Add `Athena::go_for_queue` and thread `defer_score` through `Outputs` and `RunContext`; `go` and `go_with_stages` pass false. Needed so plain `athena go` keeps its Score. Open question 2.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/commits.rs",
+      "action": "modify",
+      "purpose": "Add `Committer::commit_new_records` and the `Athena` wrapper: drop identical-bytes files and make no empty commit; everything else goes through the gated commit, whose Rule::AppendOnly refuses a rewrite. Unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "`RealSteps::run` calls `go_for_queue` with `defer_score` from the pipeline config; `RealSteps::land` calls `commit_landed_records` in the Landed arm only, a failure being a warning line. Update the module doc. No new Steps method.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Outside the brief's deliverables list. `Command::Land` calls `commit_landed_records` after a Landed report; a failure is a stderr warning. Needed so a deferred job landed outside the drain gets its Score. Open question 2.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add only: three-job order test, not-landed test, drain-path only-A check, max_in_flight 1 pin with max_concurrency 2, plain-go-keeps-Score test, idempotence and intervention-window tests. No existing body edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "purpose": "Section 8, line 3 and section 12 job 8: state what is built, the confirmed append-only reading, the local-until-carried publication and the fixed scope with its cause.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry for the Score committed from the landing queue.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Spike first, before any production change: write the criterion 1 test shape (pipelined(3), three requests, `RealSteps` with the lander double, `drain_concurrent` with 3) and run it against today's code to see whether the scripted agent runs three jobs through `RealSteps` at once. If it needs a per-job script, add it in the test. If it cannot be made to work, stop and report; do not substitute a stub Steps.",
+    "Read before editing: `scoring::score` and `RulesVersion::CURRENT`; `athena_gate::jobs::expected_score`; how the closing Outcome's `at` and totals reach it; the Git helper that reads a blob at a commit; how disk.rs reads `[drain.pipeline]`; the consumers of `Finished.score`; what `athena intervene --job` does with no closing Score; and the `crate::test_support` repository fixture. List every test that uses `pipelined(`, `drain::drain` with RealSteps, or asserts a Score or a records commit count (tests/drain.rs ~6307-6413 use pipelined(2)). Check that none of their assertions change; if one does, adjust the design, not the test body.",
+    "commits.rs: add `Committer::commit_new_records(files, message)` and the `Athena` wrapper. Under the repository lock, read each file's blob at head; drop files with identical bytes; if nothing remains return head with no commit; otherwise commit the rest through the normal gated path with the existing retry on a moved head. Different bytes stay in the list so the gate's Rule::AppendOnly refuses them. Unit tests on a temporary repository (criterion 3 a-c).",
+    "run/mod.rs and close.rs: add `defer_score` to `Outputs` and `RunContext`, add `Athena::go_for_queue`, and drop the Score from the Plan::Tree success files when set. Set `Finished.score` to what its consumers expect (read in step 2). Add `commit_landed_records(job, ui)`: return None when the job has no Outcome Landed at head or already has a Score; otherwise `expected_score` at head with the Outcome's `at`, committed through the step 3 helper. Its doc comment says the call site is the landing guard.",
+    "drain.rs: `RealSteps::run` uses `go_for_queue` with `defer_score = max_in_flight > 1`. `RealSteps::land` calls `commit_landed_records` only after `Landing::Landed` and prints a warning on error without changing the landing result. Add no Steps method. Update the module doc. main.rs: call the same function after a Landed report in `Command::Land`, warning on stderr on failure.",
+    "Run `cargo test --locked` once for the existing tests before adding new ones; fix the design if an existing test fails.",
+    "tests/drain.rs: add (never edit) the tests: three-job order (criteria 1, 9) including the first-parent descent check, not-landed (criterion 2), the drain-path only-A check (criterion 3d), the max_in_flight 1 pin with max_concurrency 2, plain `go` under pipelined(3) keeps its Score, go_for_queue then commit_landed_records twice is idempotent, and an intervention made between close and landing (state the observed result). No sleeps; order comes from the lander double's call order, with channels only where an order must be forced.",
+    "Docs and changelog: update async-drain.md (section 8, line 3, section 12 job 8) and add the CHANGELOG.md Unreleased entry. Grep the doc for 'not built', 'not confirmed', 'to be confirmed' and 'later work'.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Check `git diff crates/athena-cli/tests/drain.rs` shows only added lines."
+  ],
+  "risks": [
+    {
+      "risk": "The gate or a reader expects the Score in the same commit as Outcome Landed, so landing, status or scoring breaks for a deferred job.",
+      "mitigation": "Only the drain at max_in_flight > 1 defers. The gate (athena-gate/src/jobs.rs check) judges only scores a commit adds, against expected_score of that commit's tree, and I found no rule that ties the Score to the landing commit. Step 2 reads the consumers of `Finished.score`, and `cargo test` plus the criterion 1 test run the real gate on both commits."
+    },
+    {
+      "risk": "The Score commit is local and not published until a later landing carries it (finding 3).",
+      "mitigation": "Stated in the doc, the changelog and open question 3. The criterion 1 test checks the commit's place on the first-parent chain. Step 1 also runs `plan_rebase` over a Score commit if it is reachable from a test; if not, the limit stays stated."
+    },
+    {
+      "risk": "A deferred job whose landing is NotLanded or Waiting has no Score until it lands.",
+      "mitigation": "The drain retries the landing and `athena land` also calls `commit_landed_records`, so the Score arrives when the job lands by either path. The doc states the window."
+    },
+    {
+      "risk": "`athena intervene --job` in the window between close and landing finds no closing Score.",
+      "mitigation": "Step 2 reads what it does. A test pins the observed result and the doc states it. The queue Score uses the close time, so the intervention is not folded into it."
+    },
+    {
+      "risk": "After the host merge the local branch moves, so the Score commit builds on a moved head.",
+      "mitigation": "The helper re-reads head and retries under the repository lock as `commit_records_in` does; `expected_score` is recomputed at that head."
+    },
+    {
+      "risk": "Tests with concurrent jobs are flaky.",
+      "mitigation": "No sleeps. Order comes from the lander double's call order and at-call-time assertions, with channels only where an order must be forced."
+    },
+    {
+      "risk": "The scripted fake agent cannot run three real jobs through `drain_concurrent` with `RealSteps`.",
+      "mitigation": "Checked first, in step 1. Fall back to a per-job script in the test; if still impossible, stop and report. A stub Steps is not used for criteria 1, 2 or 9."
+    },
+    {
+      "risk": "The Score commit fails after a successful merge.",
+      "mitigation": "The landing stays Landed and a warning is printed; the next call (a drain retry or `athena land`) finds the Score missing and commits it. The function is idempotent."
+    },
+    {
+      "risk": "A stray call to `commit_landed_records` before the host landing would commit the Score early (finding 6).",
+      "mitigation": "The call sites are the only guard: the Landed arm and the Landed report. The doc comment says so and the criterion 2 test pins that a NotLanded job gets none."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test in tests/drain.rs with `Fixture::with_config(&pipelined(3))`. Three steward requests are drained by `drain_concurrent(&steps, work_everything(), &Quiet, 3)`. `steps` is `RealSteps` over an Athena from `fx.athena(scenario)`, so the real go, close, gate and commit code runs. The lander double records its call order and, at each call, loads Records at head and asserts this job has no Score yet and every job landed earlier has one. After the drain it lists the Score commits with `git log --reverse` and builds one aligned table: landing position, job, Score commit and its position. It asserts the Score commits are in landing order and that each is a descendant of its own landing commit on the first-parent chain.",
+      "command": "cargo test -p athena-cli --test drain",
+      "observes": "The Score commits appear in git log in the lander's recorded landing order. At each lander call the job being landed has no Score and its predecessors have one, so none is committed before its landing. A failure prints the landing sequence beside the Score commit sequence for the three jobs. The test also records that the Score commits are local and are not pushed (finding 3).",
+      "fails_without": "If the Score were still committed at close, every job's Score would exist before its landing and the at-call-time assertion would fail. If `RealSteps::land` did not commit, the Score commits would be missing and the log check would fail. If commits were out of landing order, the order check would fail.",
+      "seam": "Production entry point: `drain::drain_concurrent` with `RealSteps` (`RealSteps::run` calls `go_for_queue`; `RealSteps::land` calls `commit_landed_records` in the Landed arm). Preconditions: `[drain.pipeline] max_in_flight = 3`, requests from `queue_steward_request`, scripted agent from `fx.athena(scenario.script())`. The lander double (the `RecordingLander` shape at tests/drain.rs ~1352, extended with the at-call assertions) is injected through the `RealSteps.lander` field and stands in only for the host; it holds no records logic. Fixture, lander injection and `real_steps_with` (~2573) exist (read). Not proven by reading: three real jobs run through `drain_concurrent` with `RealSteps` at once. Plan step 1 checks that first."
+    },
+    {
+      "criterion": 2,
+      "method": "New test in tests/drain.rs: three jobs drained as in criterion 1. The lander double returns `Landing::NotLanded` for one chosen job id and Landed for the others. A second case uses `Landing::Waiting` if the double supports it cheaply.",
+      "command": "cargo test -p athena-cli --test drain",
+      "observes": "After the drain the not-landed job has no Score at head and no Score commit in `git log`; the two landed jobs have one each. The drain report shows that job as not landed. This also pins the call-site guard of finding 6: a closed-but-not-landed job gets no Score from the queue.",
+      "fails_without": "If the Score commit ran whatever the landing result, the not-landed job would have a Score commit and the test would fail.",
+      "seam": "Production entry point: `drain::drain_concurrent` with `RealSteps`; the `commit_landed_records` call sits only in the `Landing::Landed` arm of `RealSteps::land`. The lander double is injected through `RealSteps.lander` as in criterion 1 and returns NotLanded keyed by job id; it only stands in for the host. Lander injection exists (read); the keyed NotLanded behaviour is added in the new test (step 7)."
+    },
+    {
+      "criterion": 3,
+      "method": "Through the production commit path, on a temporary repository from `crate::test_support` and the real gate, with no double. (a) In commits.rs tests: commit a record with `Committer::commit_records`, then call it again for the same path with different bytes. Pick a record type whose edit trips only Rule::AppendOnly, not JobRecords. First show the unprotected facts: the new bytes differ from the head blob, and `git diff --name-status` of a hand-built commit would show M. Then show the refusal. (b) `Committer::commit_new_records` with identical bytes. (c) The helper with two jobs' files in one month shard. (d) In the criterion 1 drain test, run `git diff --name-status <c>^ <c>` on every queue Score commit.",
+      "command": "cargo test",
+      "observes": "(a) The error names the append-only rule (its name is 'records are append-only'), HEAD is unchanged, and no file is deleted or rewritten. (b) No new commit; head is returned. (c) Both files are added; only A lines. (d) Only A lines on every queue records commit, so the diff over the records shows only added files.",
+      "fails_without": "Without the gate's rule, the different-bytes commit would be built and the M status would show a rewrite. Without the helper's skip, the identical-bytes case would add an empty commit or be refused by the gate's empty-diff behaviour.",
+      "seam": "Production entry points: `Committer::commit_records` (exists, commits.rs ~131-260) and `Committer::commit_new_records` (added in step 3), then `Athena::commit_landed_records` (step 4) through the layer (d) drain seam. The temporary repository fixture is in `crate::test_support` (the producer reads the helper first in step 2); the real gate runs in `build_commit_in`. No double."
+    },
+    {
+      "criterion": 4,
+      "method": "The existing tests in tests/drain.rs, including the pipelined(2) tests at ~6307-6413, run with no body edits. New test: default config (`Fixture::new()`, max_in_flight 1), two requests drained by `drain_concurrent(&steps, work_everything(), &Quiet, 2)` through `RealSteps` and the lander double. Another new test closes a job with plain `athena.go` under `pipelined(3)`. Then run `git diff crates/athena-cli/tests/drain.rs`.",
+      "command": "cargo test -p athena-cli --test drain",
+      "observes": "At max_in_flight 1 each job's Score is at head before the lander is called and no extra records commit follows the landing, so the Score commit count per job is unchanged from today. A job closed by plain `go` under `pipelined(3)` has its Score right after close. The diff shows only added lines.",
+      "fails_without": "If the deferral ignored max_in_flight or the caller, the Score would be missing at the lander call in the pin test, and missing right after `go` in the plain-go test.",
+      "seam": "Production entry points: `drain_concurrent` (max_concurrency 2) with `RealSteps`, and `Athena::go`. Fixture config via `Fixture::with_config(&pipelined(3))` and `Fixture::new()`; the lander double is injected through `RealSteps.lander`; `go_with_disk` (the plain-go helper) exists (read). The new tests and any small helper are added in step 7."
+    },
+    {
+      "criterion": 5,
+      "method": "Grep `commit_landed_records` and `go_for_queue` across crates/athena-cli/src and crates/athena-core/src. The criterion 1 and 2 tests exercise the code the grep finds.",
+      "command": "cargo test -p athena-cli --test drain",
+      "observes": "`commit_landed_records` is defined in crates/athena-core/src/run/close.rs and called in `RealSteps::land` (drain.rs) and in main.rs `Command::Land`. `go_for_queue` is defined in run/mod.rs and called once, in `RealSteps::run`. `trait Steps` has no new method and `StageSink` is unchanged, so no hook has only a default no-op body.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Edit section 8: replace the 'to be confirmed by build job 8' sentence with the confirmed reading (record paths are unique per record so a shard never conflicts; a same-path different-bytes write is refused by the gate's Rule::AppendOnly). State what is built: the Score committed from the landing queue after each landing when max_in_flight > 1, in landing order, local until the next landing carries it; interventions between close and landing are not folded into it; `athena land` gives a job landed outside the drain its Score. State the fixed scope: candidate, verification and Outcome Landed stay in the landing commit because `land_pr` reads them at head, and invocations stay with the close because they are in memory and feed reconcile. Change line 3 and section 12 job 8 to say build job 8 is built with that scope. Then Grep the file for 'not built', 'not confirmed', 'to be confirmed', 'later work'.",
+      "command": "git diff docs/design/async-drain.md",
+      "observes": "The diff states both parts of build job 8 as built, and the grep finds none of those phrases for job 8. The doc's scope statement must be accepted by the user (open question 1).",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three workspace checks on the producer's tree: `cargo fmt --check`, then `cargo clippy --all-targets -- -D warnings`, then `cargo test`. Athena's own checks use `--locked`.",
+      "command": "cargo fmt --check",
+      "observes": "fmt reports no diff, clippy has no warnings, and the tests pass in every crate including the new tests in tests/drain.rs and commits.rs.",
+      "fails_without": "A formatting, lint or test regression anywhere in the workspace (for example an existing test broken by the Score deferral, or an unused item) fails one of the three.",
+      "seam": "Production entry points: the Cargo workspace commands themselves, run at the repository root. No fake or fixture; the real compiler, linter and test suite on the real tree. The seam exists today; step 9 adds only the final run."
+    },
+    {
+      "criterion": 8,
+      "method": "Add an entry under Unreleased: the job's Score is now committed from the landing queue after each landing when `[drain.pipeline] max_in_flight` is above 1, with no behaviour change at max_in_flight 1; plain `athena go` unchanged; same-path records writes refused as append-only; the other closing records still commit at close because `land_pr` reads them.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "The diff adds that entry under Unreleased and nothing else.",
+      "fails_without": null
+    },
+    {
+      "criterion": 9,
+      "method": "The criterion 1 test builds and asserts one aligned list pairing each job's landing position with its Score-commit position, with a doc comment naming the shape. Order comes only from the lander double's call order and at-call-time assertions, with channels or barriers where an order must be forced. Grep the new test bodies for `sleep`, `Duration` and timed waits.",
+      "command": "cargo test -p athena-cli --test drain",
+      "observes": "The failure message prints the landing sequence beside the records commit sequence for three jobs. The grep of the new tests finds no sleeps or timed waits.",
+      "fails_without": "A test ordered by sleeps would pass or fail by timing; the lander double's call order and at-call-time assertions fail deterministically when the order is wrong.",
+      "seam": "The same seam as criterion 1: `drain_concurrent` with `RealSteps` and the lander double injected through `RealSteps.lander`. Any channel or barrier is local to the new test and is added in step 7."
+    }
+  ],
+  "open_questions": [
+    "BLOCKER for the user, answering finding 4: the plan builds the Score-only slice of 'commit the closing records after landing'. Candidate, verification and Outcome Landed cannot move without gh/landing.rs (landing.rs 55-75 and 708-718), which is out of scope, and invocations, plans, critiques and baseline would need a per-job spool and touch reconcile. Does the user accept criterion 6 as 'built for the Score, with the scope stated in the doc'? If not, the brief must list gh/landing.rs as a deliverable (and allow a spool); this plan then cannot be built as written.",
+    "Does the user accept edits to crates/athena-core/src/run/mod.rs and crates/athena-cli/src/main.rs, which the deliverables list omits (findings 1 and 2)? Each is one small change: one per-call flag so plain `athena go` keeps its Score, and one call after a Landed report in `athena land`. I found no way to keep plain `go` unchanged and give a manually landed job its Score without them.",
+    "Publication (finding 3): the Score commit is local and is not pushed by this change. I read that `plan_rebase` carries records-only commits that follow a landing commit, so the next landing's rebase carries it, but I did not run that path over a Score commit. The last Score of a drain stays local until the next landing. Pushing it is landing.rs work. Does the user accept this limit, or want landing.rs added?",
+    "Can the scripted fake agent run three jobs through `drain_concurrent` with `RealSteps` at once? No existing test I read does it. Step 1 settles it.",
+    "What does `athena intervene --job` do when no closing Score exists yet, in the window between close and landing? I did not read it; step 2 does, and a test and the doc state the result.",
+    "No parser, stem list or matching rule is added, so the refusal corpus (crates/athena-core/tests/refusal_corpus.rs) is not involved and no demonstration runs it."
+  ],
+  "producer_section_sha256": "910fd71769de2adf3b485c02eb0115ee09dc23a7be191fc32f574d8ac5ee440e"
+}
