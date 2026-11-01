@@ -1,0 +1,160 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-031939-wz33",
+  "n": 1,
+  "at": "2026-11-01T21:29:41.815021893Z",
+  "invocation_seq": 1,
+  "base_commit": "af9773061c79e2f884b6404ee862325ba44d4b29",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Commit records from the landing queue after each landing",
+  "summary": "Build job A8 (D145, job 8): with several jobs in flight, the drain commits each landed job's records from the landing queue right after its landing, in landing order, keeping the append-only record rule. The prerequisite job 20261030-013555-f5qm (A6, landing queue) never produced a candidate; this job's scope is only records ordering, and the A6 findings are addressed as stated in the assumptions. With max_in_flight = 1 the drain behaves as today.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus fmt, clippy -D warnings and cargo test criteria."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria are run via cargo test through the real entry point."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check commit order and append-only results, not wiring."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Last criterion checks the ordering outcome."
+    },
+    {
+      "id": "small",
+      "how": "Only records ordering; queue work stays out of scope."
+    },
+    {
+      "id": "mechanism",
+      "how": "The append-only rule is enforced by a test."
+    },
+    {
+      "id": "strangers",
+      "how": "CHANGELOG and doc comments are written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/drain.rs (Landing trait at ~513, drain_concurrent at ~2482, the Athena-backed land at ~2790, doc header on max_in_flight 1 at ~46) and crates/athena-core/src/store.rs (Records::load, JobRecords, has_record_id) plus crates/athena-cli/tests/drain.rs (commit_records_to helper at ~4233). Entry point is drain_concurrent; the tests drive it, not helpers. No new record type or data file is added, so check_record_file, AnyRecord and the round-trip test are not touched.",
+    "Prior job 20261030-013555-f5qm (A6, landing queue) ended failed with no candidate and no changed files, so there is no work to keep or drop. Its findings are addressed as follows: the max_concurrency > 1 finding is addressed by a test through drain_concurrent with max_in_flight 1 pinning today's behaviour; the old-job state finding, the Rebase to Rebased mapping and the thrash finding concern the queue's rebase and conflict return (A6), so they do not apply to this job, and this job does not widen into them.",
+    "A6's work is assumed to land first, as the dependency says; if the queue is absent, the producer wires the records commit to the existing landing step and says so.",
+    "The audience is the maintainer running the drain and the verifier running cargo test.",
+    "Records are committed through the existing commit path used by the drain; records/ files themselves are never edited by hand, and existing records are never rewritten, only appended.",
+    "Changing store.rs is only to add what the ordering needs, such as a helper to commit a given job's records; it is not a change to record formats."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test through drain_concurrent with several jobs in flight shows each landed job's records are committed right after its landing, in landing order, never before the landing; run cargo test -p athena-cli --test drain and the new test passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows the append-only rule holds with interleaved jobs: after the drain, earlier record files are unchanged byte for byte (git diff shows only added record files) and no record is committed for a job that did not land.",
+      "kind": "behavior"
+    },
+    {
+      "text": "With max_in_flight = 1 the existing drain tests in crates/athena-cli/tests/drain.rs and crates/athena-cli/src/drain.rs pass unchanged (no edits to existing test bodies, shown by git diff); a test through drain_concurrent with [parallel] max_concurrency 2 and max_in_flight 1 pins today's records commit behaviour.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test pass across the workspace.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing that records are now committed from the landing queue after each landing, with no behaviour change at max_in_flight = 1.",
+      "kind": "content"
+    },
+    {
+      "text": "Outcome check: a maintainer reading the new tests can see the records commit sequence versus the landing sequence for at least three jobs, not only that functions exist.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Raising max_in_flight above 1 or running several producers at once (build job 10)",
+    "The landing queue's rebase, conflict return and thrash stop (A6, job 20261030-013555-f5qm)",
+    "Disk guard, check slots, read-ahead and recovery of leftover in-flight rows",
+    "Changes to athena.toml, defaults.toml, .github/workflows, crates/athena-data/src/config.rs",
+    "Changes to record formats, records/ and crates/athena-core/src/gh/landing.rs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1900.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7186351706036745,
+      "p_verification_passes": 0.6779661016949152,
+      "p_user_intervenes": 0.09667519181585676,
+      "cost_usd": {
+        "p10": 0.5538164886956983,
+        "p50": 1.2980035,
+        "p90": 3.554885397235635
+      },
+      "wall_time_s": {
+        "p10": 540.7789343390651,
+        "p50": 1817.0577898907368,
+        "p90": 4004.338792821258
+      }
+    }
+  },
+  "departures": "The dependency A6 failed with no candidate, so the landing queue may be missing; this adds some risk of failure and a little cost.",
+  "hard_reason": "It changes the order in which records are committed and the landing pipeline in the drain, and must keep the append-only record rule, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
