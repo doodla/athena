@@ -137,11 +137,19 @@
 //!   of work, deliverables) is unchanged and runs it in the same drain. If the scope changed, the item is
 //!   left queued with the reason (outcome `needs accepting`, plus a note); that is not a failure and stops
 //!   nothing.
+//! - **Interrupted jobs give up their build directories.** At the start of a drain and before each run, drain
+//!   removes `target/` of every job that is dispatched with no closing record, has no process in the registry
+//!   and whose job lock is free ([`athena_core::disk::reclaim_interrupted_targets`]). Work trees, kept
+//!   candidates, resume marks and records stay, so the retry resumes as before. A job that another command is
+//!   running keeps its build directory. The sweep reads the records once per call; a job another command
+//!   dispatches in that instant is protected by its job lock. This is [`Steps::reclaim_interrupted`].
 //! - **Low disk holds a job.** When free disk space is below `[disk] min_free_gb` (default 10) at dispatch,
-//!   before the checks or before the verifier, even after idle jobs' build directories are removed,
+//!   before the producer (after the baseline checks), before the checks or before the verifier, even after idle jobs' build directories are removed,
 //!   `athena go` returns [`athena_core::disk::LowDisk`]. The item ends held (outcome `environment: low disk`,
 //!   with the free and required amounts, plus a note); that is not a failure, uses no attempt, and stops
-//!   nothing. A hold at dispatch leaves the job queued, and a later drain runs it. A hold after the candidate
+//!   nothing. A hold at dispatch leaves the job queued, and a later drain runs it. A hold before the producer
+//!   leaves the job dispatched with no candidate and no resume mark; the next pass retries it from the start,
+//!   with the producer never having run. A hold after the candidate
 //!   was built leaves the job dispatched with no process, so the next pass lists it as interrupted and
 //!   resumes it from its kept candidate by itself, with no planner or producer run and no one running `athena
 //!   retry`. That skips the rebuild only while the main branch has changed nothing outside `records/` since
@@ -474,6 +482,10 @@ pub trait Steps {
     /// Approves an in-limit open proposal by its id, as `athena approve-work` does. Refuses one that is not.
     fn approve(&self, proposal: &str) -> Approval;
     fn run(&self, job: &str) -> Run;
+    /// Removes the build directories of interrupted jobs (dispatched, no process, free job lock), keeping their
+    /// work trees and candidates. It is asked at the start of the drain and before each run, so interrupted jobs
+    /// do not hold the disk. The default removes nothing, as for steps that have no state directory.
+    fn reclaim_interrupted(&self) {}
     fn land(&self, job: &str) -> Landing;
     fn rate(&self) -> Rate;
     /// Checks every text input of the page against the pinned source, with a model call per study. It is asked
@@ -1322,6 +1334,8 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             self.push(line);
             return RunStep::Budget;
         }
+        // A job interrupted since the last sweep gives up its build directory before the next one builds.
+        self.steps.reclaim_interrupted();
         let run = self.steps.run(&job);
         {
             let mut st = self.st();
@@ -2336,6 +2350,8 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     mut run: impl FnMut(&Drain<'a, S, U>, Vec<Vec<Item>>, Vec<Vec<Item>>),
 ) -> anyhow::Result<Report> {
     let limits = d.limits;
+    // Interrupted jobs' build directories first: they are the disk a run would otherwise need.
+    steps.reclaim_interrupted();
     // Before the queue is read, so a request the backfill queues is worked in this drain.
     for line in steps.review_passes() {
         d.ui.line(&line);
@@ -3022,6 +3038,11 @@ impl Steps for RealSteps<'_> {
                     .is_some(),
             },
         }
+    }
+
+    fn reclaim_interrupted(&self) {
+        self.athena.state.registry().reap();
+        self.athena.reclaim_interrupted(self.ui);
     }
 
     fn run(&self, job: &str) -> Run {

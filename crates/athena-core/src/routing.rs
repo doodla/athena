@@ -14,18 +14,21 @@
 //!   ([`Route::workflow_run`]), because a build job changes how CI works.
 //! - `test` always runs for every kind: no kind carries a skip list for it.
 //!
-//! The job run (`run.rs`) calls [`run_routed`]. No candidate commit is pushed yet (item 4's open part), so the
-//! run path reads no CI result and every check runs locally; the workflow's own run for a `build` job is
-//! flagged, not performed.
+//! The job run (`run.rs`) calls [`run_routed_with_record`]. It gives the source of the CI result and the wait
+//! together: for a GitHub origin the push run on the job's CI branch, read every [`CI_POLL`] up to the
+//! configured bound ([`Paced`], [`ci_polls`]); with no GitHub origin, or in a nested run, [`NoCi`] with one
+//! read and no wait. The workflow's own run for a `build` job is flagged, not performed.
 
 use crate::capability::CheckSpec;
 use crate::checks::{runs_from_record, skip_note, skipped_run};
 use crate::ci_result::{
-    BlockReason, CiSource, LocalChecks, Outcome, STEPS, Source, Step, Wait, resolve,
+    BlockReason, CiRecord, CiRun, CiSource, LocalChecks, Outcome, STEPS, Source, Step, Wait,
+    resolve,
 };
 use anyhow::{Result, bail};
 use athena_data::records::CheckRun;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::time::Duration;
 
 /// A kind of work, as section 3.2 names them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,13 +105,62 @@ pub fn route(kind: Option<&str>, specs: Vec<CheckSpec>, changed: &[String]) -> R
     }
 }
 
-/// A CI source with no result for any SHA. The job run uses it until the candidate commit is pushed.
+/// A CI source with no result for any SHA. The job run uses it when there is no GitHub origin to read, and in
+/// a nested run.
 #[derive(Debug, Clone, Copy)]
 pub struct NoCi;
 
 impl CiSource for NoCi {
-    fn fetch(&self, _sha: &str) -> Result<Option<crate::ci_result::CiRun>> {
+    fn fetch(&self, _sha: &str) -> Result<Option<CiRun>> {
         Ok(None)
+    }
+}
+
+/// How long to wait between two reads of the CI run.
+pub const CI_POLL: Duration = Duration::from_secs(20);
+
+/// The number of reads for a wait bound of `wait_s` seconds: the first read, then one every [`CI_POLL`]. A
+/// bound of 0 is one read and no wait.
+pub fn ci_polls(wait_s: u64) -> u32 {
+    u32::try_from(wait_s / CI_POLL.as_secs() + 1).unwrap_or(u32::MAX)
+}
+
+/// A [`CiSource`] that sleeps `pause`, through the given sleeper, before every read after the first. The
+/// pause is made here and not in [`resolve`], so a test can see each step and spend no time.
+pub struct Paced<'a> {
+    inner: &'a dyn CiSource,
+    sleep: &'a dyn Fn(Duration),
+    pause: Duration,
+    reads: Cell<u32>,
+}
+
+impl std::fmt::Debug for Paced<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Paced")
+            .field("pause", &self.pause)
+            .field("reads", &self.reads.get())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> Paced<'a> {
+    pub fn new(inner: &'a dyn CiSource, sleep: &'a dyn Fn(Duration), pause: Duration) -> Self {
+        Paced {
+            inner,
+            sleep,
+            pause,
+            reads: Cell::new(0),
+        }
+    }
+}
+
+impl CiSource for Paced<'_> {
+    fn fetch(&self, sha: &str) -> Result<Option<CiRun>> {
+        if self.reads.get() > 0 {
+            (self.sleep)(self.pause);
+        }
+        self.reads.set(self.reads.get() + 1);
+        self.inner.fetch(sha)
     }
 }
 
@@ -187,8 +239,21 @@ pub fn run_routed(
     exec: &dyn Exec,
     wait: Wait,
 ) -> Result<Vec<CheckRun>> {
+    run_routed_with_record(route, sha, changed, ci, exec, wait).map(|(runs, _)| runs)
+}
+
+/// [`run_routed`], also returning the record of the CI run when the check records came from it (green or
+/// red). It is `None` when the checks ran locally, so a caller states a reused result only when there is one.
+pub fn run_routed_with_record(
+    route: &Route,
+    sha: &str,
+    changed: &[String],
+    ci: &dyn CiSource,
+    exec: &dyn Exec,
+    wait: Wait,
+) -> Result<(Vec<CheckRun>, Option<CiRecord>)> {
     if !route.reuse {
-        return run_local(&route.items, exec);
+        return Ok((run_local(&route.items, exec)?, None));
     }
     let fallback = Fallback {
         route,
@@ -200,7 +265,7 @@ pub fn run_routed(
         Outcome::Verified(record) | Outcome::Failed(record) if record.source == Source::Ci => {
             let specs: Vec<CheckSpec> = route.items.iter().map(|i| i.spec.clone()).collect();
             let reused = runs_from_record(&specs, &record, sha);
-            Ok(route
+            let runs = route
                 .items
                 .iter()
                 .map(|item| {
@@ -218,15 +283,16 @@ pub fn run_routed(
                         },
                     }
                 })
-                .collect())
+                .collect();
+            Ok((runs, Some(record)))
         }
-        Outcome::Blocked(BlockReason::BadSha(_)) => run_local(&route.items, exec),
+        Outcome::Blocked(BlockReason::BadSha(_)) => Ok((run_local(&route.items, exec)?, None)),
         Outcome::Blocked(reason) => match fallback.error.take() {
             Some(e) => Err(e),
             None => bail!("checks blocked: {reason}"),
         },
         Outcome::Verified(_) | Outcome::Failed(_) => match fallback.runs.take() {
-            Some(runs) => Ok(runs),
+            Some(runs) => Ok((runs, None)),
             None => bail!("the local checks produced no records"),
         },
     }
@@ -458,6 +524,7 @@ mod tests {
                 output_tail: String::new(),
                 note: None,
                 failed_tests: Vec::new(),
+                reused: false,
             })
         }
     }
@@ -478,6 +545,10 @@ mod tests {
         assert_eq!(runs.len(), 3);
         assert!(runs.iter().all(|r| r.passed));
         assert!(runs[0].note.as_ref().unwrap().contains("runs/5"));
+        assert!(
+            runs.iter().all(|r| r.reused),
+            "records taken from CI are marked reused"
+        );
     }
 
     #[test]
@@ -487,6 +558,7 @@ mod tests {
         let runs = go("code", &["src/a.rs"], &ci, &local);
         assert_eq!(*local.ran.borrow(), vec!["fmt", "clippy", "test"]);
         assert!(runs.iter().all(|r| r.passed && r.exit_code == Some(0)));
+        assert!(runs.iter().all(|r| !r.reused), "locally run, not reused");
         // A red run for another SHA is not this candidate's failure either.
         let ci = Ci::new(Some(ci_run(OTHER, "failure")));
         let local = Local::new(None);
@@ -526,6 +598,96 @@ mod tests {
         assert_eq!(runs.len(), 3);
         assert!(runs[0].note.as_ref().unwrap().contains("not run"));
         assert!(runs.iter().all(|r| r.passed));
+        assert!(runs.iter().all(|r| !r.reused), "skipped is not reused");
+    }
+
+    // --- the wait: one read every CI_POLL, up to the bound ---
+
+    /// A sleeper that records each pause and spends no time.
+    fn recording_sleeper() -> (std::rc::Rc<RefCell<Vec<Duration>>>, impl Fn(Duration)) {
+        let slept = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let log = slept.clone();
+        (slept, move |d: Duration| log.borrow_mut().push(d))
+    }
+
+    fn waiting(wait_s: u64) -> Wait {
+        Wait {
+            polls: ci_polls(wait_s),
+            pause: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn routing_ci_polls_is_one_read_then_one_every_twenty_seconds() {
+        assert_eq!(CI_POLL, Duration::from_secs(20));
+        assert_eq!(ci_polls(0), 1);
+        assert_eq!(ci_polls(19), 1);
+        assert_eq!(ci_polls(20), 2);
+        assert_eq!(ci_polls(1500), 76);
+        assert_eq!(ci_polls(u64::MAX), u32::MAX);
+    }
+
+    #[test]
+    fn routing_a_run_that_never_finishes_is_read_76_times_with_75_pauses_then_runs_locally() {
+        let mut unfinished = ci_run(SHA, "");
+        unfinished.finished = false;
+        let ci = Ci::new(Some(unfinished));
+        let (slept, sleep) = recording_sleeper();
+        let paced = Paced::new(&ci, &sleep, CI_POLL);
+        let local = Local::new(None);
+        let changed = paths(&["src/a.rs"]);
+        let r = route(Some("code"), specs(), &changed);
+        let (runs, record) =
+            run_routed_with_record(&r, SHA, &changed, &paced, &local, waiting(1500)).unwrap();
+        assert_eq!(ci.reads.get(), 76);
+        assert_eq!(*slept.borrow(), vec![CI_POLL; 75]);
+        assert_eq!(*local.ran.borrow(), vec!["fmt", "clippy", "test"]);
+        assert!(runs.iter().all(|r| r.passed));
+        assert_eq!(record, None, "the checks ran locally: no CI record");
+    }
+
+    #[test]
+    fn routing_no_wait_is_one_read_and_no_pause() {
+        let (slept, sleep) = recording_sleeper();
+        let changed = paths(&["src/a.rs"]);
+        let r = route(Some("code"), specs(), &changed);
+        // A bound of 0 against a source with a run that never finishes: one read.
+        let mut unfinished = ci_run(SHA, "");
+        unfinished.finished = false;
+        let ci = Ci::new(Some(unfinished));
+        let paced = Paced::new(&ci, &sleep, CI_POLL);
+        let local = Local::new(None);
+        run_routed_with_record(&r, SHA, &changed, &paced, &local, waiting(0)).unwrap();
+        assert_eq!(ci.reads.get(), 1);
+        // NoCi with one read: nothing to wait for, nothing slept.
+        let local = Local::new(None);
+        let (runs, record) =
+            run_routed_with_record(&r, SHA, &changed, &NoCi, &local, waiting(0)).unwrap();
+        assert_eq!(*local.ran.borrow(), vec!["fmt", "clippy", "test"]);
+        assert_eq!((runs.len(), record), (3, None));
+        assert!(slept.borrow().is_empty());
+    }
+
+    #[test]
+    fn routing_returns_the_ci_record_for_a_green_or_red_run_and_none_for_a_local_one() {
+        let changed = paths(&["src/a.rs"]);
+        let r = route(Some("code"), specs(), &changed);
+        for (conclusion, all_passed) in [("success", true), ("failure", false)] {
+            let ci = Ci::new(Some(ci_run(SHA, conclusion)));
+            let local = Local::new(None);
+            let (runs, record) =
+                run_routed_with_record(&r, SHA, &changed, &ci, &local, WAIT).unwrap();
+            let record = record.expect("the record of the CI run");
+            assert_eq!(record.source, Source::Ci);
+            assert_eq!(record.sha, SHA);
+            assert_eq!(record.all_passed(), all_passed);
+            assert!(local.ran.borrow().is_empty());
+            assert_eq!(runs.iter().all(|r| r.passed), all_passed);
+        }
+        let ci = Ci::new(None);
+        let local = Local::new(None);
+        let (_, record) = run_routed_with_record(&r, SHA, &changed, &ci, &local, WAIT).unwrap();
+        assert_eq!(record, None);
     }
 
     #[test]

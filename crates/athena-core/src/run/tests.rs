@@ -89,6 +89,9 @@ mod produce_and_verify_order_tests {
     /// The check is the command `check` (`true` passes, `false` fails).
     struct Docs {
         check: &'static [&'static str],
+        /// Checks with the three names of the CI workflow (`fmt`, `clippy`, `test`), each running `check`
+        /// and none skipped by path, so the route asks for a CI result. Off, the one check is `probe`.
+        ci_steps: bool,
     }
 
     /// A check that passes on any tree.
@@ -132,12 +135,20 @@ mod produce_and_verify_order_tests {
             }
         }
         fn checks(&self, _: &JobConfig) -> Vec<CheckSpec> {
-            vec![CheckSpec {
-                name: "probe".into(),
-                run: self.check.iter().map(|part| part.to_string()).collect(),
-                kind: CheckKind::Command,
-                skip_when_only: None,
-            }]
+            let names: &[&str] = if self.ci_steps {
+                &["fmt", "clippy", "test"]
+            } else {
+                &["probe"]
+            };
+            names
+                .iter()
+                .map(|name| CheckSpec {
+                    name: name.to_string(),
+                    run: self.check.iter().map(|part| part.to_string()).collect(),
+                    kind: CheckKind::Command,
+                    skip_when_only: None,
+                })
+                .collect()
         }
         fn env(&self, _: &JobConfig) -> BTreeMap<String, String> {
             BTreeMap::new()
@@ -183,7 +194,10 @@ mod produce_and_verify_order_tests {
             git: Git::at(repo.path()),
             state,
             driver: std::sync::Arc::new(driver),
-            capabilities: vec![Box::new(Docs { check })],
+            capabilities: vec![Box::new(Docs {
+                check,
+                ci_steps: false,
+            })],
             build: Build {
                 version: "0.1.0".into(),
                 source_commit: "0".repeat(40),
@@ -1449,7 +1463,7 @@ mod produce_and_verify_order_tests {
     }
 
     #[test]
-    fn produce_dir_is_removed_after_checks_pass_and_kept_when_a_check_fails() {
+    fn produce_dir_is_removed_before_the_checks_whether_they_pass_or_fail() {
         for (check, passes) in [(PASSES, true), (FAILS_ON_EDIT, false)] {
             let repo = repo();
             let state = tempfile::tempdir().unwrap();
@@ -1483,20 +1497,136 @@ mod produce_and_verify_order_tests {
                 probes[gate - 1].produce_present,
                 "the producer's build directory existed when the checks started: {probes:?}"
             );
+            // The checks build in their own directory, so the producer's build goes before they start,
+            // whether they then pass or fail.
+            assert!(
+                !probes[gate].produce_present,
+                "target/produce is gone before the verifier gate, pass or fail: {probes:?}"
+            );
             if passes {
-                assert!(
-                    !probes[gate].produce_present,
-                    "the checks passed, so target/produce is gone before the verifier gate: {probes:?}"
-                );
                 assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
             } else {
-                assert!(
-                    probes[gate].produce_present,
-                    "a check failed, so target/produce is kept: {probes:?}"
-                );
                 assert_eq!(done.state, OutcomeState::Rejected, "{}", done.reason);
             }
         }
+    }
+
+    /// Leaks `script` as the argument vector of an `sh -c` check, which `Docs` keeps for the whole run.
+    fn leaked_sh_check(script: String) -> &'static [&'static str] {
+        let script: &'static str = Box::leak(script.into_boxed_str());
+        Box::leak(vec!["sh", "-c", script].into_boxed_slice())
+    }
+
+    #[test]
+    fn producer_build_directory_is_gone_when_the_first_check_starts_and_the_candidate_is_kept() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("repo");
+        // The real check command, run in the verifier's snapshot. It fails if any job still has a producer
+        // build directory when it starts, or if its working directory does not hold the candidate's README.
+        let check = leaked_sh_check(format!(
+            "for p in '{jobs}'/*/target/produce; do \
+                 if [ -e \"$p\" ]; then echo \"producer build still present: $p\"; exit 1; fi; \
+             done; \
+             grep -q 'A demo' README.md || {{ echo 'the candidate is not in the tree'; exit 1; }}",
+            jobs = root.join("jobs").display()
+        ));
+        let athena = athena_with(
+            &repo,
+            &state,
+            check,
+            crate::test_support::recording_plenty_space,
+            counting(Arc::new(Counts::default()), Some(root.clone())),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+
+        // The check passed, so it saw no producer build and the candidate's tree; the candidate landed.
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert!(readme_at_head(&athena).contains("A demo"));
+        let said = ui.0.lock().unwrap().clone();
+        let removed = said
+            .iter()
+            .position(|l| l.starts_with("disk       removed the producer's build directory"))
+            .unwrap_or_else(|| panic!("no removal line in {said:#?}"));
+        let checked = said
+            .iter()
+            .position(|l| l.starts_with("checks     "))
+            .unwrap_or_else(|| panic!("no checks line in {said:#?}"));
+        assert!(removed < checked, "{said:#?}");
+        assert!(said[checked].contains("probe ok"), "{said:#?}");
+        assert!(!athena.state.produce_dir(&proposal.job).exists());
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = &records.jobs[proposal.job.as_str()];
+        assert!(job.candidate.is_some(), "the candidate is in the records");
+        let verification = job.verification.as_ref().expect("a verification");
+        assert!(verification.checks.iter().all(|c| c.passed));
+    }
+
+    #[test]
+    fn a_failed_check_logs_its_failing_test_and_records_its_last_200_lines() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        // Passes on the base README. On the candidate it prints 300 numbered lines, one failing test line,
+        // and five more lines, then exits 1.
+        let check = leaked_sh_check(
+            "grep -q 'A demo' README.md || exit 0; \
+             i=1; while [ $i -le 300 ]; do echo \"output line $i\"; i=$((i+1)); done; \
+             echo 'test demo::the_failing_one ... FAILED'; \
+             for n in 1 2 3 4 5; do echo \"after $n\"; done; exit 1"
+                .to_string(),
+        );
+        let athena = athena_with(
+            &repo,
+            &state,
+            check,
+            crate::test_support::plenty_of_space,
+            base_script(),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Rejected, "{}", done.reason);
+
+        // The drain log names the failing test, not just the check.
+        let said = ui.0.lock().unwrap().clone();
+        let line = said
+            .iter()
+            .find(|l| l.starts_with("checks     "))
+            .unwrap_or_else(|| panic!("no checks line in {said:#?}"));
+        assert!(
+            line.contains("probe FAILED: demo::the_failing_one"),
+            "{line}"
+        );
+
+        // The committed record holds the last 200 lines of the output and nothing before them.
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let verification = records.jobs[proposal.job.as_str()]
+            .verification
+            .as_ref()
+            .expect("a verification");
+        let run = verification
+            .checks
+            .iter()
+            .find(|c| !c.passed)
+            .expect("the failed check is recorded");
+        // 300 numbered lines + the failing line + 5 more = 306 lines; the last 200 start at line 107.
+        let kept: Vec<&str> = run.output_tail.lines().collect();
+        assert_eq!(kept.len(), 200, "{}", run.output_tail);
+        assert_eq!(kept[0], "output line 107");
+        assert_eq!(kept[194], "test demo::the_failing_one ... FAILED");
+        assert_eq!(kept[199], "after 5");
+        assert!(!run.output_tail.contains("output line 106\n"));
+        assert!(!run.output_tail.contains("output line 1\n"));
     }
 
     /// A check result as a run killed at its deadline leaves it: no exit code, the deadline note, not passed.
@@ -1515,6 +1645,7 @@ mod produce_and_verify_order_tests {
             output_tail: String::new(),
             note: Some(crate::checks::deadline_note(limit_s)),
             failed_tests: Vec::new(),
+            reused: false,
         }
     }
 
@@ -1713,6 +1844,72 @@ mod produce_and_verify_order_tests {
         assert!(readme_at_head(&athena).contains("A demo."));
         assert_eq!(athena.state.read_resume(&first), None, "the mark is spent");
         assert_eq!(athena.state.read_resume(&retry.job), None);
+    }
+
+    /// A baseline check that leaves `baseline-ran` in the job directory (it runs in `<job dir>/baseline`),
+    /// which [`crate::test_support::low_once_baselined`] reads as "the baseline is taken".
+    const MARKS_BASELINE: &[&str] = &["sh", "-c", "touch ../baseline-ran"];
+
+    #[test]
+    fn low_disk_before_the_producer_holds_the_job_and_never_starts_the_producer() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("repo");
+        let counts = Arc::new(Counts::default());
+        // Room at dispatch; too little once the baseline is taken, before the producer.
+        let athena = athena_with(
+            &repo,
+            &state,
+            MARKS_BASELINE,
+            crate::test_support::low_once_baselined,
+            counting(counts.clone(), Some(root.clone())),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let first = proposal.job.clone();
+        let ui = Lines::default();
+        let error = athena
+            .go(first.as_str(), AcceptedBy::User, &ui)
+            .expect_err("low space before the producer holds the job");
+        let low = error
+            .downcast_ref::<crate::disk::LowDisk>()
+            .copied()
+            .unwrap_or_else(|| panic!("not a hold: {error:#}"));
+        assert_eq!(low.free, 3_000_000_000);
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter().any(|l| l.starts_with("baseline   ")),
+            "the baseline was taken first: {said:#?}"
+        );
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("held       environment: low disk: 3.0 GB free")),
+            "{said:#?}"
+        );
+
+        // The producer never started; neither did the checks or the verifier.
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (0, 0));
+        assert!(!said.iter().any(|l| l.starts_with("checks     ")));
+        assert!(!athena.state.job_dir(&first).join("target/produce").exists());
+
+        // Held, not closed, with no candidate and no resume mark; the status says why.
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let held = &records.jobs[first.as_str()];
+        assert_eq!(held.state(), JobState::Dispatched);
+        assert!(held.outcome.is_none() && held.latest_score().is_none());
+        assert!(held.candidate.is_none());
+        assert!(!held.invocations.iter().any(|i| i.role == Role::Producer));
+        assert!(records.introspections.is_empty());
+        assert_eq!(athena.state.read_resume(&first), None);
+        assert_eq!(crate::disk::read_hold(&athena.state, &first), Some(low));
+        let status = athena.status().unwrap();
+        let line = status
+            .open
+            .iter()
+            .find(|l| l.id == first.as_str())
+            .expect("the held job is open work");
+        assert_eq!(line.state, "interrupted");
+        assert_eq!(line.hold.as_deref(), Some(low.text().as_str()));
     }
 
     #[test]
@@ -2089,6 +2286,424 @@ mod produce_and_verify_order_tests {
             assert_eq!(run.skip_lines(), 1, "{origin:?}: {:?}", run.lines);
             assert!(run.warnings().is_empty(), "{origin:?}: {:?}", run.lines);
         }
+    }
+
+    // --- the checks stage reads the CI run of the candidate ---
+
+    /// What the fake `gh` says about the push run on the job's CI branch.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum CiReply {
+        /// A finished run whose aggregate job passed.
+        Green,
+        /// A finished run whose aggregate job failed because `clippy` failed.
+        Red,
+        /// No run on the branch.
+        Missing,
+        /// A finished run whose aggregate job was cancelled.
+        Cancelled,
+        /// A finished run whose aggregate job timed out.
+        TimedOut,
+        /// A run that is still going on every read.
+        Unfinished,
+    }
+
+    const CI_RUN_ADDRESS: &str = "https://github.com/owner/repo/actions/runs/4242";
+
+    /// A `gh::Runner` that answers the two reads of the CI source from the request path, as the host's
+    /// `head_sha` and `branch` filters would, and keeps every path it was asked for.
+    struct CiReplies {
+        reply: CiReply,
+        paths: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl CiReplies {
+        fn new(reply: CiReply) -> CiReplies {
+            CiReplies {
+                reply,
+                paths: Default::default(),
+            }
+        }
+
+        fn runs(&self, sha: &str, branch: &str) -> serde_json::Value {
+            let (status, conclusion) = match self.reply {
+                CiReply::Missing => return json!({ "workflow_runs": [] }),
+                CiReply::Unfinished => ("in_progress", json!(null)),
+                CiReply::Green => ("completed", json!("success")),
+                CiReply::Red => ("completed", json!("failure")),
+                CiReply::Cancelled => ("completed", json!("cancelled")),
+                CiReply::TimedOut => ("completed", json!("timed_out")),
+            };
+            json!({ "workflow_runs": [{
+                "id": 4242, "name": "ci", "event": "push", "head_branch": branch, "head_sha": sha,
+                "status": status, "conclusion": conclusion, "html_url": CI_RUN_ADDRESS,
+                "created_at": "2026-11-01T06:00:00Z", "updated_at": "2026-11-01T06:05:00Z"
+            }] })
+        }
+
+        fn jobs(&self) -> serde_json::Value {
+            let job = |name: &str, status: &str, conclusion: serde_json::Value| json!({ "name": name, "status": status, "conclusion": conclusion });
+            let aggregate = "fmt, clippy, tests";
+            let jobs = match self.reply {
+                CiReply::Green => vec![
+                    job("fmt", "completed", json!("success")),
+                    job("clippy", "completed", json!("success")),
+                    job("test (linux)", "completed", json!("success")),
+                    job(aggregate, "completed", json!("success")),
+                ],
+                CiReply::Red => vec![
+                    job("fmt", "completed", json!("success")),
+                    job("clippy", "completed", json!("failure")),
+                    job("test (linux)", "completed", json!("success")),
+                    job(aggregate, "completed", json!("failure")),
+                ],
+                CiReply::Cancelled => vec![job(aggregate, "completed", json!("cancelled"))],
+                CiReply::TimedOut => vec![job(aggregate, "completed", json!("timed_out"))],
+                CiReply::Unfinished => vec![job(aggregate, "in_progress", json!(null))],
+                CiReply::Missing => Vec::new(),
+            };
+            json!({ "jobs": jobs })
+        }
+
+        /// How many times the runs were read (each read of the source starts with this request).
+        fn reads(&self) -> usize {
+            self.paths
+                .borrow()
+                .iter()
+                .filter(|p| p.contains("/actions/runs?"))
+                .count()
+        }
+    }
+
+    impl crate::gh::Runner for CiReplies {
+        fn gh(&self, args: &[String]) -> Result<String> {
+            let path = args
+                .iter()
+                .find(|a| a.starts_with("repos/"))
+                .expect("a repos path");
+            self.paths.borrow_mut().push(path.clone());
+            if path.contains("/jobs") {
+                return Ok(self.jobs().to_string());
+            }
+            let query = path.split_once('?').map_or("", |(_, query)| query);
+            let param = |key: &str| {
+                query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix(format!("{key}=").as_str()))
+                    .unwrap_or_else(|| panic!("no {key} in {path}"))
+            };
+            Ok(self.runs(param("head_sha"), param("branch")).to_string())
+        }
+    }
+
+    /// A check result that passed, as the recording check fake returns it.
+    fn passed_run(spec: &CheckSpec) -> CheckRun {
+        CheckRun {
+            name: spec.name.clone(),
+            command: spec.run.clone(),
+            exit_code: Some(0),
+            passed: true,
+            tests_ran: None,
+            duration: athena_data::Quantity::measured(
+                1.0,
+                athena_data::Unit::Seconds,
+                "athena monotonic clock",
+            ),
+            output_tail: String::new(),
+            note: None,
+            failed_tests: Vec::new(),
+            reused: false,
+        }
+    }
+
+    /// One `go` run whose repository has `origin` (none when `None`), whose capability checks with the
+    /// three names of the CI workflow, and whose `gh` answers `reply`.
+    struct CiReuse {
+        done: Finished,
+        lines: Vec<String>,
+        /// The checks the local executor was asked to run, in order.
+        executed: Vec<String>,
+        replies: std::rc::Rc<CiReplies>,
+        sleeps: Vec<std::time::Duration>,
+        fake: std::rc::Rc<crate::test_support::EarlyFake>,
+        verifier_prompts: Vec<String>,
+        _dirs: (tempfile::TempDir, tempfile::TempDir),
+    }
+
+    impl CiReuse {
+        /// The commit pushed to the job's CI branch: the candidate.
+        fn candidate(&self) -> String {
+            self.fake.ci_of("push")[0].commit.clone()
+        }
+
+        fn checks(&self) -> &[CheckRun] {
+            &self.done.verification.as_ref().expect("verified").checks
+        }
+
+        fn names(&self, list: &[CheckRun]) -> Vec<String> {
+            list.iter().map(|c| c.name.clone()).collect()
+        }
+    }
+
+    /// Runs `go` with the early seam, the CI seam (the `gh` fake and a recording sleeper) and a recording
+    /// check fake all installed before `go` and kept through it, so nothing reaches a network or sleeps. A
+    /// GitHub origin must make the CI source read the fake: the helper fails when it was never asked, so a
+    /// run cannot pass through the local path by accident.
+    fn ci_reuse_run(origin: Option<&str>, reply: CiReply) -> CiReuse {
+        let repo = repo();
+        let git = Git::at(repo.path());
+        if let Some(url) = origin {
+            git.run(["remote", "add", "origin", url]).unwrap();
+        }
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let kept = prompts.clone();
+        let inner = counting(counts.clone(), None);
+        let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
+            if spec.role == Role::Verifier {
+                kept.lock().unwrap().push(spec.user_prompt.clone());
+            }
+            inner(spec)
+        });
+        let mut athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        athena.capabilities = vec![Box::new(Docs {
+            check: PASSES,
+            ci_steps: true,
+        })];
+        let probe = counts.clone();
+        let fake = crate::test_support::EarlyFake::new(move || {
+            let (_, producer, _, verifier) = probe.all();
+            producer + verifier
+        });
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let _early = crate::gh::early_seam::install(fake.clone(), fake.clone());
+        let replies = std::rc::Rc::new(CiReplies::new(reply));
+        let sleeps: std::rc::Rc<std::cell::RefCell<Vec<std::time::Duration>>> = Default::default();
+        let slept = sleeps.clone();
+        let _ci = ci_seam::install(
+            replies.clone(),
+            std::rc::Rc::new(move |pause| slept.borrow_mut().push(pause)),
+        );
+        let executed: std::rc::Rc<std::cell::RefCell<Vec<String>>> = Default::default();
+        let seen = executed.clone();
+        let _check = check_seam::install(std::rc::Rc::new(move |spec: &CheckSpec| {
+            seen.borrow_mut().push(spec.name.clone());
+            passed_run(spec)
+        }));
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        let lines = ui.0.lock().unwrap().clone();
+        let executed = executed.borrow().clone();
+        let sleeps = sleeps.borrow().clone();
+        let verifier_prompts = prompts.lock().unwrap().clone();
+        if origin == Some(GITHUB) {
+            assert!(
+                !replies.paths.borrow().is_empty(),
+                "the CI source was never read: {lines:#?}"
+            );
+        }
+        CiReuse {
+            done,
+            lines,
+            executed,
+            replies,
+            sleeps,
+            fake,
+            verifier_prompts,
+            _dirs: (repo, state),
+        }
+    }
+
+    const ALL_CHECKS: [&str; 3] = ["fmt", "clippy", "test"];
+
+    #[test]
+    fn ci_reuse_green_skips_local_checks() {
+        let run = ci_reuse_run(Some(GITHUB), CiReply::Green);
+        assert_eq!(run.done.state, OutcomeState::Landed, "{}", run.done.reason);
+        assert!(
+            run.executed.is_empty(),
+            "local checks ran: {:?}",
+            run.executed
+        );
+        assert_eq!(run.replies.reads(), 1, "{:?}", run.replies.paths);
+        assert!(run.sleeps.is_empty(), "{:?}", run.sleeps);
+        let candidate = run.candidate();
+        let checks = run.checks();
+        assert_eq!(run.names(checks), ALL_CHECKS);
+        for check in checks {
+            let note = check.note.as_deref().unwrap_or("");
+            assert!(check.passed, "{check:?}");
+            assert!(
+                note.contains(&format!("CI run {CI_RUN_ADDRESS} for {candidate}")),
+                "{note}"
+            );
+        }
+        assert!(
+            run.lines
+                .iter()
+                .any(|l| l.starts_with("ci         checks reused from")
+                    && l.contains(CI_RUN_ADDRESS)),
+            "{:#?}",
+            run.lines
+        );
+        // The CI branch is read, not left behind: it was pushed and deleted as before.
+        assert_eq!(run.fake.ci_of("push").len(), 1);
+        assert_eq!(run.fake.ci_of("delete").len(), 1);
+    }
+
+    #[test]
+    fn ci_reuse_red_fails_without_local_checks() {
+        let run = ci_reuse_run(Some(GITHUB), CiReply::Red);
+        assert_ne!(run.done.state, OutcomeState::Landed);
+        assert_eq!(
+            run.done.state,
+            OutcomeState::Rejected,
+            "{}",
+            run.done.reason
+        );
+        assert!(
+            run.executed.is_empty(),
+            "local checks ran: {:?}",
+            run.executed
+        );
+        assert!(run.sleeps.is_empty(), "{:?}", run.sleeps);
+        let failed: Vec<&str> = run
+            .checks()
+            .iter()
+            .filter(|c| !c.passed)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(failed, ["clippy"]);
+        assert!(
+            run.lines
+                .iter()
+                .any(|l| l.starts_with("checks     ") && l.contains("clippy FAILED")),
+            "{:#?}",
+            run.lines
+        );
+        assert!(
+            run.done.reason.contains("clippy"),
+            "the failure names the failing check: {}",
+            run.done.reason
+        );
+    }
+
+    #[test]
+    fn ci_reuse_falls_back_to_local_checks_when_the_run_gives_no_result() {
+        // (reply, reads of the runs, pauses)
+        for (reply, reads, pauses) in [
+            // No run appears: the whole bound is waited out, 76 reads with 75 pauses of 20 seconds.
+            (CiReply::Missing, 76, 75),
+            (CiReply::Unfinished, 76, 75),
+            // A finished run with no usable result is not waited for.
+            (CiReply::Cancelled, 1, 0),
+            (CiReply::TimedOut, 1, 0),
+        ] {
+            let run = ci_reuse_run(Some(GITHUB), reply);
+            assert_eq!(
+                run.done.state,
+                OutcomeState::Landed,
+                "{reply:?}: {}",
+                run.done.reason
+            );
+            assert_eq!(run.executed, ALL_CHECKS, "{reply:?}");
+            assert_eq!(run.replies.reads(), reads, "{reply:?}");
+            assert_eq!(
+                run.sleeps,
+                vec![std::time::Duration::from_secs(20); pauses],
+                "{reply:?}"
+            );
+            assert_eq!(run.names(run.checks()), ALL_CHECKS, "{reply:?}");
+            assert!(run.checks().iter().all(|c| c.passed), "{reply:?}");
+            assert!(
+                run.verifier_prompts
+                    .iter()
+                    .all(|p| !p.contains("come from the CI run")),
+                "{reply:?}: a local run carries no reuse statement"
+            );
+        }
+    }
+
+    #[test]
+    fn ci_reuse_no_github_origin_uses_no_ci() {
+        let local = tempfile::tempdir().unwrap();
+        let lookalike = local.path().join("github.com/owner/repo.git");
+        std::fs::create_dir_all(&lookalike).unwrap();
+        let lookalike = lookalike.to_str().unwrap().to_string();
+        let local_path = local.path().to_str().unwrap().to_string();
+        for origin in [
+            None,
+            Some(local_path.as_str()),
+            Some(lookalike.as_str()),
+            Some("https://gitlab.example.com/owner/repo"),
+            Some("https://example.com/github.com/owner/repo"),
+            Some("ssh://github.com/owner/repo.git"),
+        ] {
+            // A green reply is ready, so a CI read that was wrongly made would skip the local checks.
+            let run = ci_reuse_run(origin, CiReply::Green);
+            assert_eq!(
+                run.done.state,
+                OutcomeState::Landed,
+                "{origin:?}: {}",
+                run.done.reason
+            );
+            assert!(
+                run.replies.paths.borrow().is_empty(),
+                "{origin:?}: the runner was called: {:?}",
+                run.replies.paths
+            );
+            assert!(run.sleeps.is_empty(), "{origin:?}: {:?}", run.sleeps);
+            assert_eq!(run.executed, ALL_CHECKS, "{origin:?}");
+            assert!(
+                run.verifier_prompts
+                    .iter()
+                    .all(|p| !p.contains("come from the CI run")),
+                "{origin:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ci_reuse_statement_reaches_the_verifier_input() {
+        let run = ci_reuse_run(Some(GITHUB), CiReply::Green);
+        assert_eq!(run.done.state, OutcomeState::Landed, "{}", run.done.reason);
+        let candidate = run.candidate();
+        // The record the statement is about, built from the very reply the fake served, through the
+        // production parser: the expected text comes from `verify::reuse_statement`, not from a copy.
+        let branch = crate::gh::ci_branch(&run.done.job);
+        let served = CiReplies::new(CiReply::Green);
+        let parsed = crate::gh::parse_ci_run(
+            &served.runs(&candidate, &branch),
+            Some(&served.jobs()),
+            &branch,
+        )
+        .expect("the run");
+        let record = crate::ci_result::CiRecord {
+            source: crate::ci_result::Source::Ci,
+            sha: parsed.sha,
+            run_address: Some(parsed.address),
+            steps: parsed.steps,
+            duration_s: parsed.duration_s,
+        };
+        let statement = crate::verify::reuse_statement(&record, &candidate).expect("same SHA");
+        assert!(statement.contains(&candidate) && statement.contains(CI_RUN_ADDRESS));
+        let prompt = run.verifier_prompts.last().expect("the verifier ran");
+        assert!(prompt.contains(&statement), "{statement}\n---\n{prompt}");
+        // The statement is for this SHA only.
+        assert_eq!(
+            crate::verify::reuse_statement(&record, &"0".repeat(40)),
+            None
+        );
     }
 
     #[test]

@@ -9,6 +9,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The producer's build directory is now removed before the checks start, and a failed check keeps the last
+  200 lines of its output. Root cause: the build directory was removed only after every check passed, so a
+  job held two full builds (about 20 GB) while the checks compiled in their own directory, and a disk
+  allowance of about 40 GB ran out mid-test; and when a check failed, only the last 4096 bytes of its output
+  were kept, which often cut off the failing test, so neither a retry nor a person could tell a real failure
+  from an environment one. The build directory (`target/produce`) now goes after the disk check that runs
+  before the checks and before the first check, whether the checks pass or fail; the candidate and its work
+  tree stay. A failed check's record (`output_tail` in the verification) now holds its last 200 lines (with a
+  64 KiB ceiling, keeping the end), and the drain's `checks` line names the failing tests, for example
+  `test FAILED: athena_core checks::tests::x`, read from the recorded failing tests or the harness's
+  `test <name> ... FAILED` lines, and showing only the check name when none are known. A passing check
+  still keeps 4 KiB.
+- Interrupted jobs no longer keep their build directories, and low disk now holds a job before its producer
+  runs. Root cause: a job whose process died stayed dispatched with its `target/` (several gigabytes) until
+  someone closed it, and the disk check ran only at dispatch, before the checks and before the verifier, so
+  the baseline and the planner could fill the disk and the producer then started on a disk too full to build.
+  At the start of `athena drain` and before each run, Athena now removes `target/` of every job that is
+  dispatched with no closing record, has no registry entry and whose job lock is free. Work trees, kept
+  candidates, resume marks and records stay. A job with a registry entry or a held lock keeps its build
+  directory. A new disk check runs after the baseline checks and before the producer; space still short after
+  the idle cleanup holds the job as the environment stop `environment: low disk`, with no candidate and no
+  resume mark, and the producer is never started. A later drain retries it. `[disk] min_free_gb` is unchanged.
+- Checks reused from a green CI run for the candidate commit now count as commands run in the verdict (D43,
+  D115), so a behavior criterion citing `cargo fmt`, `cargo clippy` or `cargo test` is no longer marked unmet and
+  a passing job is no longer rejected for it. Root cause: `verify::judge` counted only check records with exit
+  code 0 as seen running, and a record built from a CI result carries no exit code. Fix in that seen-command rule:
+  `CheckRun` has a new optional `reused` field (absent in older records, which load as not reused), set by
+  `checks::runs_from_record`, and `judge` counts a passing record that is `reused` and has no exit code, under
+  the same guard as a local record (the checks ran on the candidate commit). A failed record, a skipped check, a
+  nested-run placeholder, or a record for another commit still does not count.
 - A failing check is now compared to the base test by test, so a new failing test is no longer excused by a
   check that already failed on the base. Root cause: the baseline kept one pass/fail bit per check name
   (`Baseline::failed_before` matched by name and `verify::is_pre_existing` used it), with no per-test comparison,
@@ -142,6 +172,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The checks stage now uses GitHub's CI result for the candidate. For a repository whose origin is an https URL
+  on github.com, `Athena::with_ci_source` (`crates/athena-core/src/run/mod.rs`) picks the CI source and its wait
+  together: the push run of the `ci` workflow on the job's CI branch (`athena/ci/<job id>`), read once and then
+  every 20 seconds up to the new `[budget] ci_wait_s` (1500 in `athena.toml`, default 1500 when absent, so 76
+  reads at most; 0 is one read and no wait). A green run for the candidate SHA stands in for the checks, so the
+  local checks are skipped and each recorded check note names the CI run. A red run fails the job and names the
+  failing check, and the local checks do not run to hide it. A missing, cancelled, timed-out or unfinished run
+  (after the bound), an unreachable service or a candidate that changes a workflow file runs the local checks
+  as before. With no GitHub origin (none, a local path, another host, an ssh remote) or in a nested run the
+  source is `NoCi`: one read, no wait, no call to `gh`. When the checks came from CI the verifier's input gets
+  the `verify::reuse_statement` text for the candidate SHA (run address, SHA and each check's result), as a
+  `ci-result` entry that is not a check and fails nothing; a job resumed after its checks passed takes its
+  recorded checks and carries no reuse statement. Known cost: a failed push of the CI branch only warns, so the
+  wait then runs to its bound before the local checks start; lower `ci_wait_s` to shorten it. Tests drive
+  `Athena::go` with a fake `gh::Runner` and sleeper and a recording check executor, so none reaches the network
+  or sleeps.
 - A plan that calls an external service (GitHub API, CI run, deploy) must now name the state the call needs
   (for example, that a run has completed) and say how the plan checks or waits for it. Root cause: planning
   designed such calls without checking the state they need, and the critic still missed the gap after the last

@@ -1,0 +1,145 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261030-185437-1tbs",
+  "n": 1,
+  "at": "2026-11-01T10:05:27.371151505Z",
+  "invocation_seq": 2,
+  "base_commit": "62ee951a3eb14c2f7f72dcaa158b0a90a2e6028d",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Reclaim interrupted jobs' build dirs; gate disk before the producer",
+  "summary": "A crash leaves a Dispatched job's build directory behind and nothing reclaims it, so the next job's producer fills the disk. Drain will reclaim build directories of jobs whose process is gone (keeping work tree and candidate) at drain start and before each producer run, and will check free disk before the producer as well as before the checks. The audience is whoever runs `athena drain` unattended.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus cargo test, clippy -D warnings and fmt are criteria."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria run through cargo test."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests check the directory removed and the producer not started."
+    },
+    {
+      "id": "root-cause",
+      "how": "Reclaims every interrupted job, not only the one that surfaced."
+    },
+    {
+      "id": "small",
+      "how": "Three files, one focused change."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and changelog written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/disk.rs (gate, sweep_idle_targets, disk_gate, LowDisk, LOW_DISK, df_free_bytes with the FREE_BYTES_ENV test hook, is_environment_reason, resumable_stop) and crates/athena-cli/src/drain.rs (module docs on low disk holds; held handling near the LowDisk downcast). Today the gate runs at dispatch and before checks; sweep_idle_targets reclaims only closed and idle jobs. The new sweep reuses the interrupted-process notion the drain already uses for Dispatched jobs.",
+    "No record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are not affected.",
+    "The change adds a sweep for interrupted jobs in disk.rs, called from drain.rs at drain start and before each producer run, plus a disk_gate call before the producer. Low disk before the producer is held as an environment stop with the existing LowDisk text.",
+    "The simulated free-space hook FREE_BYTES_ENV is used by tests for the low-disk case; the work tree and candidate of interrupted jobs are never deleted.",
+    "No governance file (athena.toml, defaults.toml, workflows) needs changing."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/src/drain.rs, run with `cargo test -p athena-cli`, enters through the drain entry point with an interrupted Dispatched job's build directory present, and asserts the build directory is gone after drain start while the job's work tree and candidate remain.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test, run with `cargo test`, simulates low free disk before the producer (via the free-bytes hook) and asserts the job is held as an environment stop (low disk) and the producer is never started.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows a build directory of a job whose process is still alive is not reclaimed, and a sweep before a second producer run reclaims a newly interrupted job's directory.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry describing the reclaim of interrupted jobs' build directories and the pre-producer disk check; `git diff` shows it.",
+      "kind": "content"
+    },
+    {
+      "text": "The diff touches only crates/athena-cli/src/drain.rs, crates/athena-core/src/disk.rs and CHANGELOG.md (plus tests inside those files), and the module docs in drain.rs and disk.rs describe the new behavior.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    }
+  ],
+  "out_of_scope": [
+    "Deleting work trees or candidates of interrupted jobs",
+    "Changing the min_free_gb default or athena.toml / defaults.toml",
+    "Changing how closed and idle jobs are reclaimed",
+    "Automatic retry policy changes for held jobs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 3.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7156498673740054,
+      "p_verification_passes": 0.6753623188405797,
+      "p_user_intervenes": 0.09133858267716535,
+      "cost_usd": {
+        "p10": 0.5475061694681759,
+        "p50": 1.2635938999999998,
+        "p90": 3.478269433879559
+      },
+      "wall_time_s": {
+        "p10": 534.278384555124,
+        "p50": 1773.0628698378807,
+        "p90": 3953.6150271326487
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass rate than reference: drain.rs is very large and the change touches the drain pipeline.",
+  "urgent_reason": "It cuts failed producer attempts and drain stops caused by a full disk after a crash.",
+  "hard_reason": "It changes the drain pipeline and adds a gate that holds work (a disk check before the producer), so mistakes are costly or hard to see.",
+  "producer_effort": "high"
+}

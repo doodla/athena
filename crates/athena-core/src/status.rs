@@ -2833,6 +2833,7 @@ pub(crate) mod planning_cost_tests {
             output_tail: String::new(),
             note: None,
             failed_tests: Vec::new(),
+            reused: false,
         }
     }
 

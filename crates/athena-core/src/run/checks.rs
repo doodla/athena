@@ -45,6 +45,23 @@ impl crate::routing::Exec for SnapExec<'_> {
 }
 
 impl Athena {
+    /// Removes the producer's build directory before the candidate's checks start. The checks build in their
+    /// own directory, so this one is idle from here on, and it is the largest thing on the disk: left in place
+    /// the job would hold two full builds while the checks compile and run. Only the build goes; the
+    /// candidate and its work tree stay. A failure to remove is a warning line only.
+    pub(super) fn free_producer_build(&self, ctx: &RunContext<'_>, id: &JobId) {
+        match self.state.remove_produce(id) {
+            Ok(0) => {}
+            Ok(bytes) => ctx.ui.line(&format!(
+                "disk       removed the producer's build directory: {}",
+                crate::state::format_bytes(bytes)
+            )),
+            Err(why) => ctx.ui.line(&format!(
+                "warning: could not remove the producer's build directory: {why}"
+            )),
+        }
+    }
+
     /// Runs the capability's configured checks on a fresh snapshot of the base commit and returns the
     /// baseline record. It never fails: a snapshot or environment error, or a nested run, gives a record
     /// with no checks and a note saying why. `before_invocation` is the sequence number the first

@@ -1,0 +1,270 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261101-102128-b1st",
+  "round": 1,
+  "at": "2026-11-01T10:25:16.436892213Z",
+  "invocation_seq": 2,
+  "approach": "Two changes at the source. (1) Reclaim: in disk.rs add `sweep_interrupted_targets` and `Athena::reclaim_interrupted`. They remove only `target/` of jobs that are Dispatched in Records, have no registry entry after `reap()`, are not on a keep list, and whose job lock `try_lock_job` can take (held while removing). In drain.rs add a defaulted `Steps::reclaim_interrupted(own: &[String])`, called once at drain start (before `steps.queue()`) and in `run_job` before `steps.run`, with the drain's own jobs as the keep list; `RealSteps` forwards to the Athena method. (2) Pre-producer gate: in producer.rs add `producer_disk_gate` (one call of the existing `disk_gate`), called from `produce_and_verify` in run/mod.rs right after `baseline_stage` and before the work tree and snapshot exist. On low space it returns `Err(self.hold_for_disk(ctx, closing, low))`, the same hold the checks gate uses: records committed with no outcome, a hold marker, `go` returns LowDisk, no attempt used. All new behavior tests go in the existing integration file crates/athena-cli/tests/drain.rs (which already imports athena_cli and Fixture). There is no `#[path]` include and no stub Job record: interrupted jobs are made with the existing `request_on` + `interrupt` (real ask/go with a killed producer). One small disk.rs unit test covers the lock and keep-list logic of the sweep on a bare StateDir.",
+  "decisions": [
+    {
+      "choice": "Answer finding 1: drop the `#[path]` include of tests/common/mod.rs. Put the drain-level tests in crates/athena-cli/tests/drain.rs, which already has `Fixture`, `Scenario`, `Script`, `Lines`, `request_on`, `interrupt`, `killing_producer`, `queue_steward_request`, `disk_fixture`, `simulated_free`, `real_steps` and imports athena_cli.",
+      "reason": "Read: tests/common/mod.rs:181 and :232 name `athena_cli::wiring::capabilities`, which does not resolve inside the lib's own unit tests. An integration test links the crate, so it compiles. This is also the file the brief names in criterion 1. The false claim about common/mod.rs and the open question about the include are removed.",
+      "rejected": [
+        {
+          "option": "Copy Fixture::athena into a drain.rs unit test with `crate::wiring::capabilities()`",
+          "why": "Duplicates a fixture and its include_str! bootstrap paths; the integration file already has all of it."
+        },
+        {
+          "option": "athena_core::test_support::make_athena from a drain.rs unit test",
+          "why": "Works, but needs a second bootstrap of repo files; no benefit over the existing integration fixture."
+        }
+      ]
+    },
+    {
+      "choice": "Answer finding 2: add the pre-producer gate now, no question to the user. `Athena::producer_disk_gate` in run/producer.rs wraps `disk_gate(jc.config.min_free_gb(), id, ui)`. `produce_and_verify` (run/mod.rs) calls it after `baseline_stage` and before `job_worktree`/`producer_snapshot`, and on low space returns `Err(self.hold_for_disk(ctx, closing, low))`.",
+      "reason": "Root-cause default and the brief's deliverables list producer.rs and run/mod.rs. After the baseline checks (which build and are what fill the disk) and before the producer, nothing checked space; the dispatch gate (run/mod.rs:749) runs earlier. `produce_and_verify` owns `closing` by value, which `hold_for_disk` (close.rs:176) takes, and the Err flows through `finish_dispatched` the same way the check-gate hold at run/mod.rs:1303 does. The work tree does not exist yet, so nothing needs cleanup. The gate sweeps idle targets first and keeps the job's own, like the other gates.",
+      "rejected": [
+        {
+          "option": "Gate at the top of `producer_loop`'s pass (covers send-back reruns)",
+          "why": "`producer_loop` holds `&mut Closing` while `hold_for_disk` needs it by value; fixing that means a new Flow variant or editing close.rs, outside the deliverables. A send-back rerun follows a producer that already ran, and the gate before the checks (run/mod.rs:1301) still covers its built candidate. Named as a risk."
+        },
+        {
+          "option": "Gate before `baseline_stage`",
+          "why": "Baseline is recorded only and never stops a job; the producer is the thing to protect, and the baseline's own build is what lowers space just before it."
+        },
+        {
+          "option": "Hook in `StageSink::enter(Stage::Producer)`",
+          "why": "`enter` returns `()`, so it cannot hold a job."
+        },
+        {
+          "option": "Drain-level `Steps::before_producer` gate",
+          "why": "Repeats the dispatch gate a few lines before `go` and does not cover `athena go` outside drain."
+        }
+      ]
+    },
+    {
+      "choice": "Reclaim `target/` only, via `StateDir::remove_target`, for jobs Dispatched in Records with no registry entry (after `registry().reap()`) not on the keep list and whose `try_lock_job` succeeds. Check the cheap predicates first, then the lock, so closed jobs get no lock file. `Athena::reclaim_interrupted` loads Records once; a failed head or load prints a `warning:` line and returns 0.",
+      "reason": "The brief keeps work trees and candidates. status.rs:1615-1616 already calls Dispatched-and-not-running 'interrupted'. `go_job` takes the job lock before the Dispatched commit, so the lock covers the window the registry misses.",
+      "rejected": [
+        {
+          "option": "steward::interrupted_work",
+          "why": "Filtered to drained channels and drops jobs a retry already names; some interrupted directories would stay."
+        },
+        {
+          "option": "clean_job (whole job dir)",
+          "why": "Deletes the work tree; out of scope."
+        },
+        {
+          "option": "Registry check alone",
+          "why": "Misses the gap between the Dispatched commit and the first process spawn."
+        },
+        {
+          "option": "Sweep every unlocked dir like sweep_idle_targets",
+          "why": "That rule runs only once disk is already low; the fault is that nothing reclaims earlier."
+        }
+      ]
+    },
+    {
+      "choice": "The keep list is the drain's own jobs: `reclaim_interrupted(&[])` at drain start; in `run_job` the item's job plus every id in `d.st().tried`. The sweep never takes their locks. The per-job remove body of `sweep_idle_targets` is factored into a private helper shared with the new sweep (behavior of the old one unchanged).",
+      "reason": "`go_job` bails with 'already running' if the lock is taken (run/mod.rs:308-310); a sweep holding a worker's lock could make its `go` fail. The drain retries an interrupted item as a new job id, so it never needs the interrupted id's lock. One remaining race (an outside `athena retry X` during the sweep of X) is a named risk.",
+      "rejected": [
+        {
+          "option": "Pass only the asking id",
+          "why": "Does not protect other workers in a concurrent drain."
+        },
+        {
+          "option": "Probe the lock without holding it",
+          "why": "The remove could overlap a job that just started building."
+        }
+      ]
+    },
+    {
+      "choice": "Test the drain wiring with the existing `Stub` Steps recording each `reclaim_interrupted` call (with the count of earlier `run` calls) in a new separate field, not in `log`; test the rule itself with real records through `RealSteps`/`Athena::reclaim_interrupted`.",
+      "reason": "Existing tests assert the exact `stub.log()`; a new log entry would break them. The Stub only records calls; the when-to-call logic is production drain code. The Records/registry/lock rule runs for real.",
+      "rejected": [
+        {
+          "option": "Two queued steward requests in one real drain to see a second-run sweep",
+          "why": "`queue_steward_request` uses a fixed key and may dedupe the second request; the Stub test is deterministic."
+        }
+      ]
+    },
+    {
+      "choice": "Answer finding 3: real records for the integration tests (`request_on` on channel 'web' + `interrupt`, killed producer). The disk.rs unit test needs no Records: it tests `sweep_interrupted_targets` on a bare `StateDir::new(tempdir)` with a predicate closure, covering only lock held, keep list, non-interrupted and work-tree retention. The Records/registry rule has no stub.",
+      "reason": "Avoids the unchecked lone-Job-stub question entirely. The closure in the unit test only stands for the Records rule, which the integration test runs for real.",
+      "rejected": [
+        {
+          "option": "Committed AnyRecord::Job stub in disk.rs",
+          "why": "Unchecked that Records::load accepts it; the integration route is proven by tests/drain.rs:3406."
+        }
+      ]
+    },
+    {
+      "choice": "Inject low space with `athena.state.clone().with_free_space(simulated_free)` (a plain `fn(&Path)` reading `<state>/simulated_free`, existing at tests/drain.rs:1452), not `ATHENA_FREE_BYTES`. For the pre-producer-only low, a small test `Ui` wrapper around `Lines` writes the file (3 GB) when it sees the line starting `baseline`, which `baseline_stage` prints just before the new gate.",
+      "reason": "`FreeSpace` is a plain fn pointer so state must be in files; the env var is process-wide and racy across parallel tests. Triggering on the production `baseline` line makes space low only after the dispatch gate passed and before the producer.",
+      "rejected": [
+        {
+          "option": "Counter-based free function",
+          "why": "Fragile to any other free-space reads and cannot be a closure."
+        },
+        {
+          "option": "ATHENA_FREE_BYTES",
+          "why": "Racy across parallel tests."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Factor the per-job remove body of `sweep_idle_targets` into a private helper. Add `sweep_interrupted_targets` and `Athena::reclaim_interrupted`. Update `//!` docs (place list, 'Freeing and resuming'). Add the unit test `the_interrupted_sweep_skips_locked_and_kept_jobs`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Add `Athena::producer_disk_gate` (the one `disk_gate` call for the point just before the producer), with its doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "In `produce_and_verify`, call `producer_disk_gate` after `baseline_stage` and before `job_worktree`/`producer_snapshot`; on low space return `Err(self.hold_for_disk(ctx, closing, low))`. Update the stage list doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add defaulted `Steps::reclaim_interrupted(&self, own: &[String])`; call it in `drain_with` before `steps.queue()` and in `Drain::run_job` before `steps.run`; implement it in `RealSteps`; update module docs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the integration tests: drain-start reclaim, guard cases, Stub wiring test (new RefCell field on `Stub`, with its `Steps` override), and the pre-producer hold test with its Ui wrapper. Reuses existing helpers.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the Unreleased entry for the reclaim and the pre-producer disk check.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "producer.rs: add `pub(super) fn producer_disk_gate(&self, ctx: &RunContext<'_>) -> Option<crate::disk::LowDisk>` returning `self.disk_gate(ctx.jc.config.min_free_gb(), ctx.id(), ctx.ui)`, with a doc naming the point (after the baseline checks, before the producer's snapshot and first invocation).",
+    "run/mod.rs `produce_and_verify`: right after `self.baseline_stage(..)` and before `let _worktree = ..`, add `if let Some(low) = self.producer_disk_gate(ctx) { return Err(self.hold_for_disk(ctx, closing, low)); }`. Update the stage-list doc comment (add the gate as stage 1b).",
+    "disk.rs: factor the per-job body of `sweep_idle_targets` (the `remove_target` call and its 'disk       removed build directory of job' and 'warning: could not remove' lines) into a private helper; `sweep_idle_targets` behavior stays.",
+    "disk.rs: add `pub fn sweep_interrupted_targets(state: &StateDir, interrupted: &dyn Fn(&JobId) -> bool, keep: &[JobId], ui: &dyn Ui) -> u64`: for each `state.job_ids()`, skip `keep`, test `interrupted` first, then `try_lock_job` (skip on None), then the helper with the lock held. Add `impl Athena { pub fn reclaim_interrupted(&self, keep: &[JobId], ui: &dyn Ui) -> u64 }`: `self.state.registry().reap()`, `Records::load(&self.git, &self.head()?)` once, interrupted = `state() == JobState::Dispatched && !self.running(id)`; on head or load failure print a `warning:` line and return 0.",
+    "disk.rs: update the `//!` docs (a fourth place: before the producer; 'Freeing and resuming': reclaim of interrupted jobs' `target/` at drain start and before each run, guards, work tree and candidate kept). Add unit test `the_interrupted_sweep_skips_locked_and_kept_jobs` on `StateDir::new(tempdir)`: planted `target/` and `work/` dirs, one lock held by `try_lock_job`, one keep-listed, one not interrupted per the closure.",
+    "drain.rs: add `fn reclaim_interrupted(&self, _own: &[String]) {}` with docs to `Steps`. In `drain_with` call `steps.reclaim_interrupted(&[])` after the in-flight notes and before `steps.queue()`. In `Drain::run_job` call it right before `self.steps.run(&job)` with the item's job plus the ids in `self.st().tried`.",
+    "drain.rs `RealSteps`: implement it by parsing `own` with `JobId::parse` (skip unparsable ones) and calling `self.athena.reclaim_interrupted(&keep, self.ui)`. Extend the 'Low disk holds a job' bullet of the module docs (reclaim, guards, and the new hold before the producer, which leaves the job dispatched like the other late holds).",
+    "tests/drain.rs: add `reclaimed: RefCell<Vec<(usize, Vec<String>)>>` to `Stub` and its `reclaim_interrupted` override (records the count of `run` calls so far and `own`); add `drain_reclaims_at_start_and_before_each_run`.",
+    "tests/drain.rs: add `an_interrupted_jobs_build_directory_is_reclaimed_at_drain_start` (criterion 1) with the planted `target/`, `work/` and kept work, run through `RealSteps` with a `Lines` ui.",
+    "tests/drain.rs: add `the_reclaim_keeps_live_locked_closed_and_own_jobs` (criterion 2a), with the live `sleep` child guard and `registry().register`.",
+    "tests/drain.rs: add the Ui wrapper and `a_job_is_held_before_the_producer_when_the_disk_fills_after_dispatch` (criterion 3), reusing `disk_fixture`, `simulated_free`, `queue_steward_request`, `work_everything` and `RealSteps`.",
+    "CHANGELOG.md: add the Unreleased bullet as in demonstration 6. Then run `cargo fmt --all`, then `cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked`; also `cargo test -p athena-cli --test drain low_disk` and `cargo test -p athena-core disk` to confirm the existing hold tests still pass."
+  ],
+  "risks": [
+    {
+      "risk": "The sweep removes a live job's build directory, or holds a lock a starting job needs.",
+      "mitigation": "Requires Dispatched in Records, no registry entry after `reap()`, a lock `try_lock_job` can take, and a job outside the keep list. The lock covers the window before any process is registered. The guard test covers lock, registry, closed and keep cases."
+    },
+    {
+      "risk": "An outside `athena retry X` or `athena go X` on an interrupted X while the sweep holds X's lock fails with 'already running in another athena process'.",
+      "mitigation": "The drain's own jobs are never swept, so its workers cannot hit it. The lock is held only while one `target/` is removed. A rerun succeeds. Named in the CHANGELOG and docs."
+    },
+    {
+      "risk": "The new pre-producer gate holds a job that previously ran, when free space is between the old checks' thresholds.",
+      "mitigation": "It uses the same `min_free_gb` and sweeps idle targets first, as the dispatch and check gates do, so it only holds when those would soon hold too; the default is unchanged. The hold is an environment stop with no attempt used, and a later drain retries the job."
+    },
+    {
+      "risk": "A job held before the producer is Dispatched with no resume mark; the next drain retries it as a new job from the base.",
+      "mitigation": "That is how any interrupted job without a candidate is resumed (retry reads it again). No work is lost since no candidate exists; the hold marker is cleared when the retry dispatches."
+    },
+    {
+      "risk": "A resumed interrupted job loses a build cache it could reuse.",
+      "mitigation": "Only `target/` is removed; the criterion 1 test asserts the work tree and kept work remain."
+    },
+    {
+      "risk": "A Records read at drain start and before each run stalls or aborts the drain.",
+      "mitigation": "One load per sweep; an unreadable head or records prints a `warning:` line and returns 0 bytes. It never fails the drain."
+    },
+    {
+      "risk": "The new trait method breaks existing `Steps` implementors; the Stub's new field breaks exact-log assertions.",
+      "mitigation": "A default no-op body keeps implementors compiling; the Stub records calls in a separate field, not in `log`. Step 12 runs the whole workspace checks."
+    },
+    {
+      "risk": "Existing run tests that count free-space reads or hold at the check gate change behavior with the new gate.",
+      "mitigation": "`built_then_low_disk` sets low space in the producer's script, after the new gate, so it still holds at the check gate (producer count 1). Step 12 runs all of them; the producer adjusts any assertion that relied on a read count."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Integration test in crates/athena-cli/tests/drain.rs entering through `drain::drain(&RealSteps, limits, &Quiet)`.",
+      "command": "cargo test -p athena-cli --test drain an_interrupted_jobs_build_directory_is_reclaimed_at_drain_start",
+      "observes": "Setup: `Fixture::new()`, `killing_producer(kill)`, `request_on(&athena, \"web\", ..)` and `interrupt()` make a real Dispatched job with no outcome on a channel the drain does not work. The test plants `jobs/<id>/target/debug/big` (100 KB), `jobs/<id>/work/main.rs` and `kept/<id>/work/kept.rs` (via `state.kept_work_dir`). No registry entry, no lock held. After `drain` returns: `jobs/<id>/target` is gone; `work/main.rs` and the kept file keep their bytes; Records still show the job Dispatched with its records intact; the ui `Lines` contains `disk       removed build directory of job <id>`; the report has no jobs (nothing was run), so only the drain-start call can have removed it.",
+      "fails_without": "Without the `steps.reclaim_interrupted(&[])` call in `drain_with`, `target/` stays and the assert fails. A whole-directory removal fails the work-file and kept-file asserts. A Records filter on closed jobs leaves the dispatched job's directory.",
+      "seam": "Entry point `drain::drain` with `RealSteps` (exists, drain.rs:2759; `real_steps_with` at tests/drain.rs:2573 builds it with a given ui). Fixture, Script, `request_on`, `interrupt`, `killing_producer` exist in tests/drain.rs. `Steps::reclaim_interrupted` and `Athena::reclaim_interrupted` are added by plan steps 2 to 5. No double holds the rule."
+    },
+    {
+      "criterion": 2,
+      "method": "Three tests. (a) integration: guards of the real rule through `Athena::reclaim_interrupted`. (b) integration: drain wiring (start and before each run) through a recording `Stub`. (c) disk.rs unit: lock and keep list on a bare StateDir.",
+      "command": "cargo test -p athena-cli --test drain the_reclaim_keeps_live_locked_closed_and_own_jobs && cargo test -p athena-cli --test drain drain_reclaims_at_start_and_before_each_run && cargo test -p athena-core the_interrupted_sweep_skips_locked_and_kept_jobs",
+      "observes": "(a) Four jobs made interrupted with `request_on` + `interrupt`, each with planted `target/` and `work/`: A no process; B with a live `sleep 60` child (`std::process::Command` + `process_group(0)`, `athena.state.registry().register(pgid, B, \"test\")`, kill-and-wait guard); C with its lock held by `athena.state.try_lock_job`; E on the keep list; plus a Proposed job closed with `athena.close(..)` that has a `target/` (D). `athena.reclaim_interrupted(&[E], &lines)` removes only A's `target/`; B, C, D and E keep theirs; every `work/` stays; a second call with the lock released and B's child killed (registry reaped) now removes B and C. A new job interrupted after the first sweep is removed by the next sweep (the later-run case). (b) The Stub records `(runs_so_far, own)` for each `reclaim_interrupted` call: one call with `[]` before `queue()` is consulted, and a call before each `run` whose `own` has that item's job and the earlier tried ones. (c) bare StateDir: locked and keep-listed jobs keep `target/`, the others lose it, `work/` stays.",
+      "fails_without": "Ignoring the registry removes B's target; ignoring the lock removes C's; filtering on closed instead of Dispatched removes D's and keeps A's; ignoring the keep list removes E's. A drain that reclaims only at start gives (b) one call, not one per run; dropping the `run_job` call does the same.",
+      "seam": "Entry points `Athena::reclaim_interrupted` (added by step 2) and `drain::drain` over the Stub (exists; Stub in tests/drain.rs gets one new RefCell field, step 7). `Registry::register` (athena-agent procs.rs:149), `StateDir::try_lock_job` (state.rs:136), `Athena::close` exist. The rule under test is production code; the Stub only records calls."
+    },
+    {
+      "criterion": 3,
+      "method": "Integration test through `drain::drain` with `RealSteps` and the production dispatch and producer path; space is low only after dispatch.",
+      "command": "cargo test -p athena-cli --test drain a_job_is_held_before_the_producer_when_the_disk_fills_after_dispatch",
+      "observes": "Setup: `disk_fixture()` (10 GB required), a Script counting `Role::Producer` calls in an `Arc<AtomicUsize>`, `athena.state.with_free_space(simulated_free)` with no `simulated_free` file (plenty), `queue_steward_request`, and a `Ui` wrapper over `Lines` that writes 3_000_000_000 into `<state>/simulated_free` on the first line starting `baseline`. Run `drain(&RealSteps{ui: &wrapper, ..}, work_everything(), &Quiet)`. Asserts: the item's outcome is `environment: low disk`, the display text has `3.0 GB` and `10.0 GB`, `failed_item` is None, nothing landed; the producer counter is 0; Records show the job Dispatched with a job record, no outcome, no score (so it passed the dispatch gate; a dispatch-gate hold would leave it Proposed with no job record); `ui` lines are ordered `dispatched`, `baseline`, then `held       environment: low disk`; `disk::read_hold` gives 3 GB / 10 GB; `display::status(&athena.status().unwrap())` contains `interrupted`-state hold text `environment: low disk: 3.0 GB free, 10.0 GB required`; no line tells anyone to `athena retry`.",
+      "fails_without": "Without `producer_disk_gate` the producer runs (counter is 1) and the job is held only later by the check gate, so the counter assert fails. If the hold were counted as a failure or committed an outcome, the outcome and Records asserts fail.",
+      "seam": "Entry point `drain::drain` with `RealSteps` (exists), `StateDir::with_free_space` on the public `Athena.state` (exists, used at tests/drain.rs:1498 and 1753), fake driver Script counting calls (pattern at tests/drain.rs:1851), Ui wrapper defined in the test and injected via `RealSteps.ui`. The gate itself is added by steps 1 and 2 (producer.rs, run/mod.rs). The wrapper only writes a file at the production `baseline` line; it holds no gate logic."
+    },
+    {
+      "criterion": 4,
+      "method": "The three Athena checks over the whole workspace after all changes.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All exit 0. This includes every existing `Steps` implementor compiling against the defaulted `reclaim_interrupted`, the existing hold tests (`low_disk_*`, `the_real_steps_hold_a_job_on_low_disk_*`, `low_disk_after_the_build_holds_*`) and run/tests.rs disk tests still passing with the new gate, and no unused-import or dead-code warning.",
+      "fails_without": "A missed fmt fails the first command; a badly shaped helper fails clippy; a `Steps` method without a default fails compilation; removing the reclaim calls or the gate turns the criterion 1, 2 and 3 tests red.",
+      "seam": "The three cargo commands on the real workspace. No fake. Step 12 runs them."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff for the gate and for any `#[path]` include.",
+      "command": "git diff -- crates/athena-core/src/run/producer.rs crates/athena-core/src/run/mod.rs crates/athena-cli/src",
+      "observes": "The diff adds `producer_disk_gate` in run/producer.rs and, in `produce_and_verify`, a call after `baseline_stage` and before `producer_snapshot` that returns `Err(self.hold_for_disk(ctx, closing, low))`. A search of the diff (`git diff` output) for `#[path` and `tests/common` finds no added line in any src file.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the CHANGELOG and module-doc diffs.",
+      "command": "git diff -- CHANGELOG.md crates/athena-cli/src/drain.rs crates/athena-core/src/disk.rs",
+      "observes": "CHANGELOG.md gains one bullet under Unreleased (Fixed group if present): root cause (an interrupted job's build directory was reclaimed only at dispatch or under low disk, so after a container restart it stayed until the disk filled and the next job failed), the fix (reclaim at drain start and before each run, work tree and candidate kept, the drain's own jobs skipped), and the new disk check just before the producer that holds the job as an environment stop (not a failure, no attempt used). No email or host name. drain.rs `//!` 'Low disk holds a job' bullet and disk.rs `//!` (place list, 'Freeing and resuming') describe the reclaim, its guards (Dispatched, no registry entry, lock free, own jobs kept, only `target/`) and the pre-producer check as a fourth place.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "List changed paths and search the diff.",
+      "command": "git diff --stat",
+      "observes": "Only crates/athena-cli/src/drain.rs, crates/athena-cli/tests/drain.rs, crates/athena-core/src/disk.rs, crates/athena-core/src/run/producer.rs, crates/athena-core/src/run/mod.rs and CHANGELOG.md appear. No athena.toml or defaults.toml, no `min_free_gb` default line changed, and no removal of `work` or candidate paths (the only deletion call is `remove_target`).",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Send-back reruns of the producer are not gated (the gate runs once, before the first invocation); the gate before the checks still covers the built candidate. Say so if a gate on each rerun is wanted; it needs `producer_loop` to return the hold to a caller that owns `closing`.",
+    "Whether the `baseline` ui line is printed with that exact prefix by every capability: read in producer.rs:59-71 (`baseline   ...`), so the test trigger relies on it; if it changes, the test fails loudly (producer would not be held at that point).",
+    "Whether `Athena::close` accepts a Proposed job in the test setup for the closed-job case was not run; the producer may instead close it with `go` on a read-only declined or use an existing closed job from `a_closed_job_stays_out_of_the_queue` (tests/drain.rs:3308)."
+  ],
+  "producer_section_sha256": "b81370885359509e3fe6cbc6556118c308f796e67e7c0cfe6eeecb3164c54959",
+  "resumed_from": "20261030-185437-1tbs"
+}
