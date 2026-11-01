@@ -1,0 +1,152 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-031934-8vyd",
+  "n": 1,
+  "at": "2026-11-01T20:09:47.322379876Z",
+  "invocation_seq": 1,
+  "base_commit": "5834eca46ff5124891316ee03cac70f97f5b9c1f",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Re-check rebased candidates only when the rebase touched their paths",
+  "summary": "Build job A7 (D145) of async drain: after the ordered landing queue rebases a verified candidate onto the latest main, the drain re-runs checks only when the rebase touched paths the candidate changed, and records the share of rebases that needed a re-check. With max_in_flight = 1 drain behaves as today. Follow-up to failed job 20261030-013555-f5qm (A6); its work is not kept as a candidate and its findings are addressed below. Audience: Sri and the verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus cargo test and clippy -D warnings criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria exercise the drain entry point, not wiring."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to drain.rs and the changelog."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the share is recorded and checks re-run only on overlap."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo commands the verifier can run."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/drain.rs (module docs, a LandingQueue field at about line 1018, the Drain landing lock) and crates/athena-core/src/gh/landing.rs (the Rebase enum with Current, Moved, Conflict, Unchecked, and plan_rebase). The entry point is the drain loop and drain_concurrent; the rebase result is judged after verification and before the merge. The new decision is a pure function over (paths changed by the candidate, paths changed by the rebase onto the new main). No new record or data file is added under crates/, so check_record_file and AnyRecord are not touched. The share is measured directly from counted rebases (needed re-check / total rebases) and printed in the drain summary.",
+    "Existing code: crates/athena-cli/src/drain.rs, crates/athena-core/src/gh/landing.rs and docs/design/async-drain.md (section on the re-check rule, build job 7) are extended and reused, not created.",
+    "Job 20261030-013555-f5qm (A6) failed in plan critique with no candidate, so nothing from it is kept. It is a dependency: if the landing queue and Rebase handling are already in the tree (they appear to be: LandingQueue in drain.rs, Rebase in landing.rs), A7 builds on them. Its findings are addressed as follows. (1) [parallel] max_concurrency > 1 runs with max_in_flight = 1 and lands group jobs one after another onto a moved main: A7 must keep that path landing as today; a test through drain_concurrent with max_concurrency 2 pins it, and a rebase that touches none of the second job's paths does not trigger a re-check. (2) The old job after drop_landed and (3) the Rebase to Rebased mapping, (4) thrash handling and (5) size are A6 matters, not A7's; they apply only if the tree lacks them, in which case the producer reports it instead of building them. The mapping from rebase outcome to re-check is a small pure function with a unit test per arm.",
+    "A rebase that changes no path the candidate changed lands without re-running checks. A rebase that touches an overlapping path re-runs checks before landing. Governed-file fingerprint handling stays as the existing merged-content check in land_pr decides.",
+    "The share is reported in the drain summary output and kept in-memory for the run. No new persisted record is added."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Tests in crates/athena-cli/src/drain.rs drive the drain through its real entry point (drain or drain_concurrent) with a landing whose rebase touches a path the candidate changed, and show checks re-run before landing. Run cargo test -p athena-cli.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test through the same entry point shows a rebase touching only paths the candidate did not change lands with no check re-run, and the drain summary reports the share of rebases needing a re-check (e.g. 1 of 2) as a number. Run cargo test -p athena-cli.",
+      "kind": "behavior"
+    },
+    {
+      "text": "With max_in_flight = 1 the existing drain tests pass unchanged: git diff shows no existing test removed or edited, and cargo test passes. A new drain_concurrent test with max_concurrency 2 pins that the second job of a group still lands as today.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the path-scoped re-check after rebase and the recorded share of rebases that needed it, citing D145 and build job 7.",
+      "kind": "content"
+    },
+    {
+      "text": "Governance files (athena.toml, defaults.toml, .github/workflows) are unchanged; no rule that refuses is newly added beyond re-running checks, so no refusal-rate figure applies.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Raising max_in_flight above 1 or running several producers at once (build job 10)",
+    "Disk guard, check slots and read-ahead",
+    "Recovery of leftover in-flight rows",
+    "Changes to athena.toml, defaults.toml, .github/workflows, crates/athena-data/src/config.rs",
+    "Rebuilding the A6 landing queue, send_back and thrash stop if they are absent; the producer reports that instead",
+    "Changes to crates/athena-core/src/state.rs and crates/athena-core/src/run/"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.6,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2200.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7186351706036745,
+      "p_verification_passes": 0.6770538243626062,
+      "p_user_intervenes": 0.09692307692307692,
+      "cost_usd": {
+        "p10": 0.5537699423918236,
+        "p50": 1.2953842072125552,
+        "p90": 3.5125631929814207
+      },
+      "wall_time_s": {
+        "p10": 540.4818145636394,
+        "p50": 1815.4336384849998,
+        "p90": 3997.0217813555983
+      }
+    }
+  },
+  "departures": "Large drain.rs and a dependency on an earlier job that failed raise cost and failure risk over the reference.",
+  "hard_reason": "It changes the drain's landing rule, deciding when a verified candidate lands without re-running checks, in the run pipeline.",
+  "producer_effort": "high"
+}
