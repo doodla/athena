@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A design reading with no inventory of the existing code is now refused at reading acceptance. Root cause: no
+  inventory of existing code was required before a design reading was accepted, so a design that rebuilds or
+  contradicts what the repository already holds was accepted; jobs 20261026-043137-zc0v and
+  20261026-065046-0c1d are the design jobs accepted that way. Fix at the reading gate and in the reader brief,
+  for the whole design class: `reading::check_design_existing_code` (a `step!` in `refusing_check`, after
+  `check_code_survey`) refuses a reading of class `design` that has no `Existing code:` assumption naming a
+  `crates/` or `docs/` path the job does not create, or no criterion that requires an existing code section
+  that reuses or extends it (a criterion such as "the existing code in section 3 is unchanged" or "no survey
+  needed" is refused). It reads only the reading, never the repository, and does not apply to other classes,
+  a question or a decline. `READING_RULES` in `athena-context` gets a sixth line that teaches the rule, so a
+  correct reading passes on the first read; `refusal_corpus.rs` gets the `design-existing-code` input form and
+  four cases. This change refuses more readings; the higher refusal rate is intended: expected 5% of newly
+  refused readings, since only design readings are affected.
 - The steward's `decisions` source was reported empty (introspection 20261029-135005-vb9w cited decision D84).
   Root cause: nothing is committed under `records/decision-states` or `records/default-expectations` at the head.
   `GitView::workspace` (`crates/athena-core/src/steward.rs`) copies every file `RecordSet::load`

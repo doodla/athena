@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-054248-rjf1",
+  "round": 1,
+  "at": "2026-11-01T00:07:02.05083331Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The rule is taught only by refusing the reading, based on a token budget that does not cover the reading rules. Every design reading is likely to be refused once.",
+      "evidence": "lib.rs:279-283 builds the 'reader' budget row from `vec![CONTRACT.into(), READER_FRAME.into(), defaults, catalog]`. READING_RULES and CODE_SURVEY_GUIDE are printed by `reader_brief` (briefs.rs:1870-1874), outside that set, so 'budget reader: 1997 of 2000' does not limit them. The test `the_reader_brief_names_each_reading_rule_in_one_short_line` asserts `lines.len() == READING_RULES.len()`, which follows the array length, plus each line ≤220 bytes and the section <2400 bytes. Nothing fixes the count at 5. The doc on READING_RULES (briefs.rs:1692-1693) says a refused reading is 'read again once, with the refusal as a correction'. If the reader is never told the `Existing code:` label, almost every design reading is refused on its first read. That costs a reader call per design job, uses up the only retry, and raises the replay's newly-refused share for design readings well above what an untold rule would need. briefs.rs:3400-3409 also follows the convention that every reading check has a rule line, and this plan skips it. Fix: Change READING_RULES to `[&str; 6]` and add one line of 220 bytes or less, for example: \"Existing code: a design reading has an `Existing code:` assumption naming crates/ or docs/ paths and a criterion that the doc has an Existing code section (`check_design_existing_code`).\" Add `check_design_existing_code` to the check list at briefs.rs:3401-3407, and confirm the section stays under 2400 bytes. The reading says briefs.rs edits must not grow the reader prompt, but that rests on the same false budget premise. State that in the plan and record it as an open question, with the lib.rs evidence, rather than keeping the doc-comment-only edit. In either case, correct the rationale in Decision 3: neither the 5-line assertion nor the token budget blocks a sixth line.",
+      "location": "Plan Decision 3, step 5, and the reading's assumption 'the reader prompt has only 3 tokens of headroom'; crates/athena-context/src/lib.rs:279-283, crates/athena-context/src/briefs.rs:1692-1700 and 3389-3412",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion match accepts any criterion that contains the words 'existing code' and 'section' anywhere, including ones that say the opposite.",
+      "evidence": "Step 1 checks only that the lowercased text contains 'existing code' and 'section'. The plan's own open question notes that 'no Existing code section is added' passes. So does 'the existing code in section 3 is unchanged'. A careful reviewer would see this as a crude keyword match. Fix: Match the phrase 'existing code section' (case-insensitive), and require 'reuse' or 'extend' in the same criterion. That is the wording the refusal message teaches. Add a unit case showing that 'the existing code in section 3 is unchanged' is refused.",
+      "location": "Plan Decision 2 and step 1 (`names_existing_code_section`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "An `Existing code:` assumption can pass by naming only the doc the job is creating, so no existing code is actually named.",
+      "evidence": "The check accepts any `crates/` or `docs/` path followed by an alphanumeric character. A design reading with the deliverable `docs/design/new-area.md (create)` and the assumption 'Existing code: docs/design/new-area.md' passes. That is the same 'written from request text alone' failure the check exists to prevent. Excluding such paths needs only the reading's own deliverable list, the same data `check_code_survey` already reads (reading.rs:3400-3405), so no repository search is involved. Fix: Ignore paths that the reading lists as `Create` deliverables when deciding whether the assumption names a path. Add a unit case where the only named path is the new doc, and assert it is refused.",
+      "location": "Plan Decision 2 and step 2 (assumption path test)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The intended-refusal test reads the doc comment with the same split pattern as the existing test. That works, but it makes the new test depend on the function being declared exactly as `pub fn check_design_existing_code`.",
+      "evidence": "reading.rs:7956-7963 splits on 'pub fn check_code_survey' and takes the part after the last blank line. That works because the doc block holds no blank lines. Fix: Keep the new doc comment free of blank lines, and keep the signature exactly as `pub fn check_design_existing_code(`.",
+      "location": "Plan Criterion 4 demonstration",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "None for the request itself. However, one assumption in the reading is factually wrong: 'the reader prompt has only 3 tokens of headroom; any briefs.rs edit must not grow the reader prompt'. READING_RULES is in the reader brief, which is outside BudgetSet::Reader (lib.rs:279-283). The plan built Decision 3 on that wrong premise.",
+  "summary": "The plan fixes the cause in the right place. It adds a deterministic `check_design_existing_code` step to `refusing_check`, next to `check_code_survey`, and the corpus guard makes it ship with a refusing case. What I read in the snapshot matches what the plan names: `refusing_check` and `check_code_survey` (reading.rs:3042 and 3375), `code_surveys` and `names_crates_path`, `\"design\"` as a class (routing.rs:50), and in the corpus `base_reading`, `repo_files` (which includes docs/design/roadmap.md and crates/athena-core/src/reading.rs), `INPUT_FORMS: [&str; 15]` and `code_survey_refusal_is_declared_intended`. The demonstrations run the real gate and the corpus with no test doubles, and each would fail without the change. One design decision is wrong, and the reading shares the mistake. Decision 3 teaches the rule only through the refusal message and justifies this by the reader token budget and the 5-line assertion. Neither applies. `BudgetSet::Reader` covers only CONTRACT, READER_FRAME, defaults and catalog (athena-context/src/lib.rs:279-283). READING_RULES and CODE_SURVEY_GUIDE are in the reader brief, outside that budget. The line-count test compares against `READING_RULES.len()`, so it does not pin the count at 5. As planned, the reader is never told the rule before it writes, so nearly every design reading is refused on its first read and uses up the one second read that briefs.rs:1692-1693 describes. The existing rule that each check has a reader rule line (briefs.rs:3400-3409) is also bypassed. Smaller weaknesses: the criterion match accepts any criterion containing the words 'existing code' and 'section', and the assumption can name the doc the job is about to create as its \"existing\" path."
+}
