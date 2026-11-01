@@ -757,6 +757,17 @@ pub struct CheckRun {
     pub duration: Quantity,
     pub output_tail: String,
     pub note: Option<String>,
+    /// The tests that failed in this run, so the baseline and the candidate can be compared test by test.
+    /// Before this field a baseline kept one pass/fail bit per check name, so a check that failed on the
+    /// base excused every failure in it, including a new, different failing test.
+    ///
+    /// Each name is `<binary> <test>` (`doc-tests <crate> <test>` for doc tests), or `<binary> (did not
+    /// finish)` for a test binary that crashed or whose failure list was cut short. Empty means no names are
+    /// known (the check is not a plain `cargo test`, it timed out, or the record is older than this field),
+    /// and the comparison falls back to the check name. For a plain `cargo test`, Athena adds
+    /// `--no-fail-fast` so every binary runs; `command` keeps the configured text without it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_tests: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2462,7 +2473,8 @@ pub const BASELINE_SCHEMA: &str = "athena.baseline/1";
 /// `athena.baseline/1`: the job's configured checks run on the base commit, before the first producer
 /// invocation, at `<job>/baseline.json`. It records which checks already fail before the producer touches
 /// anything. At verification, a check that failed here and fails again is marked pre-existing and does not
-/// fail the verdict.
+/// fail the verdict, unless both runs name their failing tests and the candidate fails a test the base did
+/// not (see [`CheckRun::failed_tests`]).
 ///
 /// A check that fails, times out or cannot start is recorded as not passed, with a note; none of these stops
 /// the job. When the baseline could not run at all, `checks` is empty and `note` says why.
@@ -2489,6 +2501,19 @@ impl Baseline {
     /// about the check, so it is never read as a reason to excuse a failure.
     pub fn failed_before(&self, name: &str) -> bool {
         self.note.is_none() && self.checks.iter().any(|c| c.name == name && !c.passed)
+    }
+
+    /// The failing test names recorded for the check `name` on the base: empty when the baseline has a
+    /// note, holds no failed entry of that name, or recorded no names for it (see
+    /// [`CheckRun::failed_tests`]). The check-name rule of [`Baseline::failed_before`] is the fallback.
+    pub fn failed_tests_before(&self, name: &str) -> &[String] {
+        if self.note.is_some() {
+            return &[];
+        }
+        self.checks
+            .iter()
+            .find(|c| c.name == name && !c.passed)
+            .map_or(&[], |c| c.failed_tests.as_slice())
     }
 
     /// Why this record is not acceptable, if it is not.
@@ -4169,6 +4194,7 @@ mod tests {
             duration: Quantity::measured(0.5, crate::Unit::Seconds, "test"),
             output_tail: "boom".into(),
             note: None,
+            failed_tests: Vec::new(),
         };
         Baseline {
             job: job(),
@@ -4177,6 +4203,44 @@ mod tests {
             checks: vec![check("fmt"), check("test")],
             note: None,
         }
+    }
+
+    #[test]
+    fn a_baseline_written_before_failed_tests_existed_still_parses_and_validates() {
+        let record = AnyRecord::Baseline(Box::new(sample_baseline()));
+        let json = record.to_json();
+        assert!(
+            !json.contains("failed_tests"),
+            "a record without names serialises as before: {json}"
+        );
+        let path = format!("{}/baseline.json", job().dir());
+        assert!(check_record_file(&path, json.as_bytes()).is_ok());
+        let parsed = AnyRecord::parse("x", json.as_bytes()).expect("the old shape parses");
+        let AnyRecord::Baseline(b) = parsed else {
+            panic!("a baseline")
+        };
+        assert!(b.checks.iter().all(|c| c.failed_tests.is_empty()));
+        assert_eq!(b.validate(), Ok(()));
+    }
+
+    #[test]
+    fn failing_test_names_round_trip_and_are_read_per_check() {
+        let mut b = sample_baseline();
+        b.checks[1].failed_tests = vec!["lib a::x".into(), "lib b::y".into()];
+        let record = AnyRecord::Baseline(Box::new(b.clone()));
+        let json = record.to_json();
+        assert!(json.contains("failed_tests"));
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
+        let path = format!("{}/baseline.json", job().dir());
+        assert!(check_record_file(&path, json.as_bytes()).is_ok());
+        assert_eq!(b.failed_tests_before("test"), ["lib a::x", "lib b::y"]);
+        assert!(b.failed_tests_before("fmt").is_empty(), "no names recorded");
+        assert!(b.failed_tests_before("clippy").is_empty(), "no entry");
+        b.checks[1].passed = true;
+        assert!(b.failed_tests_before("test").is_empty(), "it passed");
+        b.checks[1].passed = false;
+        b.note = Some("the baseline could not run".into());
+        assert!(b.failed_tests_before("test").is_empty(), "a noted baseline");
     }
 
     #[test]

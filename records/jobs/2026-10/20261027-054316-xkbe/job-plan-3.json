@@ -1,0 +1,336 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-054316-xkbe",
+  "round": 3,
+  "at": "2026-11-01T02:42:40.634950287Z",
+  "invocation_seq": 12,
+  "approach": "Root cause: the baseline keeps one pass/fail bit per check name. `Baseline::failed_before` matches by name and `verify::is_pre_existing` uses it, so a check failing on the base excuses every failure in that check, including a new, different failing test. Fix it at that comparison. (1) Add `failed_tests: Vec<String>` (serde default, skipped when empty) to `CheckRun`; `run_check` makes both baseline and candidate runs, so one field and one parser serve both. (2) For a plain `cargo test` Test check, `run_check` inserts `--no-fail-fast` after `test` so every binary runs; the recorded `command` stays as configured, and a failed run that got the flag says so in its `note`. (3) `failed_test_names(output)` parses cargo output section by section (one section per `Running`/`Doc-tests` line). It lists the indented `failures:` names qualified by binary, and adds the marker `<binary> (did not finish)` for any section with no `test result:` line (crash, abort, stack overflow, process::exit) or whose failed count differs from the names listed. Names are recorded only when the process exited with a code and the command is plain `cargo test` without `--fail-fast`; each name goes through the redactor. Anything else records an empty list. (4) `is_pre_existing`: if both sides have names, the check is pre-existing only when every candidate name (marker included) is in the base's names; otherwise the name-level rule stays. (5) `judge` adds one Minor, informational finding for a blocking check with names, splitting newly failing from already failing on the base; the existing `check X failed` reason is unchanged, so a failure counts once. Scope stated honestly: this covers case (a), a different test failing inside a check that already failed on the base. Case (b), a clash with a concurrent change, is not separated: the baseline is run on the job's fixed base, and rebasing or merging concurrent changes is out of scope. CHANGELOG and the design note say so, and (b) is an open question.",
+  "decisions": [
+    {
+      "choice": "Record failing test names as an optional `CheckRun.failed_tests`, filled in `run_check`, and keep the compile-forced one-line literal edits outside the listed deliverables (answers findings 1-8).",
+      "reason": "`run_check` produces the baseline runs (`baseline_runs`) and the candidate runs, so one field and one parser give both sides the same shape. Candidate runs travel as `Vec<CheckRun>` through run/mod.rs, `mark_pre_existing`, `held_for_timeout` and `judge`. A new field forces `failed_tests: Vec::new()` in every struct literal the compiler reports; these are logic-free and the compiler checks them. I re-read the literals: routing.rs:214 uses `..skipped_run(...)` and needs no edit (finding 12), so the outside-deliverable edits are run/mod.rs:1293, routing.rs:451, status.rs:2826, run/send_back.rs:237, run/tests.rs:1504, introspect.rs:1728, reading.rs:4222 and crates/athena-cli/tests/status_durations.rs:12. The producer edits only literals the compiler reports.",
+      "rejected": [
+        {
+          "option": "Carry candidate names beside `Vec<CheckRun>` in a new struct, to avoid the literal edits",
+          "why": "Changes the signatures of `mark_pre_existing`, `held_for_timeout`, `judge` and the run/mod.rs plumbing: a far larger and riskier edit than eight one-line field additions."
+        },
+        {
+          "option": "Re-parse `output_tail` at comparison time",
+          "why": "The tail is cut to 4096 bytes, so a long failure list loses names."
+        },
+        {
+          "option": "Hide names inside `note` or `output_tail`",
+          "why": "Overloads prose that other code matches on (`timed_out` reads the note)."
+        }
+      ]
+    },
+    {
+      "choice": "Make the name list complete in two layers: `--no-fail-fast` for plain `cargo test`, and a per-section completeness check in the parser that emits a `<binary> (did not finish)` marker (answers finding 9).",
+      "reason": "By default cargo stops after the first failing binary, so later binaries' failures never appear. With `--no-fail-fast` every binary runs, but a binary that crashes prints no `failures:` list and no `test result:` line, so the list would still be a subset of the base (base {A X}, candidate {A X} plus crashed B gives {A X} and wrongly passes). The marker counts as new unless the base has the same marker, so the crash blocks. A section whose `test result: ... N failed` count differs from the listed names also gets the marker, so a truncated list cannot excuse a failure. Output with no `Running` sections yields an empty list and the name-level fallback.",
+      "rejected": [
+        {
+          "option": "Record no names when any binary looks incomplete",
+          "why": "Falls back to the name-level rule, which excuses the new crash: the very masking being fixed."
+        },
+        {
+          "option": "Edit athena.toml to add --no-fail-fast",
+          "why": "Governance file; out of scope."
+        },
+        {
+          "option": "Detect cargo's stop marker text",
+          "why": "Fragile wording match; the flag removes the case."
+        }
+      ]
+    },
+    {
+      "choice": "Keep `CheckRun.command` as configured, and when Athena inserted `--no-fail-fast` into a failed run, append \"ran with --no-fail-fast added to the configured command\" to its `note` (answers finding 11). Document the same on the field and in the design note.",
+      "reason": "The verifier matches commands against `CheckRun.command` (`judge` builds `ran` from it), so changing the string would break the `cargo test --locked` match. The note makes the difference visible to a later reader. It is added only to failed runs, so passing runs keep `note: None` (tests at checks.rs:651 and 654 rely on that) and `timed_out` is unaffected (it matches a different substring and requires no exit code).",
+      "rejected": [
+        {
+          "option": "Record the executed command in `command`",
+          "why": "Breaks verifier command matching."
+        },
+        {
+          "option": "Say nothing",
+          "why": "The record would show a command that did not run."
+        }
+      ]
+    },
+    {
+      "choice": "Fall back to the name-level rule when either side has no names. When both have names, a failing check is pre-existing only if every candidate name is in the base's names.",
+      "reason": "fmt, clippy, build errors, timeouts, CI-reused results (`runs_from_record`) and old records behave as today; only runs with complete per-test evidence on both sides are tightened.",
+      "rejected": [
+        {
+          "option": "Treat a candidate failure with no names as new when the base had names",
+          "why": "Changes `held_for_timeout` (it calls `is_pre_existing`) and build-error handling; beyond one focused change. Left as an open question."
+        }
+      ]
+    },
+    {
+      "choice": "Qualify each name with its test binary as `<binary> <test>`, taken from the `(path)` in the `Running` line with the `-<hash>` suffix stripped; doc tests as `doc-tests <crate> <test>`.",
+      "reason": "The same test name can exist in several crates, and the lib unit binary and the doc-tests share a crate name; bare names could excuse a new failure.",
+      "rejected": [
+        {
+          "option": "Bare test names",
+          "why": "Collide across binaries."
+        }
+      ]
+    },
+    {
+      "choice": "Redact each name with `ctx.redactor.redact` before storing it; compare the redacted names on both sides.",
+      "reason": "The field is written into Baseline and verdict records and needs the same handling as `output_tail`; both sides use the same function, so the comparison stays consistent.",
+      "rejected": [
+        {
+          "option": "Store raw names",
+          "why": "Skips the redactor."
+        }
+      ]
+    },
+    {
+      "choice": "The split is one Minor Athena finding added in `judge` for a blocking check that has names; the `check X failed` reason remains the only thing that fails the verdict.",
+      "reason": "The check already fails the verdict, so the finding is informational and must not count the same failure twice. send_back.rs does not read finding severities. A verify.rs test pins one reason, one Minor finding and verdict Fail.",
+      "rejected": [
+        {
+          "option": "Major finding",
+          "why": "A second blocking item for one failure."
+        },
+        {
+          "option": "Extend the check note only",
+          "why": "A partly overlapping check is not marked pre-existing, so its note is not where the verdict is explained."
+        }
+      ]
+    },
+    {
+      "choice": "State in the change description, CHANGELOG and design note that this change covers case (a) only; case (b) (a clash with a concurrent config/test change) is listed as an open question (answers finding 10).",
+      "reason": "The baseline runs on the job's fixed base, so a failure that comes only from a concurrent change merged later is not in it. Separating that needs a rebase or merge check, which the brief puts out of scope. The entry must not overclaim.",
+      "rejected": [
+        {
+          "option": "Claim both (a) and (b) are fixed",
+          "why": "Untrue; no code here compares against a moved base."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `CheckRun.failed_tests` (serde default, skip if empty, doc notes the flag and marker) and `Baseline::failed_tests_before(name)`; update `sample_baseline` and the literal near line 4163; add old-record and round-trip tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Add `failed_test_names` (per-section parse with completeness marker) and `cargo_test_args`; `run_check` runs plain `cargo test` with `--no-fail-fast`, fills redacted `failed_tests`, notes the flag on failed runs; add the field to the other CheckRun literals; add parser, args and run_check tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Per-test `is_pre_existing` with name-level fallback, `failure_split`, Minor finding in `judge`, root-cause doc comment, tests (including the crashed-binary case).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "Doc comment on `take_baseline`: the baseline runs through `run_check`, so it records failing test names. No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Update the comment at the baseline and pre-existing handling: comparison is per test. No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased / Fixed entry naming the root cause, the completeness rules, and that case (b) is not covered.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "purpose": "Short note that the check stage compares failing tests to the base, that the recorded command omits the added flag, and that concurrent-change clashes are not separated; avoid banned boundary words.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: `failed_tests: Vec::new()` in the CheckRun literal near line 1293. No logic.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "purpose": "Compile-forced: the field in the literal near line 451 only (line 214 uses `..skipped_run`). No logic.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Compile-forced: the field in the `test_run` helper literal (line 2826). No logic.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Compile-forced: the field in the test literal (line 237). No logic.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Compile-forced: the field in `killed_at_the_deadline` (line 1504). No logic.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Compile-forced: the field in the test helper literal (line 1728). No logic.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Compile-forced: the field in the test helper literal (line 4222). No logic.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/status_durations.rs",
+      "action": "modify",
+      "purpose": "Compile-forced: the field in the `test_run` literal (line 12). No logic.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs: add `failed_tests` to `CheckRun` with `#[serde(default, skip_serializing_if = \"Vec::is_empty\")]` and a doc comment (names are `<binary> <test>` or `<binary> (did not finish)`; empty means unknown; Athena adds `--no-fail-fast` to plain `cargo test` and the recorded command omits it); add `Baseline::failed_tests_before(name) -> &[String]` (empty when the baseline has a note or no such check); update `sample_baseline` and the literal near line 4163; add the old-shape parse/validate test and a round-trip test with names.",
+    "checks.rs: add `cargo_test_args(run) -> (Vec<String>, bool)` (insert `--no-fail-fast` right after `test`, before any `--`, unless present; records_names only for program basename `cargo`, first arg `test`, no `--fail-fast`). Add `failed_test_names(output) -> Vec<String>`: walk lines; a `Running ... (path)` or `Doc-tests <crate>` line opens a section (binary = file name of the path with the `-<hash>` suffix stripped; `doc-tests <crate>` for doc tests); an unindented `failures:` line whose next line is non-blank starts a list of 4-space-indented names; `test result:` closes the section and gives its `N failed`; at the next header or end, a section with no `test result:` line or with N different from the listed count adds `<binary> (did not finish)`; return sorted, deduplicated. In `run_check`, run the adjusted args for Test-kind checks, keep `command` as configured, and when records_names and an exit code exists fill `failed_tests` from the full output with each name through `ctx.redactor.redact`; on a failed run that got the flag, set `note` to mention it. Add `failed_tests: Vec::new()` to the other literals in this file. Add the parser, args and run_check tests (cargo-named temp script, sh case).",
+    "verify.rs: add `failure_split(check, baseline) -> (new, already)`; rewrite `is_pre_existing` (name-level fallback when either side has no names, else every candidate name must be in the base's); in `judge`, push one Minor Athena finding for a blocking check with names and leave the `check X failed` reason unchanged; update the `check()` helper; add tests (X against X,Y; X only; Y only; two binaries; crashed binary against base; fallback; finding text; single count); document the root cause and the (a)-only scope on `is_pre_existing`.",
+    "Add `failed_tests: Vec::new()` only to the CheckRun literals the compiler reports in run/mod.rs, routing.rs (line 451), status.rs, run/send_back.rs, run/tests.rs, introspect.rs, reading.rs and crates/athena-cli/tests/status_durations.rs. Change nothing else there.",
+    "run/checks.rs and run/verification.rs: update doc comments only.",
+    "CHANGELOG.md: Unreleased/Fixed entry naming the root cause (baseline compared whole checks by name, no per-test comparison), the `--no-fail-fast` and did-not-finish completeness rules, and that a clash with a concurrent change (case b) is not covered. docs/design/job-planning.md: short note, avoiding banned boundary words.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix failures, including the budget and boundary-word tests that scan docs."
+  ],
+  "risks": [
+    {
+      "risk": "`CheckRun` has `deny_unknown_fields`; records with names do not parse on an older binary.",
+      "mitigation": "`#[serde(default, skip_serializing_if = \"Vec::is_empty\")]`: records without names serialise as before. The old-shape parse test and the round-trip tests cover it."
+    },
+    {
+      "risk": "Several CheckRun literals across the workspace (eight outside the deliverables) must gain the field; a miss breaks the build.",
+      "mitigation": "`cargo clippy --all-targets` compiles the tests and names any miss. The edits are one-line and logic-free."
+    },
+    {
+      "risk": "The `failures:` format varies: the first `failures:` block is the stdout sections, and each binary and the doc-tests print their own list; stdout and stderr share one file, so section order could differ from the expectation.",
+      "mitigation": "Read only a `failures:` line whose next line is not blank; qualify by the section's binary; a section with a mismatched count or no result line gets the marker, which errs toward blocking, never toward excusing. Fixtures are literal text in cargo's exact format from a real local run."
+    },
+    {
+      "risk": "A crashed or aborted binary leaves no list, so a new failure could be excused (finding 9).",
+      "mitigation": "The per-section completeness check emits `<binary> (did not finish)`, which counts as new unless the base has the same marker. Parser and verify tests cover it."
+    },
+    {
+      "risk": "`--no-fail-fast` makes a failing test check run all binaries, so a failing run takes longer and the deadline may be hit more often.",
+      "mitigation": "Only failing runs get longer; passing runs are unchanged. A timeout records no names and keeps the name-level rule. The flag applies to baseline and candidate alike."
+    },
+    {
+      "risk": "A flaky test failing on both sides is excused; a differently named flaky test now blocks.",
+      "mitigation": "Intended tightening with names on both sides; tests pin both directions."
+    },
+    {
+      "risk": "The new finding could be counted twice.",
+      "mitigation": "Minor severity; a verify.rs test pins one reason and one finding; send_back.rs does not read finding severities."
+    },
+    {
+      "risk": "The CHANGELOG could overclaim the fix by implying case (b) is handled.",
+      "mitigation": "The entry and the design note state the (a)-only scope; (b) is an open question."
+    },
+    {
+      "risk": "The fake `cargo` script test could be flaky (exec of a just-written file).",
+      "mitigation": "Write and chmod it before the check starts, in a per-test tempdir; the pure `cargo_test_args` test covers flag logic without a process."
+    },
+    {
+      "risk": "Refusal-corpus rule: the parser reads cargo output, not requests or readings.",
+      "mitigation": "Not applicable: the change adds no refusal or matching rule over requests or readings, so crates/athena-core/tests/refusal_corpus.rs is not touched and no case ids are cited. The parser has its own unit tests."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff. The doc comment on `is_pre_existing`, `Baseline::failed_tests_before`, the `failed_tests` field doc, the new `failed_test_names` and `cargo_test_args`, and the CHANGELOG Unreleased/Fixed entry must name the cause (baseline compares whole checks by name, no per-test comparison) and say the change covers case (a) only. Check that no job's candidate file (auditor.rs, ontology.toml) appears.",
+      "command": "git diff --stat",
+      "observes": "The diff touches records.rs, verify.rs, checks.rs, run/checks.rs, run/verification.rs, CHANGELOG.md and docs/design/job-planning.md, plus only one-line `failed_tests: Vec::new()` additions in the compiler-reported literals. The CHANGELOG text names the root cause and states the (a)-only scope.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in the verify.rs tests module. They use the existing helpers `baseline_with`, `judge_against` and `check` (`check` gains an empty `failed_tests`; each test sets the field on real records). Entry points: `is_pre_existing`, `mark_pre_existing`, `judge`. Cases: base {X} vs candidate {X,Y} is not pre-existing, the verdict is Fail and Y is named; base {X} vs {X} is pre-existing and passes; base {X} vs {Y} is not pre-existing; base {A X} vs candidate {A X, B X} (two binaries) is not pre-existing; base {A X} vs candidate {A X, `B (did not finish)`} (a crashed binary) is not pre-existing, while base and candidate both holding the same marker is pre-existing.",
+      "command": "cargo test -p athena-core verify::tests",
+      "observes": "The tests pass: {X} vs {X,Y} is not pre-existing, the verdict is Fail and Y is named; {X} vs {X} stays pre-existing; the crashed-binary case blocks.",
+      "fails_without": "Without the per-test comparison `is_pre_existing` matches by check name, so base {X} vs candidate {X,Y} is marked pre-existing and the verdict passes; the assertions that the check is not pre-existing, the verdict is Fail and Y is named all fail.",
+      "seam": "Production entry points `verify::is_pre_existing`, `mark_pre_existing` and `judge` (exist: verify.rs lines 134-151 and the judge function). Fixtures: existing `baseline_with` (line 731), `judge_against` (line 741) and `check` (line 678); step 3 adds the empty field to `check`. Real records, no double; the comparison is production code."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in checks.rs call `failed_test_names(&str)` with literal text in cargo's exact format (`Running unittests src/lib.rs (target/debug/deps/<crate>-<hash>)`, the blank-line-led stdout `failures:` block with `---- name stdout ----`, the 4-space-indented `failures:` list, `test result: FAILED. N passed; M failed`), written by the producer from a real local run with a deliberately failing test. Cases: (a) two binaries, two failing tests, names as `<binary> <test>`; (b) a doc-test failure; (c) only a `---- name stdout ----` block and no list yields the `(did not finish)`-free empty or count-mismatch result as the parser rule defines, and output with no `Running` sections yields an empty list; (d) no failures yields empty; (e) a crashed binary (a `Running` line, `running N tests`, then the next `Running` line with no `test result:`) yields `<binary> (did not finish)`; (f) cargo's early-stop shape. A pure `cargo_test_args` test: `--no-fail-fast` goes right after `test`, before any `--`, is not duplicated; `--fail-fast`, a non-cargo program or `cargo +nightly test` gives records_names=false. A `run_check` test uses a temp script named `cargo` (absolute path as program, Test-kind CheckSpec) that prints canned output, echoes its args and exits 101: `failed_tests` is filled, the script saw `--no-fail-fast`, `command` is unchanged and the note mentions the flag. A second `run_check` case uses `sh` (the existing `sh_spec`): the list is empty. A verify.rs test shows an empty list leads to the name-level rule (base fails, candidate fails, pre-existing).",
+      "command": "cargo test -p athena-core failed_test_names",
+      "observes": "Names are extracted and qualified by binary for multi-binary and doc-test output; a crashed binary produces the marker; output with no list gives an empty result; the cargo-named script run records names, the flag and the note; sh runs record none; the empty result leads to the name-level rule.",
+      "fails_without": "Without the parser `failed_test_names` does not exist and the tests cannot compile. A parser that reads only the first `failures:` stdout section, or `test ... FAILED` lines, gives wrong names and fails the exact-name assertions. Without the completeness rule the crashed-binary test returns an empty list. Without the flag insertion the script would not see `--no-fail-fast`.",
+      "seam": "Production entry points `checks::failed_test_names` and `checks::cargo_test_args` (added in step 2) and `checks::run_check` (exists, checks.rs line 190), and `verify::is_pre_existing` (exists). Fixture for run_check: a script written and chmod-ed in a per-test tempdir, named `cargo`, passed by absolute path in `CheckSpec.run`, with the existing `CheckContext` setup used by other run_check tests (redactor from builtin config, `Registry`). The script supplies only canned text; parsing and flag logic run in production code."
+    },
+    {
+      "criterion": 4,
+      "method": "A new records.rs test builds Baseline JSON in the old shape (`sample_baseline().to_json()` with the `failed_tests` keys removed, or a literal) with no `failed_tests` key on its CheckRuns. It parses it via `AnyRecord::parse` and `check_record_file` at `baseline.json`, then calls `Baseline::validate`. The existing round-trip tests and `a_baseline_belongs_at_baseline_json_and_nowhere_else` run unchanged apart from the field in `sample_baseline`. A second case round-trips a record with names, and a record without names serialises with no `failed_tests` key.",
+      "command": "cargo test",
+      "observes": "Old JSON parses and validates with an empty `failed_tests`; a record with names round-trips; the round-trip tests and check_record_file pass across the workspace.",
+      "fails_without": "Without `#[serde(default)]` old JSON fails to parse under `deny_unknown_fields`/required fields; without `skip_serializing_if` existing records change shape and the old-shape and round-trip assertions fail.",
+      "seam": "Production entry points `AnyRecord::parse`, `check_record_file` and `Baseline::validate` (all exist). Fixture: JSON derived from `sample_baseline` (exists; updated in step 1). No double."
+    },
+    {
+      "criterion": 5,
+      "method": "A verify.rs test judges base {X} vs candidate {X,Y} through `judge_against` and reads the Athena finding. It asserts severity Minor, evidence lists Y under newly failing and X under already failing on the base, and the result has exactly one `check test failed` reason and one such finding. Further cases: only new names gives no 'already' part; a check with no names gives no such finding; a fully pre-existing check gives none; a failed run that got the flag has the flag note.",
+      "command": "cargo test -p athena-core verify::tests::the_finding_for_a_failed_check_separates_new_from_base_failures",
+      "observes": "The finding text separates 'newly failing: Y' from 'already failing on the base: X'; the verdict stays Fail with the single existing reason.",
+      "fails_without": "Without the finding, `judge` returns only the `check test failed` reason; the assertions on the finding's severity, summary and evidence fail.",
+      "seam": "Production entry point `verify::judge` via the existing `judge_against` (exists). Text built by production `failure_split` (added in step 3). Fixtures are real CheckRun and Baseline records from `baseline_with` and `check`. No double."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs on the finished workspace; every CheckRun literal must compile, and `cargo test --locked` also runs the budget, boundary-word and record tests that scan the edited docs.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` each exit 0.",
+      "fails_without": "Without the `failed_tests: Vec::new()` additions the build fails with 'missing field'; failing new tests make `cargo test` exit non-zero; unformatted code fails fmt.",
+      "seam": "The cargo commands of Athena's check stage, run on the whole workspace (exist today as configured checks). No double."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the changed file list and the CHANGELOG [Unreleased] / Fixed entry: it names the root cause, the `--no-fail-fast` and did-not-finish completeness rules, and that case (b) is not covered.",
+      "command": "git status",
+      "observes": "No athena.toml, defaults.toml or workflow file is changed; the CHANGELOG entry states the root cause (baseline compared whole checks by name, no per-test comparison).",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Case (b), a failure caused by a clash with a concurrent config or test change, is not separated: the baseline runs on the job's fixed base. Separating it needs a check against a moved base (rebase or merge), which the brief puts out of scope.",
+    "When the base failed with test names and the candidate's check fails with none (build error, timeout, kill), the plan keeps the name-level rule, which still excuses it. A stricter rule would change `held_for_timeout` and is left out.",
+    "A base that failed with no names (build error) excuses a candidate that now has test failures, as today. Tightening that is a separate change.",
+    "A repo whose test check is not plain `cargo test` (wrapper script, nextest, `cargo +toolchain test`) records no names and keeps the name-level rule.",
+    "docs/design/job-planning.md has no clear section on the check stage; the producer chooses the placement, subject to the banned-word scan."
+  ],
+  "producer_section_sha256": "353372959bced9b072212eadaa4554c2699140dd258db723529601198d9583b2"
+}

@@ -243,6 +243,7 @@ mod left_to_athena_tests {
             duration: athena_data::Quantity::measured(1.0, athena_data::Unit::Seconds, "test"),
             output_tail: String::new(),
             note: None,
+            failed_tests: Vec::new(),
         };
         let output = VerdictOutput {
             verdict: VerdictValue::Pass,

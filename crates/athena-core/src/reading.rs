@@ -4228,6 +4228,7 @@ mod tests {
             duration: athena_data::Quantity::measured(1.0, athena_data::Unit::Seconds, "clock"),
             output_tail: output.into(),
             note: None,
+            failed_tests: Vec::new(),
         }
     }
 

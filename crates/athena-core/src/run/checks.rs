@@ -48,7 +48,9 @@ impl Athena {
     /// Runs the capability's configured checks on a fresh snapshot of the base commit and returns the
     /// baseline record. It never fails: a snapshot or environment error, or a nested run, gives a record
     /// with no checks and a note saying why. `before_invocation` is the sequence number the first
-    /// producer invocation will get. Verification reads the result to mark pre-existing failures.
+    /// producer invocation will get. Verification reads the result to mark pre-existing failures. The checks
+    /// run through `run_check`, as the candidate's do, so each failed run records the names of its failing
+    /// tests and verification compares test by test, not by check name alone.
     pub(super) fn take_baseline(
         &self,
         ctx: &RunContext<'_>,

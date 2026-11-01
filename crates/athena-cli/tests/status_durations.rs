@@ -18,6 +18,7 @@ fn test_run(seconds: f64) -> CheckRun {
         duration: Quantity::measured(seconds, Unit::Seconds, "athena monotonic clock"),
         output_tail: String::new(),
         note: None,
+        failed_tests: Vec::new(),
     }
 }
 

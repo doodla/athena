@@ -40,6 +40,134 @@ pub fn count_tests(output: &str) -> Option<u64> {
     found.then_some(total)
 }
 
+/// The flag Athena adds to a plain `cargo test`, so every test binary runs and each one's failures are listed.
+/// Without it cargo stops after the first failing binary and the later binaries' failures never appear.
+const NO_FAIL_FAST: &str = "--no-fail-fast";
+
+/// The note appended to a failed run that got [`NO_FAIL_FAST`], because `command` keeps the configured text.
+const NO_FAIL_FAST_NOTE: &str = "ran with --no-fail-fast added to the configured command";
+
+/// The arguments to run a test check with, and whether its failing test names can be recorded.
+///
+/// Names are recorded only for a plain `cargo test` (program named `cargo`, first argument `test`, no
+/// `--fail-fast`); a wrapper script, `cargo +toolchain test` or another runner records none and is compared
+/// by check name. For such a command `--no-fail-fast` is inserted right after `test` (before any `--`)
+/// unless it is already there. Anything else is returned unchanged.
+pub fn cargo_test_args(program: &str, args: &[String]) -> (Vec<String>, bool) {
+    let is_cargo = Path::new(program).file_name().is_some_and(|n| n == "cargo");
+    let own_flags = args.iter().take_while(|a| a.as_str() != "--");
+    let plain = is_cargo
+        && args.first().map(String::as_str) == Some("test")
+        && own_flags.clone().all(|a| a != "--fail-fast");
+    if !plain {
+        return (args.to_vec(), false);
+    }
+    let mut adjusted = args.to_vec();
+    if own_flags.clone().all(|a| a != NO_FAIL_FAST) {
+        adjusted.insert(1, NO_FAIL_FAST.to_string());
+    }
+    (adjusted, true)
+}
+
+/// The name of the test binary a `Running` line opens: the file name of the path in parentheses, without
+/// its `-<hash>` suffix (`target/debug/deps/athena_core-0f3a` gives `athena_core`).
+fn binary_of_running_line(rest: &str) -> String {
+    let path = match (rest.rfind('('), rest.ends_with(')')) {
+        (Some(open), true) => &rest[open + 1..rest.len() - 1],
+        _ => rest,
+    };
+    let file = path.rsplit('/').next().unwrap_or(path);
+    match file.rsplit_once('-') {
+        Some((stem, hash)) if !hash.is_empty() && hash.chars().all(|c| c.is_ascii_hexdigit()) => {
+            stem.to_string()
+        }
+        _ => file.to_string(),
+    }
+}
+
+/// One test binary's part of a cargo test run, while it is read.
+struct Section {
+    binary: String,
+    listed: Vec<String>,
+    /// The `N failed` count of its `test result:` line, if it printed one.
+    failed: Option<usize>,
+}
+
+impl Section {
+    /// Adds this section's names to `out`: its listed tests, qualified by binary, and the marker
+    /// `<binary> (did not finish)` when it printed no `test result:` line (a crash, abort or early exit) or
+    /// when its failed count differs from the names listed (a cut-short list).
+    fn close_into(self, out: &mut std::collections::BTreeSet<String>) {
+        let complete = self.failed == Some(self.listed.len());
+        for name in &self.listed {
+            out.insert(format!("{} {name}", self.binary));
+        }
+        if !complete {
+            out.insert(format!("{} (did not finish)", self.binary));
+        }
+    }
+}
+
+/// The failing tests of a cargo test run, read from its output section by section (one section per
+/// `Running` or `Doc-tests` line): each name from a section's indented `failures:` list, qualified by its
+/// binary, as `<binary> <test>`. A section whose process never printed a `test result:` line, or whose
+/// failed count differs from the names listed, adds `<binary> (did not finish)`, so a crash or a cut-short
+/// list counts as a failure and can never hide behind the names that were listed. The result is sorted
+/// and without duplicates. Output with no `Running` or `Doc-tests` line yields an empty list, which the
+/// comparison reads as "no names known".
+pub fn failed_test_names(output: &str) -> Vec<String> {
+    let lines: Vec<&str> = output.lines().collect();
+    let mut out = std::collections::BTreeSet::new();
+    let mut section: Option<Section> = None;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        let opened = if let Some(rest) = trimmed.strip_prefix("Running ") {
+            Some(binary_of_running_line(rest.trim_end()))
+        } else {
+            trimmed
+                .strip_prefix("Doc-tests ")
+                .map(|krate| format!("doc-tests {}", krate.trim()))
+        };
+        if let Some(binary) = opened {
+            if let Some(done) = section.take() {
+                done.close_into(&mut out);
+            }
+            section = Some(Section {
+                binary,
+                listed: Vec::new(),
+                failed: None,
+            });
+        } else if let Some(current) = section.as_mut() {
+            if line == "failures:" && lines.get(i + 1).is_some_and(|n| !n.trim().is_empty()) {
+                // The list: indented names up to the blank line that ends it.
+                while let Some(name) = lines.get(i + 1).and_then(|n| n.strip_prefix("    ")) {
+                    if name.trim().is_empty() {
+                        break;
+                    }
+                    current.listed.push(name.trim_end().to_string());
+                    i += 1;
+                }
+            } else if let Some(rest) = line.strip_prefix("test result:") {
+                current.failed = failed_count(rest);
+            }
+        }
+        i += 1;
+    }
+    if let Some(done) = section {
+        done.close_into(&mut out);
+    }
+    out.into_iter().collect()
+}
+
+/// The `N` of `N failed` in the rest of a `test result:` line.
+fn failed_count(rest: &str) -> Option<usize> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"(\d+) failed").expect("valid pattern"));
+    re.captures(rest)?[1].parse().ok()
+}
+
 /// The last `max` bytes of `text`, on a character boundary.
 pub fn tail(text: &str, max: usize) -> String {
     if text.len() <= max {
@@ -95,6 +223,7 @@ pub fn skipped_run(spec: &CheckSpec, note: String) -> CheckRun {
         duration: Quantity::measured(0.0, Unit::Seconds, "not run"),
         output_tail: String::new(),
         note: Some(note),
+        failed_tests: Vec::new(),
     }
 }
 
@@ -123,6 +252,7 @@ pub fn runs_from_record(specs: &[CheckSpec], record: &CiRecord, sha: &str) -> Ve
                 duration: Quantity::measured(step.duration_s, Unit::Seconds, "recorded result"),
                 output_tail: String::new(),
                 note: Some(format!("result reused from the {origin} for {sha}")),
+                failed_tests: Vec::new(),
             })
         })
         .collect()
@@ -198,8 +328,16 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
     // overwrite each other, losing the harness's summary lines (acceptance verification 1, m2).
     let stdout = output_file.reopen()?;
     let stderr = stdout.try_clone()?;
+    // A plain `cargo test` runs every binary (`--no-fail-fast`) so the failing tests of all of them are
+    // listed; `command` in the record stays as configured, and a failed run says what was added.
+    let (run_args, records_names) = if spec.kind == CheckKind::Test {
+        cargo_test_args(program, args)
+    } else {
+        (args.to_vec(), false)
+    };
+    let flag_added = run_args.len() != args.len();
     let mut cmd = Command::new(program);
-    cmd.args(args)
+    cmd.args(&run_args)
         .env_clear()
         .envs(ctx.env)
         .current_dir(ctx.dir)
@@ -223,6 +361,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
                 ),
                 output_tail: String::new(),
                 note: Some(format!("could not start {program}: {e}")),
+                failed_tests: Vec::new(),
             });
         }
     };
@@ -262,6 +401,19 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
             "ran zero tests; a test check must run at least one".to_string()
         });
     }
+    // Names only from a process that exited with a code: a killed run has a partial output.
+    let mut failed_tests = Vec::new();
+    if records_names && exit_code.is_some() {
+        for name in failed_test_names(&output) {
+            failed_tests.push(ctx.redactor.redact(&name)?);
+        }
+    }
+    if flag_added && !passed {
+        note = Some(match note {
+            Some(n) => format!("{n}; {NO_FAIL_FAST_NOTE}"),
+            None => NO_FAIL_FAST_NOTE.to_string(),
+        });
+    }
     Ok(CheckRun {
         name: spec.name.clone(),
         command: spec.run.clone(),
@@ -275,6 +427,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
         ),
         output_tail: ctx.redactor.redact(&tail(&output, TAIL_BYTES))?,
         note,
+        failed_tests,
     })
 }
 
@@ -297,6 +450,7 @@ pub fn baseline_runs(specs: &[CheckSpec], ctx: &CheckContext<'_>) -> Vec<CheckRu
                 duration: Quantity::measured(0.0, Unit::Seconds, "not run"),
                 output_tail: String::new(),
                 note: Some(format!("baseline check could not run: {e}")),
+                failed_tests: Vec::new(),
             },
         })
         .collect()
@@ -374,6 +528,244 @@ mod tests {
         let runs = baseline_runs(&[sh_spec("slow", "sleep 30")], &ctx);
         assert!(!runs[0].passed);
         assert!(runs[0].note.as_ref().unwrap().contains("deadline"));
+    }
+
+    /// Two binaries, each with one failing test, as cargo prints them under `--no-fail-fast`.
+    const TWO_BINARIES: &str = "\
+   Compiling athena-core v0.1.0 (/w/crates/athena-core)
+     Running unittests src/lib.rs (target/debug/deps/athena_core-0f3a9c1d2b4e5f60)
+
+running 2 tests
+test checks::tests::ok ... ok
+test checks::tests::x ... FAILED
+
+failures:
+
+---- checks::tests::x stdout ----
+thread 'checks::tests::x' panicked at src/checks.rs:9:5:
+boom
+
+
+failures:
+    checks::tests::x
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p athena-core --lib`
+     Running tests/policy.rs (target/debug/deps/policy-1122334455667788)
+
+running 1 test
+test scan ... FAILED
+
+failures:
+
+---- scan stdout ----
+panicked
+
+failures:
+    scan
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+";
+
+    #[test]
+    fn failing_tests_are_read_from_each_failures_list_and_qualified_by_binary() {
+        assert_eq!(
+            failed_test_names(TWO_BINARIES),
+            ["athena_core checks::tests::x", "policy scan"]
+        );
+    }
+
+    #[test]
+    fn a_doc_test_failure_is_named_under_its_crate() {
+        let output = "\
+   Doc-tests athena_core
+
+running 2 tests
+test src/lib.rs - f (line 3) ... ok
+test src/lib.rs - g (line 9) ... FAILED
+
+failures:
+
+---- src/lib.rs - g (line 9) stdout ----
+Test executable failed (exit status: 101).
+
+failures:
+    src/lib.rs - g (line 9)
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+";
+        assert_eq!(
+            failed_test_names(output),
+            ["doc-tests athena_core src/lib.rs - g (line 9)"]
+        );
+    }
+
+    #[test]
+    fn output_with_no_failures_or_no_sections_names_nothing() {
+        let passing = "     Running unittests src/lib.rs (target/debug/deps/a-00ff)\n\n\
+                       running 1 test\ntest t ... ok\n\n\
+                       test result: ok. 1 passed; 0 failed; 0 ignored\n";
+        assert!(failed_test_names(passing).is_empty());
+        assert!(failed_test_names("").is_empty());
+        // A build error prints no section at all, and a bare failures block before any section is not read.
+        let build_error = "error[E0432]: unresolved import\nerror: could not compile `x`\n\
+                           failures:\n    stray\n";
+        assert!(failed_test_names(build_error).is_empty());
+    }
+
+    #[test]
+    fn a_crashed_binary_is_marked_as_not_finished() {
+        // The second binary printed its header and `running` line, then died: no list, no result line.
+        let output = "\
+     Running unittests src/lib.rs (target/debug/deps/a-00ff)
+
+running 1 test
+test x ... FAILED
+
+failures:
+
+---- x stdout ----
+boom
+
+failures:
+    x
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored
+     Running tests/crashy.rs (target/debug/deps/crashy-aa11)
+
+running 1 test
+test boom ... ";
+        assert_eq!(
+            failed_test_names(output),
+            ["a x", "crashy (did not finish)"]
+        );
+    }
+
+    #[test]
+    fn a_list_that_disagrees_with_the_failed_count_is_marked_as_not_finished() {
+        // Only the stdout block, no `failures:` list: 1 failed, 0 listed.
+        let output = "\
+     Running tests/t.rs (target/debug/deps/t-aa11)
+
+running 1 test
+test x ... FAILED
+
+failures:
+
+---- x stdout ----
+boom
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored
+";
+        assert_eq!(failed_test_names(output), ["t (did not finish)"]);
+    }
+
+    #[test]
+    fn the_flag_goes_right_after_test_and_only_for_a_plain_cargo_test() {
+        let v = |s: &[&str]| s.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let (args, records) = cargo_test_args("cargo", &v(&["test", "--locked"]));
+        assert_eq!(args, v(&["test", "--no-fail-fast", "--locked"]));
+        assert!(records);
+        let (args, _) = cargo_test_args("/usr/bin/cargo", &v(&["test", "--", "--nocapture"]));
+        assert_eq!(args, v(&["test", "--no-fail-fast", "--", "--nocapture"]));
+        let given = v(&["test", "--no-fail-fast"]);
+        assert_eq!(cargo_test_args("cargo", &given), (given.clone(), true));
+        for (program, args) in [
+            ("cargo", v(&["test", "--fail-fast"])),
+            ("cargo", v(&["+nightly", "test"])),
+            ("cargo", v(&["nextest", "run"])),
+            ("make", v(&["test"])),
+            ("sh", v(&["-c", "cargo test"])),
+        ] {
+            assert_eq!(
+                cargo_test_args(program, &args),
+                (args.clone(), false),
+                "{program} {args:?}"
+            );
+        }
+        // A `--fail-fast` after `--` belongs to the test binary, not to cargo.
+        let (_, records) = cargo_test_args("cargo", &v(&["test", "--", "--fail-fast"]));
+        assert!(records);
+    }
+
+    fn check_ctx<'a>(
+        dir: &'a Path,
+        env: &'a BTreeMap<String, String>,
+        registry: &'a Registry,
+        redactor: &'a Redactor,
+    ) -> CheckContext<'a> {
+        CheckContext {
+            dir,
+            env,
+            timeout: Duration::from_secs(30),
+            registry,
+            job: "j",
+            redactor,
+        }
+    }
+
+    #[test]
+    fn a_cargo_test_check_records_its_failing_tests_and_the_flag_it_ran_with() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        // A script named `cargo` that echoes its arguments, prints canned failing output and exits 101.
+        let script = bin.path().join("cargo");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho \"args: $*\"\ncat <<'EOF'\n{TWO_BINARIES}EOF\nexit 101\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = Registry::new(state.path());
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let env = BTreeMap::from([("PATH".to_string(), std::env::var("PATH").unwrap())]);
+        let ctx = check_ctx(dir.path(), &env, &registry, &redactor);
+        let spec = CheckSpec {
+            name: "test".into(),
+            run: vec![
+                script.to_string_lossy().into_owned(),
+                "test".into(),
+                "--locked".into(),
+            ],
+            kind: CheckKind::Test,
+            skip_when_only: None,
+        };
+        let run = run_check(&spec, &ctx).unwrap();
+        assert!(!run.passed && run.exit_code == Some(101));
+        assert_eq!(
+            run.failed_tests,
+            ["athena_core checks::tests::x", "policy scan"]
+        );
+        assert!(
+            run.output_tail
+                .contains("args: test --no-fail-fast --locked")
+        );
+        assert_eq!(
+            run.command, spec.run,
+            "the record keeps the configured command"
+        );
+        assert!(run.note.as_deref().unwrap().contains("--no-fail-fast"));
+        assert!(!timed_out(&run));
+
+        // The same output from a command that is not cargo records no names and no flag note.
+        let sh = CheckSpec {
+            name: "test".into(),
+            run: vec![
+                "sh".into(),
+                "-c".into(),
+                format!("cat <<'EOF'\n{TWO_BINARIES}EOF\nexit 101"),
+            ],
+            kind: CheckKind::Test,
+            skip_when_only: None,
+        };
+        let run = run_check(&sh, &ctx).unwrap();
+        assert!(!run.passed);
+        assert!(run.failed_tests.is_empty());
+        assert_eq!(run.note, None);
     }
 
     #[test]
@@ -528,6 +920,7 @@ mod tests {
             duration: Quantity::measured(10.0, Unit::Seconds, "athena monotonic clock"),
             output_tail: String::new(),
             note,
+            failed_tests: Vec::new(),
         }
     }
 

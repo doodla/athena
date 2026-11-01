@@ -105,6 +105,16 @@ producer–verifier pair moved earlier, as Sri put it. `Config::validate` alread
   criterion. A run with no change at all is not checked this way; it fails as an idle producer. The producer
   brief says the same ("Planned files left unchanged"). The reasons are read from the report and are not kept in
   the invocation record.
+- **Checks against the base (code):** the check stage compares failing tests, not only failing checks, to the
+  base (`is_pre_existing` in `crates/athena-core/src/verify.rs`). The baseline and the candidate run through the
+  same `run_check`, which records `CheckRun.failed_tests` for a plain `cargo test` (names read from cargo's
+  `failures:` lists, qualified by test binary; a binary that crashed or printed a cut-short list is recorded as
+  `<binary> (did not finish)`). A failing check is pre-existing only if every failing test also failed on the
+  base; a test that fails only now is the job's own, and a Minor finding lists it apart from the tests already
+  failing on the base. Where no names are recorded the old rule stands: the check name alone. Athena adds
+  `--no-fail-fast` to a plain `cargo test` so every binary runs; the recorded `command` omits it and a failed run
+  says so in its `note`. A clash with a concurrent config or test change is not separated: the baseline runs on
+  the job's fixed base.
 - **Verifier (design):** it is not given the planner's approach, reasons or rejected options, which come from the
   producer's model and would anchor it (review F5; `VerifierInputs` in `briefs.rs` promises no producer
   reasoning). It gets only the critic-accepted demonstrations (one per criterion) and the planned file list.

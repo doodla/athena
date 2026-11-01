@@ -2832,6 +2832,7 @@ pub(crate) mod planning_cost_tests {
             duration: Quantity::measured(seconds, Unit::Seconds, basis),
             output_tail: String::new(),
             note: None,
+            failed_tests: Vec::new(),
         }
     }
 
