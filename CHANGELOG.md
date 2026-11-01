@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The drain now waits while any check run on the pull request head is queued or in progress, and treats a
+  merge the host refuses with "Repository rule violations" while checks are pending as waiting to merge, not
+  as a failed landing. Before, it asked the host to merge the rebase-before-landing pull request while its
+  history check was still running; the host refused, the drain counted the job as failed and stopped the run,
+  and a later `athena land --pr` merged it once every check had finished. Root cause: `classify_checks`
+  judged only the required `fmt, clippy, tests` run, so an unfinished optional run read as green and the
+  merge was requested too early; the drain then took every refusal for a failure. Now `classify_checks`
+  reports pending while any check run is unfinished (a failed required run is still red; a failed optional
+  run is still only a note), `land_pr` makes no merge call until every run has completed, and a rule-violation
+  refusal followed by pending checks is a report with the checks pending and a warning. The drain shows such
+  a job as `waiting to merge`, does not retry it, does not count it as a failure, and goes on to the next
+  job; `athena land --pr` merges it later.
 - Landing now judges a pull request by the `fmt, clippy, tests` check alone, and the records of a held job
   pass the pull request head check. Root cause of the first: `classify_checks` counted every check run and the
   combined status, so the pull request head check, which fails on every candidate, turned the whole pull

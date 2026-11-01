@@ -1,0 +1,30 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261101-185324-tbbf",
+  "at": "2026-11-01T18:53:24.578083677Z",
+  "trigger": "intervention",
+  "job": "20261031-031749-am9j",
+  "intervention": "20261101-185305-wpkf",
+  "class_of_work": "design",
+  "category": "mistake",
+  "what_happened": "The person running Athena asked for the drain to judge pull requests by the one required check recorded for the repository. The drain then tried to merge a job's pull request while another check that GitHub also waits on was still running. GitHub refused the merge, so the drain stopped the batch. The the person running Athena landed the job by hand with `athena land --pr` and queued a fix so the drain waits for pending checks before merging.",
+  "failure_class": "20261101-185342-3k4q",
+  "new_class": true,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "Athena has no step that checks a request about merge or landing conditions against the host's actual merge rule (all required and pending checks, branch protection). The request writer and reader work from a single recorded check name and assume it is the full rule. The drain also does not treat a refused merge as a \"wait and retry\" state; it treats it as a stop. This is the same shape as earlier mistakes where a change was designed from an assumption about external state instead of reading it.",
+  "prevention_kind": "code-check",
+  "prevention": "Before the drain merges a pull request, it should read the host's current merge state (all checks the host waits on, including pending ones, and the mergeable status). It should merge only when none is pending or failing. If any check is pending, it should wait and re-poll up to a bound instead of attempting the merge. A refused merge caused by pending checks should be treated as \"not ready yet\" and not as a job failure that stops the batch. A test should replay a pull request with one required check passed and a second check pending, and assert the drain waits and does not attempt the merge.",
+  "proposed_request": "Make the queue drain wait for all of a pull request's checks before it merges.\n\nOutcome: the drain never asks GitHub to merge a job's pull request while any check the host waits on is still pending. A pending check never stops the batch or marks the job failed.\n\nAcceptance:\n- Before merging, the drain reads the pull request's full merge state from GitHub: every check, required or not, that the host waits on, plus the mergeable status. It does not rely on one recorded check name.\n- If any such check is pending, the drain waits and re-polls, up to a configured bound, and then merges once all are green.\n- If a check fails, the job is reported as failed for that reason.\n- If the bound is reached with checks still pending, the item is held with a clear message that names the pending checks. The batch continues with other items.\n- Optional or advisory checks that the host does not wait on do not block the merge.\n- A test uses a fake GitHub with one required check passed and a second check pending. It shows the drain does not attempt the merge until the second check finishes. It also shows that a merge the host refuses for pending checks is treated as \"not ready\" and not as a job failure.\n- The text and tests respect the repo's boundary word list, and the change needs no new config field unknown to the installed build.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.1089685,
+    "input_tokens": 4,
+    "output_tokens": 2386
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}

@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-185259-36ae",
+  "round": 1,
+  "at": "2026-11-01T18:59:04.637091237Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Rule-violation text match: which error text is searched is not stated, and nothing tests the real GhClient error shape",
+      "evidence": "GhClient::merge errors come from api_text as a downcastable GhFailure, possibly wrapped in context. If the helper uses `error.to_string()`, it reads only the outermost context, which may not carry GitHub's 'Repository rule violations found' message. The planned tests use FakeHost::merge_error, a plain bail! string, so they would not catch this. Fix: In is_rule_violation, match on the full chain (`format!(\"{error:#}\")`, or walk `error.chain()`). Also add one assertion that a GhFailure carrying the GitHub message, built the way the client builds it, is detected. A unit test on the helper is enough.",
+      "location": "Plan step 3 (is_rule_violation) / crates/athena-core/src/gh/client.rs:303-332 (api_text returns a GhFailure)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The one re-read after a refusal can race: if checks finish in between, a real wait becomes an Err and the drain stops again",
+      "evidence": "land_pr re-reads check_report once right after host.merge fails. If the in-progress run completes between the refusal and the re-read, the read is Green, the original Err is returned, PrLander maps it to NotLanded, and the drain counts a failure, which is the reported symptom. The classify fix makes this rare, but the fallback is meant for exactly these timing edges. Fix: Accept as a known limitation and name it in Risks. Or, when the re-read is Green, treat the refusal as a wait too, but only when the merge was refused and the pull request is still Open, since a check may have just finished. If you take that route, keep Red/settled-with-other-violation as Err.",
+      "location": "Decision 2 / Plan step 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Decision 3 widens 'waiting' to every Open+Pending report, including poll-bound timeouts with no merge request",
+      "evidence": "PrLander::land (drain.rs:2605-2615) today maps any Open report to NotLanded, so a timed-out wait counts as a failed attempt. The plan maps Open with checks Some(Pending) to Waiting whether or not merge_requested is set. That changes behavior for plain timeouts and for the pending result of the red re-run path (early.rs step 3). It is defensible, and the plan argues it, but it goes past the request's 'refused merge' case. Fix: Keep it, but say so in the CHANGELOG entry and the Landing::Waiting doc comment: a pull request whose checks have not finished in the poll window is waiting, not failed. Make the landing_from_report test cover both merge_requested true and false, so the choice is pinned.",
+      "location": "Decision 3 / Plan step 7 (landing_from_report)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Statuses 'waiting' / 'requested' / 'pending' can hold a landing indefinitely (for example a deployment approval)",
+      "evidence": "The plan treats any status other than 'completed' as pending. A check run waiting for an environment approval never completes on its own, so every drain reports the job as waiting. The plan raises this under open questions but adds no note. Fix: Have the waiting message name the check run(s) still unfinished, so the person running the drain can see which run holds it.",
+      "location": "Plan step 1 / Open questions",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot code, and it fixes the fault where it starts. classify_checks (client.rs:797) decides only on the CI_AGGREGATE_JOB run, so an in-progress optional run reads Green and land_pr (landing.rs:230) reaches host.merge. Adding a not-completed rule there, while keeping Red tied to the required run, matches the request's rule and leaves the re-run path alone. The drain side is also right: Drain::land returns bool and attempts() counts a false as a failure (drain.rs:1532-1539), and finish() maps ItemEnd::Failed to RepeatedFailure (2005). A Waiting variant that leaves the loop and calls pass_over without set_stop is the correct change. The seams exist as named: PrHost::check_report is a default method FakeHost can override (client.rs:62), and FakeHost::script, merge_refused and Rig::run exist (tests.rs 836-1022). World, concurrent, count and logged exist in drain.rs, and display.rs has the report() helper and an (Open, _) arm to put the new arm before. Each demonstration would fail without the behavior. The drain criterion is split between the scripted World double (the drain's reaction) and a pure landing_from_report test (the refused report becomes Waiting), with criterion 3 covering the step from Err to a pending report. Together they cover the whole chain without putting logic in a double. No athena.toml field is added, and the work fits one producer run. Remaining issues are minor: the text match should search the full error chain, the single re-read can race, and the widened Waiting mapping should be documented and tested for both merge_requested values."
+}

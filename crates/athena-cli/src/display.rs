@@ -488,6 +488,10 @@ pub fn land_pr(report: &athena_core::gh::PrReport) -> String {
             };
             format!("open          {test}{rerun}; nothing was merged\n")
         }
+        (LinkState::Open, Some(Checks::Pending)) if report.merge_requested => {
+            "open          the host refused the merge by its repository rules while checks were not finished; waiting to merge. Run the command again later\n"
+                .to_string()
+        }
         (LinkState::Open, _) => {
             "open          checks are not finished; nothing was merged. Run the command again later\n"
                 .to_string()
@@ -2093,6 +2097,19 @@ mod tests {
         let text = land_pr(&report(Checks::Green, 1, None));
         assert!(text.contains("re-run once and then passed"), "{text}");
         assert!(!land_pr(&report(Checks::Green, 0, None)).contains("re-run"));
+    }
+
+    #[test]
+    fn a_refused_merge_with_pending_checks_is_shown_as_waiting_to_merge() {
+        let mut refused = report(Checks::Pending, 0, None);
+        refused.merge_requested = true;
+        let text = land_pr(&refused);
+        assert!(text.contains("waiting to merge"), "{text}");
+        assert!(text.contains("repository rules"), "{text}");
+        // Pending checks with no merge asked for keep the plain text.
+        let plain = land_pr(&report(Checks::Pending, 0, None));
+        assert!(!plain.contains("waiting to merge"), "{plain}");
+        assert!(plain.contains("checks are not finished"), "{plain}");
     }
 
     #[test]
