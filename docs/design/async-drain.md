@@ -220,6 +220,27 @@ Point 5. Records are history; their order must be stable even when jobs overlap.
   conflict; they are append-only, so a rebase conflict there is resolved by keeping both sides in queue order. This
   reading of the record formats is to be confirmed by build job 8 before it is relied on.
 
+Note on the records step (build job 8). `Drain::land` in `drain.rs` asks a new `Steps::commit_records(job)` right
+after `Steps::land` answers `Landed`, while the job still holds the head of the landing queue. The queue is what
+keeps the order: `await_head` lets only the head reach `Drain::land`, and the job's `LandingSlot` is kept until its
+attempts end, so the next job cannot start landing before the records step has returned. Records commits therefore
+follow landing order (not start order and not run-end order), each comes after its own landing, and none comes
+for a job that did not land (`NotLanded`, `Waiting` and a budget stop never reach the step). The step only adds
+files, so the append-only rule holds. A step that fails is noted in `Report::notes` and printed; the landing still
+counts, because a landed job cannot be un-landed and answering `NotLanded` would land it twice. The default does
+nothing, so a bound of 1, `drain`, and every steps type that does not override it behave as before. The tests in
+`tests/drain.rs` (`records_order`) drive `drain_concurrent` with three jobs in flight, finishing in the order c, a,
+b, and show the landing and records sequences side by side, together with the byte-for-byte check of an earlier
+record and the absence of any record for a job that was rejected.
+
+Not built here: the real steps keep the default. Today `go` still commits a job's closing files and its score and
+outcome records at close (`land_or_block` in `crates/athena-core/src/run/close.rs`), before the job joins the landing
+queue, so those commits follow close order. `Athena::land_pr` writes the landing-intent and landing records inside
+`Steps::land`, so those already follow landing order. Moving the close-time commit into the queue slot changes the
+run path and is later work, as is routing the records of failed or closed jobs through the queue (the third bullet
+above). The month-shard conflict reading is not confirmed: per-job record files and landing records are new paths,
+so no test here can show a conflict on them.
+
 ## 9. Alternatives
 
 | Option | Why not (or why later) |

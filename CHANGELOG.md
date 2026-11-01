@@ -238,6 +238,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   every exit gives the place up, a panic included. A worker held back says `drain      <job> waits in the
   landing queue`. It does not rebase: landing itself is unchanged, a landing that fails behaves as before, and
   with one job at a time the drain is unchanged. The rebase before landing is a separate, later change.
+- The drain commits a landed job's records from the landing queue right after its landing (build job 8 in
+  `docs/design/async-drain.md`, section 8). A new `Steps::commit_records` is asked in `Drain::land` once
+  `Steps::land` answers `Landed`, while the job still holds the head of the landing queue, so with several jobs in
+  flight the records commits follow landing order (not start order), each after its own landing and before the
+  next one, and never for a job that did not land. A records commit only adds files, so earlier records are never
+  rewritten. A failed commit is noted in the drain summary and does not undo the landing. The default commits
+  nothing, so with `max_in_flight` 1, `drain`, or any steps that do not override it there is no change in
+  behaviour. The real steps keep the default for now: `go` still commits a job's records at close, before the
+  job joins the queue; moving that commit into the queue is later work. The new tests (`records_order` in
+  `crates/athena-cli/tests/drain.rs`) commit real records through the real committer and print the landing
+  and records sequences for three jobs.
 - The core of the rebase before landing (second half of build job A6, core part, in
   `crates/athena-core/src/gh/landing.rs`; `Rebase`, `plan_rebase` and `rebase_job_branch` are re-exported from
   `crates/athena-core/src/gh/mod.rs`). `plan_rebase` replays the landing commits stacked on the local branch, one

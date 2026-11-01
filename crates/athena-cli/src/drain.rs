@@ -59,6 +59,17 @@
 //!   one job at a time nothing changes unless `rebase` answers `Moved`. The real steps keep the default
 //!   `Unchanged` until the drain wiring of the landing rebase exists, so the share is not measured in a live
 //!   drain yet; a rebase conflict is that wiring's matter.
+//! - **Records are committed right after each landing.** When [`Steps::land`] answers
+//!   [`Landing::Landed`], [`Steps::commit_records`] is asked for that job at once, in the same step, while the
+//!   job still holds the head of the landing queue (`LandingQueue`; the job's `LandingSlot` is kept until its
+//!   attempts end and `await_head` lets only the head land). So with several jobs in flight the records
+//!   commits come in landing order, each after its own landing and before the next one, and a job that did not
+//!   land gets none. A records commit only adds files (the append-only rule); it never rewrites an earlier
+//!   record. A commit that fails is noted ([`Report::notes`]) and does not undo the landing (`docs/design/async-drain.md`
+//!   section 8, decision D145, build job 8). With one job at a time (`max_in_flight` 1, so [`drain`] or a
+//!   bound of 1) the commit simply follows the landing, and steps that keep the default commit nothing, so
+//!   nothing changes. The real steps keep the default: `go` still commits a job's records at close, before
+//!   the job joins the landing queue; moving that commit into the queue is later work.
 //! - **The pass reads unread requests that are underspecified.** An unread request whose own words give no
 //!   acceptance (or no rung) is read first, within the budget and job limit, and planned again from its
 //!   reading. If the plan is still incomplete it is refused with the reason, so the queue
@@ -607,6 +618,20 @@ pub trait Steps {
     /// the checks are not run and the run ends as [`Stop::BudgetSpent`].
     fn rerun_cap(&self) -> f64 {
         0.0
+    }
+    /// Commits the records of `job` once it has landed. Asked once per landed job, in [`Drain::land`], right
+    /// after [`Steps::land`] answered [`Landing::Landed`], while the job still holds the head of the landing
+    /// queue (`LandingQueue`, kept by its `LandingSlot` until the job's attempts end, and waited for by
+    /// `await_head`). The next job cannot start landing before this returns, so records commits follow
+    /// landing order and are never made before the landing. Never asked for a job that did not land, is
+    /// waiting to merge, or stopped on the budget. A records commit only adds files: it never rewrites an
+    /// earlier record. An error is noted and printed; the landing still counts, because a landed job cannot be
+    /// un-landed. It should be quick, because the next landing waits for it. The default commits nothing. The
+    /// real steps keep the default: `go` commits a job's records at close
+    /// (`athena_core::run::close`, before the job joins the landing queue) and the landing records are written
+    /// inside [`Steps::land`], so moving the close-time commit into the queue is later work.
+    fn commit_records(&self, _job: &str) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -1603,6 +1628,16 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     st.landings.push(changed);
                 }
                 self.wake.notify_all();
+                // The job still holds the head of the landing queue here, so no later job can land before
+                // its records are committed: records commits follow landing order.
+                if let Err(why) = self.steps.commit_records(job) {
+                    let why = one_line(&why);
+                    self.ui
+                        .line(&format!("drain      {job} records not committed: {why}"));
+                    self.note(format!(
+                        "job {job} landed but its records were not committed: {why}"
+                    ));
+                }
                 if !outcome {
                     self.ui.line(&format!(
                         "drain      {job} landed but changed nothing the explainer is built from"
