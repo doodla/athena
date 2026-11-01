@@ -768,6 +768,11 @@ pub struct CheckRun {
     /// `--no-fail-fast` so every binary runs; `command` keeps the configured text without it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_tests: Vec<String>,
+    /// True when this record was not run locally but taken from a green CI run for the candidate commit
+    /// (it then has no exit code). The verdict counts such a passing record as a command seen running
+    /// (D43, D115). Absent in records written before this field, which load as `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4195,6 +4200,7 @@ mod tests {
             output_tail: "boom".into(),
             note: None,
             failed_tests: Vec::new(),
+            reused: false,
         };
         Baseline {
             job: job(),
@@ -4203,6 +4209,38 @@ mod tests {
             checks: vec![check("fmt"), check("test")],
             note: None,
         }
+    }
+
+    #[test]
+    fn a_check_run_written_before_reuse_was_marked_loads_as_not_reused() {
+        let old = sample_baseline().checks[0].clone();
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(
+            !json.contains("reused"),
+            "an unreused record serialises as before: {json}"
+        );
+        let parsed: CheckRun = serde_json::from_str(&json).expect("the old shape loads");
+        assert!(!parsed.reused);
+        assert_eq!(parsed, old);
+    }
+
+    #[test]
+    fn a_reused_check_record_round_trips_and_validates() {
+        let mut b = sample_baseline();
+        b.checks[1].reused = true;
+        b.checks[1].passed = true;
+        b.checks[1].exit_code = None;
+        b.checks[1].note = Some("result reused from the CI run".into());
+        let record = AnyRecord::Baseline(Box::new(b));
+        let json = record.to_json();
+        assert!(json.contains("\"reused\": true") || json.contains("\"reused\":true"));
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
+        let path = format!("{}/baseline.json", job().dir());
+        assert!(check_record_file(&path, json.as_bytes()).is_ok());
+        let AnyRecord::Baseline(back) = AnyRecord::parse("x", json.as_bytes()).unwrap() else {
+            panic!("a baseline")
+        };
+        assert!(!back.checks[0].reused && back.checks[1].reused);
     }
 
     #[test]

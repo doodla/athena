@@ -524,6 +524,7 @@ mod tests {
                 output_tail: String::new(),
                 note: None,
                 failed_tests: Vec::new(),
+                reused: false,
             })
         }
     }
@@ -544,6 +545,10 @@ mod tests {
         assert_eq!(runs.len(), 3);
         assert!(runs.iter().all(|r| r.passed));
         assert!(runs[0].note.as_ref().unwrap().contains("runs/5"));
+        assert!(
+            runs.iter().all(|r| r.reused),
+            "records taken from CI are marked reused"
+        );
     }
 
     #[test]
@@ -553,6 +558,7 @@ mod tests {
         let runs = go("code", &["src/a.rs"], &ci, &local);
         assert_eq!(*local.ran.borrow(), vec!["fmt", "clippy", "test"]);
         assert!(runs.iter().all(|r| r.passed && r.exit_code == Some(0)));
+        assert!(runs.iter().all(|r| !r.reused), "locally run, not reused");
         // A red run for another SHA is not this candidate's failure either.
         let ci = Ci::new(Some(ci_run(OTHER, "failure")));
         let local = Local::new(None);
@@ -592,6 +598,7 @@ mod tests {
         assert_eq!(runs.len(), 3);
         assert!(runs[0].note.as_ref().unwrap().contains("not run"));
         assert!(runs.iter().all(|r| r.passed));
+        assert!(runs.iter().all(|r| !r.reused), "skipped is not reused");
     }
 
     // --- the wait: one read every CI_POLL, up to the bound ---
