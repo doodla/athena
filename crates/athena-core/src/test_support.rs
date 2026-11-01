@@ -679,6 +679,27 @@ pub fn low_once_verifying(state: &Path) -> std::io::Result<u64> {
     }
 }
 
+/// A free-space reader for a job that clears the gate at dispatch and stops at the gate before its producer:
+/// plenty of space until a job's baseline check has left the file `baseline-ran` in the job directory, 3 GB
+/// then, unless a file named `freed` lies in the state root. Pair it with a baseline check that creates
+/// `../baseline-ran` (the check runs in the job's `baseline` directory).
+pub fn low_once_baselined(state: &Path) -> std::io::Result<u64> {
+    if state.join("freed").exists() {
+        return plenty_of_space(state);
+    }
+    let baselined = std::fs::read_dir(state.join("jobs"))
+        .map(|dirs| {
+            dirs.flatten()
+                .any(|e| e.path().join("baseline-ran").exists())
+        })
+        .unwrap_or(false);
+    if baselined {
+        Ok(3_000_000_000)
+    } else {
+        plenty_of_space(state)
+    }
+}
+
 /// A free-space reader for a job that clears the gate at dispatch and stops at the gate before its checks:
 /// plenty of space until a job's producer has left a build directory (`target/produce`), 3 GB then, unless a
 /// file named `freed` lies in the state root. Pair it with a script whose producer leaves that directory.
