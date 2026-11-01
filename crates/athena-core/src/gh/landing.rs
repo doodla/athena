@@ -167,7 +167,10 @@ pub struct PrReport {
 
 /// Runs the flow. With no stored link: guard and push the branch, open the pull request, store the link.
 /// Then, while the pull request is open: look for a merge, else read the checks, and merge over REST only if
-/// the setting is on and the checks are green.
+/// the setting is on and the checks are green. Checks are green only when no check run on the head is still
+/// queued or in progress. A merge the host refuses with "Repository rule violations" while the checks are
+/// pending again is a wait: the report has `checks` pending, `merge_requested` set and a warning, and it is
+/// not an error. The same refusal with the checks settled stays an error.
 pub fn land_pr(job: &LandPr) -> Result<PrReport> {
     // The commit an early push left on the branch at verification start, if any.
     let early = load_early(job.state, job.job)?;
@@ -239,11 +242,38 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
                 }
                 None => None,
             };
-            let method = job.host.merge(link.pr_number, &link.head, job.squash)?;
-            merge_requested = true;
-            observe_merge(job.host, job.content, &mut link, job.verified_fingerprint)?;
-            if let Some((records, expected_base, intent)) = intent {
-                match (&link.state, &link.merged_commit) {
+            let method = match job.host.merge(link.pr_number, &link.head, job.squash) {
+                Ok(method) => {
+                    merge_requested = true;
+                    Some(method)
+                }
+                // The host refused the merge by its repository rules. While a check is still running that
+                // is a wait, not a failure: the merge is possible once every check has finished. Any other
+                // refusal, or one with the checks settled, is returned as it came.
+                Err(refusal) if is_rule_violation(&refusal) => {
+                    if job.host.check_report(&link.head)?.checks != Checks::Pending {
+                        return Err(refusal);
+                    }
+                    let record = intent
+                        .as_ref()
+                        .map(|(_, _, id)| {
+                            format!("; landing-intent record {id} is on the records branch")
+                        })
+                        .unwrap_or_default();
+                    warnings.push(format!(
+                        "the host refused the merge by its repository rules while checks were not finished \
+                         ({refusal:#}); waiting to merge{record}"
+                    ));
+                    checks = Some(Checks::Pending);
+                    merge_requested = true;
+                    None
+                }
+                Err(other) => return Err(other),
+            };
+            if let Some(method) = method {
+                observe_merge(job.host, job.content, &mut link, job.verified_fingerprint)?;
+                if let Some((records, expected_base, intent)) = intent {
+                    match (&link.state, &link.merged_commit) {
                     (LinkState::Landed, Some(host_commit)) => {
                         let facts = LandingFacts {
                             intent: intent.clone(),
@@ -278,6 +308,7 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
                          landing-intent record {intent} is on the records branch for reconciliation"
                     )),
                 }
+                }
             }
         }
     }
@@ -290,6 +321,11 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
         failing_test,
         warnings,
     })
+}
+
+/// Whether the host refused a merge by its repository rules (GitHub: "Repository rule violations found").
+fn is_rule_violation(refusal: &anyhow::Error) -> bool {
+    format!("{refusal:#}").contains("Repository rule violations")
 }
 
 /// For a job whose landed commit is not on the current branch: when the job's pull request link already

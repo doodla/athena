@@ -1,0 +1,213 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261101-185259-36ae",
+  "round": 1,
+  "at": "2026-11-01T18:57:50.030478932Z",
+  "invocation_seq": 3,
+  "approach": "Fix at two points. (1) classify_checks in gh/client.rs: Red stays tied to the required check run alone. Otherwise any check run on the head that is not completed (queued, in_progress, waiting, requested, pending) makes the verdict Pending, so wait_for_checks keeps polling and land_pr never reaches host.merge. (2) land_pr in gh/landing.rs: a merge error containing 'Repository rule violations' is followed by one re-read of check_report. If that read is Pending, the refusal is a wait: land_pr returns Ok with checks Some(Pending), merge_requested true and a warning. Any other refusal, or a rule violation with checks not pending, stays an Err. In the drain, add Landing::Waiting(String). PrLander maps an Open pull request with Pending checks to it, through a small pure function. Drain::land returns a three-way result. A waiting item ends as ItemEnd::Waiting: it is not retried, not counted as a failure, sets no stop, is passed over with a 'waiting to merge' reason, and the next item is worked. display.rs gets a 'land --pr' line for the refused-merge case and a test. Doc comments on classify_checks and wait_for_checks state the new rule. CHANGELOG gets a Fixed entry.",
+  "decisions": [
+    {
+      "choice": "Red still comes only from the required CI_AGGREGATE_JOB run. Pending is returned whenever the required run is missing or not completed, or any other run is not completed. A required-red run stays Red even while an optional run is in progress.",
+      "reason": "Keeps the request's rule ('only a failed required check is a failure; a failed optional check stays a note') and leaves the existing red path (wait for runs, one re-run) untouched, which the brief puts out of scope.",
+      "rejected": [
+        {
+          "option": "Make any in-progress run Pending even when the required run is red",
+          "why": "It would delay the red re-run logic and change out-of-scope behavior; wait_for_checks step 2 already waits for sibling runs."
+        },
+        {
+          "option": "Read required checks from branch protection",
+          "why": "Explicitly out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "On a merge error containing 'Repository rule violations', land_pr re-reads check_report once. Pending gives a wait (Ok report); anything else is returned as the original Err.",
+      "reason": "The brief calls the refusal a wait only 'while checks are pending'. A rule violation with settled checks (for example a missing review) is a real failure and must not be hidden as waiting. The re-read also covers a check that started after the first read.",
+      "rejected": [
+        {
+          "option": "Treat every 'Repository rule violations' error as a wait",
+          "why": "Would hide permanent violations behind an endless 'waiting' state."
+        },
+        {
+          "option": "Detect it in GhClient::merge and return a typed error",
+          "why": "The text match is needed anyway. Keeping it in land_pr leaves it testable with the fake host, which returns an error string."
+        }
+      ]
+    },
+    {
+      "choice": "No new PrReport field. A wait is checks == Some(Pending) with state Open. PrLander maps that to Landing::Waiting. Any other Open or Err result stays NotLanded.",
+      "reason": "Smallest change: the PrReport constructors in after_merge_tests.rs and the display test helper stay untouched. Pending checks that outlast the poll bound are also a wait, not a failure, and would otherwise make the drain stop with RepeatedFailure now that optional runs count.",
+      "rejected": [
+        {
+          "option": "Add a waiting_to_merge bool to PrReport",
+          "why": "Touches every PrReport literal for no extra information; the Pending state plus merge_requested already carries it."
+        }
+      ]
+    },
+    {
+      "choice": "Add Landing::Waiting(String) and ItemEnd::Waiting. A waiting item leaves the attempts loop at once (no second land attempt), sets jobs[at].landing = 'waiting to merge: <why>', and finish() calls pass_over without set_stop.",
+      "reason": "The run continues to the next item as required. The item is neither counted as landed nor as a failure. It stays in the 'queued not landed' list (it is not in st.landed), so a later run or 'athena land --pr' finishes it.",
+      "rejected": [
+        {
+          "option": "Reuse NotLanded with a 'waiting' text",
+          "why": "The drain counts NotLanded as a failure attempt and ends the run with RepeatedFailure, which is the bug."
+        }
+      ]
+    },
+    {
+      "choice": "Extract the Result<PrReport> to Landing mapping from PrLander::land into a pure function, landing_from_report, and unit-test it.",
+      "reason": "PrLander calls athena.land_pr with GhCli and cannot be driven in a unit test. The pure function makes 'rule-violation refusal reported as waiting' checkable end to end from a PrReport to a Landing without moving logic into a fake.",
+      "rejected": [
+        {
+          "option": "Test only with a fake Steps returning Landing::Waiting",
+          "why": "That proves the drain's reaction but not that a refused merge becomes Waiting. It is kept as the second half of the drain test."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "purpose": "classify_checks: Pending when any check run on the head is not completed (and the required run is not red). Update the doc comments of classify_checks and of Checks::Pending.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "purpose": "land_pr: on a host.merge error containing 'Repository rule violations', re-read check_report; Pending means a wait (Ok report with checks Some(Pending), merge_requested true, a warning). Anything else propagates. Add a small helper for the text match. Update the land_pr doc comment.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/early.rs",
+      "action": "modify",
+      "purpose": "Doc comment of wait_for_checks: any queued or in-progress check run keeps the verdict pending, so the wait polls until every run completes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "New tests for criteria 1 to 3. FakeHost gets a `runs` field with a check_report override that calls classify_checks, and a `merge_error` field. Extend the classify tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Landing::Waiting(String), ItemEnd::Waiting, a three-way Drain::land, finish() handling without a stop, the pure landing_from_report used by PrLander::land, the module doc line, and the new tests (World.waiting / .waits, drain test, mapping test).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "land_pr: an (Open, Pending) with merge_requested arm saying the host refused the merge by its rules while checks are unfinished and the job is waiting to merge; a display test. The drain job line already prints the landing text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Fixed entry under [Unreleased].",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Edit classify_checks in gh/client.rs: keep the required-run logic, but when the required run is not red and any run has a status that is present and not 'completed', return Pending. Update the doc comments of classify_checks and Checks::Pending (client.rs lines 28 and 785-796).",
+    "Update the wait_for_checks doc comment in gh/early.rs: any queued or in-progress check run keeps the verdict pending, so land waits for every run to complete before it can reach the merge.",
+    "In gh/landing.rs, restructure the merge block of land_pr. Call job.host.merge and, on Err whose text contains 'Repository rule violations', call job.host.check_report(&link.head). If it is Pending: push a warning (the refusal, the intent id if any, 'waiting to merge'), set checks = Some(Pending) and merge_requested = true, skip observe_merge and the landing record, and fall through to store_link and Ok(PrReport). Otherwise return the original error. Put the text match in a helper `is_rule_violation(&anyhow::Error)`. Update the land_pr doc comment.",
+    "In display.rs land_pr, add an arm `(LinkState::Open, Some(Checks::Pending)) if report.merge_requested` that says the host refused the merge by its rules while checks were not finished, so it is waiting to merge and the command can be run again later. Place it before the `(LinkState::Open, _)` arm. Add a display test using the existing report() helper with merge_requested set.",
+    "In gh/tests.rs, extend FakeHost: `runs: RefCell<Option<Value>>` plus a `check_report` override that returns classify_checks(&runs, &json!({\"statuses\": []})) when it is set, and `merge_error: RefCell<Option<String>>` consulted in merge() before merge_refused. Add the tests for criteria 1 to 3 (classify Pending with an in-progress optional run; land_pr no merge call; optional-failed Green with note; required-failed Red even with an in-progress optional run; rule-violation wait with script [Green, Pending]; rule-violation with script [Green, Green] is Err).",
+    "In drain.rs, add Landing::Waiting(String) with a doc comment, and ItemEnd::Waiting. Make Drain::land return a small private enum (Landed, Waiting, NotLanded) or Option<bool>. On Waiting, print 'drain {job} waiting to merge: {why}', set jobs[at].landing = 'waiting to merge: {why}', and in attempts return ItemEnd::Waiting before the failures counter. In finish(), pass_over(&item.job, 'waiting to merge: ...') with no set_stop.",
+    "Extract `fn landing_from_report(report: anyhow::Result<PrReport>) -> Landing` from PrLander::land: Landed state gives Landed; Open with checks Some(Pending) gives Waiting with a message naming the pull request and that it merges once checks finish; any other state or Err gives NotLanded as before. Add its unit test, using a PrReport built like display.rs's report() helper.",
+    "In drain.rs tests, extend World with `waiting: BTreeSet<String>` and a `.waits(job)` builder, and make World::land return Landing::Waiting for those jobs. Add the drain test (a waits, b lands, stop == QueueEmpty, one land call for a, report.landed == 1, a's job line starts 'waiting to merge'). Update the module doc comment (and Landing's doc comment) to mention the waiting outcome.",
+    "Add the CHANGELOG.md entry under [Unreleased] / ### Fixed (line ~10): the drain waits while any check run on the pull request head is queued or in progress and treats a 'Repository rule violations' merge refusal while checks are pending as 'waiting to merge'; root cause: classify_checks judged only the required run.",
+    "Run cargo fmt --all, then cargo clippy --all-targets --locked -- -D warnings and cargo test --locked, and fix anything they report."
+  ],
+  "risks": [
+    {
+      "risk": "Treating a non-completed optional run as Pending could stall a landing on a long or stuck optional check, since the pull request head check always fails on a candidate.",
+      "mitigation": "Make Pending apply only when the required run is not red, and keep the Red-to-rerun path unchanged. Existing tests in tests.rs (checks_are_classified_from_the_two_replies, only_the_required_check_decides...) still pass. Case (iv) and the unnamed-run case stay Pending."
+    },
+    {
+      "risk": "A rule violation caused by something other than checks (review required, linear history) would be shown as a wait.",
+      "mitigation": "Only the exact text 'Repository rule violations' is matched, and it is a wait only if the immediate re-read of the checks is Pending. Otherwise the original error is returned."
+    },
+    {
+      "risk": "The landing-intent record is written before the merge call, so a refused merge leaves an intent with no landing.",
+      "mitigation": "The landing-intent record written before the refused merge stays on the records branch. The warning added on the wait path names the intent record. A retried land_pr writes a new intent and reconciliation already handles an unconfirmed merge. Verify by reading the existing 'merge was requested but not confirmed' path when implementing."
+    },
+    {
+      "risk": "Adding a Landing variant breaks other matches, such as tests in other files.",
+      "mitigation": "Grep for `Landing::` and `ItemEnd` across crates/ (including crates/athena-cli/tests) while implementing. The compiler flags any non-exhaustive match."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Test A: call classify_checks with check_runs [required run completed/success, a second run in_progress] and assert checks == Pending. Test B: drive land_pr through the existing Rig::run helper against a FakeHost that carries those check-run JSON replies. A new FakeHost field, set by a new constructor, makes check_report return classify_checks(runs, status). Assert host.merges == 0, report.merge_requested is false, report.checks == Some(Pending) and the link stays Open, with merge_via_rest on.",
+      "command": "cargo test -p athena-core gh::",
+      "observes": "classify_checks returns Pending for a green required check plus an in-progress run. land_pr with merge_via_rest on makes no merge call.",
+      "fails_without": "Without the not-completed rule in classify_checks the in-progress optional run reads Green, FakeHost::merge is called (merges == 1, merge_requested true) and both assertions fail.",
+      "seam": "Production entry points are gh::classify_checks and gh::land_pr, via Rig::run (exists, tests.rs ~1030). The fake is FakeHost (exists, tests.rs 836), which implements PrHost. Plan step 5 adds a `runs: RefCell<Option<Value>>` field and a `check_report` override on FakeHost. The override only calls the production classify_checks, so no classification logic lives in the double."
+    },
+    {
+      "criterion": 2,
+      "method": "Extend the existing test only_the_required_check_decides_and_optional_failures_become_notes (tests.rs 709), or add a sibling. Assert classify_checks([required success, head_run failure]) is Green with one note naming 'pull request head' and 'failure'. Assert [required failure, an optional completed run] is Red. Assert [required failure, an optional in_progress run] is still Red.",
+      "command": "cargo test -p athena-core gh::",
+      "observes": "Verdicts and notes returned by classify_checks.",
+      "fails_without": "If optional failures stopped being notes the Green assertion fails. If a required failure stopped being Red the Red assertion fails. The 'not completed' rule must not break these.",
+      "seam": "Production gh::classify_checks called directly. Existing helpers required_run and head_run (tests.rs 699-706) are the fixtures. The seam exists."
+    },
+    {
+      "criterion": 3,
+      "method": "Add a FakeHost field `merge_error: RefCell<Option<String>>`, used by merge() in place of the fixed refusal text. Positive case: checks Green, script [Green, Pending], merge_error 'Repository rule violations found'; call rig.run(&host, true, ...) and assert Ok, report.checks == Some(Pending), host.merges == 1, report.link.state == Open, and a warning mentioning the refusal. Negative case: script [Green, Green] with the same error text must still return Err.",
+      "command": "cargo test -p athena-core gh::",
+      "observes": "land_pr returns Ok with a Pending report in the first case and an Err in the second.",
+      "fails_without": "Without the rule-violation branch land_pr returns Err from host.merge, so the Ok/unwrap in the test fails. Without the re-read, the Green-then-Green negative case would be treated as a wait.",
+      "seam": "Production gh::land_pr via Rig::run (exists). FakeHost.script (exists, tests.rs 851) supplies the second read. Plan step 5 adds merge_error."
+    },
+    {
+      "criterion": 4,
+      "method": "Test 1, in drain.rs `mod tests` (the World fixture, line 3744): World gets `waiting: BTreeSet<String>`, set by a new `.waits(job)` builder, and World::land returns Landing::Waiting for those jobs. Use independent items a and b with disjoint paths and no dependency. Run `concurrent(&world, 2)` (which calls drain_concurrent). Assert report.stop == Stop::QueueEmpty, not RepeatedFailure. Assert world.count(\"land a\") == 1 (no retry). Assert world.logged(\"land b\") and report.landed == 1. Assert the job line for a has landing starting 'waiting to merge'. Test 2: landing_from_report on a PrReport (built like display.rs's report() helper) with an Open link, checks Some(Pending) and merge_requested true gives Landing::Waiting. The same report with checks Red gives NotLanded, and Err gives NotLanded.",
+      "command": "cargo test -p athena-cli drain",
+      "observes": "Report.stop, report.jobs[..].landing text, the log order and landed counts.",
+      "fails_without": "Without Landing::Waiting and ItemEnd::Waiting, a refused landing is counted as a failed attempt. The item is retried, the run ends with Stop::RepeatedFailure and b never lands, so every assertion fails.",
+      "seam": "Production entry points are drain::drain_concurrent (via the `concurrent` helper, exists) and landing_from_report (new, plan step 7). The fake is World (exists, drain.rs 3744), injected as `&dyn Steps`. Step 8 adds the `waiting` set and the .waits builder. The fake only returns the scripted Landing; the drain's reaction to it is production code."
+    },
+    {
+      "criterion": 5,
+      "method": "Add an entry under ## [Unreleased] ### Fixed (CHANGELOG.md line 10). It says the drain now waits while any check run on the pull request head is queued or in progress, and treats a 'Repository rule violations' merge refusal while checks are pending as 'waiting to merge'. It names the root cause: classify_checks looked only at the required run. Read the entry; a Grep with the Grep tool for 'waiting to merge' and 'Repository rule violations' in CHANGELOG.md is the check.",
+      "command": "grep -n \"Repository rule violations\" CHANGELOG.md",
+      "observes": "The entry is present under Unreleased and describes both behaviors.",
+      "fails_without": "Without the entry the grep finds nothing.",
+      "seam": "Content check, no test seam. If the verifier cannot run grep, use the Grep tool on CHANGELOG.md."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three commands separately: cargo fmt --all --check; cargo clippy --all-targets --locked -- -D warnings; cargo test --locked.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All exit 0. This also covers the existing tests that expect Pending-with-no-merge, and the display.rs tests.",
+      "fails_without": "Any compile error, lint warning (for example a non-exhaustive match on Landing or ItemEnd) or failing existing test makes one of the three commands exit non-zero.",
+      "seam": "Whole workspace. Existing and new tests."
+    },
+    {
+      "criterion": 7,
+      "method": "Edit the doc comment on classify_checks (client.rs ~785) and the doc of wait_for_checks (early.rs ~117) to say that any check run on the head still queued or in progress makes the verdict pending, and that only a failed required check is Red. Check by reading both comments and by grep (the Grep tool also works).",
+      "command": "grep -n \"queued or in progress\\|in progress\" crates/athena-core/src/gh/client.rs crates/athena-core/src/gh/early.rs",
+      "observes": "Both doc comments state the any-queued-or-in-progress-run rule.",
+      "fails_without": "Without the doc updates the grep finds only the old wording.",
+      "seam": "Content check, no test seam."
+    }
+  ],
+  "open_questions": [
+    "Dependents of a waiting item: take_until_done inserts the item into `done` whatever its end, so an item that depends on a waiting one may start before the waiting job has merged. Should a dependency on a waiting item hold the dependent? The brief only says the run goes on to the next job, so the plan leaves this unchanged.",
+    "Check-run statuses other than queued and in_progress (waiting, requested, pending) are also treated as not finished. The brief names only queued and in progress; this is the conservative reading.",
+    "If the optional check never finishes, the drain keeps reporting 'waiting to merge' on every run instead of failing; a later `athena land --pr` finishes the job. The plan does not add a time limit."
+  ],
+  "producer_section_sha256": "ddfa11348ae038d9c04ff18a3801c56fe364522236a95b6f267e18f6157c3afc"
+}
