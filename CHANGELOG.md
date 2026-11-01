@@ -142,6 +142,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A plan that calls an external service (GitHub API, CI run, deploy) must now name the state the call needs
+  (for example, that a run has completed) and say how the plan checks or waits for it. Root cause: planning
+  designed such calls without checking the state they need, and the critic still missed the gap after the last
+  round (failure class 20261018-100239-xc20; introspections 20261018-100226-1mfq, 20261026-002830-390w and
+  20261026-091638-kqx6). Fix in the prompts: `crates/athena-context/prompts/planner.md` states the rule and
+  `crates/athena-context/prompts/critic.md` tells the critic to raise a major finding in round one when a plan
+  omits it. The test `external_service_calls_need_a_named_state_and_a_wait` guards the wording; whether the
+  agents follow it is prose-only guidance. To keep each frame under 500 estimated tokens, two redundant lines
+  were cut (the planner's and critic's closing "structured output" lines, which the contract already states) and
+  the snapshot sentences were shortened.
 - Each job's candidate is pushed to the branch `athena/ci/<job id>` on `origin` as soon as it is admitted, and
   the branch is deleted when the job closes, whatever the outcome (landed, rejected or failed). The push goes
   through `gh::Remote`, apart from the early pull request's own push to the job's work branch.
