@@ -1,0 +1,129 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261031-031934-8vyd",
+  "base_commit": "85010362a58dec4355e87ee2bf6a7df99ad874f2",
+  "base_fingerprint": "sha256:0c05f0c42d77e2860d2d51f746630645e4fd997c0ba43984d305adb2a615d1c3",
+  "previous_job": "20261101-185259-36ae",
+  "candidate_commit": "aed33d74ec844268eda7ea836860dce86880b99d",
+  "candidate_tree": "4e0b39ab2079b7593cc2fce4cd9e98cb03515eb9",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 279496
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 207297
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 236144
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 25586
+    }
+  ],
+  "fingerprint": "sha256:9a43cc1ce9a3c07de08c9489bcd914f93c0818add1682548b6b409ad8b7a65e2",
+  "violations": [],
+  "producer_report": {
+    "summary": "The drain now re-runs a job's checks after a rebase only when the rebase touched what the candidate changed. It also counts the share of rebases that needed a re-check and prints it in the drain summary. The real steps do not call the rebase yet, so none of this runs in a live drain; the new tests drive it with scripted steps.\n\nI ran fmt, clippy, the policy scan and the whole `athena-cli` test suite. All pass, with no existing test edited. I did not run the full workspace `cargo test`.\n\n- **Seam:** The `Steps` trait in `crates/athena-cli/src/drain.rs` gets three methods that all have defaults: `rebase`, `rerun_checks` and `rerun_cap`. With the defaults (no rebase, checks pass, cost 0) the drain behaves as it did, including with `max_in_flight = 1`.\n- **Rule:** `Drain::land` asks `rebase` under the landing lock, before the job lands. A re-check is needed when a touched path overlaps a candidate path, or when any `Cargo.toml` or `Cargo.lock` at any depth changed. A change to only `CHANGELOG.md`, `docs/decisions.md` or `README.md` does not count.\n- **Failed re-check:** A failed re-check stays owed on the landing retry. The retry finds the branch already moved and `rebase` answers `Unchanged`, so without this the job would land on failed checks. Failing twice ends the run as repeated-failure, like any landing that fails twice.\n- **Budget:** The re-check's cap is held against the budget first. If it does not fit, the run ends as budget-spent, no failure is counted, and the job line says why.\n- **Share:** Only rebases that moved a branch are counted. The result is in `Report.rebases` and in a summary note, for example `rebases: 1 of 2 needed a re-check (measured by candidate paths and any Cargo.toml or Cargo.lock)`. It is kept for the run only and no record is written.\n- **Tests:** `mod rebase_recheck` in `crates/athena-cli/tests/drain.rs` has 10 tests through `drain_concurrent` and `drain`:\n  - overlap re-checks before landing;\n  - no overlap lands with no re-check;\n  - the 1 of 2 share appears in the report and the rendered summary;\n  - a failed re-check survives the retry;\n  - a failed re-check followed by a pass lands;\n  - a re-check that does not fit the budget ends the run as budget-spent;\n  - a re-check's cost is added to the spend;\n  - a two-worker (`max_concurrency` 2) group still lands its second job as before.\n\n  Six unit tests in `drain.rs` cover the rule per case.\n- **Docs and changelog:** `CHANGELOG.md` has one bullet citing D145 and build job 7. `docs/design/async-drain.md` records the rule as built, and both say the share is not measured in a live drain yet.",
+    "files": [
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md",
+      "docs/design/async-drain.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --locked --test drain rebase_recheck",
+        "result": "pass",
+        "note": "10 new integration tests"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --lib rebase_needs",
+        "result": "pass",
+        "note": "6 unit tests of rebase_needs_recheck"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked -q",
+        "result": "pass",
+        "note": "whole crate, every suite ok, no existing test edited (git diff --stat shows 1 deleted line, in the design doc)"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --locked --test policy",
+        "result": "pass",
+        "note": "boundary scan, 12 tests"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Tests in crates/athena-cli/src/drain.rs drive the drain through its real entry point (drain or drain_concurrent) with a landing whose rebase touches a path the candidate changed, and show checks re-run before landing. Run cargo test -p athena-cli.",
+        "status": "met",
+        "evidence": "The drain-level tests are in crates/athena-cli/tests/drain.rs, `mod rebase_recheck`. drain.rs holds the unit tests for the pure rule. This differs from the criterion's file wording; the Files line and the plan put the drain tests in tests/drain.rs. a_rebase_that_touched_a_candidate_path_runs_the_checks_again_before_landing runs drain_concurrent and asserts the log is [run a, rebase a, rerun a, land a]. the_same_rule_holds_through_the_one_job_at_a_time_entry_point does the same through drain::drain. Both passed in `cargo test -p athena-cli`. Six unit tests in drain.rs (read_ahead_tests::rebase_needs_*) pin the rule per arm."
+      },
+      {
+        "criterion": "A test through the same entry point shows a rebase touching only paths the candidate did not change lands with no check re-run, and the drain summary reports the share of rebases needing a re-check (e.g. 1 of 2) as a number. Run cargo test -p athena-cli.",
+        "status": "met",
+        "evidence": "a_rebase_that_touched_no_candidate_path_lands_with_no_checks_run_again asserts the log [run a, rebase a, land a]. the_summary_reports_the_share_of_rebases_that_needed_a_re_check runs two jobs and asserts no `rerun a`, `rerun b` before `land b`, report.rebases == {total 2, rechecked 1}, the note `rebases: 1 of 2 needed a re-check (...)`, and that display::drain(&report) contains that line. a_drain_with_no_rebase_reports_no_share asserts no note when nothing was rebased. All passed."
+      },
+      {
+        "criterion": "With max_in_flight = 1 the existing drain tests pass unchanged: git diff shows no existing test removed or edited, and cargo test passes. A new drain_concurrent test with max_concurrency 2 pins that the second job of a group still lands as today.",
+        "status": "met",
+        "evidence": "git diff --stat shows only insertions in drain.rs and tests/drain.rs (the single deleted line is in the design doc). The new Steps methods have defaults, so every existing stub compiled unchanged. `cargo test -p athena-cli -q` passed in every suite, including the 140 existing drain integration tests plus the new ones. with_two_workers_the_second_job_of_a_group_still_lands_after_the_first runs drain_concurrent with bound 2 and asserts plan_groups [[a, b]], landed 2, `land a` before `land b`, no rerun, and rebases {1, 0}."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` (both clean) and `cargo test -p athena-cli` (all pass). I did not run the full workspace `cargo test`."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing the path-scoped re-check after rebase and the recorded share of rebases that needed it, citing D145 and build job 7.",
+        "status": "met",
+        "evidence": "One bullet added under Unreleased: it cites async drain build job 7 and decision D145. It describes the overlap-or-manifest rule, the budget hold, the owed re-check on the landing retry, the printed share (`rebases: 1 of 2 needed a re-check (...)`) and the live-drain limit."
+      },
+      {
+        "criterion": "Governance files (athena.toml, defaults.toml, .github/workflows) are unchanged; no rule that refuses is newly added beyond re-running checks, so no refusal-rate figure applies.",
+        "status": "met",
+        "evidence": "git diff --stat lists only CHANGELOG.md, crates/athena-cli/src/drain.rs, crates/athena-cli/tests/drain.rs and docs/design/async-drain.md. The only new stop is the existing budget stop, reached when a re-check cap does not fit. No parser, stem list or refusal rule was added."
+      }
+    ],
+    "open_issues": [
+      "The real steps keep the Steps defaults (Unchanged, checks pass, cap 0), so the rule and the share run only in tests. The A6 wiring (Steps::rebase, Athena::rebase_for_landing) is absent, as the plan expected. The share is not yet measured in a live drain. The CHANGELOG, the design doc and the drain.rs module docs say so.",
+      "Rebase conflict handling (hold the job, no retry, no drain stop), the thrash stop and the send-back were not built. They belong to A6 and are out of scope.",
+      "The plan's open questions about the rule stay open. I followed the plan: every Cargo.toml or Cargo.lock at any depth forces a re-check, only moved rebases count in the share, and a re-check that fails twice ends as repeated-failure. Each is a small edit to change.",
+      "The unit tests for rebase_needs_recheck sit in the `read_ahead_tests` module in drain.rs, because that module has the `own` helper. The plan's filter `drain::tests::rebase` does not match them; use `cargo test -p athena-cli --lib rebase_needs`.",
+      "The drain-level tests are in crates/athena-cli/tests/drain.rs rather than src/drain.rs, as the plan and expected deliverables say. Criterion 1's wording names src/drain.rs, so the verifier may want to know."
+    ],
+    "mistakes": [
+      "None found. All new tests passed on the first run."
+    ],
+    "learnings": [
+      "The landing queue and Rebase handling (LandingQueue; plan_rebase and rebase_job_branch in landing.rs) are in the tree, but drain.rs never calls them. Steps::rebase and Athena::rebase_for_landing do not exist, so the rule cannot run in a live drain yet.",
+      "Drain::land is called again after NotLanded with the same `passed` slot, and the job is not re-run. This is why a failed re-check must be remembered (the `owing` set): a second `rebase` finds the branch already moved and answers Unchanged.",
+      "pass_over lines go to the Ui, not to Report. A test must use a recording Ui (`Lines` in tests/common) to assert them.",
+      "display::drain already prints report.notes, so the share line needed no display.rs change."
+    ],
+    "desires": [
+      "A way to run only the new tests by a stable filter name; the plan's `drain::tests::rebase` filter does not match because the unit tests sit in the read_ahead_tests module, so I used `rebase_needs`."
+    ]
+  }
+}

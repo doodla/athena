@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-031934-8vyd",
+  "round": 3,
+  "at": "2026-11-01T20:19:55.282993362Z",
+  "invocation_seq": 8,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The two-worker pin asserts a landing order that depends on thread timing.",
+      "evidence": "drain.rs 2337-2341 and 1430-1452: jobs in one plan group run side by side, and the landing queue is joined in the order runs pass (`enter_queue` when `RunStep::Passed`). With two workers, whether a or b passes first is a matter of thread timing. So asserting that a lands first is either flaky or relies on timing that the plan does not script. Fix: Make the order deterministic in the fixture (for example, b's run waits until a has entered the queue, as `mod parallel`'s Shared can arrange), or assert only that both land one after the other with no 'rerun' logged, and that rebases is {1, 0}.",
+      "location": "Demonstrations, Criterion 3 (max_concurrency 2 pin): \"'land a' is logged before 'land b'\"",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The scripted rebase answers come from one shared queue, so concurrent workers can get the wrong job's answer.",
+      "evidence": "For the max_concurrency 2 pin the plan needs `Unchanged` for a and `Moved` for b. One shared FIFO queue would give the answers in call order, not by job, and the call order across workers is not fixed. Fix: Key the scripted answers by job (for example `Mutex<BTreeMap<String, VecDeque<Rebased>>>`), and do the same for `rerun_checks` results.",
+      "location": "Demonstrations, Criteria 1 and 3: the fixture answers `rebase` from a single `Mutex<VecDeque<Rebased>>`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan takes the method name A6 reserved and fixes a two-arm result that A6 will need to extend.",
+      "evidence": "async-drain.md 164-165 reserves the name `Steps::rebase` (and `Athena::rebase_for_landing`) for A6's wiring, which must also carry a conflict or held-back result (lines 151-158). A7 fixes the signature and a two-arm enum ahead of A6, so A6 will have to reshape both. Fix: Say in the doc comment and in the design-doc note that A6 is expected to extend `Rebased` with a conflict arm and to supply candidate and touched paths from `rebase_job_branch`. Or pick a narrower name, such as `rebase_paths`, that leaves `Steps::rebase` to A6.",
+      "location": "Decision 1 / Step 1: new `Steps::rebase(&self, job) -> Rebased` with arms Unchanged and Moved",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The share is never measured in a live drain; the plan says so, but the CHANGELOG wording should make it plain that the feature is not yet active.",
+      "evidence": "drain.rs never calls `rebase_job_branch` (grep finds no `Steps::rebase`), and A6 (20261030-013555-f5qm) failed. The request's 'record the share of rebases that needed it' therefore holds only in tests; a live drain always reports nothing. The plan states this in the CHANGELOG, the design doc and the final report, which matches the reading's 'producer reports it' clause. Fix: Keep the disclosure. Also make the CHANGELOG bullet's first clause say the rule is ready but not yet active, so a reader does not take it as a live feature.",
+      "location": "Open question 1 / Decision 7: real steps keep the defaults",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Verdict: accept, with four minor findings and no blocker or major. I checked the plan against the snapshot with Read and Grep. Its claims hold in the code. `Drain::land` (drain.rs 1454) takes the landing lock and then calls `steps.land`. The landing loop in `attempts()` (1506-1584) keeps the passed job and calls land again after `NotLanded`, which is why the `owing` set is needed. `ItemEnd::Budget` gives `pass_over`, using `last_reason`, and `Stop::BudgetSpent` (2049-2055). The budget methods `fits`, `hold`, `release` and `add` exist (250-266). `Check::pass`, `stale_paths` and `overlap` exist, and the defaulted-method precedent is at 541-557. `Report` is built in one place only (2541), and `drain_concurrent` is at 2342. The design doc names the workspace manifests as a re-check trigger (line 127), so adding Cargo.toml and Cargo.lock at any depth is grounded in the design, not a guess. Reusing `stale_paths` keeps the rule the same as the one the plan and read-ahead use. The demonstrations drive the real entry points with scripted steps. The overlap rule, the owed re-check, the counting and the budget mapping all run in production code, and each test would fail without its behavior. The main limit, that real steps do not rebase until A6 is wired, is disclosed and matches the reading's clause for a missing A6. The fixes: make the two-worker pin deterministic, key the scripted answers by job, mark `Steps::rebase` and `Rebased` as provisional for A6, and say plainly that the feature is not yet active in a live drain."
+}

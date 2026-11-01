@@ -5676,6 +5676,405 @@ mod parallel {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// Checks run again after a rebase only when it touched what the candidate changed (async-drain.md section 6,
+// decision D145, build job 7)
+
+mod rebase_recheck {
+    use super::*;
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// The rule line the summary prints after the share.
+    const RULE: &str = "measured by candidate paths and any Cargo.toml or Cargo.lock";
+
+    /// A stub world that answers `Steps::rebase` and `Steps::rerun_checks` from scripts, per job; a job with
+    /// nothing scripted is not rebased (`Unchanged`) and its checks pass. Each read costs 0.1, each run 0.5
+    /// and each rating 0.2; their caps are 0.2, 1.0 and 0.3. Every call is logged.
+    #[derive(Default)]
+    struct Rebasing {
+        items: Vec<&'static str>,
+        plan: Vec<PlanEntry>,
+        rebases: Mutex<HashMap<String, VecDeque<drain::Rebased>>>,
+        checks: Mutex<HashMap<String, VecDeque<Check>>>,
+        /// What `rerun_cap` answers.
+        cap: f64,
+        /// Runs of these jobs take longer, so they pass after the others.
+        slow: Vec<&'static str>,
+        log: Mutex<Vec<String>>,
+    }
+
+    impl Rebasing {
+        fn with(items: &[&'static str]) -> Rebasing {
+            Rebasing {
+                items: items.to_vec(),
+                plan: items
+                    .iter()
+                    .map(|id| planned(id, Ladder::Implementation, &[&format!("src/{id}.rs")], &[]))
+                    .collect(),
+                ..Rebasing::default()
+            }
+        }
+
+        /// The next `rebase` of `job` moved the branch: the candidate changed `candidate`, the rebase `touched`.
+        fn moves(self, job: &str, candidate: &[&str], touched: &[&str]) -> Rebasing {
+            self.rebases
+                .lock()
+                .unwrap()
+                .entry(job.to_string())
+                .or_default()
+                .push_back(drain::Rebased::Moved {
+                    candidate: candidate.iter().map(|p| p.to_string()).collect(),
+                    touched: touched.iter().map(|p| p.to_string()).collect(),
+                });
+            self
+        }
+
+        /// The next `rerun_checks` of `job` gives this result.
+        fn checks(self, job: &str, check: Check) -> Rebasing {
+            self.checks
+                .lock()
+                .unwrap()
+                .entry(job.to_string())
+                .or_default()
+                .push_back(check);
+            self
+        }
+
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+
+        fn position(&self, entry: &str) -> usize {
+            self.log()
+                .iter()
+                .position(|e| e == entry)
+                .unwrap_or_else(|| panic!("{entry} is not in {:?}", self.log()))
+        }
+
+        fn count(&self, entry: &str) -> usize {
+            self.log().iter().filter(|e| *e == entry).count()
+        }
+
+        fn reruns(&self) -> Vec<String> {
+            self.log()
+                .into_iter()
+                .filter(|e| e.starts_with("rerun "))
+                .collect()
+        }
+    }
+
+    impl Steps for Rebasing {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Ok(Caps {
+                read: 0.2,
+                run: 1.0,
+                rate: 0.3,
+            })
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            Ok(QueueView {
+                items: self
+                    .items
+                    .iter()
+                    .map(|j| Item::queued(j, &format!("title of {j}")))
+                    .collect(),
+                plan: self.plan.clone(),
+                ..QueueView::default()
+            })
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn read(&self, what: ReadOf<'_>) -> Read {
+            let job = match what {
+                ReadOf::Queued(j) => j.to_string(),
+                ReadOf::Retry(j) => format!("{j}-retry"),
+            };
+            Read {
+                job: Some(job),
+                cost: 0.1,
+                runnable: true,
+                error: None,
+                held: false,
+            }
+        }
+        fn run(&self, job: &str) -> Run {
+            if self.slow.contains(&job) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            self.log.lock().unwrap().push(format!("run {job}"));
+            Run {
+                outcome: Some(OutcomeState::Landed),
+                reason: String::new(),
+                cost: 0.5,
+                ..Run::default()
+            }
+        }
+        fn rebase(&self, job: &str) -> drain::Rebased {
+            self.log.lock().unwrap().push(format!("rebase {job}"));
+            self.rebases
+                .lock()
+                .unwrap()
+                .get_mut(job)
+                .and_then(VecDeque::pop_front)
+                .unwrap_or(drain::Rebased::Unchanged)
+        }
+        fn rerun_checks(&self, job: &str) -> Check {
+            self.log.lock().unwrap().push(format!("rerun {job}"));
+            self.checks
+                .lock()
+                .unwrap()
+                .get_mut(job)
+                .and_then(VecDeque::pop_front)
+                .unwrap_or_else(|| Check::pass("checks pass again"))
+        }
+        fn rerun_cap(&self) -> f64 {
+            self.cap
+        }
+        fn land(&self, job: &str) -> Landing {
+            self.log.lock().unwrap().push(format!("land {job}"));
+            Landing::Landed {
+                changed: vec!["README.md".into()],
+            }
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("stub")
+        }
+        fn check_cap(&self) -> f64 {
+            0.0
+        }
+        fn rate(&self) -> Rate {
+            Rate {
+                rating: Some(2),
+                cost: 0.2,
+                error: None,
+            }
+        }
+    }
+
+    fn share_line(report: &drain::Report) -> Vec<&String> {
+        report
+            .notes
+            .iter()
+            .filter(|n| n.starts_with("rebases:"))
+            .collect()
+    }
+
+    fn landing_of<'a>(report: &'a drain::Report, item: &str) -> &'a str {
+        report
+            .jobs
+            .iter()
+            .find(|j| j.item == item)
+            .map(|j| j.landing.as_str())
+            .unwrap_or_else(|| panic!("no job line for {item}: {:?}", report.jobs))
+    }
+
+    #[test]
+    fn a_rebase_that_touched_a_candidate_path_runs_the_checks_again_before_landing() {
+        let steps = Rebasing::with(&["a"]).moves("a", &["src/a.rs"], &["src/a.rs"]);
+        let report = drain::drain_concurrent(&steps, limits(9.0), &Quiet, 1).unwrap();
+        assert_eq!(
+            steps.log(),
+            ["run a", "rebase a", "rerun a", "land a"],
+            "the checks run again after the rebase and before the landing"
+        );
+        assert_eq!(report.landed, 1);
+        assert_eq!(report.stop, Stop::QueueEmpty);
+        assert_eq!(
+            report.rebases,
+            drain::RebaseTally {
+                total: 1,
+                rechecked: 1
+            }
+        );
+    }
+
+    #[test]
+    fn the_same_rule_holds_through_the_one_job_at_a_time_entry_point() {
+        // A manifest of another crate is not a candidate path, but it can break the candidate.
+        let steps = Rebasing::with(&["a"]).moves("a", &["src/a.rs"], &["crates/x/Cargo.toml"]);
+        let report = drain::drain(&steps, limits(9.0), &Quiet).unwrap();
+        assert_eq!(steps.log(), ["run a", "rebase a", "rerun a", "land a"]);
+        assert_eq!(report.landed, 1);
+        assert_eq!(report.rebases.rechecked, 1);
+    }
+
+    #[test]
+    fn a_rebase_that_touched_no_candidate_path_lands_with_no_checks_run_again() {
+        let steps = Rebasing::with(&["a"]).moves("a", &["src/a.rs"], &["docs/other.md"]);
+        let report = drain::drain_concurrent(&steps, limits(9.0), &Quiet, 1).unwrap();
+        assert_eq!(steps.log(), ["run a", "rebase a", "land a"]);
+        assert_eq!(report.landed, 1);
+        assert_eq!(
+            report.rebases,
+            drain::RebaseTally {
+                total: 1,
+                rechecked: 0
+            }
+        );
+    }
+
+    #[test]
+    fn the_summary_reports_the_share_of_rebases_that_needed_a_re_check() {
+        // a: the rebase touched only another file. b: the rebase touched b's own file.
+        let steps = Rebasing::with(&["a", "b"])
+            .moves("a", &["src/a.rs"], &["docs/other.md"])
+            .moves("b", &["src/b.rs"], &["src/b.rs"]);
+        let report = drain::drain_concurrent(&steps, limits(9.0), &Quiet, 1).unwrap();
+        assert_eq!(report.landed, 2);
+        assert_eq!(steps.reruns(), ["rerun b"], "{:?}", steps.log());
+        assert!(steps.position("rerun b") < steps.position("land b"));
+        assert_eq!(
+            report.rebases,
+            drain::RebaseTally {
+                total: 2,
+                rechecked: 1
+            }
+        );
+        let expected = format!("rebases: 1 of 2 needed a re-check ({RULE})");
+        assert_eq!(share_line(&report), [&expected], "{:?}", report.notes);
+        let text = display::drain(&report);
+        assert!(
+            text.lines().any(|l| l.ends_with(&expected)),
+            "the summary shows the share: {text}"
+        );
+    }
+
+    #[test]
+    fn a_drain_with_no_rebase_reports_no_share() {
+        let steps = Rebasing::with(&["a", "b"]);
+        let report = drain::drain_concurrent(&steps, limits(9.0), &Quiet, 1).unwrap();
+        assert_eq!(report.landed, 2);
+        assert_eq!(report.rebases, drain::RebaseTally::default());
+        assert!(share_line(&report).is_empty(), "{:?}", report.notes);
+        assert_eq!(steps.count("rerun a") + steps.count("rerun b"), 0);
+    }
+
+    #[test]
+    fn a_failed_re_check_is_still_owed_when_the_landing_is_tried_again() {
+        // The first rebase moved the branch; the retry finds it current, so `rebase` answers Unchanged. The
+        // job still must not land on checks that failed.
+        let steps = Rebasing::with(&["a"])
+            .moves("a", &["src/a.rs"], &["src/a.rs"])
+            .checks("a", Check::fail("a test broke"))
+            .checks("a", Check::fail("a test broke again"));
+        let report = drain::drain_concurrent(&steps, limits(9.0), &Quiet, 1).unwrap();
+        assert_eq!(steps.count("land a"), 0, "{:?}", steps.log());
+        assert_eq!(steps.count("rerun a"), 2, "{:?}", steps.log());
+        assert_eq!(report.landed, 0);
+        assert_eq!(report.stop, Stop::RepeatedFailure);
+        assert_eq!(report.failed_item.as_deref(), Some("a"));
+        assert!(
+            landing_of(&report, "a").starts_with("not landed: checks failed after rebase"),
+            "{:?}",
+            report.jobs
+        );
+        assert!(landing_of(&report, "a").contains("a test broke again"));
+        // One rebase moved the branch, however many times the landing was tried.
+        assert_eq!(
+            report.rebases,
+            drain::RebaseTally {
+                total: 1,
+                rechecked: 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_re_check_that_fails_and_then_passes_lands_after_it_passes() {
+        let steps = Rebasing::with(&["a"])
+            .moves("a", &["src/a.rs"], &["src/a.rs"])
+            .checks("a", Check::fail("a test broke"))
+            .checks("a", Check::pass("fixed by the retry"));
+        let report = drain::drain_concurrent(&steps, limits(9.0), &Quiet, 1).unwrap();
+        assert_eq!(
+            steps.log(),
+            [
+                "run a", "rebase a", "rerun a", "rebase a", "rerun a", "land a"
+            ]
+        );
+        assert_eq!(report.landed, 1);
+        assert_eq!(report.stop, Stop::QueueEmpty);
+        assert_eq!(landing_of(&report, "a"), "landed");
+        assert_eq!(report.rebases.total, 1);
+    }
+
+    #[test]
+    fn a_re_check_that_does_not_fit_the_budget_is_not_run_and_ends_the_run_for_the_budget() {
+        let steps = Rebasing {
+            cap: 5.0,
+            ..Rebasing::with(&["a"])
+        }
+        .moves("a", &["src/a.rs"], &["src/a.rs"]);
+        let lines = Lines::default();
+        let report = drain::drain_concurrent(&steps, limits(2.0), &lines, 1).unwrap();
+        assert_eq!(
+            steps.log(),
+            ["run a", "rebase a"],
+            "no re-check and no landing"
+        );
+        assert_eq!(report.landed, 0);
+        assert_eq!(report.stop, Stop::BudgetSpent);
+        assert_eq!(report.failed_item, None, "a budget stop is not a failure");
+        let why = "the re-check after the rebase does not fit the budget";
+        assert!(landing_of(&report, "a").contains(why), "{:?}", report.jobs);
+        let said = lines_of(&lines);
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("plan       a passed over:") && l.contains(why)),
+            "{said:#?}"
+        );
+        assert!(report.spent_usd <= 2.0, "{}", report.spent_usd);
+    }
+
+    #[test]
+    fn a_re_check_costs_money_that_is_added_to_the_spend() {
+        let steps = Rebasing {
+            cap: 0.5,
+            ..Rebasing::with(&["a"])
+        }
+        .moves("a", &["src/a.rs"], &["src/a.rs"])
+        .checks("a", Check::pass("ok").costing(0.4));
+        let report = drain::drain_concurrent(&steps, limits(9.0), &Quiet, 1).unwrap();
+        assert_eq!(report.landed, 1);
+        // read 0.1 + run 0.5 + re-check 0.4 + rating 0.2
+        assert!(
+            (report.spent_usd - 1.2).abs() < 1e-9,
+            "{}",
+            report.spent_usd
+        );
+    }
+
+    #[test]
+    fn with_two_workers_the_second_job_of_a_group_still_lands_after_the_first() {
+        // a and b are one group (disjoint paths) and run side by side. b is rebased onto a's landing, but
+        // that touched nothing b changed, so b lands as before, with no checks run again.
+        let steps = Rebasing {
+            slow: vec!["b"],
+            ..Rebasing::with(&["a", "b"])
+        }
+        .moves("b", &["src/b.rs"], &["src/a.rs"]);
+        let report = drain::drain_concurrent(&steps, limits(9.0), &Quiet, 2).unwrap();
+        assert_eq!(report.plan_groups, [["a", "b"]]);
+        assert_eq!(report.landed, 2);
+        assert_eq!(report.stop, Stop::QueueEmpty);
+        assert!(steps.position("land a") < steps.position("land b"));
+        assert_eq!(steps.reruns().len(), 0, "{:?}", steps.log());
+        assert_eq!(
+            report.rebases,
+            drain::RebaseTally {
+                total: 1,
+                rechecked: 0
+            }
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
 // Per-job worktree and build directory, and the disk bound on how many jobs start (async-drain.md section 5)
 
 /// What a producer saw of its own worktree and build directory the moment it started.

@@ -165,6 +165,24 @@ net. The queue order is still the order runs pass, not the stacking order. The d
 `Athena::rebase_for_landing`, and the drain test of a held-back head) is a follow-up request that depends on this
 one.
 
+Note on the re-check rule (build job 7). `Drain::land` in `drain.rs` applies step 2 under the landing lock, before
+`Steps::land`. It asks `Steps::rebase`, which answers `Rebased::Unchanged` (the branch is current, or nothing was
+rebased) or `Rebased::Moved` with the paths the candidate changed and the paths the rebase touched. The pure
+`rebase_needs_recheck` decides, and it is the same notion of touching that read-ahead and the plan use: a touched
+path equals a candidate path or lies inside it, or the other way round, with `CHANGELOG.md`, `docs/decisions.md` and
+`README.md` ignored; and any touched `Cargo.toml` or `Cargo.lock`, at any depth, also forces a re-check, because
+a manifest change can break a candidate that never touched it. Otherwise the job lands with no checks run again;
+the merged-content check of `land_pr` stays the safety net. The re-check is `Steps::rerun_checks`, and its
+`Steps::rerun_cap` is held against the budget first. A cap that does not fit ends the run as budget spent, with no
+failure counted and the job left for a later run. A re-check that fails is owed again on the landing retry
+(the retry finds the branch already moved and `rebase` answers `Unchanged`, so the drain remembers the debt), and
+failing it twice ends like any landing that fails twice. Only moved rebases count: the share is the rebases that
+needed a re-check over the rebases that moved a branch, kept in memory for the run, in `Report::rebases` and in a
+note of the drain summary that names the rule, for example `rebases: 1 of 2 needed a re-check (...)`. No record
+is written. Not built here: the real steps keep the defaults (`Unchanged`, checks pass, cap 0), because the drain
+wiring and the conflict hold above are a follow-up, so the share is not measured in a live drain yet; the estimate
+in step 2 that most rebases need no re-run stays an estimate until then.
+
 ## 7. CI waits and self-rebuild as background awaits
 
 Point 4. A wait is not work. While one job waits for CI or while the drain rebuilds itself, the other jobs go on.
@@ -300,7 +318,8 @@ come first. Nothing here changes a limit until job 10.
 5. **Read-ahead.** Depends on: 2. Read and plan up to `read_ahead` jobs, with the stale-reading re-check.
 6. **Landing queue, ordered.** Depends on: 3, 4. One queue with rebase and conflict return to the producer, thrash stop.
 7. **Re-check rule after rebase.** Depends on: 6. Re-run checks only when paths overlap; measures the share of rebases that
-   need it.
+   need it. Built as the rule and the count, with the real steps still on the defaults (section 6, note on build
+   job 7); the share is not yet measured in a live drain.
 8. **Records commit ordering.** Depends on: 6. Commit records in the queue after each landing; confirm the
    append-only conflict rule.
 9. **Background awaits and crash recovery.** Depends on: 6, 8. Park CI waits, defer self-rebuild until a safe point,
