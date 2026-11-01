@@ -9,6 +9,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A failing check is now compared to the base test by test, so a new failing test is no longer excused by a
+  check that already failed on the base. Root cause: the baseline kept one pass/fail bit per check name
+  (`Baseline::failed_before` matched by name and `verify::is_pre_existing` used it), with no per-test comparison,
+  so a check failing on the base excused every failure in it, including a different new failing test; jobs
+  20261017-044408-wcwy and 20261017-182453-a5sf met this (failure class
+  `failing-check-blocks-all-criteria-unjudged-no-baseline`). Fix at the comparison: `CheckRun.failed_tests`
+  (`crates/athena-data/src/records.rs`, optional, absent in older records) holds `<binary> <test>` names read
+  by `checks::failed_test_names` from cargo's `failures:` lists, filled by `run_check` for both the baseline and
+  the candidate. `is_pre_existing` excuses a failing check only when every failing test also failed on the base;
+  a Minor finding from `judge` lists newly failing tests apart from those already failing on the base. For a
+  plain `cargo test`, Athena adds `--no-fail-fast` so every binary runs (the recorded command omits it and a
+  failed run's note says so), and a binary that crashed or printed a list shorter than its failed count is
+  recorded as `<binary> (did not finish)`, so it counts as new. With no names on either side (timeouts, build
+  errors, other runners, reused results, older records) the check-name rule stands. Not covered: a failure from a
+  clash with a concurrent config or test change, since the baseline runs on the job's fixed base.
 - A design reading with no inventory of the existing code is now refused at reading acceptance. Root cause: no
   inventory of existing code was required before a design reading was accepted, so a design that rebuilds or
   contradicts what the repository already holds was accepted; jobs 20261026-043137-zc0v and

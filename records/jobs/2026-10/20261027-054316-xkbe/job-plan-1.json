@@ -1,0 +1,263 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-054316-xkbe",
+  "round": 1,
+  "at": "2026-11-01T02:37:02.999828844Z",
+  "invocation_seq": 8,
+  "approach": "Root cause: the baseline records only whether a whole check failed on the base. `Baseline::failed_before` matches by check name, and `verify::is_pre_existing` uses it, so a check that failed on the base excuses every failure inside it. That includes a new, different test failure and a failure from a clash with a concurrent change. Fix it at that comparison. Add `failed_tests: Vec<String>` (serde default, skipped when empty) to `CheckRun`. Add a parser in `checks.rs` that reads the `failures:` list from cargo test output, qualified by test binary. `run_check` fills the field for test-kind checks from the full output before the tail is cut. `baseline_runs` calls `run_check`, so the baseline and the candidate runs share one field and one parser. `Baseline::failed_tests_before` returns the base's names. `is_pre_existing` becomes per test: when both sides have names, the check is pre-existing only if every failing test also failed on the base. When either side has none (fmt, clippy, build errors, timeouts, old records), it keeps the name-level rule. `judge` adds a finding for a blocking check with names, splitting newly failing tests from tests already failing on the base. No governance file changes. The one-line `failed_tests: Vec::new()` additions in files outside the deliverable list are forced by the compiler, because Rust struct literals must name every field. They carry no logic, and a missed one breaks `cargo clippy --all-targets`. Each is listed in `files` for that reason.",
+  "decisions": [
+    {
+      "choice": "Record failing test names on `CheckRun` (new optional field), so the baseline and the candidate run share one shape and one parser.",
+      "reason": "The origin is that the baseline holds a pass/fail bit per check. `run_check` produces both the baseline runs (via `baseline_runs`) and the candidate runs, so one field filled there fixes both sides. `output_tail` cannot serve: it is capped at 4 KiB and keeps only the tail.",
+      "rejected": [
+        {
+          "option": "Re-parse `output_tail` at comparison time",
+          "why": "The tail is cut to the last 4096 bytes, so a long failure list would be truncated and a failing test could be missed."
+        },
+        {
+          "option": "Add the names only to `Baseline` and keep `CheckRun` unchanged, to avoid editing about ten literal sites outside the deliverables",
+          "why": "The candidate side needs names too, and the candidate runs travel as `Vec<CheckRun>` through run/mod.rs, `mark_pre_existing`, `held_for_timeout` and `judge`. Carrying them separately would change every one of those signatures. That is a larger change than the mechanical literal additions."
+        },
+        {
+          "option": "Hide the names in the existing `note` or `output_tail` text",
+          "why": "It overloads fields that other code reads as prose, for example `timed_out` matches on the note, and it avoids the compile-forced edits only by making a hidden format."
+        }
+      ]
+    },
+    {
+      "choice": "Fall back to the name-level rule whenever either side has no parsed names. When both have names, a candidate whose names are all in the base's names is pre-existing; any other name is new.",
+      "reason": "It keeps fmt and clippy, build errors, timeouts and records written before the change behaving as today, and it tightens only the case where per-test evidence exists on both sides.",
+      "rejected": [
+        {
+          "option": "Treat a candidate failure without names as new when the base had names",
+          "why": "It changes timeout and held-for-timeout behaviour (`held_for_timeout` calls `is_pre_existing`), which is beyond one focused change. Recorded as an open question."
+        }
+      ]
+    },
+    {
+      "choice": "Qualify each name with its test binary (taken from the `Running ...` or `Doc-tests ...` line, hash suffix stripped).",
+      "reason": "The same test name can exist in several crates. An unqualified match could excuse a new failure that shares a name with a base failure.",
+      "rejected": [
+        {
+          "option": "Bare test names",
+          "why": "They can collide across binaries."
+        }
+      ]
+    },
+    {
+      "choice": "Report the split as an Athena finding from `judge`, naming new and already-failing tests, and leave the existing `check X failed` reasons unchanged.",
+      "reason": "Tests assert the `check test failed` reason text, and the finding is what the user reads in a rejected job. A partial overlap is not pre-existing, so `mark_pre_existing` does not mark it. A check with no names produces no finding, so existing behaviour is unchanged.",
+      "rejected": [
+        {
+          "option": "Only extend the check's note",
+          "why": "The note is not shown where the verdict is explained, and a partially overlapping check is not marked pre-existing."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `CheckRun.failed_tests: Vec<String>` (serde default, skipped when empty). Add `Baseline::failed_tests_before(name)`. Update `sample_baseline`. Add the old-record parse and validate test and a round-trip with names.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Add `failed_test_names(output)`. Set `failed_tests` in `run_check` for test-kind checks. Add `failed_tests: Vec::new()` to the other `CheckRun` literals (`skipped_run`, `runs_from_record`, the spawn-failure path, `baseline_runs`, test helpers). Add parser and `run_check` tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Make `is_pre_existing` per test with the name-level fallback. Add the `failure_split` helper and the finding in `judge`. Document the root cause on `is_pre_existing`. Add tests for X against X,Y, the X-only case, the fallback and the finding text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "Doc comment on `take_baseline`: the baseline runs through `run_check`, so it now carries failing test names. No logic change expected.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Update the comment at the baseline and pre-existing handling to say the comparison is per test. No logic change expected, since `judge` receives the baseline.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under [Unreleased] / Fixed naming the root cause (baseline compared whole checks by name, no per-test comparison) and the fix.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "purpose": "Short note that the check stage compares failing tests to the base and the baseline records test names. The scan for banned boundary words applies to it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add `failed_tests: Vec::new()` to the one `CheckRun` literal (around line 1293). No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add `failed_tests: Vec::new()` to its two `CheckRun` literals (around lines 214 and 451). No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add the field to the `test_run` test helper literal. No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add the field to the test literal. No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add the field to the `killed_at_the_deadline` test helper literal. No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add the field to the test helper literal. No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add the field to the test helper literal. No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/status_durations.rs",
+      "action": "modify",
+      "purpose": "Compile-forced, outside the listed deliverables: add the field to the `test_run` literal. No logic change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs: add `failed_tests` to `CheckRun` with serde default and skip-if-empty. Add `Baseline::failed_tests_before`. Update `sample_baseline`. Add tests for old-shape JSON parsing and validation and for a round-trip with names.",
+    "checks.rs: write `failed_test_names(output) -> Vec<String>` (the `failures:` list, qualified by binary, sorted and deduplicated). Call it in `run_check` for `CheckKind::Test` with the full output, before the tail is cut. Add `failed_tests: Vec::new()` in `skipped_run`, `runs_from_record`, the spawn-failure path, `baseline_runs` and the test helpers. Add parser and `run_check` tests.",
+    "verify.rs: add `failure_split(check, baseline)`. Rewrite `is_pre_existing` to use it with the name-level fallback. In `judge`, push the Athena finding for blocking checks that have names. Update the `check()` test helper. Add the X against X,Y, X-only, fallback and finding-text tests. Document the root cause on `is_pre_existing`.",
+    "Add `failed_tests: Vec::new()` to the remaining `CheckRun` literals the compiler reports: run/mod.rs, routing.rs, status.rs, run/send_back.rs, run/tests.rs, introspect.rs, reading.rs and crates/athena-cli/tests/status_durations.rs. Change nothing else in them.",
+    "run/checks.rs and run/verification.rs: update doc comments only (the baseline runs through `run_check`, so it records names; verification compares per test).",
+    "CHANGELOG.md: add the Unreleased/Fixed entry naming the root cause. docs/design/job-planning.md: add the short note, avoiding banned boundary words.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any failures, including the budget and boundary-word tests that scan docs."
+  ],
+  "risks": [
+    {
+      "risk": "`CheckRun` has `deny_unknown_fields`, so records written by the new code with names would not parse on an older binary.",
+      "mitigation": "Use `#[serde(default, skip_serializing_if = \"Vec::is_empty\")]`. Records without names serialise as before. The old-record parse test and the existing round-trip tests cover it."
+    },
+    {
+      "risk": "About 20 `CheckRun` literals across the files above must gain the field, and a missed one breaks the build.",
+      "mitigation": "The compiler lists every missed literal. The file list came from grepping `CheckRun {` across crates, and `cargo clippy --all-targets` compiles the tests."
+    },
+    {
+      "risk": "The `failures:` format varies: the first `failures:` block holds stdout sections, and doc-tests and several binaries each print their own list.",
+      "mitigation": "Qualify names with the binary from the `Running`/`Doc-tests` line. Read only the `failures:` list lines (4-space indent) up to the first blank line. Test on real output shapes quoted in the two jobs."
+    },
+    {
+      "risk": "A flaky test that fails on both base and candidate is excused, and a differently named flaky test now blocks.",
+      "mitigation": "With names on both sides this is the intended tightening, and the tests pin both directions. The fallback applies only when a side has no names."
+    },
+    {
+      "risk": "The new finding adds a Major finding next to the existing `check test failed` reason and could double-count in send-back.",
+      "mitigation": "The reasons and verdict logic are otherwise unchanged. Run the send_back tests (`run/send_back.rs` calls `judge`), and fall to Minor if they count it twice."
+    },
+    {
+      "risk": "Brief rules ask for a refusal-corpus mapping when a parser is added.",
+      "mitigation": "Not applicable: the change adds no refusal or matching rule over requests or readings, so the refusal corpus is not touched. I did not read `refusal_corpus.rs` and cite no case ids. The test-name parser has its own unit tests."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff. The doc comment on `is_pre_existing` and the CHANGELOG entry must name the cause: the baseline compares whole checks by name, with no per-test comparison. The changes must sit in records.rs, verify.rs and checks.rs, plus mechanical call sites, and touch none of the earlier jobs' files (auditor.rs, ontology.toml).",
+      "command": "git diff --stat",
+      "observes": "The diff shows the new `failed_tests` field, `Baseline::failed_tests_before`, the per-test `is_pre_existing`, the parser, and CHANGELOG text naming the root cause. No auditor or ontology file appears. Files outside the deliverables show only the one-line `failed_tests: Vec::new()` literal addition.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests in the verify.rs tests module build a baseline with the existing `baseline_with` and candidate `CheckRun`s whose `failed_tests` is set. They call `is_pre_existing`, `mark_pre_existing` and `judge` through the existing `judge_against`. Cases: base {X} against candidate {X,Y} is not pre-existing, the verdict is Fail, and a finding names Y. Base {X} against candidate {X} is pre-existing and passes with no reasons. Base {X} against candidate {Y} is not pre-existing.",
+      "command": "cargo test -p athena-core verify::tests::a_new_failing_test_beyond_the_base_is_not_pre_existing",
+      "observes": "The tests pass, including the assertion that Y is named and the companion case where only X fails stays pre-existing.",
+      "fails_without": "Without the per-test comparison, `is_pre_existing` matches by check name, so base {X} against candidate {X,Y} is marked pre-existing and the verdict passes. The assertions that the check is not pre-existing, the verdict is Fail and Y is named would fail.",
+      "seam": "Production entry points `verify::is_pre_existing`, `mark_pre_existing` and `judge` (exist; verify.rs around lines 134-151 and 282). Fixtures are the existing helpers `baseline_with`, `judge_against` and `check` in the verify.rs tests (they exist). Step 3 makes `check` carry an empty `failed_tests` list and the tests set it directly on real records. There is no fake, and the comparison logic is not in any double."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in checks.rs call `failed_test_names(&str)` with literal cargo output. One multi-binary run has two failing tests under `failures:` and `Running unittests ...` lines, so names come out qualified by binary. One doc-test failure. One output with only a `---- name stdout ----` block and no list. One output with no failures. A `run_check` test uses `sh -c printf ...` for a `CheckKind::Test` spec and checks that `CheckRun.failed_tests` is filled. A verify.rs test checks that a check without names falls back to the name-level rule (base fails and candidate fails is pre-existing).",
+      "command": "cargo test -p athena-core failed_test_names",
+      "observes": "Names are extracted. Output with no list gives an empty result. The empty result leads to the name-level rule.",
+      "fails_without": "Without the parser, `failed_test_names` does not exist and the extraction and `run_check` tests cannot pass. A wrong parser, for example one that reads the first `failures:` stdout section or the `test ... FAILED` lines, would give wrong names and fail the exact-name assertions.",
+      "seam": "Production entry points `checks::failed_test_names` (added in step 2), `checks::run_check` (exists, checks.rs line 190) and `verify::is_pre_existing` (exists). Fixture: a `sh_spec`-style spec (the helper exists in the checks.rs tests; the new test sets `kind` to Test) that prints the cargo output with `printf`, injected as the `CheckSpec` argument to `run_check`. The output is canned text and the parsing runs in production code."
+    },
+    {
+      "criterion": 4,
+      "method": "A new records.rs test builds a Baseline JSON in the old shape, with no `failed_tests` key on its CheckRuns. It parses that through `AnyRecord::parse` and `check_record_file` at `baseline.json`, then calls `Baseline::validate`. The existing `a_baseline_belongs_at_baseline_json_and_nowhere_else` and the record round-trip test run unchanged apart from the field in `sample_baseline`. A second case round-trips a record that has names.",
+      "command": "cargo test",
+      "observes": "Old JSON parses and validates with `failed_tests` empty, a record with names round-trips, and a record without names serialises with no `failed_tests` key. The round-trip tests pass across the workspace.",
+      "fails_without": "If `failed_tests` lacked `#[serde(default)]`, old JSON would fail to parse under `deny_unknown_fields` and `check_record_file`. If it lacked `skip_serializing_if`, existing serialised records would change shape and the round-trip and old-shape tests would fail.",
+      "seam": "Production entry points `AnyRecord::parse`, `check_record_file` and `Baseline::validate` (all exist). Fixture: a JSON string built from `sample_baseline().to_json()` with the `failed_tests` keys removed, or a literal. `sample_baseline` exists and is updated in step 1. There is no double."
+    },
+    {
+      "criterion": 5,
+      "method": "A verify.rs test judges base {X} against candidate {X,Y} through the existing `judge_against` and reads the Athena finding. It asserts the evidence lists Y under newly failing and X under already failing on the base. A second case with only new names has no 'already' part. A third case, a check with no names, yields no such finding.",
+      "command": "cargo test -p athena-core verify::tests::the_finding_for_a_failed_check_separates_new_from_base_failures",
+      "observes": "The finding text separates the two groups: new: Y, already failing on the base: X.",
+      "fails_without": "Without the finding, `judge` returns only the `check test failed` reason and no text that separates the tests, so the assertions on the finding's summary and evidence would fail.",
+      "seam": "Production entry point `verify::judge` through the existing `judge_against` helper (exists). The text is built by the production helper `failure_split` added in step 3. Fixtures are real `CheckRun` and `Baseline` records from `baseline_with` and `check`. There is no fake."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs, as separate commands, on the finished workspace. `cargo test --locked` also runs the existing whole-workspace budget, boundary-word and record tests, which scan the edited docs and records.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` each exit 0, with every `CheckRun` literal in the workspace compiling.",
+      "fails_without": "Without the `failed_tests: Vec::new()` additions at the existing `CheckRun` literals, `cargo clippy --all-targets` and `cargo test` fail to compile (missing field `failed_tests`). Without the new tests passing, `cargo test` exits non-zero. Unformatted code fails `cargo fmt --all --check`.",
+      "seam": "The production entry points are the cargo commands that Athena's check stage runs (`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`), run on the whole workspace. The fixture is the workspace itself with the change applied. The commands need no injected fake. The seam exists today, since these are the configured checks."
+    },
+    {
+      "criterion": 7,
+      "method": "Read `git status` and `git diff --stat`. The changed list must contain no athena.toml, defaults.toml or workflow file. Read CHANGELOG.md under [Unreleased] for an entry that names the cause.",
+      "command": "git status",
+      "observes": "No governance file appears in the changed list, and the CHANGELOG [Unreleased] / Fixed entry states the root cause (baseline compared whole checks by name, no per-test comparison).",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "When the base failed with test names and the candidate check fails with none (build error or timeout), the plan keeps the name-level rule, which still excuses it. A stricter rule would change `held_for_timeout`, so it is left out of this change.",
+    "Should the finding be Major, as planned, or Minor? Major adds to the blocker/major count, but the check already fails the verdict. The producer should confirm against `send_back` behaviour when running the tests.",
+    "docs/design/job-planning.md has no clear section on the check stage. The producer chooses the placement (section 2 is the planned spot). The banned-word scan applies to it.",
+    "The eight files outside the deliverable list are edited only to add one field to struct literals. If the reviewers want zero edits outside the list, the alternative is to carry candidate names beside `Vec<CheckRun>` through run/mod.rs and `judge`. That touches more code, so the plan does not take it."
+  ],
+  "producer_section_sha256": "a81c24ff59323eeacade0af3576166c12ed81aa76be5f6329904751811b9b750"
+}

@@ -130,9 +130,35 @@ pub struct VerdictInputs<'a> {
     pub replay: Option<&'a Replay>,
 }
 
-/// True when `check` failed now and the baseline shows the same check failing on the base commit.
+/// True when `check` failed now and the baseline shows the same check failing on the base commit, with no
+/// failing test the base did not also fail.
+///
+/// The root cause this guards against: the baseline once kept one pass/fail bit per check name, so a check
+/// that failed on the base excused every failure in it, including a new, different failing test. When both
+/// runs name their failing tests ([`CheckRun::failed_tests`]), every failing test now must also have failed on
+/// the base, or the check is the job's own failure. When either side names none (a timeout, a build error, a
+/// check that is not a plain `cargo test`, a reused result, an older record) the check-name rule stands.
+/// A failure that comes only from a concurrent change merged after the base is not in the baseline and is
+/// not separated here.
 pub fn is_pre_existing(check: &CheckRun, baseline: Option<&Baseline>) -> bool {
-    !check.passed && baseline.is_some_and(|b| b.failed_before(&check.name))
+    let Some(base) = baseline.filter(|b| !check.passed && b.failed_before(&check.name)) else {
+        return false;
+    };
+    let before = base.failed_tests_before(&check.name);
+    before.is_empty()
+        || check.failed_tests.is_empty()
+        || check.failed_tests.iter().all(|t| before.contains(t))
+}
+
+/// The failing tests of `check` split into those the base did not fail (newly failing) and those it also
+/// failed (already failing on the base). Each list keeps the order of `check.failed_tests`.
+pub fn failure_split(check: &CheckRun, baseline: Option<&Baseline>) -> (Vec<String>, Vec<String>) {
+    let before = baseline.map_or(&[][..], |b| b.failed_tests_before(&check.name));
+    check
+        .failed_tests
+        .iter()
+        .cloned()
+        .partition(|t| !before.contains(t))
 }
 
 /// Prefixes the note of each pre-existing failed check with [`PRE_EXISTING_NOTE`], so the record shows
@@ -302,6 +328,28 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
     let blocking_checks = |c: &&CheckRun| !c.passed && !is_pre_existing(c, inputs.baseline);
     for check in inputs.checks.iter().filter(blocking_checks) {
         reasons.push(format!("check {} failed", check.name));
+        // The check already fails the verdict; this finding only shows which failures are the job's own, so
+        // it is Minor and a failure is not counted twice.
+        if !check.failed_tests.is_empty() {
+            let (new, already) = failure_split(check, inputs.baseline);
+            let mut parts = vec![format!("newly failing: {}", new.join(", "))];
+            if !already.is_empty() {
+                parts.push(format!(
+                    "already failing on the base: {}",
+                    already.join(", ")
+                ));
+            }
+            findings.push(athena_finding(
+                Severity::Minor,
+                format!(
+                    "Check {}: {} test(s) newly failing, {} already failing on the base",
+                    check.name,
+                    new.len(),
+                    already.len()
+                ),
+                parts.join("; "),
+            ));
+        }
     }
     if let Some(failure) = &inputs.verifier_failure {
         reasons.push(format!("the verifier did not complete: {failure}"));
@@ -685,6 +733,15 @@ mod tests {
             duration: Quantity::measured(1.0, Unit::Seconds, "clock"),
             output_tail: String::new(),
             note: None,
+            failed_tests: Vec::new(),
+        }
+    }
+
+    /// A failed `test` check that names its failing tests.
+    fn failing(tests: &[&str]) -> CheckRun {
+        CheckRun {
+            failed_tests: tests.iter().map(|t| t.to_string()).collect(),
+            ..check(false)
         }
     }
 
@@ -946,6 +1003,120 @@ mod tests {
         // judge alone, with no mark applied, reaches the same verdict.
         let j = judge_against(Some(&base), &[check(false)]);
         assert_eq!(j.final_verdict, Verdict::Pass, "{:?}", j.reasons);
+    }
+
+    #[test]
+    fn a_new_failing_test_beside_one_failing_on_the_base_is_not_pre_existing() {
+        let base = baseline_with(vec![failing(&["lib X"])], None);
+        // Base {X}, now {X, Y}: the check is the job's, and the verdict names Y.
+        let mut now = vec![failing(&["lib X", "lib Y"])];
+        assert!(!is_pre_existing(&now[0], Some(&base)));
+        mark_pre_existing(&mut now, Some(&base));
+        assert_eq!(now[0].note, None, "not marked pre-existing");
+        let j = judge_against(Some(&base), &now);
+        assert_eq!(j.final_verdict, Verdict::Fail);
+        assert!(j.reasons.iter().any(|r| r == "check test failed"));
+        let finding = j.findings.iter().find(|f| f.summary.contains("Check test"));
+        let text = finding.map(|f| f.evidence.clone()).unwrap_or_default();
+        assert!(text.contains("newly failing: lib Y"), "{text}");
+        // Base {X}, now {X}: still pre-existing, and the verdict passes.
+        let mut same = vec![failing(&["lib X"])];
+        assert!(is_pre_existing(&same[0], Some(&base)));
+        mark_pre_existing(&mut same, Some(&base));
+        assert!(
+            same[0]
+                .note
+                .as_deref()
+                .unwrap()
+                .starts_with(PRE_EXISTING_NOTE)
+        );
+        assert_eq!(
+            judge_against(Some(&base), &same).final_verdict,
+            Verdict::Pass
+        );
+        // Fewer failures than the base is still pre-existing.
+        let fewer = baseline_with(vec![failing(&["lib X", "lib Z"])], None);
+        assert!(is_pre_existing(&failing(&["lib X"]), Some(&fewer)));
+        // A different single failure is new.
+        assert!(!is_pre_existing(&failing(&["lib Y"]), Some(&base)));
+    }
+
+    #[test]
+    fn the_same_test_name_in_another_binary_is_a_new_failure() {
+        let base = baseline_with(vec![failing(&["a X"])], None);
+        assert!(is_pre_existing(&failing(&["a X"]), Some(&base)));
+        assert!(!is_pre_existing(&failing(&["a X", "b X"]), Some(&base)));
+    }
+
+    #[test]
+    fn a_crashed_binary_is_new_unless_the_base_crashed_the_same_way() {
+        let base = baseline_with(vec![failing(&["a X"])], None);
+        let crashed = failing(&["a X", "b (did not finish)"]);
+        assert!(!is_pre_existing(&crashed, Some(&base)));
+        assert_eq!(
+            judge_against(Some(&base), std::slice::from_ref(&crashed)).final_verdict,
+            Verdict::Fail
+        );
+        let base_crashed = baseline_with(vec![failing(&["a X", "b (did not finish)"])], None);
+        assert!(is_pre_existing(&crashed, Some(&base_crashed)));
+    }
+
+    #[test]
+    fn with_no_names_on_either_side_the_check_name_rule_stands() {
+        let named = baseline_with(vec![failing(&["lib X"])], None);
+        let unnamed = baseline_with(vec![check(false)], None);
+        // The base named tests, the candidate none (a build error, a timeout): excused as before.
+        assert!(is_pre_existing(&check(false), Some(&named)));
+        // The candidate named tests, the base none: excused as before.
+        assert!(is_pre_existing(&failing(&["lib Y"]), Some(&unnamed)));
+        assert!(is_pre_existing(&check(false), Some(&unnamed)));
+        // A check that passed is never pre-existing, with or without names.
+        assert!(!is_pre_existing(&check(true), Some(&named)));
+    }
+
+    #[test]
+    fn the_finding_for_a_failed_check_separates_new_from_base_failures() {
+        let base = baseline_with(vec![failing(&["lib X"])], None);
+        let j = judge_against(Some(&base), &[failing(&["lib X", "lib Y"])]);
+        assert_eq!(
+            j.reasons
+                .iter()
+                .filter(|r| *r == "check test failed")
+                .count(),
+            1
+        );
+        let found: Vec<_> = j
+            .findings
+            .iter()
+            .filter(|f| f.summary.starts_with("Check test:"))
+            .collect();
+        assert_eq!(found.len(), 1, "one finding, not a second blocker");
+        assert_eq!(found[0].severity, Severity::Minor);
+        assert_eq!(found[0].source, FindingSource::Athena);
+        assert!(
+            found[0]
+                .summary
+                .contains("1 test(s) newly failing, 1 already failing")
+        );
+        assert_eq!(
+            found[0].evidence,
+            "newly failing: lib Y; already failing on the base: lib X"
+        );
+        assert_eq!(j.reasons.len(), 1, "{:?}", j.reasons);
+        // Only new names: no already part.
+        let j = judge_against(None, &[failing(&["lib Y"])]);
+        let f = j
+            .findings
+            .iter()
+            .find(|f| f.summary.starts_with("Check test:"));
+        assert_eq!(f.unwrap().evidence, "newly failing: lib Y");
+        // No names: no finding. Fully pre-existing: none either.
+        assert!(judge_against(None, &[check(false)]).findings.is_empty());
+        assert!(
+            judge_against(Some(&base), &[failing(&["lib X"])])
+                .findings
+                .is_empty()
+        );
     }
 
     #[test]
