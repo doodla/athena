@@ -458,6 +458,32 @@ mod tests {
     }
 
     #[test]
+    fn external_service_calls_need_a_named_state_and_a_wait() {
+        // Guidance only: the frames tell the planner to name the state and the critic to reject without it.
+        for wording in [
+            "calling an external service (GitHub API, CI run, deploy)",
+            "must name the state it needs",
+            "how the plan checks or waits for it",
+        ] {
+            assert!(
+                PLANNER_FRAME.text.contains(wording),
+                "planner frame lacks: {wording}"
+            );
+        }
+        for wording in [
+            "In round one, raise a major finding",
+            "calls an external service (GitHub API, CI run, deploy)",
+            "without naming the state it needs",
+            "how the plan checks or waits for it",
+        ] {
+            assert!(
+                CRITIC_FRAME.text.contains(wording),
+                "critic frame lacks: {wording}"
+            );
+        }
+    }
+
+    #[test]
     fn the_verifier_frame_limits_snapshot_runs_to_the_snapshot() {
         let text = VERIFIER_FRAME.text;
         for wording in [
