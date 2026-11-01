@@ -53,6 +53,14 @@ const ALL_METHODS: &str = r#"{"default_branch": "trunk", "allow_merge_commit": t
 const SQUASH_ONLY: &str = r#"{"default_branch": "trunk", "allow_merge_commit": false,
         "allow_squash_merge": true, "allow_rebase_merge": false}"#;
 
+/// A check-runs reply whose required check, [`EARLY_RUN_JOB`], finished well and is the only run.
+fn required_green_reply() -> String {
+    json!({"check_runs": [
+        {"id": 1, "name": EARLY_RUN_JOB, "status": "completed", "conclusion": "success"}
+    ]})
+    .to_string()
+}
+
 struct FakeRunner {
     calls: RefCell<Vec<Vec<String>>>,
     /// What `GET repos/example/project` answers.
@@ -83,7 +91,7 @@ impl Runner for FakeRunner {
         } else if path.contains("/pulls/") && !path.ends_with("/merge") {
             r#"{"merged": true, "merge_commit_sha": "m1"}"#.to_string()
         } else if path.contains("check-runs") {
-            r#"{"check_runs": [{"status": "completed", "conclusion": "success"}]}"#.to_string()
+            required_green_reply()
         } else if path.ends_with("/status") {
             r#"{"state": "success", "statuses": []}"#.to_string()
         } else {
@@ -672,22 +680,89 @@ fn ci_push_run_verdict_comes_from_the_aggregate_job() {
 
 #[test]
 fn checks_are_classified_from_the_two_replies() {
-    let done = |c: &str| json!({"check_runs": [{"status": "completed", "conclusion": c}]});
+    let done = |c: &str| json!({"check_runs": [{"id": 1, "name": EARLY_RUN_JOB, "status": "completed", "conclusion": c}]});
     let none = json!({"state": "pending", "statuses": []});
-    assert_eq!(classify_checks(&done("success"), &none), Checks::Green);
-    assert_eq!(classify_checks(&done("skipped"), &none), Checks::Green);
-    assert_eq!(classify_checks(&done("failure"), &none), Checks::Red);
-    let running = json!({"check_runs": [{"status": "in_progress", "conclusion": null}]});
-    assert_eq!(classify_checks(&running, &none), Checks::Pending);
+    let verdict = |runs: &Value, status: &Value| classify_checks(runs, status).checks;
+    assert_eq!(verdict(&done("success"), &none), Checks::Green);
+    assert_eq!(verdict(&done("skipped"), &none), Checks::Green);
+    assert_eq!(verdict(&done("failure"), &none), Checks::Red);
+    let running = json!({"check_runs": [{"id": 1, "name": EARLY_RUN_JOB, "status": "in_progress", "conclusion": null}]});
+    assert_eq!(verdict(&running, &none), Checks::Pending);
     // No report at all is not green.
+    assert_eq!(verdict(&json!({"check_runs": []}), &none), Checks::Pending);
+    // A pending combined status says nothing about the required check.
+    let waiting = json!({"state": "pending", "statuses": [{"state": "pending"}]});
+    assert_eq!(verdict(&done("success"), &waiting), Checks::Green);
+}
+
+/// The required check run, finished with `conclusion`, as the host lists it.
+fn required_run(id: u64, conclusion: &str) -> Value {
+    json!({"id": id, "name": EARLY_RUN_JOB, "status": "completed", "conclusion": conclusion})
+}
+
+/// The pull request head check, which fails on every candidate and is not required.
+fn head_run(conclusion: &str) -> Value {
+    json!({"id": 50, "name": "pull request head", "status": "completed", "conclusion": conclusion})
+}
+
+#[test]
+fn only_the_required_check_decides_and_optional_failures_become_notes() {
+    let none = json!({"state": "pending", "statuses": []});
+    let report =
+        |runs: Vec<Value>, status: &Value| classify_checks(&json!({"check_runs": runs}), status);
+
+    // (i) Required green, optional red: green, with one note naming the optional check.
+    let r = report(vec![required_run(1, "success"), head_run("failure")], &none);
+    assert_eq!(r.checks, Checks::Green);
+    assert_eq!(r.notes.len(), 1, "{:?}", r.notes);
+    assert!(r.notes[0].contains("pull request head"), "{:?}", r.notes);
+    assert!(r.notes[0].contains("failure"), "{:?}", r.notes);
+    // (ii) Required red is red, whatever else is green.
+    let ok = json!({"id": 51, "name": "other", "status": "completed", "conclusion": "success"});
+    let r = report(vec![required_run(1, "failure"), ok], &none);
+    assert_eq!(r.checks, Checks::Red);
+    assert!(r.notes.is_empty(), "{:?}", r.notes);
+    // (iii) Required not finished: pending.
+    let going =
+        json!({"id": 1, "name": EARLY_RUN_JOB, "status": "in_progress", "conclusion": null});
+    assert_eq!(report(vec![going], &none).checks, Checks::Pending);
+    // (iv) Only an optional green run, no required run: pending.
     assert_eq!(
-        classify_checks(&json!({"check_runs": []}), &none),
+        report(vec![head_run("success")], &none).checks,
         Checks::Pending
     );
-    let failed = json!({"state": "failure", "statuses": [{"state": "failure"}]});
-    assert_eq!(classify_checks(&done("success"), &failed), Checks::Red);
-    let waiting = json!({"state": "pending", "statuses": [{"state": "pending"}]});
-    assert_eq!(classify_checks(&done("success"), &waiting), Checks::Pending);
+    // (v) A failed legacy status is a note, not a verdict.
+    let failed =
+        json!({"state": "failure", "statuses": [{"context": "legacy-ci", "state": "failure"}]});
+    let r = report(vec![required_run(1, "success")], &failed);
+    assert_eq!(r.checks, Checks::Green);
+    assert_eq!(r.notes.len(), 1, "{:?}", r.notes);
+    assert!(r.notes[0].contains("legacy-ci"), "{:?}", r.notes);
+    // (vi) A named run with no id still decides: the pick does not need an id.
+    let no_id = json!({"name": EARLY_RUN_JOB, "status": "completed", "conclusion": "success"});
+    assert_eq!(report(vec![no_id], &none).checks, Checks::Green);
+    // (vii) Two runs of the required name: the newer (higher id) one decides.
+    let r = report(
+        vec![required_run(2, "success"), required_run(1, "failure")],
+        &none,
+    );
+    assert_eq!(r.checks, Checks::Green);
+    assert!(r.notes.is_empty(), "{:?}", r.notes);
+    let r = report(
+        vec![required_run(1, "success"), required_run(2, "failure")],
+        &none,
+    );
+    assert_eq!(r.checks, Checks::Red);
+    // (viii) A skipped required run is green, as before.
+    assert_eq!(
+        report(vec![required_run(1, "skipped")], &none).checks,
+        Checks::Green
+    );
+    // A run with no name that failed is a note, called (unnamed), and a run with no name does not decide.
+    let unnamed = json!({"status": "completed", "conclusion": "failure"});
+    let r = report(vec![unnamed], &none);
+    assert_eq!(r.checks, Checks::Pending);
+    assert!(r.notes[0].contains("(unnamed)"), "{:?}", r.notes);
 }
 
 #[test]
@@ -2189,7 +2264,7 @@ impl Runner for Refusing {
                     r#"{"merged": false}"#.to_string()
                 }
             } else if path.contains("check-runs") {
-                r#"{"check_runs": [{"status": "completed", "conclusion": "success"}]}"#.to_string()
+                required_green_reply()
             } else {
                 r#"{"state": "success", "statuses": []}"#.to_string()
             });
@@ -2293,6 +2368,139 @@ fn a_failure_that_is_not_a_host_refusal_is_not_recorded() {
     };
     assert!(client.default_branch().is_err());
     assert!(log.entries().is_empty());
+}
+
+/// A host whose check-runs reply is set by the test, and which logs every path it serves. A merge succeeds.
+struct Reporting {
+    runs: Value,
+    paths: RefCell<Vec<String>>,
+    merged: Cell<bool>,
+}
+impl Reporting {
+    fn new(runs: Vec<Value>) -> Self {
+        Reporting {
+            runs: json!({"check_runs": runs}),
+            paths: RefCell::new(Vec::new()),
+            merged: Cell::new(false),
+        }
+    }
+    fn reads_of(&self, part: &str) -> usize {
+        self.paths
+            .borrow()
+            .iter()
+            .filter(|p| p.contains(part))
+            .count()
+    }
+}
+impl Runner for Reporting {
+    fn gh(&self, args: &[String]) -> Result<String> {
+        let path = args.iter().find(|a| a.starts_with("repos/")).unwrap();
+        self.paths.borrow_mut().push(path.clone());
+        Ok(if path == "repos/example/project" {
+            ALL_METHODS.to_string()
+        } else if path.ends_with("/merge") {
+            self.merged.set(true);
+            "{}".to_string()
+        } else if path.ends_with("/pulls") {
+            r#"{"number": 7}"#.to_string()
+        } else if path.contains("/pulls/") {
+            if self.merged.get() {
+                r#"{"merged": true, "merge_commit_sha": "merged1"}"#.to_string()
+            } else {
+                r#"{"merged": false}"#.to_string()
+            }
+        } else if path.contains("check-runs") {
+            self.runs.to_string()
+        } else if path.ends_with("/status") {
+            r#"{"state": "success", "statuses": []}"#.to_string()
+        } else {
+            "{}".to_string()
+        })
+    }
+}
+
+#[test]
+fn an_optional_red_check_reaches_the_report_as_a_warning_and_the_job_lands() {
+    let runner = Reporting::new(vec![required_run(1, "success"), head_run("failure")]);
+    let rig = Rig::new();
+    let client = GhClient::new(&runner, "example/project".into());
+    let report = rig
+        .run_with(&client, true, "athena/bootstrap", "cand1", &Anc(true))
+        .unwrap();
+    assert_eq!(report.link.state, LinkState::Landed);
+    assert!(report.merge_requested);
+    assert_eq!(report.checks, Some(Checks::Green));
+    let notes: Vec<_> = report
+        .warnings
+        .iter()
+        .filter(|w| w.contains("pull request head"))
+        .collect();
+    assert_eq!(notes.len(), 1, "{:?}", report.warnings);
+}
+
+#[test]
+fn an_optional_red_check_with_the_setting_off_leaves_the_pull_request_waiting_and_green() {
+    let runner = Reporting::new(vec![required_run(1, "success"), head_run("failure")]);
+    let rig = Rig::new();
+    let client = GhClient::new(&runner, "example/project".into());
+    let report = rig
+        .run_with(&client, false, "athena/bootstrap", "cand1", &Anc(true))
+        .unwrap();
+    assert_eq!(report.link.state, LinkState::Open);
+    assert!(!report.merge_requested);
+    assert_eq!(report.checks, Some(Checks::Green));
+    assert_eq!(report.reruns, 0);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("pull request head")),
+        "{:?}",
+        report.warnings
+    );
+}
+
+#[test]
+fn a_red_required_check_is_still_red_and_nothing_is_merged() {
+    let runner = Reporting::new(vec![required_run(1, "failure"), head_run("success")]);
+    let rig = Rig::new();
+    let client = GhClient::new(&runner, "example/project".into());
+    let report = rig
+        .run_with(&client, true, "athena/bootstrap", "cand1", &Anc(true))
+        .unwrap();
+    assert_eq!(report.checks, Some(Checks::Red));
+    assert!(!report.merge_requested);
+    assert_eq!(report.link.state, LinkState::Open);
+}
+
+#[test]
+fn a_missing_required_check_stays_pending_and_nothing_is_merged() {
+    let runner = Reporting::new(vec![head_run("success")]);
+    let rig = Rig::new();
+    let client = GhClient::new(&runner, "example/project".into());
+    let report = rig
+        .run_with(&client, true, "athena/bootstrap", "cand1", &Anc(true))
+        .unwrap();
+    assert_eq!(report.checks, Some(Checks::Pending));
+    assert!(!report.merge_requested);
+}
+
+#[test]
+fn the_verdict_and_the_notes_come_from_one_read_of_the_check_runs_and_the_status() {
+    let runner = Reporting::new(vec![required_run(1, "success"), head_run("failure")]);
+    let client = GhClient::new(&runner, "example/project".into());
+    let report = client.check_report("abc").unwrap();
+    assert_eq!(report.checks, Checks::Green);
+    assert_eq!(report.notes.len(), 1, "{:?}", report.notes);
+    assert!(report.notes[0].contains("pull request head"));
+    assert_eq!(runner.reads_of("commits/abc/check-runs"), 1);
+    assert_eq!(runner.reads_of("commits/abc/status"), 1);
+    assert_eq!(
+        runner.paths.borrow().len(),
+        2,
+        "{:?}",
+        runner.paths.borrow()
+    );
 }
 
 fn failure(status_code: Option<u16>, text: &str) -> GhFailure {

@@ -87,7 +87,10 @@ impl Runner for Injecting {
                 r#"{"merged": false}"#.to_string()
             }
         } else if path.contains("check-runs") {
-            r#"{"check_runs": [{"status": "completed", "conclusion": "success"}]}"#.to_string()
+            // The name is the required check, `CI_AGGREGATE_JOB` in athena-core's `gh` module; only a run of
+            // that name decides whether the pull request lands.
+            r#"{"check_runs": [{"name": "fmt, clippy, tests", "status": "completed", "conclusion": "success"}]}"#
+                .to_string()
         } else {
             r#"{"state": "success", "statuses": []}"#.to_string()
         })

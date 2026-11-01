@@ -1,0 +1,33 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261101-163615-67fa",
+  "at": "2026-11-01T16:36:15.962510351Z",
+  "trigger": "rejection",
+  "job": "20261101-135902-9bxs",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "rejected",
+  "what_happened": "The job changed how pull requests are judged. They are now judged by required checks, and held-job records may pass the head check. It was rejected at the final verdict. One of 8 acceptance criteria was unmet: `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` must pass for the workspace. There were two blocker or major findings. The blocker: an athena-cli fake host (crates/athena-cli/tests/external_calls.rs:90, assertion at :499) still returns an unnamed check run. The new classifier reads that as Pending, so its landing test stays Open. The major finding: behavior criterion 6 is unmet because its evidence must cite commands that ran (D43). One check failed, and it is a check, not a criterion: `test`. The failing test is the check that backs the unmet workspace criterion.",
+  "failure_class": "20261014-172333-6fy0",
+  "new_class": false,
+  "earlier_cases": [
+    "20261101-113931-j9at",
+    "20261031-111717-s4qq"
+  ],
+  "decisions_matched": [],
+  "cause": "The job changed how check runs are classified, and nothing made the producer find and update the existing tests and fakes that feed that classifier. The fake host in external_calls.rs returns unnamed check runs, which the new rule treats differently. Nothing lists the consumers of the changed input shape, and nothing forces the full workspace gate to run and pass, with its output cited, before the final verdict. Only the verifier runs everything and compares evidence with criteria. At that point rejection is the only outcome. The same gap, an unrun or uncited full gate plus a stale test pinning old behavior, appears in the two earlier cases. This is an inference, since the stored fields do not show the plan or the producer's report.",
+  "prevention_kind": "code-check",
+  "prevention": "Add a pre-verdict gate in the job pipeline. After the producer finishes, Athena itself runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` on the workspace. It records each command with its exit status. If any command fails, it sends the failure output back to the producer for repair while rounds remain. The verifier then reads these recorded runs as the evidence for behavior and gate criteria, so nothing depends on the producer citing them. When a job changes a shared classifier or outcome rule, the gate also lists the tests and fakes that exercise it, so they are updated in the same job.",
+  "proposed_request": "Make Athena run the workspace gate itself before the final verdict, so a job cannot reach the verifier with the gate unrun or its evidence uncited.\n\nOutcome:\n- After the producer stage ends and before the verifier runs, Athena runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` on the job's work tree. It records each command, its exit status and the tail of its output in the job's records.\n- If a command fails and producer rounds remain, Athena sends the failing output back to the producer to repair, then runs the gate again. If no rounds remain, the job ends rejected with the failed commands named as failed checks, not as unmet criteria.\n- The verifier is given these recorded runs as the evidence for criteria that require commands to have run. A criterion about commands that ran is judged from the record, not from the producer's report.\n- Re-ask job 20261101-135902-9bxs, which judges PRs by required checks and lets held-job records pass the head check. The fake host in crates/athena-cli/tests/external_calls.rs returns an unnamed check run that the new classifier reads as Pending, so the fake must return named check runs and the landing test must pass.\n\nAcceptance:\n- A test with a fake producer that leaves a failing test shows the gate runs, the failure goes back to the producer, and the job is not sent to the verifier until the gate passes or rounds run out.\n- A test shows that a passing gate leaves a record of the three commands with exit status 0, and that the verifier input contains it.\n- Run on this repo, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass for the workspace.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.100602,
+    "input_tokens": 2,
+    "output_tokens": 1535
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}

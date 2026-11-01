@@ -1,0 +1,203 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261101-061448-sdya",
+  "n": 1,
+  "at": "2026-11-01T06:16:22.120522854Z",
+  "invocation_seq": 2,
+  "base_commit": "5df09d2309c64c17564ea06a8cadb2b2af190fde",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Use GitHub CI result for the candidate in checks stage (retry, no",
+  "summary": "Retry of job 20261031-230912-n9tm: in the checks stage, pick the CI source and its wait together, so a GitHub origin reads the athena/ci/<job id> push run and a green run skips the local checks. The earlier fault was an email address in gh/client.rs. This time no email-like text is written anywhere.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust and TOML."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus cargo test, clippy -D warnings and fmt --check."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that exercise the green, red, missing, cancelled, timed-out and no-origin cases."
+    },
+    {
+      "id": "public",
+      "how": "No email or identity literal is written anywhere."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that the checks stage uses the CI result, shown by the test through Athena::go."
+    },
+    {
+      "id": "mechanism",
+      "how": "The wait bound is set in athena.toml with a schema field."
+    },
+    {
+      "id": "root-cause",
+      "how": "The email literal is removed and the diff is scanned for any other."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-core/src/run/mod.rs (check_and_verify passes routing::NoCi to run_routed near line 1283), crates/athena-core/src/routing.rs (NoCi, CiSource), crates/athena-core/src/verify.rs (reuse_statement at line 60), crates/athena-data/src/config.rs ([personal_data] email_allow at line 456, [budget] schema) and athena.toml (email_allow at line 181). No record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are unaffected. The CI wait is measured through a fake gh::Runner and a fake sleeper, not a stand-in.",
+    "Job 20261031-230912-n9tm is addressed this way: its single finding was an email-like literal in crates/athena-core/src/gh/client.rs. The retry drops that literal, so the file takes no identity text, or none that contains an at-sign form. All its other file changes are kept as deliverables: CHANGELOG.md, athena.toml, routing.rs, run/mod.rs, run/tests.rs, run/verification.rs, test_support.rs and config.rs. verify.rs stays listed as a possible change.",
+    "Goal and audience: the Athena maintainer wants the checks stage to reuse GitHub's CI result for the candidate commit, so local checks are skipped when CI is green. Reviewers judge it by the tests and by admission accepting the diff.",
+    "No new text anywhere may match an email: no user-at-host remotes and no bot or author identities. GitHub remotes use https://github.com/owner/repo.git or ssh://github.com/owner/repo.git, as gh/tests.rs does. The only addresses allowed are those in athena.toml [personal_data] email_allow.",
+    "The wait bound is a new [budget] ci_wait_s field, default 1500 seconds, with its schema field in config.rs. The wait is one read every 20 seconds. No GitHub origin, or a nested run, uses NoCi with one read and no wait.",
+    "Existing code: this job reuses crates/athena-core/src/routing.rs, crates/athena-core/src/ci_result.rs, crates/athena-core/src/verify.rs and crates/athena-core/src/gh/ (for the Runner and the CI branch source). It does not create them."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-core`: a new test through Athena::go with an https github.com origin, a fake gh::Runner replying a green push run for the candidate SHA, and early_seam recording fakes shows the recording local check executor is never called, and the recorded check notes name CI as their source.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a test with a red push run for the candidate SHA shows the job fails, the failure names the failing check, and no local check ran.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: tests with a missing run, a cancelled run and a timed-out run each show the local checks run as before and the job proceeds.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a test with no GitHub origin (none, or a local path) shows NoCi is used, the fake runner gets no call, and the wait does not apply (no sleeping, one read).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a test shows that when CI is green the verifier's input contains the text of verify::reuse_statement for the candidate SHA.",
+      "kind": "behavior"
+    },
+    {
+      "text": "run/mod.rs no longer passes routing::NoCi unconditionally at the run_routed call; Grep `with_ci_source` shows a function choosing the source and wait together, and the candidate SHA is passed to resolution.",
+      "kind": "content"
+    },
+    {
+      "text": "athena.toml (a listed deliverable) sets the CI wait bound to 1500 seconds, and crates/athena-data/src/config.rs has the matching schema field; the config load tests still pass.",
+      "kind": "content"
+    },
+    {
+      "text": "Every new test with an https github.com origin installs both the gh::Runner fake and early_seam recording fakes (Grep `early_seam::install` in the new tests); no test reaches the network.",
+      "kind": "content"
+    },
+    {
+      "text": "No added line in the diff contains an email address or user-at-host remote outside the athena.toml [personal_data] email_allow list; Grep the diff for an at-sign form, including crates/athena-core/src/gh/client.rs, and it finds none.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the change that also states a resumed job carries no reuse statement.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`; all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "p": 0.6
+    }
+  ],
+  "out_of_scope": [
+    "Pushing or deleting the CI branch (job 3rze's landed work, kept unchanged, including ci.yml, gh/early.rs, gh/remote.rs, gh/tests.rs and gh/mod.rs).",
+    "Changing .github/workflows/ci.yml or what the workflow checks.",
+    "Changing the SHA rules in ci_result.rs or the local check implementation.",
+    "Real network calls in tests, or giving the producer GitHub access.",
+    "A reuse statement for resumed jobs whose checks were recorded earlier from CI.",
+    "Avoiding the needless remote_head lookup in delete_ci_branch (3rze nit)."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.65,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7175531914893617,
+      "p_verification_passes": 0.6744186046511628,
+      "p_user_intervenes": 0.08894736842105262,
+      "cost_usd": {
+        "p10": 0.5467339401391867,
+        "p50": 1.2605772490872662,
+        "p90": 3.3767187343437075
+      },
+      "wall_time_s": {
+        "p10": 533.4817740075339,
+        "p50": 1771.2114739909996,
+        "p90": 3922.6713976097944
+      }
+    }
+  },
+  "departures": "Slightly higher cost and time than the reference: the change is multi-file and touches the run pipeline, and the previous attempt was large.",
+  "urgent_reason": "It retries a failed job and so cuts wasted redo work from an admission refusal.",
+  "hard_reason": "It changes the run pipeline: which checks run in the checks stage, and when a red or green CI run fails or passes a job.",
+  "producer_effort": "high"
+}

@@ -3986,3 +3986,43 @@ should replace those estimates with its figures.
   `crates/athena-context/prompts/planner.md`. Measured: `cargo test -p athena-core --test refusal_corpus`,
   `cargo test -p athena-context planner_prompt_and_brief_carry_the_refusal_corpus_rule`,
   `cargo test -p athena-cli --test budgets`.
+
+## D149 · A pull request is judged by its required check only, and a held job's records pass the pull request head check
+
+- **Case:** The drain stopped on pull requests that should have landed. The pull request head check (the CI job
+  that runs on the pull request's head) fails on every candidate, and a job held for lack of disk commits its
+  records with a candidate and no verification. Both were counted against the job: landing read the red head
+  check as a red pull request, and the pre-merge check refused the hold commit for having no verification.
+- **Root cause:** `classify_checks` read every check run and the combined status, so one red optional check
+  made the whole pull request red, and a pull request with no `fmt, clippy, tests` run could read green from
+  another run. `closing_jobs` counted any job with closing records and no recorded outcome as a landing, which
+  a held job is not: `hold_for_disk` commits a candidate and the opening records and no outcome.
+- **Decision:** (1) `classify_checks` judges only the check run named `CI_AGGREGATE_JOB` (`fmt, clippy, tests`),
+  found by name alone (the highest id when several carry it; a run with no id counts as 0). Failed is red, a
+  missing or unfinished run is pending, anything else is green. Every other failed check run and every failed
+  legacy status becomes a note. The verdict and the notes come from one read (`CheckReport`, from
+  `PrHost::check_report`, whose default wraps `checks` with no notes), so there is no extra API call and the
+  notes cannot disagree with the verdict. `wait_for_checks` keeps the notes of the read behind its final
+  verdict only, and `land_pr` adds them to `PrReport.warnings`. `EARLY_RUN_JOB` is the same constant. (2)
+  `closing_jobs` leaves out a held job: a candidate, no verification, no outcome and no later outcome. A job
+  with an outcome and no verification still returns `Uncovered::NoVerification`. A commit that changes governed
+  content without landing a job still falls to `Uncovered::GovernedChange`, so main's landing check is as strict
+  as before.
+- **Assumption:** The required check has one fixed name. A repository whose CI has no job of that name reads as
+  pending and does not land (before, a missing early run only ended the early wait).
+- **Alternatives:** (a) A second method that reads the optional failures again: two more API calls per look, and
+  notes that could disagree with the verdict. (b) Change `PrHost::checks` to return the report: every host fake
+  would change. (c) Reuse `parse_check_run`: it drops a run with no id, so a fake without one would read pending.
+  (d) Exempt every job without an outcome from the verification check: a finished job's closing records carry
+  an outcome and must keep needing one. (e) Read the required checks from the branch protection: a larger
+  change to the host reads.
+- **Tradeoff:** Optional failures no longer stop a landing; they appear as warnings in the report, which the
+  drain does not yet print.
+- **Reversal cost:** Low. Restore the any-failure rule in `classify_checks` and drop `held` in `closing_jobs`.
+- **Follow-ups:** Read the branch's required checks from the host instead of the fixed name; print the report's
+  warnings in the drain output.
+- **Provenance:** Read: `crates/athena-core/src/gh/client.rs` (`classify_checks`), `gh/early.rs`
+  (`wait_for_checks`), `crates/athena-gate/src/invariant.rs` (`closing_jobs`, `classify_pre_merge`),
+  `crates/athena-core/src/run/close.rs` (`push_closing_records`). Measured:
+  `cargo test -p athena-core gh::`, `cargo test -p athena-gate landing_tests`,
+  `cargo test -p athena-cli --test external_calls`.

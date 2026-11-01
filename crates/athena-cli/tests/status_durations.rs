@@ -19,6 +19,7 @@ fn test_run(seconds: f64) -> CheckRun {
         output_tail: String::new(),
         note: None,
         failed_tests: Vec::new(),
+        reused: false,
     }
 }
 

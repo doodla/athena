@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-185437-1tbs",
+  "round": 2,
+  "at": "2026-11-01T10:15:53.877282479Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Criterion 2 is left unshown: the plan adds no new test and delivers no new check, although the criterion asks for a new test.",
+      "evidence": "Criterion 2 reads: \"A new test, run with `cargo test`, simulates low free disk before the producer ... and asserts the job is held as an environment stop ... and the producer is never started.\" The plan says: \"This change adds no test of its own for this criterion\" and \"Fails without the behavior: Nothing in this change's diff.\" I read the code, and the plan's facts are correct: disk_gate runs at dispatch (run/mod.rs:749) before any agent; the producer stage is entered at run/producer.rs:153; and StageSink::enter returns () (state.rs:40), so a stage sink cannot stop the producer. So a gate at the producer's own start, which would also cover send-back reruns, needs a file outside the list. Even so, a new test of the observable behavior fits inside the listed files. Low space through StateDir::with_free_space, then a run through `go` or the drain's RealSteps with the fake driver, then an assert that the driver saw no producer invocation and the outcome is `environment: low disk`. That test would fail if the dispatch gate were removed. Fix: Add a new test in disk.rs or drain.rs. It drives a job through `go` (or drain with RealSteps) with low simulated free space and asserts three things: the fake driver recorded no producer invocation, the job is held with LOW_DISK text, and no attempt is used. Keep open question 1, and route it to the user as a scope decision: add run/producer.rs for a gate before `invoke_and_record`, or accept the dispatch gate as the pre-producer check. Do not mark criterion 2 met until the user answers.",
+      "location": "Plan, Demonstrations: Criterion 2; Decision 1",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "While the sweep holds a job's lock, a concurrent `go` on that same job fails with an error instead of waiting.",
+      "evidence": "go_job does `let Some(_job_lock) = self.state.try_lock_job(&id)? else { bail!(\"job {id} is already running in another athena process\") }` (run/mod.rs:308-310), and it never waits. The drain runs workers in threads (drain.rs:2107, 2128 `std::thread::scope`), and the plan calls the sweep in every run_job. The drain also retries interrupted jobs by itself. So worker A's sweep can hold job X's lock while it removes a large target/, which takes seconds, just as worker B, or a person running `athena retry X`, enters go_job for X. That `go` then bails with a false 'already running' error. The plan's risk list covers only the opposite case: the sweep removing a live job's directory. Fix: Keep the drain's own jobs out of the sweep: pass the set of job ids this drain has queued or in flight, not one `asking` id, and skip them. Interrupted jobs the drain will retry are then reclaimed only at drain start, before any worker runs. Name the remaining race with an outside `athena retry` as a risk. Or show from drain.rs how a go error that is not LowDisk is handled, and add a test that the race cannot turn into a failure.",
+      "location": "Plan, Decision 3 and Step 1 (sweep takes try_lock_job and holds it while removing target/); Step 3 (call in run_job of a pipelined drain)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan has not read the constructor of the fixture behind its criterion 1 and 3(b) tests.",
+      "evidence": "test_support::make_athena exists (test_support.rs:748) and athena-cli turns on the `test-support` feature (athena-cli/Cargo.toml:31). The plan says it \"did not read its constructor\" for Script. code_health::tests::set_up is pub(crate) (code_health.rs:1016), so it is usable only from athena-core. Fix: Read make_athena's signature and name the Script value the drain tests pass. That keeps the producer from swapping in a fixture that does not run the production Records/registry/lock rule.",
+      "location": "Plan, Open questions 2 (make_athena Script)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The reclaim part is sound and placed where the fault starts. The plan adds a Records-, registry- and lock-guarded sweep of interrupted jobs' target/ in disk.rs and calls it from drain at drain start and before each run. Its tests run the production rule, not a double. The code it names checks out: disk_gate at run/mod.rs:749 and 1301, try_lock_job at run/mod.rs:308, StageSink::enter returning (), sweep_idle_targets, remove_target, with_free_space, and make_athena behind the test-support feature. Two things need revising. First, criterion 2 is left unshown, with no new test at all. A new test of the observable behavior (low disk held, producer never invoked) fits inside the listed files. The producer-start gate itself needs a scope decision from the user, not a silent gap. Second, the sweep holds a job's lock while it removes target/. In a pipelined drain, or with a manual retry, a concurrent `go` on that job then bails with 'already running' instead of waiting. Excluding the drain's own queued and in-flight jobs, or showing how that error is handled, would close this."
+}

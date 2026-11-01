@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-185437-1tbs",
+  "round": 3,
+  "at": "2026-11-01T10:20:50.062599767Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The #[path] include of tests/common/mod.rs into drain.rs's test module will not compile: the module names the crate itself as `athena_cli`.",
+      "evidence": "Read: tests/common/mod.rs:181 `capabilities: athena_cli::wiring::capabilities(),` inside `Fixture::athena`, which the plan calls, and :232 `let capabilities = athena_cli::wiring::capabilities;`. The plan says common/mod.rs imports 'never athena_cli', which is wrong. drain.rs is part of the athena-cli lib (lib.rs:7 `pub mod drain;`), and lib.rs has no `extern crate self as athena_cli`, so `athena_cli::` does not resolve in its unit tests. The open question's fallback lists Fixture::with_config, Scenario, test_config and with_min_free_gb but not Fixture::athena or demo_files, and demo_files' include_str!(\"../../../../defaults.toml\") is relative to tests/common/. Fix: Drop the #[path] include. In drain.rs `mod tests`, build the Athena with `athena_core::test_support::make_athena(&git, state_root, crate::wiring::capabilities(), script)` (available through the dev-dependency's test-support feature), or copy `Fixture::athena` using `crate::wiring::capabilities()`. Copy only the Scenario script parts and the bootstrap files the three tests need, with the include_str! path fixed for src/. Remove the wrong claim and the open question about the include.",
+      "location": "Decision 4, step 7, Demonstrations for criteria 1, 2 and 3(b); crates/athena-cli/tests/common/mod.rs:181 and :232",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 2's test passes on today's code, and the requested new check before the producer is left to a user answer that may not come before the producer runs.",
+      "evidence": "Read: run/mod.rs:746-753 already holds the job at dispatch, before any agent runs. producer.rs:120-153 has no disk check, and send-back reruns of the producer have none either. The plan says so and leaves criterion 2 unmet. The routing is right under the root-cause default, since the fix sits in run/producer.rs outside the accepted file list. Fix: Send open question 1 to the user now, before the producer runs, because the answer changes the file list. If there is no answer, have the change description name the gap and propose the producer.rs change: a disk_gate before invoke_and_record that holds the job through hold_for_disk.",
+      "location": "Decision 1 / Open question 1 / Demonstration for criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Whether Records::load accepts a single committed Job stub with no Reading was not checked.",
+      "evidence": "The plan itself flags this as unchecked and gives the ask+go+killed-producer route as the fallback. Fix: Prefer the ask+go fallback from the start in the disk.rs test if the code_health set_up already gives an Athena with a fake driver, so the test runs real records.",
+      "location": "Open question 3 (disk.rs unit test stub)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The reclaim design is sound and the cited code exists as described (read): disk_gate at run/mod.rs:749 and 1301, the producer entered at run/producer.rs:153, Athena::running (status.rs:1609), try_lock_job, remove_target, write_resume, with_free_space, Registry::register and reap, sweep_idle_targets, and d.st().tried. It removes only target/, and only for jobs that are Dispatched in Records, have no registry entry, have a free job lock held during removal and are not one of the drain's own jobs. That reuses the existing meaning of 'interrupted' and keeps work trees and candidates. Tests 1 and 3 would fail if the drain-start or per-run reclaim call were missing. One major problem: the plan's test fixture, `#[path = \"../tests/common/mod.rs\"] mod common;`, cannot compile inside the athena-cli library's unit tests. That module calls `athena_cli::wiring::capabilities()` (lines 181 and 232), the crate cannot name itself that way, and lib.rs has no `extern crate self as athena_cli`. So the drain tests for criteria 1, 2 and 3(b) do not build as planned. Criterion 2's test passes on today's code, because the dispatch gate already holds the job. The plan says so honestly and routes the producer.rs scope question to the user. That is acceptable but minor: the question should go to the user before the producer runs."
+}

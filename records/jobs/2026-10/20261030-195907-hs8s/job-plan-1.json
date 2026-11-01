@@ -1,0 +1,186 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-195907-hs8s",
+  "round": 1,
+  "at": "2026-11-01T14:06:12.999285071Z",
+  "invocation_seq": 3,
+  "approach": "The check stage is in `check_and_verify` in crates/athena-core/src/run/mod.rs, not in drain.rs. The \"checks     test FAILED\" line is built there, and the post-check removal of `target/produce` is there too. Two small changes: (1) Call `StateDir::remove_produce` (exists) from a new helper in run/checks.rs, right after the pre-check disk gate and before the routed checks run. Delete the old \"only when all checks pass\" removal and keep its resume-mark lines. (2) Add a log-line helper in core checks.rs that adds failing test names to a failed check's entry. Change `run_check` so a failed check's `output_tail` is its last 200 lines instead of the last 4096 bytes. The CheckRun record already has `output_tail` and `failed_tests`, so no new record type or allow-list entry is needed. Update the existing test that expects the producer build to be kept after a failed check, add two tests through `Athena::go` with real check commands, and add a CHANGELOG entry.",
+  "decisions": [
+    {
+      "choice": "Remove the producer build after the pre-check disk gate and before the first routed check runs, only when the checks will run here (not resumed, not nested).",
+      "reason": "The checks build in their own directory, so the producer build is idle once the checks start. Placing it after the gate keeps the existing low-disk hold tests valid, because `low_once_built` and the probes need the directory present at that gate. Resumed jobs already had it removed.",
+      "rejected": [
+        {
+          "option": "Remove before the pre-check disk gate",
+          "why": "That would break the existing low-disk-before-checks tests, which rely on `target/produce` existing at the gate. It would also change what the gate measures."
+        },
+        {
+          "option": "Keep removing only after passing checks, and raise the disk allowance",
+          "why": "That is the symptom fix. The allowance is out of scope, and the root cause is two builds held during the checks."
+        },
+        {
+          "option": "Add new deletion logic in disk.rs",
+          "why": "`StateDir::remove_produce` already does this, and its test is in state.rs."
+        }
+      ]
+    },
+    {
+      "choice": "Store the tail in the existing `CheckRun.output_tail`, as the last 200 lines for a failed run. A passing run keeps the 4096-byte tail. A generous byte ceiling (64 KiB, keeping the end) still applies as a record-size guard.",
+      "reason": "The field is already committed with the verification record and read by the reader and introspection code, so no new record type, `check_record_file` or `AnyRecord` change is needed. Today the 4096-byte tail often cuts off the failing test's lines. The ceiling is documented in the code and keeps a pathological single huge line from bloating the committed record.",
+      "rejected": [
+        {
+          "option": "A new record or data file for the tail",
+          "why": "It would need allow-list and round-trip-test extensions, and the brief prefers extending an existing record."
+        },
+        {
+          "option": "Raise TAIL_BYTES for all runs",
+          "why": "That does not give 200 lines and grows the records of passing checks."
+        }
+      ]
+    },
+    {
+      "choice": "Print failing names in the log from `failed_tests` when present. Otherwise parse `test <name> ... FAILED` lines from the kept output tail. If neither gives a name, print only the check name, as today.",
+      "reason": "This matches the brief's assumption. The log-only fallback does not touch `CheckRun.failed_tests`, which verification uses for baseline comparison. Filling it from the looser parse would change verdict logic.",
+      "rejected": [
+        {
+          "option": "Make `run_check` fill `failed_tests` from `... FAILED` lines for every check",
+          "why": "That would change pre-existing-failure matching in verify.rs, which is out of scope and risky."
+        }
+      ]
+    },
+    {
+      "choice": "Put the log-line builder and the removal helper in files the brief names (core checks.rs, run/checks.rs). Make only call-site edits in run/mod.rs and update the existing test in run/tests.rs.",
+      "reason": "drain.rs prints no check lines (grep for FAILED found none), and the log line is created at run/mod.rs:1439-1451 through `ctx.ui.line`. The edit stays small and the logic stays in listed files.",
+      "rejected": [
+        {
+          "option": "Edit drain.rs to build the line",
+          "why": "It never sees the check runs. The Ui lines come from core."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "Add `Athena::free_producer_build(&self, ctx, id)`. It calls `self.state.remove_produce(&id)` and prints the existing `disk       removed the producer's build directory: <size>` or warning line. It is moved from mod.rs, so the message stays the same.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Not in the brief's file list but required: the check stage and the log line live here. Call `free_producer_build` just before the routed checks run (in the `else if self.nested.is_none()` branch, before `SnapExec`). Replace the old post-check removal with the call, keeping the resume-mark lines. Build the `checks     ` line with the new helper from core checks.rs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Add `tail_lines(text, n)`, a `FAILED_TAIL_LINES = 200` constant and a byte ceiling. In `run_check`, set `output_tail` to the last 200 lines for a failed run, else keep `tail(.., TAIL_BYTES)`. Redact the result as now. Add `failing_names(&CheckRun)`, a `... FAILED` line parse fallback, and `log_entry(&CheckRun)` (`name ok (n tests)`, `name ok`, or `name FAILED: a, b, +N more`). Add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Update the module doc (lines 58-60) that says the producer build is removed after the checks pass and kept on failure. It now says it is removed before the checks start, since they build in their own directory.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Rewrite `produce_dir_is_removed_after_checks_pass_and_kept_when_a_check_fails` so the build is gone after the checks whether they pass or fail, while still present at the pre-check gate. Add the two new tests of criteria 1 and 2. This file is not in the brief's list but the old test would otherwise fail.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased entry describing both changes, with the root cause (two builds held during the checks, no failure output kept).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read run/mod.rs 1300-1520, run/checks.rs, checks.rs `run_check` and its tests, and the `Verification` record's `checks` field. Confirm that nothing uses `target/produce` after the checks start.",
+    "In core checks.rs add `FAILED_TAIL_LINES: usize = 200`, a byte ceiling constant, and `tail_lines(text, n)` (last n lines, then the last bytes of those if over the ceiling, on a char boundary). In `run_check` use it for the output tail when the run did not pass, then redact as now. Add `failing_names(&CheckRun) -> Vec<String>`: `failed_tests` if non-empty, else names parsed from `test X ... FAILED` lines (not `test result:`) in `output_tail`. Add `log_entry(&CheckRun) -> String`: `{name} ok ({n} tests)`, `{name} ok`, or `{name} FAILED: a, b` (up to 5 names, then `+N more`). Add unit tests for these.",
+    "In run/checks.rs add `Athena::free_producer_build(&self, ctx: &RunContext<'_>, id: &JobId)`. Move the `remove_produce` match and its two messages (success and warning) from mod.rs into it.",
+    "In run/mod.rs `check_and_verify`, call `free_producer_build` at the start of the `else if self.nested.is_none()` branch, before the route and `SnapExec`. Remove the old post-check removal block and update its comment (keep `built.recorded_checks = Some(..)` and `write_resume_mark`). Build the `checks_line` from `crate::checks::log_entry`.",
+    "Update the doc text in disk.rs (lines 58-60).",
+    "In run/tests.rs rewrite the existing produce-dir test: the pre-check gate still sees the directory, and the verifier gate does not for both a passing and a failing check. Add the criterion-1 test, using a leaked `sh -c` script that checks `<root>/jobs/*/target/produce` is absent and `<root>/jobs/*/verify` plus README.md in its cwd hold the candidate text, and asserts a Landed outcome and the removal line before `checks     `. Add the criterion-2 test: a `sh -c` check that prints 300 lines, a FAILED line and a few more, then exits 1. Assert the log line contains the test name, and via `Records::load` that the committed check run has exactly the last 200 lines and no earlier line.",
+    "Add an Unreleased entry to CHANGELOG.md naming both changes and the root cause.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any failure, including existing drain tests."
+  ],
+  "risks": [
+    {
+      "risk": "Moving removal earlier could change what the pre-check disk gate sees and break the low-disk hold tests.",
+      "mitigation": "Removal sits after the pre-check disk gate. The existing low-disk-hold tests, and the `low_once_built` and `recording_plenty_space` fakes, are run (criterion 5) to confirm."
+    },
+    {
+      "risk": "A send-back to the producer after a failed check may have relied on the kept build directory.",
+      "mitigation": "Search the code for uses of `produce_dir` and `target/produce` before editing. The grep shows none in send_back.rs or producer.rs, and the producer's work tree is already removed before the checks. The comment in mod.rs is rewritten. The producer rebuilds cold in its own directory if it runs again."
+    },
+    {
+      "risk": "The 64 KiB ceiling could cut a 200-line tail whose lines are very long, so it would not strictly be 200 lines.",
+      "mitigation": "The ceiling is documented in the code and the changelog. The test uses short lines. The unit test covers the ceiling."
+    },
+    {
+      "risk": "Baseline records of failing checks also grow to 200 lines.",
+      "mitigation": "Failed baseline checks use the same `run_check`. That is intended, since baseline output helps diagnosis, and the size is bounded by the ceiling. The verdict logic does not read `output_tail`, which grep confirms."
+    },
+    {
+      "risk": "Changing the `checks     ` line text could break tests that match it exactly.",
+      "mitigation": "The assertions check the `checks     ` line's content and order, not its exact whole text. Existing tests only match prefixes and `clippy FAILED` (run/tests.rs:2474), which the new text still contains."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test in crates/athena-core/src/run/tests.rs. It drives `Athena::go` with `athena_with(&repo,&state,check,recording_plenty_space,counting(counts,Some(root)))`. The `counting` fake producer plants `jobs/<id>/target/produce/debug/big`. `check` is a leaked `&'static [&'static str]`: an `sh -c` script that exits 1 if any `<root>/jobs/*/target/produce` exists. It also exits 1 unless `<root>/jobs/*/verify` and README.md in its cwd hold the candidate text ('A demo'). The test asserts the job is Landed, the ui lines show `disk       removed the producer's build directory` before `checks     `, and the committed candidate record has a candidate commit.",
+      "command": "cargo test --locked -p athena-core run::tests::producer_build_directory_is_gone_when_the_first_check_starts_and_the_candidate_is_kept",
+      "observes": "Landed with a passing check. The check itself saw the producer build directory absent and the candidate's tree present. The removal line precedes the `checks     ` line.",
+      "fails_without": "Without the early removal, `target/produce` still exists when the first check starts. The real check command exits 1, the job is rejected and the test fails. Before the change the removal ran only after all checks passed.",
+      "seam": "Entry is `Athena::go` through `check_and_verify` and `SnapExec::exec` to `run_check`, which runs the real `sh` command. The seams `athena_with`, `counting`, `Lines` and `recording_plenty_space` exist (read in run/tests.rs and test_support.rs). The script path is injected via `Box::leak(format!(..))`. Nothing is added to production code for the test, and no check double is used."
+    },
+    {
+      "criterion": 2,
+      "method": "New test in run/tests.rs through `Athena::go`. The check is a real `sh -c` that prints 300 numbered lines, then `test demo::the_failing_one ... FAILED`, then 5 more lines, and exits 1. The test asserts the `checks     ` ui line contains `demo::the_failing_one`. It then runs `Records::load(&athena.git,&athena.head().unwrap())`, finds the job's verification check run with `passed == false`, and asserts that its `output_tail` has exactly 200 lines, ends with the last printed line, contains the FAILED line, and does not contain the line numbered before the window. Unit tests in core checks.rs cover the line builder with `failed_tests` names, the fallback parse, the name-less fallback and a many-names cap. They also cover `run_check` with a 250-line failing `sh` spec, a passing spec keeping the byte tail, and the byte ceiling.",
+      "command": "cargo test --locked -p athena-core run::tests::a_failed_check_logs_its_failing_test_and_records_its_last_200_lines",
+      "observes": "The drain line names the failing test. The committed record has the last 200 lines of a longer output and the earlier lines are cut.",
+      "fails_without": "Without the log change the line is `checks     probe FAILED (..s)` with no test name. Without the 200-line tail the record holds at most 4096 bytes and lacks line 101 or the failure line. The test fails on either.",
+      "seam": "Entry is `Athena::go` with `athena_with(.., FAILING_CHECK, plenty_of_space, base_script())`. The fixtures `Lines` and `Records::load` exist. The check is a real subprocess. Production helpers added in step 2 and 3 are the code under test. The unit tests use the existing `sh_spec` helper in checks.rs tests."
+    },
+    {
+      "criterion": 3,
+      "method": "Run `git diff --stat` and `git diff CHANGELOG.md`. Check that the changed files are only crates/athena-core/src/run/checks.rs, crates/athena-core/src/run/mod.rs (call sites), crates/athena-core/src/checks.rs, crates/athena-core/src/disk.rs (doc comment), crates/athena-core/src/run/tests.rs (tests), and CHANGELOG.md.",
+      "command": "git diff --stat",
+      "observes": "One new CHANGELOG entry under Unreleased names both changes: the producer build removed before the checks, and the failed-check output tail kept with failing test names in the drain log. No config, workflow, toml or record-type file appears.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three Athena check commands in order.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The updated `produce_dir_is_removed_before_the_checks_whether_they_pass_or_fail` test and the new tests pass with the whole suite.",
+      "fails_without": "A formatting, lint or test failure anywhere in the workspace fails the command.",
+      "seam": "The commands are the existing fmt, clippy and test checks. No new seam is needed."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the unchanged existing drain tests in crates/athena-cli/tests/drain.rs (read at lines 1509-1640 and 3463). Also run `cargo test --locked -p athena-core run::tests::` for the core low-disk and resume tests.",
+      "command": "cargo test --locked -p athena-cli --test drain",
+      "observes": "The tests still pass: idle build directories are swept, the hold-and-resume path works, and an interrupted job keeps its work and candidate.",
+      "fails_without": "If the early removal broke the disk gate or removed the work or candidate, `low_disk_*`, `low_disk_before_the_checks_holds_the_job_and_a_retry_with_space_runs_the_checks` or `drain_start_reclaims_the_build_directory_of_an_interrupted_job_and_keeps_its_work_and_candidate` would fail.",
+      "seam": "The existing fixtures `disk_fixture`, `go_with_disk`, `plant_idle_job` and `low_once_built` exist and are untouched."
+    }
+  ],
+  "open_questions": [
+    "run/mod.rs and run/tests.rs are outside the brief's file list, yet the log line, the removal point and the old kept-on-failure test are there. The plan assumes a call-site edit in mod.rs is acceptable under criterion 3. drain.rs (cli) and state.rs are planned unchanged, since `remove_produce` already exists. The new tests go in core run/tests.rs, not cli tests/drain.rs, because the `Docs` capability and the `Lines` ui are there.",
+    "Whether a job whose check failed always commits a verification record with its `checks`. The existing test at run/tests.rs:1466 shows a Rejected outcome with a failing check, so the producer must confirm the field path in `Records` (job verification checks) when writing the criterion-2 assertion.",
+    "Whether any record-size limit exists in the records commit path that a 64 KiB tail could hit. A grep found no reference to TAIL_BYTES outside checks.rs. If a limit is found, lower the ceiling and say so in the changelog.",
+    "Failing-test names from the baseline run are also stored for non-cargo checks only in the log, never in `failed_tests`. If the owner wants those names in the records for comparison, that is a separate verdict-logic change."
+  ],
+  "producer_section_sha256": "2bf09c8d9aa62d2c546e848c3244533d3d069d7332eeb171c0cae7a06ef8c1cd"
+}

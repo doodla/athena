@@ -311,6 +311,47 @@ fn amend(git: &Git, message: &str) {
     git.run(["commit", "-q", "--amend", "-m", message]).unwrap();
 }
 
+/// The pre-merge classification of the head commit.
+fn pre_merge(git: &Git) -> Result<invariant::PreMergeCommit, invariant::Uncovered> {
+    let sha = git.head().unwrap().unwrap();
+    invariant::classify_pre_merge(git, &sha).unwrap()
+}
+
+#[test]
+fn the_records_of_a_held_job_are_records_only_and_need_no_verification() {
+    // What a job held for lack of disk commits: the opening records and the candidate (`candidate2.json`),
+    // with no verification and no outcome.
+    let (dir, git) = owner_repo();
+    write_records(dir.path(), &opening(&HONEST));
+    // A candidate/2 record states its base fingerprint; a record without one does not load.
+    let held = Candidate {
+        base_fingerprint: Some("e".repeat(40)),
+        ..candidate(&"f".repeat(40))
+    };
+    write_records(dir.path(), &[AnyRecord::Candidate2(Box::new(held))]);
+    commit(&git, "Hold job for lack of disk\n");
+    let covered = pre_merge(&git).expect("a held job's records are covered");
+    assert_eq!(covered.kind, athena_data::history::LandingKind::RecordsOnly);
+    assert_eq!(covered.job, None);
+}
+
+#[test]
+fn the_closing_records_of_a_finished_job_without_a_verification_are_still_refused() {
+    let (dir, git) = owner_repo();
+    let fp = "f".repeat(40);
+    write_records(dir.path(), &opening(&HONEST));
+    let without_verification: Vec<AnyRecord> = closing(&fp)
+        .into_iter()
+        .filter(|r| !matches!(r, AnyRecord::Verification(_)))
+        .collect();
+    write_records(dir.path(), &without_verification);
+    commit(&git, "Close job\n");
+    assert_eq!(
+        pre_merge(&git),
+        Err(invariant::Uncovered::NoVerification(job_id()))
+    );
+}
+
 #[test]
 fn a_squash_merge_with_no_trailers_lands() {
     let (dir, git) = owner_repo();

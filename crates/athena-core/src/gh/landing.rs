@@ -223,6 +223,7 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
         let seen = waited.checks;
         reruns = waited.reruns;
         failing_test = waited.failing_test;
+        warnings.extend(waited.notes);
         checks = Some(seen);
         // The merge gate: the setting is on and every check is green. Nothing else reaches the host's
         // merge endpoint.

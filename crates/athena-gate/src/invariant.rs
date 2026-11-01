@@ -227,7 +227,13 @@ pub fn landing_job(
 /// A job whose recorded outcome in the commit's tree is not landed (rejected, blocked, or failed) is left
 /// out. A squash ships the records of such a job, but its work never reached the branch, so it is no link
 /// of the chain: counting it would make its landed retry, which names it as `previous_job`, look like a
-/// fork. A job with no outcome record at all stays in, so that the landing check can refuse it.
+/// fork.
+///
+/// A held job is left out as well: one with a candidate but no verification and no outcome, the records a
+/// job parked for lack of disk commits so that its work is kept. It claims no landing, so the pull request
+/// head check must not ask it for a verification. A commit that changes governed content without landing a
+/// job is still refused by the rule for it ([`Uncovered::GovernedChange`]). A job with an outcome and no
+/// verification, or with a verification and no outcome, stays in, so that the landing check can refuse it.
 ///
 /// This is the single answer to "which jobs does this commit claim to land": the landing check uses it, and
 /// so does the classification of a pull request's commits (`athena_core::land::pr_commits`).
@@ -252,9 +258,11 @@ pub fn closing_jobs(git: &Git, change: &Change, judged: &Judged) -> Result<BTree
             && let Ok(job) = JobId::parse(id)
             && job.is_request()
             && d.path == format!("{}/{name}", job.dir())
-            && !not_landed(&JobFiles::load(git, &change.tree, &job)?)
         {
-            jobs.insert(job);
+            let files = JobFiles::load(git, &change.tree, &job)?;
+            if !not_landed(&files) && !held(&files) {
+                jobs.insert(job);
+            }
         }
     }
     Ok(jobs)
@@ -305,6 +313,7 @@ impl Uncovered {
 ///
 /// 1. It adds the closing records of a job ([`closing_jobs`]): a job landing, which needs that job's
 ///    verification record in the commit's tree. Closing records of more than one job are [`Uncovered`].
+///    The records of a held job (a candidate, no verification, no outcome) are not closing records.
 /// 2. It adds an intervention record: a declared intervention.
 /// 3. Otherwise, if the governed fingerprint changed, nothing covers the change: [`Uncovered::GovernedChange`].
 /// 4. Otherwise it touched only records and excluded paths: records only.
@@ -341,6 +350,14 @@ pub fn classify_pre_merge(
         kind,
         job,
     }))
+}
+
+/// Whether `files` are those of a held job: a candidate, and neither a verification nor any outcome.
+fn held(files: &JobFiles) -> bool {
+    files.candidate.is_some()
+        && files.verification.is_none()
+        && files.outcome.is_none()
+        && files.later_outcome.is_none()
 }
 
 /// Whether `files` record an outcome and none of the recorded outcomes is landed.
