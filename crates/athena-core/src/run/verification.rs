@@ -145,7 +145,8 @@ impl Athena {
         // not at fault. The verdict is discarded and verification reruns once on a fresh snapshot.
         let mut system_fault: Option<String> = None;
         // The verifier always runs, so a failed check never leaves the criteria unjudged; the check still
-        // fails the final verdict unless it is pre-existing.
+        // fails the final verdict unless it is pre-existing: it failed on the base too and, where both runs
+        // name their failing tests, every failing test now also failed there (`verify::is_pre_existing`).
         {
             ctx.stages.enter(&id, Stage::Verifier);
             closing.files.push(NewFile::text(

@@ -1734,6 +1734,7 @@ mod tests {
             duration: Quantity::measured(1.0, Unit::Seconds, "test"),
             output_tail: tail.into(),
             note: None,
+            failed_tests: Vec::new(),
         }
     }
 

@@ -1514,6 +1514,7 @@ mod produce_and_verify_order_tests {
             ),
             output_tail: String::new(),
             note: Some(crate::checks::deadline_note(limit_s)),
+            failed_tests: Vec::new(),
         }
     }
 
