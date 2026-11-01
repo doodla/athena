@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Landing now judges a pull request by the `fmt, clippy, tests` check alone, and the records of a held job
+  pass the pull request head check. Root cause of the first: `classify_checks` counted every check run and the
+  combined status, so the pull request head check, which fails on every candidate, turned the whole pull
+  request red and stopped the drain. Only the check run named `fmt, clippy, tests` (one constant, shared with
+  the early-run wait) decides now: failed is red, missing or unfinished is pending, otherwise green. A failed
+  optional check or status adds a warning to the landing report, taken from the same read as the verdict (no
+  extra API call). A repository whose CI has no job of that name reads as pending and does not land. Root cause
+  of the second: `closing_jobs` counted a job with a candidate, no verification and no outcome as a landing, so
+  the commit that `hold_for_disk` makes was refused with "without its verification". A held job's records are
+  no longer closing records; a finished job's closing records (with an outcome) still need a verification, and
+  a commit that changes governed content without landing a job is still refused. Test fakes that returned a
+  check run without a name now name it `fmt, clippy, tests` (decision D149).
 - The producer's build directory is now removed before the checks start, and a failed check keeps the last
   200 lines of its output. Root cause: the build directory was removed only after every check passed, so a
   job held two full builds (about 20 GB) while the checks compiled in their own directory, and a disk

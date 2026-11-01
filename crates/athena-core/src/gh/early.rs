@@ -22,7 +22,7 @@ use std::time::Duration;
 const EARLY_RUN_STEP: Duration = Duration::from_secs(20);
 /// The check run land waits for on the early commit: the job of the CI workflow whose pass the host caches.
 /// It must match the job name in the CI workflow.
-pub(super) const EARLY_RUN_JOB: &str = "fmt, clippy, tests";
+pub(super) const EARLY_RUN_JOB: &str = super::client::CI_AGGREGATE_JOB;
 
 /// Replaces the job's early-pushed head `early_head` with the landing commit: allowed by [`check_replace`]
 /// for the job's own branch only, and pinned to `early_head` on the remote. Forgets the early head after.
@@ -103,6 +103,8 @@ pub(super) struct Waited {
     pub(super) checks: Checks,
     pub(super) reruns: u32,
     pub(super) failing_test: Option<String>,
+    /// Notes about failed optional checks, from the same read as `checks`.
+    pub(super) notes: Vec<String>,
 }
 
 /// The first test name found in the logs of the failed runs; a failed lookup names nothing.
@@ -130,24 +132,29 @@ pub(super) fn wait_for_checks(job: &LandPr, head: &str) -> Result<Waited> {
         }
     };
     let mut seen = Checks::Pending;
+    // The notes of the read behind the verdict in `seen`, and of no other read.
+    let mut notes = Vec::new();
     let mut looks = 0;
     for n in 0..attempts {
-        seen = job.host.checks(head)?;
+        let read = job.host.check_report(head)?;
+        seen = read.checks;
+        notes = read.notes;
         looks += 1;
         if seen != Checks::Pending {
             break;
         }
         nap(n + 1 < attempts);
     }
-    let done = |checks, reruns, failing_test| {
+    let done = |checks, reruns, failing_test, notes| {
         Ok(Waited {
             checks,
             reruns,
             failing_test,
+            notes,
         })
     };
     if seen != Checks::Red {
-        return done(seen, 0, None);
+        return done(seen, 0, None, notes);
     }
     // Step 2: wait for the runs to complete.
     let run_looks = (attempts - looks.min(attempts)).max(1);
@@ -161,7 +168,7 @@ pub(super) fn wait_for_checks(job: &LandPr, head: &str) -> Result<Waited> {
     }
     let failing_test = name_failure(job.host, &runs);
     if runs.iter().any(|r| r.status != "completed") {
-        return done(Checks::Red, 0, failing_test);
+        return done(Checks::Red, 0, failing_test, notes);
     }
     // Step 3: re-run each failed run once.
     let mut rerun: Vec<(u64, Option<u64>)> = Vec::new();
@@ -172,13 +179,13 @@ pub(super) fn wait_for_checks(job: &LandPr, head: &str) -> Result<Waited> {
     }
     if rerun.is_empty() {
         // Nothing to re-run (a red the runs do not explain), or the host refused: the refusal is in the log.
-        return done(Checks::Red, 0, failing_test);
+        return done(Checks::Red, 0, failing_test, notes);
     }
     let mut seen = Checks::Pending;
     let mut last_runs = Vec::new();
     for n in 0..attempts {
         let now = job.host.ci_runs(head)?;
-        let read = job.host.checks(head)?;
+        let read = job.host.check_report(head)?;
         let restarted = rerun.iter().all(|(id, before)| {
             match (
                 before,
@@ -190,7 +197,13 @@ pub(super) fn wait_for_checks(job: &LandPr, head: &str) -> Result<Waited> {
             }
         });
         last_runs = now;
-        seen = if restarted { read } else { Checks::Pending };
+        // A read taken before every re-run restarted is thrown away, with its notes.
+        seen = if restarted {
+            notes = read.notes;
+            read.checks
+        } else {
+            Checks::Pending
+        };
         if seen != Checks::Pending {
             break;
         }
@@ -201,7 +214,7 @@ pub(super) fn wait_for_checks(job: &LandPr, head: &str) -> Result<Waited> {
     } else {
         None
     };
-    done(seen, 1, failing_test)
+    done(seen, 1, failing_test, notes)
 }
 
 /// What the early step needs: the job's candidate, and the seams it pushes and opens through.

@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-164247-5mrg",
+  "round": 2,
+  "at": "2026-11-01T16:50:50.483364249Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Test (a) wraps `candidate(fp)` in `AnyRecord::Candidate2`, but that helper sets `base_fingerprint: None`, and a Candidate2 must have one. The record is probably skipped on load, so the held-job rule never sees a candidate.",
+      "evidence": "landing_tests.rs:176 sets `base_fingerprint: None`. records.rs:2722 rejects `Candidate2` when `base_fingerprint.is_none()` ('athena.candidate/2 records the base_fingerprint'). If parsing applies that check, `JobFiles::load` skips any record that fails `AnyRecord::parse` (jobs.rs:55-57). Then `files.candidate` is None, `held()` is false, and test (a) returns NoVerification even with the fix in place. That is a false failure, and it hides whether the rule works. Fix: In test (a), build the candidate with `base_fingerprint: Some(...)`, as `hold_for_disk` writes it. For example, use a `held_candidate(fp)` helper or `Candidate { base_fingerprint: Some(base_fp), ..candidate(fp) }`. Assert first that `JobFiles::load` sees the candidate, then assert the classify_pre_merge result.",
+      "location": "Plan decision 7 / criterion 5 test (a); crates/athena-gate/src/landing_tests.rs:172-185; crates/athena-data/src/records.rs:2722-2726; crates/athena-gate/src/jobs.rs:55-57",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A hold after verification commits candidate and verification with no outcome. `held()` excludes that commit, so it stays in `closing_jobs` and `classify_pre_merge` calls it a JobLanding even though nothing landed.",
+      "evidence": "`push_closing_records` writes the Verification whenever `closing.verification` is Some, and `hold_for_disk` calls it too. `held` requires no verification, so this shape counts as a closing job. classify_pre_merge then passes it as `LandingKind::JobLanding` with that job (invariant.rs:319-329). The criterion is still met (the commit passes), but the commit is labelled as a landing. Fix: Either define held as 'a candidate and no outcome or later_outcome', whether or not a verification exists, so every hold commit is RecordsOnly; or state in the decisions.md entry that a post-verification hold is classified as a JobLanding and why that is safe. Add a table case for whichever you choose.",
+      "location": "Plan decision 5 (held rule); crates/athena-core/src/run/close.rs:557-559",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "After the change, a pending legacy status no longer holds the verdict. Before, a pending or unfinished status gave Pending.",
+      "evidence": "Today `statuses_done` gates Green (client.rs:789-790). The plan makes every legacy status optional, and a note is written only for a failed one, so a pending status changes the outcome silently. Fix: Add a table case showing that a pending legacy status with the required check green gives Green, and mention it in the CHANGELOG entry, so the change is visible and deliberate.",
+      "location": "Plan decision 2 / open question 1; client.rs:782-791",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code using Read and Grep only. Its claims hold up. Grepping `check_runs|check-runs` across the repo finds unnamed fakes only at external_calls.rs:90 and gh/tests.rs:86, :675, :680 and :2192; outside crates/ the only hit is a design doc. `classify_checks` (client.rs:766) treats any failure as red today. `parse_check_run` (client.rs:121) drops runs that have no id, so picking the required run by name alone is what lets the id-less fixture reach Landed. `wait_for_checks` reads checks in exactly two places (early.rs:135 and :181), and the `restarted` rule the plan describes matches the code. `hold_for_disk` writes Candidate2 and, only when one exists, a Verification, and never an outcome (close.rs:177-201, :531-561). `closing_jobs` and `not_landed` match the plan's description (invariant.rs:224-261, :347-353). `GhClient::checks` already reads check-runs and status once each, so moving that into `check_report` keeps notes and verdict in a single read, which is criterion 4. Most demonstrations run through real entry points (`land_pr` over a Runner fake, `classify_pre_merge` over a temp git repo) and would fail without the change; criteria 6 and 7 are checked by reading the diff, as content criteria allow. I found one minor test-construction defect: the `candidate(fp)` helper sets `base_fingerprint: None`, which a Candidate2 record may not have, so test (a) as written would likely fail for the wrong reason. I also have two smaller soundness notes. None is a blocker or major finding."
+}
