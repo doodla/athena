@@ -1730,6 +1730,72 @@ mod produce_and_verify_order_tests {
         assert_eq!(athena.state.read_resume(&retry.job), None);
     }
 
+    /// A baseline check that leaves `baseline-ran` in the job directory (it runs in `<job dir>/baseline`),
+    /// which [`crate::test_support::low_once_baselined`] reads as "the baseline is taken".
+    const MARKS_BASELINE: &[&str] = &["sh", "-c", "touch ../baseline-ran"];
+
+    #[test]
+    fn low_disk_before_the_producer_holds_the_job_and_never_starts_the_producer() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("repo");
+        let counts = Arc::new(Counts::default());
+        // Room at dispatch; too little once the baseline is taken, before the producer.
+        let athena = athena_with(
+            &repo,
+            &state,
+            MARKS_BASELINE,
+            crate::test_support::low_once_baselined,
+            counting(counts.clone(), Some(root.clone())),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let first = proposal.job.clone();
+        let ui = Lines::default();
+        let error = athena
+            .go(first.as_str(), AcceptedBy::User, &ui)
+            .expect_err("low space before the producer holds the job");
+        let low = error
+            .downcast_ref::<crate::disk::LowDisk>()
+            .copied()
+            .unwrap_or_else(|| panic!("not a hold: {error:#}"));
+        assert_eq!(low.free, 3_000_000_000);
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter().any(|l| l.starts_with("baseline   ")),
+            "the baseline was taken first: {said:#?}"
+        );
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("held       environment: low disk: 3.0 GB free")),
+            "{said:#?}"
+        );
+
+        // The producer never started; neither did the checks or the verifier.
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (0, 0));
+        assert!(!said.iter().any(|l| l.starts_with("checks     ")));
+        assert!(!athena.state.job_dir(&first).join("target/produce").exists());
+
+        // Held, not closed, with no candidate and no resume mark; the status says why.
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let held = &records.jobs[first.as_str()];
+        assert_eq!(held.state(), JobState::Dispatched);
+        assert!(held.outcome.is_none() && held.latest_score().is_none());
+        assert!(held.candidate.is_none());
+        assert!(!held.invocations.iter().any(|i| i.role == Role::Producer));
+        assert!(records.introspections.is_empty());
+        assert_eq!(athena.state.read_resume(&first), None);
+        assert_eq!(crate::disk::read_hold(&athena.state, &first), Some(low));
+        let status = athena.status().unwrap();
+        let line = status
+            .open
+            .iter()
+            .find(|l| l.id == first.as_str())
+            .expect("the held job is open work");
+        assert_eq!(line.state, "interrupted");
+        assert_eq!(line.hold.as_deref(), Some(low.text().as_str()));
+    }
+
     #[test]
     fn low_disk_before_the_checks_holds_after_the_idle_sweep_and_a_retry_resumes_at_the_checks() {
         let repo = repo();

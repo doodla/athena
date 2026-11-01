@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Interrupted jobs no longer keep their build directories, and low disk now holds a job before its producer
+  runs. Root cause: a job whose process died stayed dispatched with its `target/` (several gigabytes) until
+  someone closed it, and the disk check ran only at dispatch, before the checks and before the verifier, so
+  the baseline and the planner could fill the disk and the producer then started on a disk too full to build.
+  At the start of `athena drain` and before each run, Athena now removes `target/` of every job that is
+  dispatched with no closing record, has no registry entry and whose job lock is free. Work trees, kept
+  candidates, resume marks and records stay. A job with a registry entry or a held lock keeps its build
+  directory. A new disk check runs after the baseline checks and before the producer; space still short after
+  the idle cleanup holds the job as the environment stop `environment: low disk`, with no candidate and no
+  resume mark, and the producer is never started. A later drain retries it. `[disk] min_free_gb` is unchanged.
 - Checks reused from a green CI run for the candidate commit now count as commands run in the verdict (D43,
   D115), so a behavior criterion citing `cargo fmt`, `cargo clippy` or `cargo test` is no longer marked unmet and
   a passing job is no longer rejected for it. Root cause: `verify::judge` counted only check records with exit

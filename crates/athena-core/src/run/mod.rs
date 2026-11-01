@@ -1204,7 +1204,8 @@ impl Athena {
 
     /// The stages of a job after the reading is accepted, in order:
     ///
-    /// 1. `baseline_stage` takes the baseline checks before the producer runs.
+    /// 1. `baseline_stage` takes the baseline checks before the producer runs. Then the disk gate: low space
+    ///    holds the job here, before the producer is started.
     /// 2. `producer_snapshot` and `producer_loop` run the producer and collect its report; a stop in
     ///    the loop closes the job here. The producer's worktree and build directory are a
     ///    [`crate::state::JobWorktree`], held until this function returns by any path.
@@ -1228,6 +1229,13 @@ impl Athena {
         let seq = ctx.next_seq(&closing);
 
         self.baseline_stage(ctx, &job_dir, seq, &mut closing);
+        // Free disk space, before the producer. The baseline builds on the base commit and the planner ran, so
+        // the disk can be short now though it was not at dispatch. After the idle build directories are removed,
+        // space that is still low holds the job as an environment stop, not a failure: no producer is started,
+        // there is no candidate and no resume mark, and a later drain retries the job from the start.
+        if let Some(low) = self.disk_gate(ctx.jc.config.min_free_gb(), &id, ctx.ui) {
+            return Err(self.hold_for_disk(ctx, closing, low));
+        }
         // The producer's worktree and build directory belong to this call: cleared now, removed on every way
         // out of the function (a verdict, a stop or an error), so a finished job leaves neither behind.
         let _worktree = self.state.job_worktree(&id);
