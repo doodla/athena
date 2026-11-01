@@ -45,6 +45,20 @@
 //!   longer holds, [`Steps::reread`] makes a fresh one, and a reading whose paths no landing touched is used
 //!   as it is. With one job at a time (`max_in_flight` 1, so [`drain`] or a bound of 1), or `read_ahead` 0,
 //!   nothing is read ahead and the drain behaves as it always did. The real steps do not turn this on yet.
+//! - **Checks run again after a rebase only when it touched what the candidate changed.** Under the landing
+//!   lock, before a verified job lands, the drain asks [`Steps::rebase`] what rebasing the job onto the latest
+//!   main moved (`docs/design/async-drain.md` section 6, decision D145, build job 7). The pure
+//!   [`rebase_needs_recheck`] decides: yes when a path the rebase touched overlaps a path the candidate changed
+//!   (the rule of [`stale_paths`]) or is a `Cargo.toml` or `Cargo.lock` at any depth; otherwise the job lands
+//!   with no checks run again. The checks are [`Steps::rerun_checks`], with [`Steps::rerun_cap`] held against
+//!   the budget first; a cap that does not fit ends the run as [`Stop::BudgetSpent`] without a failure
+//!   counted. A re-check that fails is owed again on the landing retry (the branch is then already moved, so
+//!   `rebase` answers [`Rebased::Unchanged`]), and a job that fails it twice ends like any landing that fails
+//!   twice. Every rebase that moved a branch is counted, and so is every one that needed a re-check: the share
+//!   is [`Report::rebases`] and a line in [`Report::notes`] naming the rule. It is kept for the run only. With
+//!   one job at a time nothing changes unless `rebase` answers `Moved`. The real steps keep the default
+//!   `Unchanged` until the drain wiring of the landing rebase exists, so the share is not measured in a live
+//!   drain yet; a rebase conflict is that wiring's matter.
 //! - **The pass reads unread requests that are underspecified.** An unread request whose own words give no
 //!   acceptance (or no rung) is read first, within the budget and job limit, and planned again from its
 //!   reading. If the plan is still incomplete it is refused with the reason, so the queue
@@ -576,6 +590,62 @@ pub trait Steps {
     /// Told once when the work on an item ends, with the last job the item had (a retry is a new job), so the
     /// table row of a job that did not land can be removed. The default does nothing.
     fn item_over(&self, _job: &str) {}
+    /// Rebases `job`'s branch onto the latest main before it lands and says what that moved. Asked under the
+    /// landing lock, before [`Steps::land`]. The default does not rebase ([`Rebased::Unchanged`]). The real
+    /// steps keep the default until the drain wiring of the landing rebase exists; a rebase conflict is also
+    /// that wiring's matter (it holds the job), not this method's.
+    fn rebase(&self, _job: &str) -> Rebased {
+        Rebased::Unchanged
+    }
+    /// Runs the checks of `job` again after a rebase that touched what its candidate changed. Asked before
+    /// [`Steps::land`], and again on the landing retry while the last answer was a failure. It reports what it
+    /// cost in [`Check::cost`]. The default passes at no cost.
+    fn rerun_checks(&self, _job: &str) -> Check {
+        Check::pass("no checks to run again")
+    }
+    /// The most [`Steps::rerun_checks`] may cost; held against the budget while it runs. If it does not fit,
+    /// the checks are not run and the run ends as [`Stop::BudgetSpent`].
+    fn rerun_cap(&self) -> f64 {
+        0.0
+    }
+}
+
+/// What rebasing a verified job's branch onto the latest main did, as far as the re-check rule needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rebased {
+    /// The branch was already on the latest main, or there was nothing to rebase. Not counted as a rebase.
+    Unchanged,
+    /// The branch moved. `candidate` is the paths the candidate changed; `touched` the paths the rebase
+    /// changed (what main gained since the candidate's base).
+    Moved {
+        candidate: Vec<String>,
+        touched: Vec<String>,
+    },
+}
+
+/// How many rebases moved a branch in a drain, and how many of them needed the checks run again. Kept in
+/// memory for the run and printed in the drain summary; no record is written.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RebaseTally {
+    pub total: u32,
+    pub rechecked: u32,
+}
+
+/// The rule behind the share, as the summary line names it.
+const RECHECK_RULE: &str = "measured by candidate paths and any Cargo.toml or Cargo.lock";
+
+/// Whether a rebase that touched `touched` needs the checks of a candidate that changed `candidate` run
+/// again: some touched path overlaps a candidate path by the rule of [`stale_paths`] (equal, or one holds the
+/// other as a directory; the shared append-only files are ignored), or a touched path is a `Cargo.toml` or
+/// `Cargo.lock` at any depth, because a manifest change can break a candidate that never touched it.
+fn rebase_needs_recheck(candidate: &[String], touched: &[String]) -> bool {
+    let manifest = |p: &String| {
+        matches!(
+            p.rsplit('/').next(),
+            Some("Cargo.toml") | Some("Cargo.lock")
+        )
+    };
+    !stale_paths(candidate, touched).is_empty() || touched.iter().any(manifest)
 }
 
 /// The file name of the in-flight table in the state directory.
@@ -955,6 +1025,9 @@ pub struct Report {
     pub rebuild_output: Option<String>,
     /// What is left to carry on with, when `stop` is `rebuilt` ([`follow_restart`]).
     pub restart: Option<Restart>,
+    /// The rebases before landing that moved the branch, and how many of them touched a path that needed the
+    /// checks run again. Kept for this run only; also stated in [`Report::notes`] when there was one.
+    pub rebases: RebaseTally,
 }
 
 impl Report {
@@ -1016,6 +1089,12 @@ struct State {
     carry: Carry,
     /// Workers whose run passed and whose job is not landed yet, in the order the runs passed.
     queue: LandingQueue,
+    /// The rebases of this run's landings that moved the branch, and how many of them needed a re-check.
+    rebases: RebaseTally,
+    /// Jobs whose checks after a rebase are still owed: decided at the rebase, cleared when the re-check
+    /// passes. The landing retry asks `Steps::rebase` again, and a branch already moved answers `Unchanged`,
+    /// so without this a candidate whose re-check failed would land unchecked on the second try.
+    owing: BTreeSet<String>,
 }
 
 /// What a drain keeps from one plan to the next, merged into each fresh queue view by `Drain::prepare`. A
@@ -1147,6 +1226,8 @@ enum LandStep {
     Landed,
     Waiting,
     NotLanded,
+    /// The checks owed after a rebase could not start: their cap does not fit what is left of the budget.
+    Budget,
 }
 
 /// The outcome of an item held because its job's budget does not cover the whole path still to run; also the
@@ -1451,8 +1532,63 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         }
     }
 
+    /// The re-check rule after a rebase, run under the landing lock before the job is landed. Asks
+    /// [`Steps::rebase`]; a rebase that moved the branch is counted, and one that touched a path the candidate
+    /// changed ([`rebase_needs_recheck`]) puts the job in `owing`. A job in `owing` has its checks run again
+    /// ([`Steps::rerun_checks`]) before it lands. None means the landing goes on; Some ends this attempt.
+    fn recheck_after_rebase(&self, job: &str, at: usize) -> Option<LandStep> {
+        if let Rebased::Moved { candidate, touched } = self.steps.rebase(job) {
+            let needed = rebase_needs_recheck(&candidate, &touched);
+            let mut st = self.st();
+            st.rebases.total += 1;
+            if needed {
+                st.rebases.rechecked += 1;
+                st.owing.insert(job.to_string());
+            }
+        }
+        if !self.st().owing.contains(job) {
+            return None;
+        }
+        let cap = self.steps.rerun_cap();
+        {
+            let mut st = self.st();
+            if !st.budget.fits(cap) {
+                let why =
+                    "not landed: the re-check after the rebase does not fit the budget".to_string();
+                st.jobs[at].landing = why.clone();
+                st.jobs[at].reason = Some(why.clone());
+                drop(st);
+                self.ui.line(&format!("drain      {job} {why}"));
+                return Some(LandStep::Budget);
+            }
+            st.budget.hold(cap);
+        }
+        self.ui.line(&format!(
+            "drain      {job} re-running checks after the rebase"
+        ));
+        let check = self.steps.rerun_checks(job);
+        {
+            let mut st = self.st();
+            st.budget.release(cap);
+            st.budget.add(check.cost);
+            if check.passed {
+                st.owing.remove(job);
+            }
+        }
+        if check.passed {
+            return None;
+        }
+        let why = format!("not landed: checks failed after rebase: {}", check.detail);
+        self.ui.line(&format!("drain      {job} {why}"));
+        self.st().jobs[at].landing = why;
+        Some(LandStep::NotLanded)
+    }
+
     fn land(&self, job: &str, at: usize) -> LandStep {
         let _one_at_a_time = self.landing.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(step) = self.recheck_after_rebase(job, at) {
+            return step;
+        }
         match self.steps.land(job) {
             Landing::Landed { changed } => {
                 let outcome = changes_outcome(&changed);
@@ -1574,6 +1710,8 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     }
                     // Not a failed attempt: nothing is retried, and no failure is counted.
                     LandStep::Waiting => return ItemEnd::Waiting,
+                    // The run ends for the budget; the job is not tried again and no failure is counted.
+                    LandStep::Budget => return ItemEnd::Budget,
                     LandStep::NotLanded => {}
                 }
             }
@@ -1994,6 +2132,8 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 passed_over: BTreeSet::new(),
                 carry: Carry::default(),
                 queue: LandingQueue::default(),
+                rebases: RebaseTally::default(),
+                owing: BTreeSet::new(),
             }),
             landing: Mutex::new(()),
             wake: Condvar::new(),
@@ -2509,6 +2649,13 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
             "the reading of {item} (job {job}) was made ahead but not used: the run ended first"
         ));
     }
+    if st.rebases.total > 0 {
+        let line = format!(
+            "rebases: {} of {} needed a re-check ({RECHECK_RULE})",
+            st.rebases.rechecked, st.rebases.total
+        );
+        st.notes.push(line);
+    }
     let (mut stop, failed_item) = st.stop.clone().unwrap_or((Stop::QueueEmpty, None));
     // A rebuilt Athena carries on with what is left, unless there is nothing left or a stop was asked for.
     let mut restart = None;
@@ -2561,6 +2708,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         jobs: st.jobs.clone(),
         rebuild_output: st.rebuild_output.clone(),
         restart,
+        rebases: st.rebases.clone(),
     })
 }
 
@@ -4411,6 +4559,50 @@ mod read_ahead_tests {
             stale_paths(&p(&["src/dir/"]), &p(&["src/dir/x.rs", "src/other.rs"])),
             ["src/dir/x.rs"]
         );
+    }
+
+    fn needs(candidate: &[&str], touched: &[&str]) -> bool {
+        rebase_needs_recheck(&own(candidate), &own(touched))
+    }
+
+    #[test]
+    fn rebase_needs_recheck_when_a_touched_path_is_a_candidate_path() {
+        assert!(needs(&["src/a.rs"], &["src/a.rs"]));
+        assert!(needs(&["src/a.rs", "src/b.rs"], &["docs/x.md", "src/b.rs"]));
+    }
+
+    #[test]
+    fn rebase_needs_recheck_when_a_directory_holds_the_other_path() {
+        assert!(needs(&["src/dir/"], &["src/dir/x.rs"]));
+        assert!(needs(&["src/dir/x.rs"], &["src/dir"]));
+    }
+
+    #[test]
+    fn rebase_needs_recheck_when_a_workspace_manifest_changed() {
+        assert!(needs(&["src/a.rs"], &["Cargo.toml"]));
+        assert!(needs(&["src/a.rs"], &["Cargo.lock"]));
+        assert!(needs(&["src/a.rs"], &["crates/x/Cargo.toml"]));
+    }
+
+    #[test]
+    fn rebase_needs_no_recheck_when_no_candidate_path_is_touched() {
+        assert!(!needs(&["src/a.rs"], &["docs/other.md"]));
+        assert!(!needs(&["src/a.rs"], &["src/ab.rs", "src/a.rs.bak"]));
+        assert!(!needs(&["src/a.rs"], &[]));
+        // A file merely named like a manifest is not one.
+        assert!(!needs(&["src/a.rs"], &["docs/Cargo.toml.md"]));
+    }
+
+    #[test]
+    fn rebase_needs_no_recheck_when_only_shared_append_only_files_are_touched() {
+        assert!(!needs(&["src/a.rs"], &["CHANGELOG.md", "README.md"]));
+        assert!(!needs(&["CHANGELOG.md"], &["CHANGELOG.md"]));
+    }
+
+    #[test]
+    fn rebase_needs_recheck_when_the_candidate_paths_are_unknown_and_a_real_path_is_touched() {
+        assert!(needs(&[], &["src/a.rs"]));
+        assert!(!needs(&[], &["CHANGELOG.md"]));
     }
 }
 
