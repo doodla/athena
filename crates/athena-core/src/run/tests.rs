@@ -1463,7 +1463,7 @@ mod produce_and_verify_order_tests {
     }
 
     #[test]
-    fn produce_dir_is_removed_after_checks_pass_and_kept_when_a_check_fails() {
+    fn produce_dir_is_removed_before_the_checks_whether_they_pass_or_fail() {
         for (check, passes) in [(PASSES, true), (FAILS_ON_EDIT, false)] {
             let repo = repo();
             let state = tempfile::tempdir().unwrap();
@@ -1497,20 +1497,136 @@ mod produce_and_verify_order_tests {
                 probes[gate - 1].produce_present,
                 "the producer's build directory existed when the checks started: {probes:?}"
             );
+            // The checks build in their own directory, so the producer's build goes before they start,
+            // whether they then pass or fail.
+            assert!(
+                !probes[gate].produce_present,
+                "target/produce is gone before the verifier gate, pass or fail: {probes:?}"
+            );
             if passes {
-                assert!(
-                    !probes[gate].produce_present,
-                    "the checks passed, so target/produce is gone before the verifier gate: {probes:?}"
-                );
                 assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
             } else {
-                assert!(
-                    probes[gate].produce_present,
-                    "a check failed, so target/produce is kept: {probes:?}"
-                );
                 assert_eq!(done.state, OutcomeState::Rejected, "{}", done.reason);
             }
         }
+    }
+
+    /// Leaks `script` as the argument vector of an `sh -c` check, which `Docs` keeps for the whole run.
+    fn leaked_sh_check(script: String) -> &'static [&'static str] {
+        let script: &'static str = Box::leak(script.into_boxed_str());
+        Box::leak(vec!["sh", "-c", script].into_boxed_slice())
+    }
+
+    #[test]
+    fn producer_build_directory_is_gone_when_the_first_check_starts_and_the_candidate_is_kept() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("repo");
+        // The real check command, run in the verifier's snapshot. It fails if any job still has a producer
+        // build directory when it starts, or if its working directory does not hold the candidate's README.
+        let check = leaked_sh_check(format!(
+            "for p in '{jobs}'/*/target/produce; do \
+                 if [ -e \"$p\" ]; then echo \"producer build still present: $p\"; exit 1; fi; \
+             done; \
+             grep -q 'A demo' README.md || {{ echo 'the candidate is not in the tree'; exit 1; }}",
+            jobs = root.join("jobs").display()
+        ));
+        let athena = athena_with(
+            &repo,
+            &state,
+            check,
+            crate::test_support::recording_plenty_space,
+            counting(Arc::new(Counts::default()), Some(root.clone())),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+
+        // The check passed, so it saw no producer build and the candidate's tree; the candidate landed.
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert!(readme_at_head(&athena).contains("A demo"));
+        let said = ui.0.lock().unwrap().clone();
+        let removed = said
+            .iter()
+            .position(|l| l.starts_with("disk       removed the producer's build directory"))
+            .unwrap_or_else(|| panic!("no removal line in {said:#?}"));
+        let checked = said
+            .iter()
+            .position(|l| l.starts_with("checks     "))
+            .unwrap_or_else(|| panic!("no checks line in {said:#?}"));
+        assert!(removed < checked, "{said:#?}");
+        assert!(said[checked].contains("probe ok"), "{said:#?}");
+        assert!(!athena.state.produce_dir(&proposal.job).exists());
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = &records.jobs[proposal.job.as_str()];
+        assert!(job.candidate.is_some(), "the candidate is in the records");
+        let verification = job.verification.as_ref().expect("a verification");
+        assert!(verification.checks.iter().all(|c| c.passed));
+    }
+
+    #[test]
+    fn a_failed_check_logs_its_failing_test_and_records_its_last_200_lines() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        // Passes on the base README. On the candidate it prints 300 numbered lines, one failing test line,
+        // and five more lines, then exits 1.
+        let check = leaked_sh_check(
+            "grep -q 'A demo' README.md || exit 0; \
+             i=1; while [ $i -le 300 ]; do echo \"output line $i\"; i=$((i+1)); done; \
+             echo 'test demo::the_failing_one ... FAILED'; \
+             for n in 1 2 3 4 5; do echo \"after $n\"; done; exit 1"
+                .to_string(),
+        );
+        let athena = athena_with(
+            &repo,
+            &state,
+            check,
+            crate::test_support::plenty_of_space,
+            base_script(),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Rejected, "{}", done.reason);
+
+        // The drain log names the failing test, not just the check.
+        let said = ui.0.lock().unwrap().clone();
+        let line = said
+            .iter()
+            .find(|l| l.starts_with("checks     "))
+            .unwrap_or_else(|| panic!("no checks line in {said:#?}"));
+        assert!(
+            line.contains("probe FAILED: demo::the_failing_one"),
+            "{line}"
+        );
+
+        // The committed record holds the last 200 lines of the output and nothing before them.
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let verification = records.jobs[proposal.job.as_str()]
+            .verification
+            .as_ref()
+            .expect("a verification");
+        let run = verification
+            .checks
+            .iter()
+            .find(|c| !c.passed)
+            .expect("the failed check is recorded");
+        // 300 numbered lines + the failing line + 5 more = 306 lines; the last 200 start at line 107.
+        let kept: Vec<&str> = run.output_tail.lines().collect();
+        assert_eq!(kept.len(), 200, "{}", run.output_tail);
+        assert_eq!(kept[0], "output line 107");
+        assert_eq!(kept[194], "test demo::the_failing_one ... FAILED");
+        assert_eq!(kept[199], "after 5");
+        assert!(!run.output_tail.contains("output line 106\n"));
+        assert!(!run.output_tail.contains("output line 1\n"));
     }
 
     /// A check result as a run killed at its deadline leaves it: no exit code, the deadline note, not passed.

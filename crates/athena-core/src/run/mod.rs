@@ -1352,6 +1352,10 @@ impl Athena {
         let resumed_checks = recorded_checks.is_some();
         if !resumed_checks {
             ctx.stages.enter(&id, Stage::Checks);
+            // The checks build in their own directory, so the producer's build is idle now: it goes before
+            // the first check starts, and the job never holds two full builds at once. A resumed job
+            // removed it before it was held.
+            self.free_producer_build(ctx, &id);
         }
         if let Some(runs) = recorded_checks {
             ctx.ui.line(
@@ -1436,14 +1440,8 @@ impl Athena {
             .as_ref()
             .filter(|b| b.base_commit == p.as_str());
         if !resumed_checks {
-            let checks_line: Vec<String> = check_runs
-                .iter()
-                .map(|r| match (r.passed, r.tests_ran) {
-                    (true, Some(n)) => format!("{} ok ({n} tests)", r.name),
-                    (true, None) => format!("{} ok", r.name),
-                    (false, _) => format!("{} FAILED", r.name),
-                })
-                .collect();
+            let checks_line: Vec<String> =
+                check_runs.iter().map(crate::checks::log_entry).collect();
             ctx.ui.line(&format!(
                 "checks     {} ({:.0}s)",
                 checks_line.join(" · "),
@@ -1469,21 +1467,9 @@ impl Athena {
                 let _ = crate::pin::remove_tree(&verify_dir);
                 return Ok(closing);
             }
-            // Every check passed: the producer's build directory is idle, and it is the largest thing on the
-            // disk, so it goes now, before the gate that runs before the verifier. When a check failed it
-            // stays, since the work may be sent back to the producer.
+            // The producer's build directory went before the checks started. When every check passed, a stop
+            // from here resumes at the verifier, with these results.
             if check_runs.iter().all(|r| r.passed) {
-                match self.state.remove_produce(&id) {
-                    Ok(0) => {}
-                    Ok(bytes) => ctx.ui.line(&format!(
-                        "disk       removed the producer's build directory: {}",
-                        crate::state::format_bytes(bytes)
-                    )),
-                    Err(why) => ctx.ui.line(&format!(
-                        "warning: could not remove the producer's build directory: {why}"
-                    )),
-                }
-                // The checks passed: a stop from here resumes at the verifier, with these results.
                 built.recorded_checks = Some(check_runs.clone());
                 self.write_resume_mark(ctx, &closing, &built);
             }

@@ -55,9 +55,11 @@
 //! ([`reclaim_interrupted_targets`]). Work trees, kept candidates, resume marks and records stay, so the
 //! retry resumes as before. A job with a registry entry or a held lock is running and is not touched.
 //!
-//! Freeing and resuming. The producer's build directory (`target/produce`) is idle once Athena's checks have
-//! passed, since the checks build in their own directory; it is removed then, before the gate that runs
-//! before the verifier, and kept when a check fails (the send-back needs it). A job that stops for an
+//! Freeing and resuming. The producer's build directory (`target/produce`) is idle once the producer has
+//! finished, since Athena's checks build in their own directory; it is removed before the first check starts,
+//! after the gate that runs before the checks, whether the checks then pass or fail. The job so never holds
+//! two full builds while the checks run. A failed check keeps the last 200 lines of its output in the
+//! job's verification record, and the `checks` log line names its failing tests. A job that stops for an
 //! environment cause after its candidate is built, or that is interrupted, leaves a resume mark
 //! ([`crate::state::ResumeMark`]) outside its job directory; [`resumable_stop`] says which stopped jobs
 //! `athena retry` resumes from that candidate, with no new planner or producer run.

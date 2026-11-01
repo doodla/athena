@@ -3,8 +3,9 @@
 //! Checks run in the verifier's snapshot, with the agent environment, the capability's environment, and
 //! the nested-run marker, each in its own process group under the kill switch and a deadline. A check of
 //! kind `test` fails if it ran zero tests, counted from the test harness's own summary lines, even when
-//! its exit status is 0. Output tails are capped at 4 KiB and redacted. A check that names
-//! `skip_when_only` patterns is skipped, with a note in its record, when every changed path matches one.
+//! its exit status is 0. Output tails are redacted: a passing check keeps 4 KiB, a failed one its last 200
+//! lines. A check that names `skip_when_only` patterns is skipped, with a note in its record, when every
+//! changed path matches one.
 
 use crate::capability::CheckSpec;
 use crate::ci_result::{CiRecord, Source};
@@ -178,6 +179,77 @@ pub fn tail(text: &str, max: usize) -> String {
         start += 1;
     }
     format!("…{}", &text[start..])
+}
+
+/// How many final output lines a failed check's record keeps, so a failing test's name and message
+/// survive for a retry or a person to read.
+pub const FAILED_TAIL_LINES: usize = 200;
+
+/// The byte ceiling on a failed check's kept lines, so one enormous line cannot bloat the committed
+/// record. Ordinary output stays far below it, and the cut keeps the end.
+pub const FAILED_TAIL_BYTES: usize = 64 * 1024;
+
+/// The last `n` lines of `text`, with its final newline kept when it had one.
+pub fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= n {
+        return text.to_string();
+    }
+    let mut kept = lines[lines.len() - n..].join("\n");
+    if text.ends_with('\n') {
+        kept.push('\n');
+    }
+    kept
+}
+
+/// The most failing names one log entry lists before it counts the rest.
+const LOGGED_NAMES: usize = 5;
+
+/// The names of the tests that failed in `run`: its recorded `failed_tests` when it has any, else each
+/// `test <name> ... FAILED` line of its kept output (the Rust harness's own line, which also covers a
+/// command that is not a plain `cargo test`). Without duplicates, in the order found; empty when none show.
+pub fn failing_names(run: &CheckRun) -> Vec<String> {
+    if !run.failed_tests.is_empty() {
+        return run.failed_tests.clone();
+    }
+    let mut names: Vec<String> = Vec::new();
+    for line in run.output_tail.lines() {
+        let name = line
+            .trim_end()
+            .strip_prefix("test ")
+            .and_then(|rest| rest.strip_suffix(" ... FAILED"));
+        if let Some(name) = name
+            && !names.iter().any(|n| n == name)
+        {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+/// One check's part of the drain log's `checks` line: `name ok (n tests)`, `name ok`, or `name FAILED`
+/// followed by the failing test names (up to five, then `+N more`) when any are known.
+pub fn log_entry(run: &CheckRun) -> String {
+    if run.passed {
+        return match run.tests_ran {
+            Some(n) => format!("{} ok ({n} tests)", run.name),
+            None => format!("{} ok", run.name),
+        };
+    }
+    let names = failing_names(run);
+    if names.is_empty() {
+        return format!("{} FAILED", run.name);
+    }
+    let mut listed = names
+        .iter()
+        .take(LOGGED_NAMES)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > LOGGED_NAMES {
+        listed.push_str(&format!(", +{} more", names.len() - LOGGED_NAMES));
+    }
+    format!("{} FAILED: {listed}", run.name)
 }
 
 /// Whether `path` matches one skip pattern. A pattern ending in `/` matches every path under that
@@ -417,6 +489,13 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
             None => NO_FAIL_FAST_NOTE.to_string(),
         });
     }
+    // A passing run keeps a short byte tail. A failed run keeps its last lines, whole, because the
+    // failing test's name and message are what a retry or a person needs.
+    let kept = if passed {
+        tail(&output, TAIL_BYTES)
+    } else {
+        tail(&tail_lines(&output, FAILED_TAIL_LINES), FAILED_TAIL_BYTES)
+    };
     Ok(CheckRun {
         name: spec.name.clone(),
         command: spec.run.clone(),
@@ -428,7 +507,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
             Unit::Seconds,
             "athena monotonic clock",
         ),
-        output_tail: ctx.redactor.redact(&tail(&output, TAIL_BYTES))?,
+        output_tail: ctx.redactor.redact(&kept)?,
         note,
         failed_tests,
         reused: false,
@@ -533,6 +612,105 @@ mod tests {
         let runs = baseline_runs(&[sh_spec("slow", "sleep 30")], &ctx);
         assert!(!runs[0].passed);
         assert!(runs[0].note.as_ref().unwrap().contains("deadline"));
+    }
+
+    fn run_of(passed: bool, tail: &str, failed_tests: &[&str]) -> CheckRun {
+        CheckRun {
+            name: "probe".into(),
+            command: vec!["x".into()],
+            exit_code: Some(i32::from(!passed)),
+            passed,
+            tests_ran: None,
+            duration: Quantity::measured(0.0, Unit::Seconds, "test"),
+            output_tail: tail.into(),
+            note: None,
+            failed_tests: failed_tests.iter().map(|s| s.to_string()).collect(),
+            reused: false,
+        }
+    }
+
+    fn run_script(spec: &CheckSpec) -> CheckRun {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let registry = Registry::new(state.path());
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let env = BTreeMap::from([("PATH".to_string(), std::env::var("PATH").unwrap())]);
+        let ctx = CheckContext {
+            dir: dir.path(),
+            env: &env,
+            timeout: Duration::from_secs(30),
+            registry: &registry,
+            job: "j",
+            redactor: &redactor,
+        };
+        run_check(spec, &ctx).unwrap()
+    }
+
+    #[test]
+    fn tail_lines_keeps_the_last_n_lines_and_the_final_newline() {
+        assert_eq!(tail_lines("a\nb\nc\nd\n", 2), "c\nd\n");
+        assert_eq!(tail_lines("a\nb\nc\nd", 2), "c\nd");
+        assert_eq!(tail_lines("a\nb\n", 5), "a\nb\n");
+        assert_eq!(tail_lines("", 3), "");
+    }
+
+    #[test]
+    fn a_failed_run_keeps_its_last_200_lines_and_a_passing_run_its_byte_tail() {
+        let script = "i=1; while [ $i -le 600 ]; do echo \"line $i\"; i=$((i+1)); done";
+        let failed = run_script(&sh_spec("noisy", &format!("{script}; exit 1")));
+        let lines: Vec<&str> = failed.output_tail.lines().collect();
+        assert_eq!(lines.len(), 200);
+        assert_eq!(lines[0], "line 401");
+        assert_eq!(lines[199], "line 600");
+        // The same output from a run that passes keeps only the byte tail.
+        let passed = run_script(&sh_spec("noisy", script));
+        assert!(passed.output_tail.len() <= TAIL_BYTES + 3);
+        assert!(
+            passed.output_tail.starts_with('…'),
+            "cut by bytes, not lines"
+        );
+    }
+
+    #[test]
+    fn a_failed_runs_kept_lines_stop_at_the_byte_ceiling() {
+        let script = "i=0; while [ $i -lt 150 ]; do printf '%0900d\\n' 0; i=$((i+1)); done; \
+                      echo the-end; exit 1";
+        let failed = run_script(&sh_spec("wide", script));
+        assert!(failed.output_tail.len() <= FAILED_TAIL_BYTES + 3);
+        assert!(failed.output_tail.starts_with('…'));
+        assert!(failed.output_tail.trim_end().ends_with("the-end"));
+    }
+
+    #[test]
+    fn the_log_entry_names_the_failing_tests() {
+        assert_eq!(log_entry(&run_of(true, "", &[])), "probe ok");
+        let mut ran = run_of(true, "", &[]);
+        ran.tests_ran = Some(7);
+        assert_eq!(log_entry(&ran), "probe ok (7 tests)");
+        // Recorded names come first.
+        assert_eq!(
+            log_entry(&run_of(
+                false,
+                "test other ... FAILED\n",
+                &["bin a::b", "bin c"]
+            )),
+            "probe FAILED: bin a::b, bin c"
+        );
+        // Without recorded names, the harness's FAILED lines give them; a repeated name shows once.
+        let out = "test a::ok ... ok\ntest a::bad ... FAILED\ntest a::bad ... FAILED\n\
+                   test result: FAILED. 1 passed; 1 failed\n";
+        assert_eq!(log_entry(&run_of(false, out, &[])), "probe FAILED: a::bad");
+        // No name anywhere: the check name alone.
+        assert_eq!(log_entry(&run_of(false, "boom\n", &[])), "probe FAILED");
+    }
+
+    #[test]
+    fn the_log_entry_counts_names_beyond_five() {
+        let names = ["t1", "t2", "t3", "t4", "t5", "t6", "t7"];
+        assert_eq!(
+            log_entry(&run_of(false, "", &names)),
+            "probe FAILED: t1, t2, t3, t4, t5, +2 more"
+        );
     }
 
     /// Two binaries, each with one failing test, as cargo prints them under `--no-fail-fast`.
