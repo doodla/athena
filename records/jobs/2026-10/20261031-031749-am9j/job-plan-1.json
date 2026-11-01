@@ -1,0 +1,229 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-031749-am9j",
+  "round": 1,
+  "at": "2026-11-01T17:45:59.568237487Z",
+  "invocation_seq": 3,
+  "approach": "Add to crates/athena-core/src/gh/landing.rs a pure, stack-aware `plan_rebase` and a free function `rebase_job_branch`, and re-export them from gh/mod.rs. `plan_rebase` takes git, the new base (`onto`), the local branch head, the job's own landing commit, the verified fingerprint, the rules commit and `sign`. It returns Current, Moved, or Conflict. It replays the first-parent commits between the fork and the head one at a time onto `onto`, using the same three-way step as `Git::replay`: `merge_tree(parent, tip, commit)`, then `commit_tree` with the old message. The only new git call is `git merge-base`, through `Git::run`, because athena-git has no helper for it. A commit that conflicts and is not the job's own is carried as a records-only commit. That commit is built with the existing `Git::commit_with_records(parent, commit, ..)`, which gives the parent's tree with the commit's `records/` paths. It is then merged onto the running tip with `merge_tree(parent, tip, records_image)`. So its `records/` paths are kept and its code paths are dropped. The carried message has its trailers removed and a note added, so the commit cannot be mistaken for the job's landing commit. A conflict in the job's own commit gives `Conflict`, and no ref moves. `rebase_job_branch(git, state, remote_name, default_branch, job, verified_fp, rules_commit, sign, ui)` does the following. It refuses to rebase (`Unchecked`) when the work branch on the remote holds anything other than the stored early head. It fetches origin's default branch. It finds the landing commit with `landed_commit_for`. It takes the repository lock. It runs `plan_rebase`. On `Moved` it runs `reset_keep(tip)` and prints one status line. It never pushes. Tests use real temporary repositories and a real bare origin, with no mocks. The drain is not touched. CHANGELOG.md and async-drain.md get notes. The CHANGELOG entry and the design-doc note state: clean earlier unlanded commits still ride along in the next pull request, the re-check rule does not cover stacked content, a conflicting earlier commit is kept as records only, queue order is pass order, and the drain wiring is a follow-up.",
+  "decisions": [
+    {
+      "choice": "A conflicting earlier commit is carried as a records-only commit. The helper is `Git::commit_with_records(parent, commit, ..)`, then `merge_tree(parent, tip, that_image)`. The carried message drops the Athena-* trailers and gets a note that the code was held back.",
+      "reason": "This answers finding 2 and the user's ruling. Its `records/` paths stay on the branch, so `Records::load` from the new tip still sees the held-back job. `commit_with_records(parent, commit)` builds the parent's tree with the commit's records, so the later three-way merge from the parent applies only the commit's own record changes and never replaces records that earlier carried commits added. It uses an existing public athena-git API, so athena-git stays untouched. Trailers are dropped so that `landed_commit` (pre-C0, which finds a commit by its Athena-Job and Athena-Verified-Content trailers) cannot select the code-less commit as that job's landing commit.",
+      "rejected": [
+        {
+          "option": "Skip a conflicting earlier commit and leave it off the branch (the round-3 left-behind rule)",
+          "why": "It drops the job's records from the branch, which is the deferred drop_landed by another name. This is finding 2."
+        },
+        {
+          "option": "Replace all of `records/` with the commit's `records/` snapshot at the tip",
+          "why": "It would erase records that earlier carried commits added."
+        },
+        {
+          "option": "Hold back every job stacked above a conflicting commit",
+          "why": "The next candidate would never land in the stacked shape."
+        }
+      ]
+    },
+    {
+      "choice": "A conflict in the job's own landing commit returns `Rebase::Conflict { commit, text }`. No ref moves, nothing is pushed, there is no retry, and there is no stop. A conflict in the records-only merge of an earlier commit is also `Conflict`, naming that commit. A first-parent commit with no parent in the range is an `Err`, not a `Conflict`.",
+      "reason": "This is the hold-back the user asked for. A records conflict is a conflict between job records, which an operator must see. A parentless commit is a repository fault, not a conflict, and must not read as a hold.",
+      "rejected": [
+        {
+          "option": "Map every failure to Conflict",
+          "why": "It would hide real errors as a hold-back."
+        }
+      ]
+    },
+    {
+      "choice": "`plan_rebase` checks `Current` first: when `onto` is an ancestor of the job's landing commit, it returns `Current` and replays nothing. Otherwise it replays `fork..head`, where fork comes from `git merge-base onto head`. The commits after the job's own commit (later jobs stacked above) are carried with the same rule, and the new tip is the whole rebuilt branch.",
+      "reason": "`reset_keep(tip)` moves the whole local branch, so commits stacked above the job must be carried or they would be lost. `Current` also covers the group-job path today. After `resync_onto_merge`, main is already an ancestor of the next job's commit.",
+      "rejected": [
+        {
+          "option": "Replay only fork..landed",
+          "why": "Jobs and records stacked above the head would vanish when the branch moves."
+        }
+      ]
+    },
+    {
+      "choice": "`Moved` carries `content_changed: bool`. It is true when the governed fingerprint of the replayed landing commit's tree differs from the verified fingerprint. It is computed with `athena_git::attrs::fingerprint` under `rules_commit`. `plan_rebase` never refuses on it.",
+      "reason": "The request names no re-check outcome. The re-check rule is build job 7. The drain follow-up needs to know that verified content moved. Landing is not blocked here, and `land_pr`'s merged-content check stays the safety net. A report-only flag keeps this half small and loses no information.",
+      "rejected": [
+        {
+          "option": "Return NeedsRecheck and refuse to move",
+          "why": "Any change to governed content on main would block every rebase, so the acceptance case (main moved, second job lands rebased) would not hold. It also pre-empts job 7."
+        },
+        {
+          "option": "Say nothing about content change",
+          "why": "The follow-up would have to recompute it, and the CHANGELOG would hide a real gap."
+        }
+      ]
+    },
+    {
+      "choice": "The CHANGELOG entry and async-drain.md state that earlier unlanded commits which replay cleanly still ride along in the next job's pull request, as today. They also state that the re-check rule does not cover stacked content, that queue order is pass order and not stacking order, and that the drain wiring is a follow-up job. The queue-order note extends the first-half note at async-drain.md lines 137-141.",
+      "reason": "This answers findings 3 and 4 by stating the facts instead of claiming a guarantee the code does not give.",
+      "rejected": [
+        {
+          "option": "Treat known not-landed jobs' code like a conflicting commit",
+          "why": "It needs record state the drain wiring owns, and it is outside this slice."
+        },
+        {
+          "option": "Order the queue by position on the local branch",
+          "why": "It changes drain.rs, which is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "`rebase_job_branch` takes `git`, `state: &StateDir`, `remote_name: &str` and `default_branch: &str`, and builds `GitRemote { git, name }` itself. The flow is: (1) published-head rule: the work branch on the remote is absent or equals `load_early(state, job)`, otherwise `Unchecked(reason)`. (2) `git.fetch_remote_branch(remote_name, default_branch)`; a failure or none found is `Unchecked`. (3) `landed_commit_for` on the head; none found is `Unchecked`. (4) `state.lock_repository()`, re-read the head, `plan_rebase`. (5) On `Moved`, `reset_keep(tip)` and one `ui.line`; a refused reset is an `Err`. `Rebase` has the variants Current, Moved{onto, landed, tip, records_only: Vec<String>, content_changed}, Conflict{commit, text} and Unchecked(String).",
+      "reason": "It runs against a real bare origin in tests and never pushes. A network failure or an already-published head must not become 'not landed', and `land_pr` keeps replacing the head only when it is the early head, so the published-head rule keeps today's cases working.",
+      "rejected": [
+        {
+          "option": "Take a `&dyn Remote` argument",
+          "why": "The fetch needs the remote's name anyway, and a real bare origin is a stronger test than a fake."
+        },
+        {
+          "option": "Skip the repository lock",
+          "why": "`resync_onto_merge` takes it for the same branch rewrite."
+        },
+        {
+          "option": "Push the rebased commit",
+          "why": "It adds a push path to `land_pr`, which is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "gh/mod.rs gets a one-line widening of the existing `pub use landing::{..}` list (lines 51-54) with `Rebase`, `plan_rebase` and `rebase_job_branch`.",
+      "reason": "This answers finding 1. The brief now lists gh/mod.rs as a deliverable. The `landing` module is private, so athena-cli cannot name the items otherwise.",
+      "rejected": [
+        {
+          "option": "Leave the items unexported",
+          "why": "The drain follow-up could not call them."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "purpose": "Add `Rebase`, the pure stack-aware `plan_rebase` with the records-only carry, `rebase_job_branch`, and a `#[cfg(test)] mod rebase_tests` with real-repository and bare-origin tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/mod.rs",
+      "action": "modify",
+      "purpose": "Add `Rebase`, `plan_rebase` and `rebase_job_barnch` to the existing `pub use landing::{..}` list (lines 51-54), because `landing` is a private module. One line, and it is a listed deliverable.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "purpose": "Add a section 6 note for the second half of build job 6 covering only the core function: the records-only carry, clean earlier commits riding along, the re-check rule not covering stacked content, queue order being pass order, and the drain wiring being a follow-up.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under `## [Unreleased]` / `### Added` (line 185) for the core rebase and its stated limits, with the gh/mod.rs re-export named.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read in landing.rs the imports (lines 4-21), `landed_commit_for` and `Athena::land_pr`. Read the land.rs tests (~351-526) and `fixtures` (line 243), gh/tests.rs `records_flow::World` (~1971) and test_support.rs `land_through_pr` (line 606). Read `Git::replay`, `merge_tree`, `commit_tree`, `commit_with_records`, `reset_keep` and `fetch_remote_branch` in athena-git, and `store::Records::load` (store.rs:309).",
+    "In landing.rs add `Rebase` (Current, Moved{onto, landed, tip, records_only, content_changed}, Conflict{commit, text}, Unchecked(String)). Add `pub fn plan_rebase(git, onto, head, landed, verified_fingerprint, rules_commit, sign) -> Result<Rebase>`: Current if `onto` is an ancestor of `landed`. Otherwise fork = `git.run([\"merge-base\", onto, head])`, then the first-parent commits in `fork..head` oldest first. For each: its first parent (none is an Err); `merge_tree(parent, tip, commit)`; a clean merge is committed with the old message unless the tree equals the tip's. A conflict at `landed` returns Conflict. A conflict elsewhere builds `commit_with_records(parent, commit, note, sign)` and merges it onto the tip; the note is the old subject, the old body without trailers, and a line saying the code was held back by a rebase conflict. A conflict there is Conflict naming the commit. Record the commit in `records_only`. Remember the replayed commit for `landed`. `content_changed` compares `athena_git::attrs::fingerprint` of its tree with the verified one.",
+    "Add the `#[cfg(test)] mod rebase_tests` plan_rebase cases: plan_rebase_clean_move, plan_rebase_already_current, plan_rebase_conflict_in_own_commit, plan_rebase_earlier_conflict_is_records_only (including the Records::load and path assertions), plan_rebase_clean_earlier_commit_is_carried, and one with a parentless commit giving Err. Run `cargo test -p athena-core plan_rebase` before going on.",
+    "Add `pub fn rebase_job_branch(git, state, remote_name, default_branch, job, verified_fingerprint, rules_commit, sign, ui) -> Result<Rebase>` with the flow of decision 5, and add the bare-origin tests: rebase_job_branch_lands_second_job_on_the_moved_main, rebase_job_branch_conflict_changes_nothing, and the two Unchecked extras. If the run grows long, apply the cut line.",
+    "Add `Rebase, plan_rebase, rebase_job_branch` to the `pub use landing::{..}` list in gh/mod.rs (lines 51-54).",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Confirm `git diff --stat` lists only the four deliverables.",
+    "Add the async-drain.md note after line 141 and the CHANGELOG.md entry under `### Added` (line 185), with the content in the criterion 6 demonstration. Re-read both for an outside reader, with no banned words and no email-like text."
+  ],
+  "risks": [
+    {
+      "risk": "A records-only commit is classed as a JobLanding for the held-back job in the next job's pull request (see the first open question).",
+      "mitigation": "The carried message has its Athena-* trailers removed and a note added, so the trailer lookup (`landed_commit`, pre-C0) cannot pick it. The post-C0 records lookup caveat is named in async-drain.md and the CHANGELOG, and left to the drain follow-up that returns the job. A clean earlier commit already rides along today in the same way."
+    },
+    {
+      "risk": "A held-back job's records may be changed by the records-only merge if they overlap other carried records.",
+      "mitigation": "`merge_tree(parent, tip, records_image)` is a three-way merge restricted to that commit's own records changes. A conflict there returns `Conflict` naming the commit and moves nothing. A core test pins the carry."
+    },
+    {
+      "risk": "Rebasing makes the governed fingerprint of the landed commit differ from the verified one, so a later merged-content check reports merged-unverified.",
+      "mitigation": "`content_changed` reports it and the status line shows it. This half adds no re-check. The merged-content check in `land_pr` stays the safety net. Job 7 decides the re-check."
+    },
+    {
+      "risk": "After a rebase the local branch moved while the pull request's remote head already holds an earlier landing commit.",
+      "mitigation": "The published-head rule makes the result `Unchecked` and nothing moves. A test covers it. The cut line allows reporting that test as a read-only check."
+    },
+    {
+      "risk": "The producer run is long: about 10 tests, with bare-origin setup.",
+      "mitigation": "The cut line: the Moved test and every plan_rebase test must run. The conflict case against the bare origin and the two Unchecked extras may be reported as read-only checks. Nothing in drain.rs or the athena-cli tests is touched."
+    },
+    {
+      "risk": "Clippy or fmt failures from new code.",
+      "mitigation": "Every new item is `pub` and exported. No `#[allow]` is added. Step 6 runs the three checks."
+    },
+    {
+      "risk": "Replaying with `commit_tree` signs commits only when `sign` is set.",
+      "mitigation": "The caller passes `git.signs_commits()?`, as `resync_onto_merge` does (land.rs line 195). Tests pass false."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Tests in a `#[cfg(test)] mod rebase_tests` inside landing.rs call the production `plan_rebase` on real temporary git repositories made with `Git::isolated` and `git init`, with real commits built by `crate::land::fixtures::commit/landed/plain`. Both exist today: `pub(crate) mod fixtures` in land.rs line 243, and the repo helper in the land.rs tests (~line 351, copied locally). Cases: (a) `plan_rebase_clean_move`: main gets an outside commit, the job's landing commit sits on the old main. (b) `plan_rebase_already_current`: onto is an ancestor of the landing commit. (c) `plan_rebase_conflict_in_own_commit`: main and the job's commit edit the same line. (d) `plan_rebase_earlier_conflict_is_records_only`: stack of b then c, b conflicts with the new main, c is disjoint. (e) `plan_rebase_clean_earlier_commit_is_carried`: stack of b then c, both replay cleanly. There is no mock. The seam is the real repository.",
+      "command": "cargo test --locked -p athena-core plan_rebase",
+      "observes": "(a) Moved: the new landing commit's parent is the outside commit's main tip, its message and trailers equal the old ones, and `content_changed` is true. (b) Current, and no ref moved. (c) Conflict naming the job's own commit, and the main ref and branch tip unchanged. (d) Moved with `records_only` equal to [b's commit], and the tip's parent chain is onto, then b's records-only commit, then c. (e) Moved with `records_only` empty, and the tip holds b's file and c's file.",
+      "fails_without": "If plan_rebase did not replay, the clean-move test would see no new parent chain. Without the first-parent conflict check, the conflict test would get Moved or an Err, not Conflict. Without the records-only carry, the earlier-conflict test would see either a Conflict or a branch missing the earlier job's records/ paths. Without the Current check, the already-current test would see Moved.",
+      "seam": "Production `plan_rebase` called directly. Real repositories from `Git::isolated` plus `land::fixtures`. These exist today (read in land.rs). Step 3 adds the plan_rebase tests."
+    },
+    {
+      "criterion": 2,
+      "method": "The test `plan_rebase_earlier_conflict_is_records_only` from criterion 1 goes further. b's landing commit is built with `fixtures::landed(job_b)` for its records and `fixtures::plain` for a code file that conflicts with the moved main. c's commit uses `fixtures::landed(job_c)` and a disjoint code file. After `plan_rebase` for c, the test reads the new tip. It calls `git.show_file(tip, <b's code path>)`, `git.ls_tree`/`show_file` for b's `records/` paths, and `crate::store::Records::load(&git, &tip)`. `Records::load` is the production loader that `land_pr` uses (landing.rs line 431). The whole athena-core suite runs, so the new tests also run with every existing one.",
+      "command": "cargo test --locked -p athena-core",
+      "observes": "At the new tip, b's code path is absent and b's `records/` paths are present. `Records::load(&git, &tip)` returns jobs for both b and c, and b's candidate, verification and outcome records are readable. The suite passes.",
+      "fails_without": "If the records-only carry dropped records/, or kept the code paths, the path assertions fail. If it replaced all of records/ with a snapshot, c's record would be missing and Records::load would lack job c. Without the carry, `Records::load` at the new tip would not contain b's job.",
+      "seam": "Production `plan_rebase` and `Records::load` on a real repository. The fixtures exist (land.rs line 243). The test is added in step 3. Whether `Records::load` accepts the fixtures' repository is unproven and is settled by running the test."
+    },
+    {
+      "criterion": 3,
+      "method": "Tests in landing.rs call the production `rebase_job_branch` against a real bare origin. The origin is `git init --bare` in a temp directory. The work repository, made with `Git::isolated`, has `origin` pointing at it. The work repository has two jobs' landing commits stacked on one local branch. A third repository, or the work repository, then pushes an outside commit to the bare main after the second job was verified. `StateDir::new(tempdir)` is the state. The Quiet or recording Ui from the crate's tests is used. The producer reads `records_flow::World` (gh/tests.rs ~1971) and `test_support` for the setup shape and copies the minimum; the seam is the real bare repository. Cases: `rebase_job_branch_lands_second_job_on_the_moved_main` and `rebase_job_branch_conflict_changes_nothing`. A cheaper extra pair, `rebase_job_branch_unchecked_when_origin_is_unreachable` and `rebase_job_branch_unchecked_for_a_published_head`, is part of the plan.",
+      "command": "cargo test --locked -p athena-core rebase_job_branch",
+      "observes": "First case: the result is Moved. `git log --first-parent --format=%H` on the local branch is linear. The second job's new landing commit has the bare main's tip as an ancestor. The first job's commit rides along. Second case: Conflict, the local branch tip equals the old tip, and the bare main equals the old main. Extras: Unchecked, with no ref moved.",
+      "fails_without": "Without the replay in rebase_job_branch, job 2's landing commit would stay on the old main and the parent-is-origin-main assertion would fail. Without the conflict path, the local branch or the bare main would move or the call would return Err.",
+      "seam": "Production `rebase_job_branch`, with git, the state dir and the remote name passed as arguments. A real bare origin. The test is added in step 4; the Ui and StateDir helpers exist. Cut line: if the run is long, the conflict case and the two Unchecked extras may be reported as read-only checks. The Moved case and the plan_rebase tests are never cut."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three Athena checks on the final tree. The new items are `pub` and re-exported, so clippy's dead-code check does not fire. The change adds no `#[allow]`. It edits no existing test and no drain.rs line, so the drain tests (including those that pin `[read a, run a, land a, land a]`) run as they were.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three commands exit 0.",
+      "fails_without": "Unformatted code fails fmt. An unused item or parameter fails clippy under -D warnings. A changed or broken existing test fails cargo test.",
+      "seam": "Existing toolchain commands; there is no seam. Nothing is added to any existing test double."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff listing after the change. Then `git diff -- crates/athena-core/src/gh/mod.rs` to confirm that its change is the one list line.",
+      "command": "git diff --stat",
+      "observes": "Only crates/athena-core/src/gh/landing.rs, crates/athena-core/src/gh/mod.rs, docs/design/async-drain.md and CHANGELOG.md appear. crates/athena-cli/src/drain.rs is absent.",
+      "fails_without": "A drain.rs or any other file in the diff would show here."
+    },
+    {
+      "criterion": 6,
+      "method": "Read both diffs. The CHANGELOG entry goes under the `### Added` heading at CHANGELOG.md line 185, in `## [Unreleased]`. The async-drain.md note goes in section 6, after the first-half note (lines 137-141). Both are written for an outside reader.",
+      "command": "git diff -- CHANGELOG.md docs/design/async-drain.md",
+      "observes": "Both texts say: earlier unlanded commits that replay cleanly still ride along in the next job's pull request as they do today, and the re-check rule does not cover stacked content. Both say a conflicting earlier commit is kept as records only, so its records stay on the branch and its code is held back. Both say queue order is pass order, not stacking order. Both name the drain wiring (Steps::rebase and the drain test) as a follow-up. The CHANGELOG entry also names the one-line gh/mod.rs re-export.",
+      "fails_without": "A missing sentence is visible in the diff."
+    }
+  ],
+  "open_questions": [
+    "A records-only commit for a held-back job b still adds b's closing records. The gate's `classify_pre_merge` (athena-gate invariant.rs:320) classes a commit that adds closing records as a JobLanding without comparing the governed fingerprint, so b's records could appear as a landing in c's pull request. After C0, `landed_commit_from_records` finds a landing by its records and could pick the records-only commit as b's landing commit. This slice does not wire b to land again. Should the drain follow-up (A6b, send_back) handle this? I assume yes and name it in async-drain.md.",
+    "`Moved.content_changed` is report-only here. The re-check rule is build job 7. Is a flag with no refusal acceptable for this half? I assume so. It is stated in the CHANGELOG and the doc note.",
+    "Whether `Records::load` (store.rs:309) loads the repository the `land::fixtures` build is not proven. The producer settles it by running the records-only test. The fallback is to assert the record paths through `show_file`, and then to say so in the report.",
+    "The bare-origin setup is copied from `records_flow::World` (gh/tests.rs ~1971) and `test_support`. I did not read those lines. The producer reads them first, and falls back to `git init --bare` plus `git remote add origin <path>` with `Git::isolated`."
+  ],
+  "producer_section_sha256": "18053acf137cd46c5936e6f195027ab9204868b7335c68d35e600334dc0d6661",
+  "resumed_from": "20261031-030119-tw3v"
+}
