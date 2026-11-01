@@ -1047,6 +1047,44 @@ pub(crate) mod check_seam {
     }
 }
 
+/// The seam tests use to give the CI read a fake `gh` runner and a sleeper that spends no time. With nothing
+/// installed, a test build reads no CI result (`routing::NoCi`), so a test that gives the repository a GitHub
+/// origin never reaches the real `gh` or waits. Production builds do not have it. It is per thread.
+#[cfg(test)]
+pub(crate) mod ci_seam {
+    use crate::gh::Runner;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    /// Called in place of a sleep between two reads of the CI run.
+    pub type Sleeper = Rc<dyn Fn(Duration)>;
+
+    type Pair = (Rc<dyn Runner>, Sleeper);
+
+    thread_local! {
+        static SEAM: RefCell<Option<Pair>> = const { RefCell::new(None) };
+    }
+
+    /// Clears the seam when dropped.
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            SEAM.with(|s| *s.borrow_mut() = None);
+        }
+    }
+
+    pub fn install(runner: Rc<dyn Runner>, sleeper: Sleeper) -> Guard {
+        SEAM.with(|s| *s.borrow_mut() = Some((runner, sleeper)));
+        Guard
+    }
+
+    pub fn current() -> Option<Pair> {
+        SEAM.with(|s| s.borrow().clone())
+    }
+}
+
 /// How many times a report with unmet criteria goes back to the producer before the verifier judges it.
 const PRODUCER_SEND_BACKS: u32 = 1;
 
@@ -1104,6 +1142,66 @@ fn normal_path(path: &str) -> String {
 }
 
 impl Athena {
+    /// Picks where the CI result of job `job` is read from and how long to wait for it, together, and runs
+    /// `act` with both. The source and the wait are one choice, so a repository with no GitHub origin can
+    /// never get a wait:
+    ///
+    /// - a nested run, or an origin that is not an https URL on github.com (none, a local path, another
+    ///   host): [`crate::routing::NoCi`] with one read and no wait;
+    /// - a GitHub origin: the push run on the job's CI branch, read through `gh`, once at first and then
+    ///   every [`crate::routing::CI_POLL`] up to `wait_s` seconds. In a test build the runner and the sleeper
+    ///   come from [`ci_seam`], and with none installed the choice is `NoCi`.
+    ///
+    /// The source borrows the client, which borrows the runner, so they live only inside this call.
+    fn with_ci_source<T>(
+        &self,
+        job: &JobId,
+        wait_s: u64,
+        act: impl FnOnce(&dyn crate::ci_result::CiSource, crate::ci_result::Wait) -> T,
+    ) -> T {
+        use crate::ci_result::Wait;
+        let one_read = Wait {
+            polls: 1,
+            pause: std::time::Duration::ZERO,
+        };
+        let repository = if self.nested.is_some() {
+            None
+        } else {
+            self.git
+                .run(["remote", "get-url", "origin"])
+                .ok()
+                .and_then(|url| crate::gh::GhClient::origin_repository(&url))
+        };
+        let Some(repository) = repository else {
+            return act(&crate::routing::NoCi, one_read);
+        };
+        let wait = Wait {
+            polls: crate::routing::ci_polls(wait_s),
+            pause: std::time::Duration::ZERO,
+        };
+        let branch = crate::gh::ci_branch(job);
+        #[cfg(test)]
+        {
+            let Some((runner, sleeper)) = ci_seam::current() else {
+                return act(&crate::routing::NoCi, one_read);
+            };
+            let client = crate::gh::GhClient::new(&*runner, repository);
+            let source = client.ci_source(&branch);
+            let sleep = move |pause: std::time::Duration| (*sleeper)(pause);
+            let paced = crate::routing::Paced::new(&source, &sleep, crate::routing::CI_POLL);
+            act(&paced, wait)
+        }
+        #[cfg(not(test))]
+        {
+            let runner = crate::gh::GhCli;
+            let client = crate::gh::GhClient::new(&runner, repository);
+            let source = client.ci_source(&branch);
+            let paced =
+                crate::routing::Paced::new(&source, &std::thread::sleep, crate::routing::CI_POLL);
+            act(&paced, wait)
+        }
+    }
+
     /// The stages of a job after the reading is accepted, in order:
     ///
     /// 1. `baseline_stage` takes the baseline checks before the producer runs.
@@ -1206,8 +1304,8 @@ impl Athena {
         }
 
         // The admitted candidate goes to the job's CI branch, so the repository's CI runs on it. The branch is
-        // deleted when the job closes (`finish_dispatched`). Nothing reads the CI result yet, and a failure is
-        // a warning line only.
+        // deleted when the job closes (`finish_dispatched`). The checks below read its push run, and a failure to
+        // push is a warning line only: the checks then run here once the wait bound has passed.
         self.push_ci_branch(&id, &c, ctx.ui);
 
         // Verification starts: open or update the job's pull request now, so the host's checks run on the
@@ -1233,6 +1331,9 @@ impl Athena {
         .map_err(anyhow::Error::msg)?;
         let registry = self.state.registry();
         let mut check_runs: Vec<CheckRun> = Vec::new();
+        // The statement for the verifier when the check results came from the CI run for the candidate. A
+        // resumed job takes its recorded checks and a nested run runs none, so neither carries one.
+        let mut reuse: Option<String> = None;
         let mut cleanup: Vec<String> = Vec::new();
         let check_started = Instant::now();
         let changed_for_skip: Vec<String> = closing
@@ -1275,18 +1376,28 @@ impl Athena {
                 redactor: ctx.redactor,
                 cleanup: std::cell::RefCell::new(Vec::new()),
             };
-            // No candidate commit is pushed yet, so no CI result exists to read: one read, no wait.
-            check_runs = crate::routing::run_routed(
-                &route,
-                &c,
-                &changed_for_skip,
-                &crate::routing::NoCi,
-                &exec,
-                crate::ci_result::Wait {
-                    polls: 1,
-                    pause: std::time::Duration::ZERO,
-                },
-            )?;
+            // The candidate was pushed to the job's CI branch above: a GitHub origin gives its push run, read
+            // up to `ci_wait_s`; any other repository gives no CI result, with one read and no wait. A green
+            // run stands in for the checks, a red run fails them, and anything else runs them here.
+            let (runs, ci_record) =
+                self.with_ci_source(&id, jc.config.budget.ci_wait_s, |ci, wait| {
+                    crate::routing::run_routed_with_record(
+                        &route,
+                        &c,
+                        &changed_for_skip,
+                        ci,
+                        &exec,
+                        wait,
+                    )
+                })?;
+            check_runs = runs;
+            if let Some(record) = &ci_record {
+                ctx.ui.line(&format!(
+                    "ci         checks reused from {} for {c}",
+                    record.run_address.as_deref().unwrap_or("the CI run")
+                ));
+                reuse = crate::verify::reuse_statement(record, &c);
+            }
             cleanup.extend(exec.cleanup.into_inner());
         } else {
             for spec in ctx.capability.checks(jc) {
@@ -1394,6 +1505,7 @@ impl Athena {
                 replay_record,
                 verify_dir,
                 capability_env,
+                reuse,
             },
         )
     }
