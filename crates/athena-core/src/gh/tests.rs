@@ -1954,6 +1954,43 @@ fn git_remote_lists_the_commits_after_the_landing_commit() {
     assert_eq!(remote.remote_head("work").unwrap(), Some(y));
 }
 
+#[test]
+fn git_remote_deletes_a_pushed_branch_and_a_remote_without_delete_refuses() {
+    let bare_dir = tempfile::tempdir().unwrap();
+    let bare = Git::isolated(bare_dir.path());
+    bare.run(["init", "-q", "--bare", "-b", "main"]).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let git = Git::isolated(dir.path());
+    git.run(["init", "-q", "-b", "main"]).unwrap();
+    std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+    git.run(["add", "-A"]).unwrap();
+    git.run(["commit", "-q", "-m", "x"]).unwrap();
+    let commit = git.head().unwrap().unwrap();
+    git.run(["remote", "add", "origin", bare_dir.path().to_str().unwrap()])
+        .unwrap();
+    let remote = GitRemote {
+        git: &git,
+        name: "origin",
+    };
+    let branch = ci_branch(&JobId::parse("20261031-230906-3rze").unwrap());
+    assert_eq!(branch, "athena/ci/20261031-230906-3rze");
+    remote.push(&branch, &commit).unwrap();
+    // A neighbouring branch must survive the delete.
+    remote.push("athena/ci/other", &commit).unwrap();
+    assert_eq!(remote.remote_head(&branch).unwrap(), Some(commit.clone()));
+
+    remote.delete_branch(&branch).unwrap();
+    assert_eq!(remote.remote_head(&branch).unwrap(), None);
+    assert_eq!(
+        remote.remote_head("athena/ci/other").unwrap(),
+        Some(commit.clone())
+    );
+    // A remote that does not implement the delete refuses rather than doing nothing.
+    let refusing = FakeRemote::default();
+    let err = refusing.delete_branch(&branch).unwrap_err().to_string();
+    assert!(err.contains("cannot delete"), "{err}");
+}
+
 /// End to end over real git: the branch holds the landing commit plus a declared-intervention commit.
 /// Land refuses naming that commit, requests no merge, and leaves the remote branch untouched.
 #[test]

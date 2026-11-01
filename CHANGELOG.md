@@ -127,6 +127,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Each job's candidate is pushed to the branch `athena/ci/<job id>` on `origin` as soon as it is admitted, and
+  the branch is deleted when the job closes, whatever the outcome (landed, rejected or failed). The push goes
+  through `gh::Remote`, apart from the early pull request's own push to the job's work branch.
+  `.github/workflows/ci.yml` now also runs on pushes to `athena/ci/**` (the job named `fmt, clippy, tests` keeps
+  its name). A branch left by a killed run is replaced, pinned to the head found, and a failed push or delete
+  is one warning line that does not change the job's outcome. With no GitHub origin (none, or not an https URL
+  on github.com) nothing is pushed and one log line says the CI branch push is skipped. Nothing reads the CI
+  result yet: this only starts the runs. `Remote` gains `delete_branch` (git `push --delete` on `GitRemote`;
+  the default returns an error). The tests use recording fakes and never reach the network.
 - The drain lands passed jobs through an ordered landing queue (first half of build job A6 in
   `docs/design/async-drain.md`). With `[parallel] max_concurrency` above 1, a worker joins the queue when its run
   passes and only the head takes the landing lock, so jobs land first in, first out in the order their runs

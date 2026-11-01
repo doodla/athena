@@ -1,0 +1,165 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-054316-xkbe",
+  "n": 1,
+  "at": "2026-11-01T01:19:53.771952516Z",
+  "invocation_seq": 6,
+  "base_commit": "89558392d8d06eb7f28f7e84cd78e186c604e740",
+  "config_sha256": "d981dad648f6930542cadfb583fb19c7165ef87f8477868cef62f66e4afc4c3e",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Compare failing tests to the base so job-caused failures are separate",
+  "summary": "Root cause: the baseline records only whether a whole check (e.g. \"test\") failed on the base, so a failure is either wholly pre-existing or wholly the job's; a different test failing, or a clash with a concurrent config/test change, cannot be told apart (jobs 20261017-044408-wcwy and 20261017-182453-a5sf). Fix it where it originates by recording failing test names in the baseline and comparing per test at verification.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "fix the per-check-name baseline comparison itself"
+    },
+    {
+      "id": "tested",
+      "how": "tests for the parser and the verdict; fmt, clippy, test pass"
+    },
+    {
+      "id": "rust",
+      "how": "all changes in Rust"
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "criteria run cargo test on the new tests"
+    },
+    {
+      "id": "mechanism",
+      "how": "enforced in verdict code, not prose"
+    },
+    {
+      "id": "small",
+      "how": "one focused change to baseline comparison"
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/verify.rs (is_pre_existing, mark_pre_existing, VerdictInputs.baseline), crates/athena-core/src/run/checks.rs (take_baseline runs the configured checks on the base snapshot via crates/athena-core/src/checks.rs baseline_runs), crates/athena-core/src/run/verification.rs (verifier always runs; failed check fails the final verdict unless pre-existing) and crates/athena-data/src/records.rs (Baseline::failed_before matches a check by name only; Baseline::validate). The Baseline record is already in AnyRecord, so a new optional field on CheckRun/Baseline must keep serde defaults so old records still parse and the record round-trip test and check_record_file still pass.",
+    "Cause as read: pre-existing detection is per check name, so (a) a check failing on the base masks a new, different test failure in the same check, and (b) a failure from a clash with a concurrent change is judged as the job's own. The name-only comparison is the origin; the fix is test-level.",
+    "Fix shape: parse failing test names from cargo test output (the 'failures:' list) into CheckRun for baseline and candidate runs; is_pre_existing treats a failed check as pre-existing only if every failing test also failed on the base; failures new relative to the base are reported separately in the finding with their names. Where no test names can be parsed, behaviour falls back to the current name-level rule.",
+    "Jobs 20261017-044408-wcwy and 20261017-182453-a5sf: their candidate changes are not retried or kept here; their findings are addressed by the general mechanism (failing test names classified against the base), not by editing their files. The athena.toml / docs/design/job-planning.md clashes are not edited.",
+    "Audience: the verifier and the user reading a rejected job, who need to see which failures the job caused. Check names in the stage are the existing ones (fmt, clippy, test)."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description names the root cause (baseline compares whole checks by name, with no per-test comparison) and the fix is in crates/athena-data/src/records.rs and crates/athena-core/src/verify.rs / checks.rs, not in any one job's files; check with git diff.",
+      "kind": "content"
+    },
+    {
+      "text": "A unit test in crates/athena-core/src/verify.rs fails without the change and passes with it: a baseline where test X failed and a candidate where tests X and Y fail is NOT pre-existing and the verdict fails naming Y; where only X fails it is pre-existing. Run cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A parser test shows failing test names are extracted from real cargo test output of the shapes quoted in the two jobs (the 'failures:' list), and output with no list falls back to the name-level rule. Run cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A Baseline/CheckRun record written before the change (no test-name field) still parses and validates; the records round-trip test and check_record_file pass. Run cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The finding or note for a failed check separates tests already failing on the base from tests newly failing, so the user can see what the job caused; covered by a test on the produced finding text. Run cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets and cargo test --locked pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No governance file (athena.toml, defaults.toml, workflows) is changed; CHANGELOG.md has an entry describing the root cause.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Re-landing the auditor role or the ontology file from the two earlier jobs; their candidate files (auditor.rs, ontology.toml, tests, docs) are dropped, not kept",
+    "Fixing the max_concurrency test or the banned-word wording in docs, which are separate instances",
+    "Changing athena.toml, defaults.toml or workflows",
+    "Rebasing or merging concurrent changes automatically"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7168,
+      "p_verification_passes": 0.6744868035190615,
+      "p_user_intervenes": 0.0896551724137931,
+      "cost_usd": {
+        "p10": 0.5427645481214932,
+        "p50": 1.2459717999999995,
+        "p90": 3.3726722480387514
+      },
+      "wall_time_s": {
+        "p10": 529.0420783129066,
+        "p50": 1759.403067752696,
+        "p90": 3906.2573213966702
+      }
+    }
+  },
+  "departures": "Hard change to the verdict logic with record schema care, so cost is somewhat above the reference.",
+  "urgent_reason": "It cuts rejected attempts: two jobs were rejected for failing tests they did not cause, and retries are wasted work.",
+  "hard_reason": "It changes how the check stage and verdict judge failed checks (is_pre_existing, baseline record), a rule that can fail or pass a job.",
+  "producer_effort": "high"
+}

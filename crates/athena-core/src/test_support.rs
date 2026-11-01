@@ -257,12 +257,24 @@ pub struct EarlyCall {
 /// A remote and a host in one recording fake, for tests that drive `go` through the early-pull-request seam.
 /// It records every call with a probe reading taken at call time, and can be told to refuse a push or an
 /// open.
+///
+/// Calls on a CI branch (`athena/ci/<job id>`, see [`crate::gh::ci_branch`]) are kept apart from the early
+/// pull request's: they go to `ci_calls`, move `ci_head` and fail on `fail_ci`, and `calls`, `head` and
+/// `fail_push` see only the job's own branch.
 pub struct EarlyFake {
     /// What the remote branch holds; a push or replace moves it.
     pub head: RefCell<Option<String>>,
     pub calls: RefCell<Vec<EarlyCall>>,
     pub fail_push: std::cell::Cell<bool>,
     pub fail_open: std::cell::Cell<bool>,
+    /// What the CI branch holds; a push or replace moves it and a delete clears it.
+    pub ci_head: RefCell<Option<String>>,
+    /// The calls on a CI branch: `push`, `replace` or `delete`.
+    pub ci_calls: RefCell<Vec<EarlyCall>>,
+    /// Refuses every push and replace on a CI branch.
+    pub fail_ci: std::cell::Cell<bool>,
+    /// Refuses every delete of a CI branch.
+    pub fail_ci_delete: std::cell::Cell<bool>,
     probe: Box<dyn Fn() -> usize>,
 }
 
@@ -282,17 +294,36 @@ impl EarlyFake {
             calls: RefCell::new(Vec::new()),
             fail_push: std::cell::Cell::new(false),
             fail_open: std::cell::Cell::new(false),
+            ci_head: RefCell::new(None),
+            ci_calls: RefCell::new(Vec::new()),
+            fail_ci: std::cell::Cell::new(false),
+            fail_ci_delete: std::cell::Cell::new(false),
             probe: Box::new(probe),
         })
     }
 
     fn record(&self, kind: &'static str, branch: &str, commit: &str) {
-        self.calls.borrow_mut().push(EarlyCall {
+        let call = EarlyCall {
             kind,
             branch: branch.to_string(),
             commit: commit.to_string(),
             seen: (self.probe)(),
-        });
+        };
+        if is_ci_branch(branch) {
+            self.ci_calls.borrow_mut().push(call);
+        } else {
+            self.calls.borrow_mut().push(call);
+        }
+    }
+
+    /// The calls of one kind on a CI branch, in order.
+    pub fn ci_of(&self, kind: &str) -> Vec<EarlyCall> {
+        self.ci_calls
+            .borrow()
+            .iter()
+            .filter(|c| c.kind == kind)
+            .cloned()
+            .collect()
     }
 
     /// The calls of one kind, in order.
@@ -306,26 +337,59 @@ impl EarlyFake {
     }
 }
 
+/// Whether `branch` is a CI branch, one of Athena's `athena/ci/<job id>` branches.
+fn is_ci_branch(branch: &str) -> bool {
+    branch.starts_with(crate::gh::CI_BRANCH_PREFIX)
+}
+
+impl EarlyFake {
+    /// The cell that holds the head of `branch`: the CI branch's or the job's own.
+    fn head_of(&self, branch: &str) -> &RefCell<Option<String>> {
+        if is_ci_branch(branch) {
+            &self.ci_head
+        } else {
+            &self.head
+        }
+    }
+}
+
 impl crate::gh::Remote for EarlyFake {
-    fn remote_head(&self, _: &str) -> Result<Option<String>> {
-        Ok(self.head.borrow().clone())
+    fn remote_head(&self, branch: &str) -> Result<Option<String>> {
+        Ok(self.head_of(branch).borrow().clone())
     }
 
     fn push(&self, branch: &str, commit: &str) -> Result<()> {
         self.record("push", branch, commit);
-        if self.fail_push.get() {
+        let refused = if is_ci_branch(branch) {
+            self.fail_ci.get()
+        } else {
+            self.fail_push.get()
+        };
+        if refused {
             bail!("the remote refused the push");
         }
-        *self.head.borrow_mut() = Some(commit.to_string());
+        *self.head_of(branch).borrow_mut() = Some(commit.to_string());
         Ok(())
     }
 
     fn replace(&self, branch: &str, commit: &str, expected_old: &str) -> Result<()> {
         self.record("replace", branch, commit);
-        if self.head.borrow().as_deref() != Some(expected_old) {
+        if is_ci_branch(branch) && self.fail_ci.get() {
+            bail!("the remote refused the push");
+        }
+        if self.head_of(branch).borrow().as_deref() != Some(expected_old) {
             bail!("the remote branch moved");
         }
-        *self.head.borrow_mut() = Some(commit.to_string());
+        *self.head_of(branch).borrow_mut() = Some(commit.to_string());
+        Ok(())
+    }
+
+    fn delete_branch(&self, branch: &str) -> Result<()> {
+        self.record("delete", branch, "");
+        if is_ci_branch(branch) && self.fail_ci_delete.get() {
+            bail!("the remote refused the delete");
+        }
+        *self.head_of(branch).borrow_mut() = None;
         Ok(())
     }
 

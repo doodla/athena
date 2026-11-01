@@ -455,7 +455,7 @@ mod produce_and_verify_order_tests {
             .map(String::as_str)
             .take_while(|l| !l.starts_with("landed "))
             .collect();
-        assert_eq!(said.len(), 7, "{said:#?}");
+        assert_eq!(said.len(), 8, "{said:#?}");
         assert!(said[0].starts_with("dispatched "), "{said:#?}");
         assert_eq!(said[1], "baseline   probe ok");
         // The producer and verifier lines carry a model, a wall time, a cost and a count or verdict.
@@ -468,11 +468,16 @@ mod produce_and_verify_order_tests {
             said[3].starts_with("candidate  README.md (modified) · "),
             "{said:#?}"
         );
-        assert!(said[4].starts_with("checks     probe ok ("), "{said:#?}");
+        // This repository has no origin, so the candidate is not pushed to a CI branch, and one line says so.
+        assert_eq!(
+            said[4],
+            "ci         CI branch push is skipped because there is no GitHub origin"
+        );
+        assert!(said[5].starts_with("checks     probe ok ("), "{said:#?}");
         // The replay has no history to replay here, and a fake driver builds nothing: it says why.
-        assert!(said[5].starts_with("replay     no replay: "), "{said:#?}");
+        assert!(said[6].starts_with("replay     no replay: "), "{said:#?}");
         assert!(
-            said[6].starts_with("verifier   ") && said[6].ends_with(" · $0.01 · pass"),
+            said[7].starts_with("verifier   ") && said[7].ends_with(" · $0.01 · pass"),
             "{said:#?}"
         );
 
@@ -1929,5 +1934,213 @@ mod produce_and_verify_order_tests {
         );
         assert!(readme_at_head(&athena).contains("A demo."));
         assert_eq!(athena.state.read_resume(&first), None, "the mark is spent");
+    }
+
+    /// One `go` run with the early seam holding a recording fake, so nothing reaches a network.
+    struct CiRun {
+        git: Git,
+        job: JobId,
+        fake: std::rc::Rc<crate::test_support::EarlyFake>,
+        lines: Vec<String>,
+        state: OutcomeState,
+        landed: Option<String>,
+        _dirs: (tempfile::TempDir, tempfile::TempDir),
+    }
+
+    impl CiRun {
+        fn warnings(&self) -> Vec<&String> {
+            self.lines
+                .iter()
+                .filter(|l| l.starts_with("warning: "))
+                .collect()
+        }
+
+        fn skip_lines(&self) -> usize {
+            self.lines
+                .iter()
+                .filter(|l| {
+                    l.contains("CI branch push is skipped because there is no GitHub origin")
+                })
+                .count()
+        }
+
+        fn ci_kinds(&self) -> Vec<&'static str> {
+            self.fake.ci_calls.borrow().iter().map(|c| c.kind).collect()
+        }
+    }
+
+    /// Runs `go` with `origin` as the `origin` remote (none when `None`), the capability check `check`, and
+    /// the early seam holding a recording fake whose probe counts the producer and verifier runs so far. With
+    /// `kill_check` the check is reported as killed at its deadline, a stop for the environment. Every test
+    /// that gives the repository an origin goes through here, so the seam is always installed first.
+    fn ci_run(
+        origin: Option<&str>,
+        check: &'static [&'static str],
+        kill_check: bool,
+        setup: impl Fn(&crate::test_support::EarlyFake),
+    ) -> CiRun {
+        let repo = repo();
+        let git = Git::at(repo.path());
+        if let Some(url) = origin {
+            git.run(["remote", "add", "origin", url]).unwrap();
+        }
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            check,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let probe = counts.clone();
+        let fake = crate::test_support::EarlyFake::new(move || {
+            let (_, producer, _, verifier) = probe.all();
+            producer + verifier
+        });
+        setup(&fake);
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let _seam = crate::gh::early_seam::install(fake.clone(), fake.clone());
+        let _check = kill_check.then(|| {
+            check_seam::install(std::rc::Rc::new(|spec: &CheckSpec| {
+                killed_at_the_deadline(spec, 1805.0, 1800)
+            }))
+        });
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        let lines = ui.0.lock().unwrap().clone();
+        CiRun {
+            git,
+            job: proposal.job.clone(),
+            fake,
+            lines,
+            state: done.state,
+            landed: done.landed_commit.clone(),
+            _dirs: (repo, state),
+        }
+    }
+
+    const GITHUB: &str = "https://github.com/owner/repo";
+
+    #[test]
+    fn ci_branch_is_pushed_after_admission_and_deleted_at_close() {
+        let run = ci_run(Some(GITHUB), PASSES, false, |_| {});
+        assert_eq!(run.state, OutcomeState::Landed);
+        let branch = format!("athena/ci/{}", run.job.as_str());
+        assert_eq!(branch, crate::gh::ci_branch(&run.job));
+        // The CI branch is pushed, then deleted, and nothing else happens to a CI branch.
+        assert_eq!(run.ci_kinds(), vec!["push", "delete"]);
+        let pushes = run.fake.ci_of("push");
+        let deletes = run.fake.ci_of("delete");
+        assert_eq!(pushes[0].branch, branch);
+        assert_eq!(deletes[0].branch, branch);
+        // It is the admitted candidate: a commit in the repository that is not the landed one, and the same
+        // commit the early pull request pushed to the job's own branch.
+        assert_eq!(
+            run.git
+                .run(["cat-file", "-t", &pushes[0].commit])
+                .unwrap()
+                .trim(),
+            "commit"
+        );
+        assert_ne!(Some(&pushes[0].commit), run.landed.as_ref());
+        // The early pull request still happened, through its own separate push.
+        let early_pushes = run.fake.of("push");
+        assert_eq!(early_pushes.len(), 1, "{:?}", run.fake);
+        assert_eq!(early_pushes[0].branch, crate::gh::work_branch(&run.job));
+        assert_eq!(early_pushes[0].commit, pushes[0].commit);
+        assert_eq!(run.fake.of("open_pr").len(), 1);
+        assert!(run.fake.ci_of("replace").is_empty());
+        // Pushed once the producer had run and before the verifier started; deleted after the verifier ended.
+        assert_eq!(pushes[0].seen, 1);
+        assert_eq!(deletes[0].seen, 2);
+        assert_eq!(*run.fake.ci_head.borrow(), None, "the branch is gone");
+        assert!(run.warnings().is_empty(), "{:?}", run.lines);
+        assert_eq!(run.skip_lines(), 0, "{:?}", run.lines);
+    }
+
+    #[test]
+    fn no_github_origin_pushes_no_ci_branch() {
+        let local = tempfile::tempdir().unwrap();
+        let lookalike = local.path().join("github.com/owner/repo.git");
+        std::fs::create_dir_all(&lookalike).unwrap();
+        let lookalike = lookalike.to_str().unwrap().to_string();
+        let local_path = local.path().to_str().unwrap().to_string();
+        for origin in [
+            None,
+            Some(local_path.as_str()),
+            Some(lookalike.as_str()),
+            Some("https://gitlab.example.com/owner/repo"),
+            Some("https://example.com/github.com/owner/repo"),
+        ] {
+            let run = ci_run(origin, PASSES, false, |_| {});
+            assert_eq!(run.state, OutcomeState::Landed, "{origin:?}");
+            // The seam holds a fake, so a push or a delete that ran would have been recorded.
+            assert!(
+                run.fake.ci_calls.borrow().is_empty() && run.fake.calls.borrow().is_empty(),
+                "{origin:?}: {:?}",
+                run.fake
+            );
+            assert_eq!(run.skip_lines(), 1, "{origin:?}: {:?}", run.lines);
+            assert!(run.warnings().is_empty(), "{origin:?}: {:?}", run.lines);
+        }
+    }
+
+    #[test]
+    fn ci_branch_is_deleted_when_the_job_is_rejected_or_fails() {
+        // A check that fails once the README is edited: the job is rejected.
+        let rejected = ci_run(Some(GITHUB), FAILS_ON_EDIT, false, |_| {});
+        assert_eq!(rejected.state, OutcomeState::Rejected);
+        // A check killed at its deadline: the job fails, a stop for the environment.
+        let failed = ci_run(Some(GITHUB), PASSES, true, |_| {});
+        assert_eq!(failed.state, OutcomeState::Failed);
+        for run in [&rejected, &failed] {
+            assert_eq!(run.ci_kinds(), vec!["push", "delete"], "{:?}", run.lines);
+            assert_eq!(*run.fake.ci_head.borrow(), None);
+            assert!(run.warnings().is_empty(), "{:?}", run.lines);
+        }
+    }
+
+    #[test]
+    fn a_failing_ci_push_or_delete_is_one_warning_and_the_outcome_stays() {
+        let ok = ci_run(Some(GITHUB), PASSES, false, |_| {});
+
+        // The push is refused: one warning, no delete (the remote holds nothing), the same outcome.
+        let bad_push = ci_run(Some(GITHUB), PASSES, false, |f| f.fail_ci.set(true));
+        assert_eq!(bad_push.state, ok.state);
+        assert_eq!(bad_push.ci_kinds(), vec!["push"]);
+        assert_eq!(bad_push.warnings().len(), 1, "{:?}", bad_push.lines);
+        assert!(
+            bad_push.warnings()[0].contains("could not push the CI branch"),
+            "{:?}",
+            bad_push.lines
+        );
+
+        // The delete is refused: one warning, the same outcome, and the branch is left for a later run to
+        // replace.
+        let bad_delete = ci_run(Some(GITHUB), PASSES, false, |f| f.fail_ci_delete.set(true));
+        assert_eq!(bad_delete.state, ok.state);
+        assert_eq!(bad_delete.ci_kinds(), vec!["push", "delete"]);
+        assert_eq!(bad_delete.warnings().len(), 1, "{:?}", bad_delete.lines);
+        assert!(
+            bad_delete.warnings()[0].contains("could not delete the CI branch"),
+            "{:?}",
+            bad_delete.lines
+        );
+        assert!(bad_delete.fake.ci_head.borrow().is_some());
+
+        // A branch left by an earlier run of the job holds another commit: it is replaced, pinned to that
+        // head, and then deleted.
+        let left_over = ci_run(Some(GITHUB), PASSES, false, |f| {
+            *f.ci_head.borrow_mut() = Some("f".repeat(40));
+        });
+        assert_eq!(left_over.state, ok.state);
+        assert_eq!(left_over.ci_kinds(), vec!["replace", "delete"]);
+        assert_eq!(*left_over.fake.ci_head.borrow(), None);
+        assert!(left_over.warnings().is_empty(), "{:?}", left_over.lines);
     }
 }

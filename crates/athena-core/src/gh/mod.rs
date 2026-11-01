@@ -47,7 +47,7 @@ pub use client::{
 };
 #[cfg(test)]
 use early::EARLY_RUN_JOB;
-pub use early::{EarlyPr, open_early_pr};
+pub use early::{CI_BRANCH_PREFIX, EarlyPr, ci_branch, open_early_pr};
 pub use landing::{
     LandPr, Poll, PrReport, confirm_existing_merge, land_pr, landed_commit, landed_commit_for,
     landed_commit_from_records, squash_text_for, work_branch,
