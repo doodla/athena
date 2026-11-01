@@ -14,6 +14,8 @@ pub(super) struct Checked {
     pub(super) replay_record: Replay,
     pub(super) verify_dir: PathBuf,
     pub(super) capability_env: std::collections::BTreeMap<String, String>,
+    /// [`crate::verify::reuse_statement`] for the candidate, when the check results came from its CI run.
+    pub(super) reuse: Option<String>,
 }
 
 impl Athena {
@@ -44,6 +46,7 @@ impl Athena {
             replay_record,
             verify_dir,
             capability_env,
+            reuse,
         } = checked;
         let usable_baseline = closing
             .baseline
@@ -88,6 +91,17 @@ impl Athena {
             // Change verification asks the soundness question; a study's verifier brief does not.
             soundness: ctx.capability.id() != "study",
         };
+        // Check results taken from the CI run for this candidate are said to be so, with the run, the SHA and
+        // each check's conclusion. It is not a check and fails nothing: the recorded check results above
+        // decide. A job resumed after its checks passed, or a nested run, carries none.
+        if let Some(statement) = reuse {
+            inputs.checks.push(CheckResultView {
+                name: "ci-result".into(),
+                command: "not a check".into(),
+                passed: true,
+                detail: statement,
+            });
+        }
         // What the producer's report still lacked after the send-back goes to the verifier as one more
         // entry under the checks. It is not a check and fails nothing; it names what the self-check
         // could not confirm, so the verifier judges those items itself. Only the gaps are passed, not the report.
