@@ -57,6 +57,14 @@ pub trait PrHost: Host {
     fn open_pr(&self, pr: &NewPr) -> Result<u64>;
     /// The state of the checks on a commit.
     fn checks(&self, commit: &str) -> Result<Checks>;
+    /// The state of the checks on a commit with the notes about its optional checks, from one read. The
+    /// default is [`PrHost::checks`] with no notes.
+    fn check_report(&self, commit: &str) -> Result<CheckReport> {
+        Ok(CheckReport {
+            checks: self.checks(commit)?,
+            notes: Vec::new(),
+        })
+    }
     /// Asks the host to merge the pull request, guarded by the head commit it was opened with, by a merge
     /// method the repository allows (see [`MergeMethods::choose`]). `text` is the message a squash carries.
     /// Returns the method the host was asked to use, which the landing record names (§5.3).
@@ -403,6 +411,10 @@ impl PrHost for GhClient<'_> {
     }
 
     fn checks(&self, commit: &str) -> Result<Checks> {
+        Ok(self.check_report(commit)?.checks)
+    }
+
+    fn check_report(&self, commit: &str) -> Result<CheckReport> {
         let runs = self.api(
             HostOperation::ReadChecks,
             "GET",
@@ -513,7 +525,7 @@ const CI_EVENT: &str = "push";
 
 /// The name of the job in `ci.yml` that needs the gate and the three check jobs and fails unless they all
 /// passed. It is the one name the workflow keeps for "this commit is green".
-const CI_AGGREGATE_JOB: &str = "fmt, clippy, tests";
+pub(super) const CI_AGGREGATE_JOB: &str = "fmt, clippy, tests";
 
 /// The newest run of [`CI_WORKFLOW`] that was started by a `push` event on `branch`.
 ///
@@ -761,11 +773,29 @@ impl crate::ci_result::CiSource for CiBranchSource<'_> {
     }
 }
 
-/// Reads the check-runs reply and the combined-status reply for one commit. A failure anywhere is red;
-/// anything unfinished, or no report at all, is pending; green needs at least one report and no other state.
-pub fn classify_checks(runs: &Value, status: &Value) -> Checks {
+/// How a commit's checks stand, with what the same read found about the checks that do not decide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckReport {
+    /// The verdict: the state of the required check only.
+    pub checks: Checks,
+    /// One line for each optional check that failed. They never change the verdict; the caller reports them.
+    pub notes: Vec<String>,
+}
+
+/// Reads the check-runs reply and the combined-status reply for one commit, and returns the verdict and the
+/// notes from that one read.
+///
+/// Only the required check decides, and it is found by name: the check run named [`CI_AGGREGATE_JOB`]
+/// (when several carry the name, the one with the highest id, which is the latest try; a run with no id
+/// counts as id 0). A failed one is [`Checks::Red`]; a missing one, or one not yet completed, is
+/// [`Checks::Pending`]; otherwise it is [`Checks::Green`]. Every other check run and every legacy status is
+/// optional: when one failed, it adds a note and nothing else. The pull request head check, for example,
+/// always fails on a candidate and says nothing about the change.
+///
+/// The required name is fixed: a repository whose CI has no job of that name reads as pending and does not
+/// land. Reading the required checks from the host's branch protection would lift that limit.
+pub fn classify_checks(runs: &Value, status: &Value) -> CheckReport {
     let runs = runs["check_runs"].as_array().cloned().unwrap_or_default();
-    let statuses = status["statuses"].as_array().cloned().unwrap_or_default();
     let run_failed = |r: &Value| {
         matches!(
             r["conclusion"].as_str(),
@@ -779,18 +809,36 @@ pub fn classify_checks(runs: &Value, status: &Value) -> Checks {
             )
         )
     };
-    let status_state = status["state"].as_str();
-    if runs.iter().any(run_failed) || matches!(status_state, Some("failure" | "error")) {
-        return Checks::Red;
-    }
-    let runs_done = runs
+    let required = runs
         .iter()
-        .all(|r| r["status"].as_str() == Some("completed"));
-    let statuses_done = statuses.is_empty() || status_state == Some("success");
-    if (runs.is_empty() && statuses.is_empty()) || !runs_done || !statuses_done {
-        return Checks::Pending;
+        .filter(|r| r["name"].as_str() == Some(CI_AGGREGATE_JOB))
+        .max_by_key(|r| r["id"].as_u64().unwrap_or(0));
+    let checks = match required {
+        Some(r) if run_failed(r) => Checks::Red,
+        Some(r) if r["status"].as_str() == Some("completed") => Checks::Green,
+        _ => Checks::Pending,
+    };
+    let mut notes: Vec<String> = runs
+        .iter()
+        .filter(|r| r["name"].as_str() != Some(CI_AGGREGATE_JOB) && run_failed(r))
+        .map(|r| {
+            format!(
+                "optional check {:?} concluded {}; it is not required, so it did not hold the landing",
+                r["name"].as_str().unwrap_or("(unnamed)"),
+                r["conclusion"].as_str().unwrap_or("unknown"),
+            )
+        })
+        .collect();
+    for s in status["statuses"].as_array().into_iter().flatten() {
+        if matches!(s["state"].as_str(), Some("failure" | "error")) {
+            notes.push(format!(
+                "optional status {:?} is {}; it is not required, so it did not hold the landing",
+                s["context"].as_str().unwrap_or("(unnamed)"),
+                s["state"].as_str().unwrap_or("unknown"),
+            ));
+        }
     }
-    Checks::Green
+    CheckReport { checks, notes }
 }
 
 /// Splits a remote URL into its host and `owner/name`. Only github.com is supported; the URL is not echoed
