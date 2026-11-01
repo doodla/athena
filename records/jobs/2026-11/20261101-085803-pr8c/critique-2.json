@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-085803-pr8c",
+  "round": 2,
+  "at": "2026-11-01T09:07:43.95207157Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "docs/system-facts.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/system-facts.md",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The in-loop scan finds added lines differently from admission, so moved lines that already hold a disallowed address are still left to admission.",
+      "evidence": "Admission flags every '+' line of `git diff -U0 --no-renames` (athena-git lib.rs:555-583, used at admission.rs:394). The multiset rule does not count a line that was moved or reordered, so a moved line that already holds a disallowed address passes the in-loop scan and is still refused at admission. That is root cause 1 again, for that form. The plan's subset test accepts this gap: it asserts equality only for the plain form. The reason given for rejecting the alternative ('Needs a new Git method') is wrong. Snapshot::git() is pub (snapshot.rs:122), Git::run_bytes is pub (lib.rs:218), and change_list already diffs the snapshot's base against work_tree_tree(). So athena-core can run the same `git diff -U0 --no-renames` and read line numbers from the `@@ -a,b +c,d @@` headers without touching athena-git. Fix: Either compute added lines the way admission does: run `git diff -U0 --no-renames --no-ext-diff <base> <work-tree-tree>` through snapshot.git().run_bytes and number the '+' lines from the hunk headers. Then make the criterion 7 test assert equality for every form. Or keep the multiset and say plainly, in the open questions and the code comment, that moved lines with an existing address are still left to admission.",
+      "location": "Decision 1 (added_email_lines line multiset) and its rejected alternative 'Parse git diff -U0 hunk headers'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The refusal-kind match reads event.what, which also holds the job title and verifier text, so unrelated events can match.",
+      "evidence": "Event.what is built in event_of_job (introspect.rs:1275-1284) as `title: reason` plus the verifier's failure_details. For interventions it is free text written by a person (introspect.rs:1312). A job whose title or verifier details contain a table phrase, such as a request about gitlinks or about the email allow-list, would pull in every earlier case of that kind. Under CASE_CAP those cases can crowd out the real class/category matches. Fix: Take the event's kinds from its own outcome reasons instead: job_reasons[event.job] when event.job is Some, or a new Event field holding outcome.reason. Use no refusal-kind clause for intervention events. Add a control test where the title contains the phrase but the reason does not.",
+      "location": "Decision 5: narrow_cases matches on refusal_kinds(&event.what)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The size phrase is also used by the athena-gate content gate, so those refusals get the admission 'size' kind too.",
+      "evidence": "athena-gate content.rs:71 builds the same phrase ('{path} is {size} bytes, over the limit of {max}') for a separate content gate, so refusals from that gate also get the admission 'size' kind. Fix: State that both gates share the 'size' kind on purpose, or build content.rs's message from the same constant so the two stay together.",
+      "location": "Decision 4: REFUSAL_PHRASES size entry 'bytes, over the limit of'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 2 deals with the earlier findings. send_back_text keeps its three-argument signature for run_pin_tests.rs. job_reasons keeps every outcome file's reason. The end-to-end introspection test uses three different classes of work, so it fails on base code. The plan names a real subset test inside admission.rs, which can call the private admit_without_secrets. It handles the budget line in docs/system-facts.md, and the reason it gives is correct (system_facts_budgets_match_computed). I checked the code the plan names: the producer loop's break condition, the single send-back and failure() (producer.rs:221-289, mod.rs:1089/1636); Snapshot::change_list and blob; DiffEntry; narrow_cases filtering on class and category only (introspect.rs:841-850); OutcomeRow without a reason field; read_records reading every outcome*.json; event_of_job building `what` from outcome.reason; the admission message strings at admission.rs:359-418; and the fake driver's `edits` field. All match the plan. Each demonstration drives real code (Athena::go, narrow_cases, admit_without_secrets with real git) and fails without the change. Two soundness points are minor. The line-multiset scan approximates git's diff where the exact `git diff -U0` output is reachable through public APIs, so moved lines are still left to admission. The refusal-kind match reads event.what, which also holds the job title and verifier text, so unrelated events can match. Athena's own scope finding on docs/system-facts.md is justified by the budgets test and flagged as an open question. No blocker or major findings."
+}
