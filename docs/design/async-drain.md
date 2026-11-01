@@ -140,6 +140,31 @@ the order runs pass, not the order their landing commits were stacked: a job tha
 its commit sits on. That half adds the queue alone and does not rebase. The rebase before landing (steps 1 to 4
 above) is a later request that depends on it.
 
+Note on the core of the rebase (second half of build job 6, core part). `plan_rebase` and `rebase_job_branch` in
+`crates/athena-core/src/gh/landing.rs` replay the landing commits stacked on the local branch, one at a time, onto
+origin's main, and move the local branch to the result. They do not push. Landing commits are stacked on one local
+branch, so the replay covers the whole stack from the fork with main up to the branch head, and the job's own
+landing commit is found in it. What the drain will do with each result:
+
+- Rebased cleanly: the job lands from the new landing commit.
+- Already current (main is an ancestor of the landing commit): nothing moves.
+- A conflict in the job's own landing commit: the job is held back. Nothing is landed, main and the local branch
+  are untouched, there is no retry and no drain stop; the next queued candidate still lands. Returning the job to
+  its producer, and the thrash stop above, are not part of this change.
+- A conflict in an earlier commit of the stack: that commit is kept as records only. Its `records/` paths are
+  carried and its code paths are dropped, so no job's records leave the branch and the held-back job's record
+  still loads from the new tip. The kept commit's message names the old commit in an `Athena-Records-Only:` line
+  and drops the job trailers, so it is never found again as that job's landing commit; a job whose only commit is
+  such a kept commit is held back in the same way as a conflict.
+
+Limits. Earlier unlanded commits that replay cleanly still ride along in the next job's pull request, as they do
+today. The re-check rule of step 2 does not cover stacked content: it is about the paths the landing job touches,
+not about the other jobs' commits that travel with it. A rebased result may differ from the content that was
+verified; deciding whether to re-check is build job 7, and the merged-content check of `land_pr` stays the safety
+net. The queue order is still the order runs pass, not the stacking order. The drain wiring (`Steps::rebase`,
+`Athena::rebase_for_landing`, and the drain test of a held-back head) is a follow-up request that depends on this
+one.
+
 ## 7. CI waits and self-rebuild as background awaits
 
 Point 4. A wait is not work. While one job waits for CI or while the drain rebuilds itself, the other jobs go on.

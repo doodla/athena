@@ -411,6 +411,241 @@ fn publish(job: &LandPr, early: Option<&str>) -> Result<(PrLink, Option<String>)
     Ok((link, note))
 }
 
+/// The start of the message line that marks a commit kept as records only (see [`plan_rebase`]).
+const RECORDS_ONLY_MARKER: &str = "Athena-Records-Only: ";
+
+/// Whether `message` has a line that marks its commit as kept as records only.
+fn has_records_only_marker(message: &str) -> bool {
+    message
+        .lines()
+        .any(|line| line.starts_with(RECORDS_ONLY_MARKER))
+}
+
+/// The result of rebasing a job's landing commit onto the latest main (see [`plan_rebase`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rebase {
+    /// Main is already part of the landing commit's history, or the landing commit is already part of
+    /// main's: nothing moves.
+    Current,
+    /// The stack was replayed onto `onto`. `tip` is the new head of the whole stack, `landed` the new hash of
+    /// the job's own landing commit, and `records_only` the old hashes of earlier commits that conflicted and
+    /// were kept as records only.
+    Moved {
+        onto: String,
+        landed: String,
+        tip: String,
+        records_only: Vec<String>,
+    },
+    /// The job is held back: its own landing commit conflicts with main (or is itself a records-only commit,
+    /// so its code is not on the branch). Nothing is landed and nothing moves. `commit` is the commit at
+    /// fault.
+    Conflict { commit: String, text: String },
+    /// The rebase could not be judged (main could not be fetched, the work branch is already published, or no
+    /// landing commit was found). Nothing moves, and this is not a statement about the job.
+    Unchecked(String),
+}
+
+/// The message a commit kept as records only carries: the old subject and body without the `Athena-*`
+/// trailers (so the pre-C0 lookup by `Athena-Job` cannot select it), a line saying the code was held back, and
+/// `Athena-Records-Only: <old commit>`. A message that already has the marker (a second rebase) keeps it and
+/// gets no second one.
+fn records_only_message(git: &Git, commit: &str) -> Result<String> {
+    let message = git.message(commit)?;
+    let marked = has_records_only_marker(&message);
+    let kept: Vec<&str> = message
+        .lines()
+        .filter(|line| line.starts_with(RECORDS_ONLY_MARKER) || !line.starts_with("Athena-"))
+        .collect();
+    let mut text = kept.join("\n").trim_end().to_string();
+    if !marked {
+        text.push_str(&format!(
+            "\n\nThe code of this commit was held back by a rebase conflict; only its records are kept.\n\n{RECORDS_ONLY_MARKER}{commit}"
+        ));
+    }
+    text.push('\n');
+    Ok(text)
+}
+
+/// Plans the rebase of the stack of landing commits ending at `head` onto `onto` (origin's main), for the
+/// job whose own landing commit is `landed`. Nothing is moved: the new tip is returned.
+///
+/// Landing commits are stacked on one local branch, so the first-parent commits between the fork with `onto`
+/// and `head` are replayed oldest first with a three-way merge each, keeping their messages. Then:
+///
+/// - A `landed` commit that is itself a records-only commit has no code to land: [`Rebase::Conflict`].
+/// - `onto` is already an ancestor of `landed` (or `landed` of `onto`): [`Rebase::Current`].
+/// - A conflict in `landed` itself: [`Rebase::Conflict`]. The job is held back.
+/// - A conflict in any other commit: that commit is kept as records only. Its `records/` paths are carried
+///   onto the new tip and its code paths are dropped, so no job's records leave the branch. A conflict in
+///   that records-only merge is a [`Rebase::Conflict`] naming the commit.
+///
+/// Commits that replay cleanly, including earlier unlanded ones, are carried as they are. A replayed result
+/// may hold governed content that differs from what was verified: deciding whether to re-check is for the
+/// caller (build job 7); this function does not.
+pub fn plan_rebase(git: &Git, onto: &str, head: &str, landed: &str, sign: bool) -> Result<Rebase> {
+    if has_records_only_marker(&git.message(landed)?) {
+        return Ok(Rebase::Conflict {
+            commit: landed.to_string(),
+            text: format!(
+                "commit {landed} holds only the records of its job (its code was held back by an \
+                 earlier rebase conflict), so there is no code to land"
+            ),
+        });
+    }
+    if git.is_ancestor(onto, landed)? || git.is_ancestor(landed, onto)? {
+        return Ok(Rebase::Current);
+    }
+    if !git.is_ancestor(landed, head)? {
+        bail!("the landing commit {landed} is not part of the branch head {head}");
+    }
+    let fork = git.run(["merge-base", onto, head])?.trim().to_string();
+    let commits = git.run([
+        "rev-list",
+        "--reverse",
+        "--first-parent",
+        &format!("{fork}..{head}"),
+    ])?;
+    let conflict_text = |commit: &str| -> Result<String> {
+        let subject = git.run(["log", "-1", "--format=%s", commit])?;
+        Ok(format!(
+            "commit {commit} (\"{}\") conflicts with {onto}",
+            subject.trim()
+        ))
+    };
+    let mut tip = onto.to_string();
+    let mut new_landed = None;
+    let mut records_only = Vec::new();
+    for commit in commits.lines() {
+        let parent =
+            git.parents(commit)?.into_iter().next().with_context(|| {
+                format!("commit {commit} has no parent, so it cannot be replayed")
+            })?;
+        match git.merge_tree(&parent, &tip, commit)? {
+            Some(tree) => {
+                if tree != git.tree_of(&tip)? {
+                    // `%B` ends with a blank line; one newline keeps the message as it was written.
+                    let message = format!("{}\n", git.message(commit)?.trim_end());
+                    tip = git.commit_tree(&tree, &[&tip], &message, sign)?;
+                }
+            }
+            None if commit == landed => {
+                return Ok(Rebase::Conflict {
+                    commit: commit.to_string(),
+                    text: conflict_text(commit)?,
+                });
+            }
+            None => {
+                let note = records_only_message(git, commit)?;
+                let image = git.commit_with_records(&parent, commit, &note, sign)?;
+                if image != parent {
+                    let Some(tree) = git.merge_tree(&parent, &tip, &image)? else {
+                        return Ok(Rebase::Conflict {
+                            commit: commit.to_string(),
+                            text: format!(
+                                "the records of an earlier commit conflict: {}",
+                                conflict_text(commit)?
+                            ),
+                        });
+                    };
+                    if tree != git.tree_of(&tip)? {
+                        tip = git.commit_tree(&tree, &[&tip], &note, sign)?;
+                    }
+                }
+                records_only.push(commit.to_string());
+            }
+        }
+        if commit == landed {
+            new_landed = Some(tip.clone());
+        }
+    }
+    let Some(new_landed) = new_landed else {
+        bail!("the landing commit {landed} is not on the first-parent chain of {head}");
+    };
+    Ok(Rebase::Moved {
+        onto: onto.to_string(),
+        landed: new_landed,
+        tip,
+        records_only,
+    })
+}
+
+/// Rebases the job's landing commit, with the stack under and over it, onto the latest `default_branch` of
+/// `remote_name`, and moves the local branch to the result. It never pushes. Commits are signed when the
+/// repository's configuration says so.
+///
+/// It is [`Rebase::Unchecked`], with nothing moved, when the job's work branch on the remote holds anything
+/// but the job's own early push (a published head is not rewritten here), when main cannot be fetched, or
+/// when the job has no landing commit on the branch. Otherwise it takes the repository lock, runs
+/// [`plan_rebase`] and, for [`Rebase::Moved`], moves the branch with a keep-edits reset; a reset git refuses is
+/// an error and the branch stays as it was.
+pub fn rebase_job_branch(
+    git: &Git,
+    state: &StateDir,
+    remote_name: &str,
+    default_branch: &str,
+    job: &JobId,
+    verified_fingerprint: &str,
+    ui: &dyn Ui,
+) -> Result<Rebase> {
+    let remote = GitRemote {
+        git,
+        name: remote_name,
+    };
+    let published = match remote.remote_head(&work_branch(job)) {
+        Ok(published) => published,
+        Err(problem) => {
+            return Ok(Rebase::Unchecked(format!(
+                "could not read the work branch on {remote_name}: {problem:#}"
+            )));
+        }
+    };
+    if let Some(published) = published
+        && load_early(state, job)?.as_deref() != Some(published.as_str())
+    {
+        return Ok(Rebase::Unchecked(format!(
+            "the work branch {} is already published at {published}; it is not rewritten",
+            work_branch(job)
+        )));
+    }
+    let onto = match git.fetch_remote_branch(remote_name, default_branch) {
+        Ok(Some(onto)) => onto,
+        Ok(None) => {
+            return Ok(Rebase::Unchecked(format!(
+                "{remote_name} has no branch {default_branch}"
+            )));
+        }
+        Err(problem) => {
+            return Ok(Rebase::Unchecked(format!(
+                "could not fetch {default_branch} from {remote_name}: {problem}"
+            )));
+        }
+    };
+    let _lock = state.lock_repository()?;
+    let Some(head) = git.head()? else {
+        return Ok(Rebase::Unchecked("the branch has no commit".to_string()));
+    };
+    let landed = match landed_commit_for(git, &head, job, verified_fingerprint) {
+        Ok(landed) => landed,
+        Err(problem) => return Ok(Rebase::Unchecked(format!("{problem:#}"))),
+    };
+    let plan = plan_rebase(git, &onto, &head, &landed, git.signs_commits()?)?;
+    if let Rebase::Moved { tip, .. } = &plan {
+        match git.reset_keep(tip)? {
+            Ok(()) => ui.line(&format!(
+                "the branch was rebased onto {remote_name}/{default_branch} ({}); it held {} before",
+                &onto[..onto.len().min(12)],
+                &head[..head.len().min(12)]
+            )),
+            Err(stderr) => bail!(
+                "could not move the branch onto {onto}: {}. The branch is unchanged; move the local \
+                 edits aside and run the command again",
+                stderr.trim()
+            ),
+        }
+    }
+    Ok(plan)
+}
+
 impl Athena {
     /// `athena land --pr <job>`: takes a verified job to an open pull request, or, when one exists, looks at
     /// it again (see the module text).
@@ -566,5 +801,378 @@ impl Athena {
         }
         self.code_health_after_landing(ui);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod rebase_tests {
+    use super::*;
+    use crate::Quiet;
+    use crate::land::fixtures::{self, File, plain};
+    use crate::store::Records;
+
+    const JOB_A: &str = "20261024-115923-02gf";
+    const JOB_B: &str = "20261024-120000-0b0b";
+    const JOB_C: &str = "20261024-121000-0c0c";
+    const BASE: &str = "one\ntwo\nthree\n";
+    const JOB_EDIT: &str = "one\nJOB\nthree\n";
+    const MAIN_EDIT: &str = "one\nMAIN\nthree\n";
+
+    fn fingerprint() -> String {
+        "f".repeat(64)
+    }
+
+    fn id(text: &str) -> JobId {
+        JobId::parse(text).unwrap()
+    }
+
+    /// A repository on `main` with one base commit holding `code.txt`.
+    fn repo() -> (tempfile::TempDir, Git) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::isolated(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        fixtures::commit(&git, &[plain("code.txt", BASE)], "base");
+        (dir, git)
+    }
+
+    /// The landing commit of `job`: its closing records, `extra` files, and the job trailers.
+    fn job_commit(git: &Git, job: &str, extra: &[File]) -> String {
+        let mut files = fixtures::landed(&id(job));
+        files.extend(extra.iter().cloned());
+        let message = format!(
+            "Job {job}\n\nAthena-Job: {job}\nAthena-Verified-Content: {}\n",
+            fingerprint()
+        );
+        fixtures::commit(git, &files, &message)
+    }
+
+    /// A commit that changes `path` on a side branch from `base`; `main` is checked out again afterwards.
+    fn outside(git: &Git, base: &str, path: &str, text: &str) -> String {
+        git.run(["checkout", "-q", "-b", "outside", base]).unwrap();
+        let onto = fixtures::commit(git, &[plain(path, text)], "outside change");
+        git.run(["checkout", "-q", "main"]).unwrap();
+        onto
+    }
+
+    fn show(git: &Git, commit: &str, path: &str) -> Option<String> {
+        git.show_file(commit, path)
+            .unwrap()
+            .map(|b| String::from_utf8(b).unwrap())
+    }
+
+    #[test]
+    fn plan_rebase_clean_move() {
+        let (_dir, git) = repo();
+        let base = git.head().unwrap().unwrap();
+        let job = job_commit(&git, JOB_A, &[plain("a.txt", "a\n")]);
+        let onto = outside(&git, &base, "outside.txt", "o\n");
+        let plan = plan_rebase(&git, &onto, &job, &job, false).unwrap();
+        let Rebase::Moved {
+            onto: moved_onto,
+            landed,
+            tip,
+            records_only,
+        } = plan
+        else {
+            panic!("expected Moved, got {plan:?}");
+        };
+        assert_eq!(moved_onto, onto);
+        assert_eq!(landed, tip);
+        assert!(records_only.is_empty());
+        assert_ne!(landed, job);
+        assert_eq!(git.parents(&landed).unwrap(), vec![onto.clone()]);
+        assert_eq!(git.message(&landed).unwrap(), git.message(&job).unwrap());
+        assert_eq!(show(&git, &tip, "outside.txt").as_deref(), Some("o\n"));
+        assert_eq!(show(&git, &tip, "a.txt").as_deref(), Some("a\n"));
+        // The plan moves nothing.
+        assert_eq!(git.head().unwrap().unwrap(), job);
+    }
+
+    #[test]
+    fn plan_rebase_already_current() {
+        let (_dir, git) = repo();
+        let base = git.head().unwrap().unwrap();
+        let job = job_commit(&git, JOB_A, &[plain("a.txt", "a\n")]);
+        assert_eq!(
+            plan_rebase(&git, &base, &job, &job, false).unwrap(),
+            Rebase::Current
+        );
+        // Main already holding the landing commit is current too.
+        assert_eq!(
+            plan_rebase(&git, &job, &job, &job, false).unwrap(),
+            Rebase::Current
+        );
+    }
+
+    #[test]
+    fn plan_rebase_conflict_in_own_commit() {
+        let (_dir, git) = repo();
+        let base = git.head().unwrap().unwrap();
+        let job = job_commit(&git, JOB_A, &[plain("code.txt", JOB_EDIT)]);
+        let onto = outside(&git, &base, "code.txt", MAIN_EDIT);
+        match plan_rebase(&git, &onto, &job, &job, false).unwrap() {
+            Rebase::Conflict { commit, text } => {
+                assert_eq!(commit, job);
+                assert!(text.contains(&job), "{text}");
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    /// Two stacked jobs: `b` edits `code.txt` (conflicting with the moved main when `b_conflicts`), `c` adds
+    /// a disjoint file. Returns the repository, main's new tip, `b`'s and `c`'s landing commits.
+    fn stack(b_conflicts: bool) -> (tempfile::TempDir, Git, String, String, String) {
+        let (dir, git) = repo();
+        let base = git.head().unwrap().unwrap();
+        let b_code = if b_conflicts {
+            plain("code.txt", JOB_EDIT)
+        } else {
+            plain("b.txt", "b\n")
+        };
+        let b = job_commit(&git, JOB_B, &[b_code]);
+        let c = job_commit(&git, JOB_C, &[plain("c.txt", "c\n")]);
+        let onto = outside(&git, &base, "code.txt", MAIN_EDIT);
+        (dir, git, onto, b, c)
+    }
+
+    #[test]
+    fn plan_rebase_earlier_conflict_is_records_only() {
+        let (_dir, git, onto, b, c) = stack(true);
+        let plan = plan_rebase(&git, &onto, &c, &c, false).unwrap();
+        let Rebase::Moved {
+            landed,
+            tip,
+            records_only,
+            ..
+        } = plan
+        else {
+            panic!("expected Moved, got {plan:?}");
+        };
+        assert_eq!(records_only, vec![b.clone()]);
+        assert_eq!(landed, tip);
+        // The chain is main, the records-only commit of b, then c.
+        let carried = git.parents(&tip).unwrap().remove(0);
+        assert_eq!(git.parents(&carried).unwrap(), vec![onto.clone()]);
+        let message = git.message(&carried).unwrap();
+        assert!(
+            message.contains(&format!("Athena-Records-Only: {b}")),
+            "{message}"
+        );
+        // b's code is dropped: main's text stands, and b's records are all there.
+        assert_eq!(show(&git, &tip, "code.txt").as_deref(), Some(MAIN_EDIT));
+        for (path, text) in fixtures::landed(&id(JOB_B)) {
+            assert_eq!(show(&git, &tip, &path), Some(text), "{path}");
+        }
+        assert_eq!(show(&git, &tip, "c.txt").as_deref(), Some("c\n"));
+        // The production loader still sees both jobs, and b's closing records.
+        let records = Records::load(&git, &tip).unwrap();
+        assert!(records.invalid.is_empty(), "{:?}", records.invalid);
+        let held = records.jobs.get(JOB_B).expect("the held-back job loads");
+        assert!(held.candidate.is_some());
+        assert!(held.verification.is_some());
+        assert!(held.outcome.is_some());
+        assert!(records.jobs.contains_key(JOB_C));
+    }
+
+    #[test]
+    fn plan_rebase_records_only_commit_is_a_hold() {
+        let (_dir, git, onto, _b, c) = stack(true);
+        let Rebase::Moved { tip, .. } = plan_rebase(&git, &onto, &c, &c, false).unwrap() else {
+            panic!("expected Moved");
+        };
+        // The lookup by records, as after C0, finds the records-only commit as the job's landing commit.
+        let carried = landed_commit_from_records(&git, &tip, &id(JOB_B), &fingerprint()).unwrap();
+        assert!(git.is_ancestor(&onto, &carried).unwrap());
+        let message = git.message(&carried).unwrap();
+        assert!(message.contains("Athena-Records-Only: "), "{message}");
+        assert!(!message.contains("Athena-Job"), "{message}");
+        // It has no code to land: a hold, not Current, although main is its ancestor.
+        match plan_rebase(&git, &onto, &tip, &carried, false).unwrap() {
+            Rebase::Conflict { commit, .. } => assert_eq!(commit, carried),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        // The pre-C0 lookup by trailers does not find it either.
+        assert!(landed_commit(&git, &tip, &id(JOB_B), &fingerprint()).is_err());
+    }
+
+    #[test]
+    fn plan_rebase_clean_earlier_commit_is_carried() {
+        let (_dir, git, onto, b, c) = stack(false);
+        let Rebase::Moved {
+            landed,
+            tip,
+            records_only,
+            ..
+        } = plan_rebase(&git, &onto, &c, &c, false).unwrap()
+        else {
+            panic!("expected Moved");
+        };
+        assert!(records_only.is_empty());
+        assert_eq!(landed, tip);
+        let rebased_b = git.parents(&tip).unwrap().remove(0);
+        assert_ne!(rebased_b, b);
+        assert_eq!(git.parents(&rebased_b).unwrap(), vec![onto]);
+        assert_eq!(git.message(&rebased_b).unwrap(), git.message(&b).unwrap());
+        assert_eq!(show(&git, &tip, "b.txt").as_deref(), Some("b\n"));
+        assert_eq!(show(&git, &tip, "c.txt").as_deref(), Some("c\n"));
+        assert_eq!(show(&git, &tip, "code.txt").as_deref(), Some(MAIN_EDIT));
+    }
+
+    #[test]
+    fn plan_rebase_unrelated_history_is_an_error() {
+        let (_dir, git) = repo();
+        let base = git.head().unwrap().unwrap();
+        git.run(["checkout", "-q", "--orphan", "other"]).unwrap();
+        let job = job_commit(&git, JOB_A, &[plain("a.txt", "a\n")]);
+        assert!(plan_rebase(&git, &base, &job, &job, false).is_err());
+    }
+
+    /// A bare origin, the work repository cloned from nothing but wired to it, and a state directory.
+    struct World {
+        tmp: tempfile::TempDir,
+        bare: Git,
+        work: Git,
+        state: StateDir,
+    }
+
+    fn world() -> World {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = |name: &str| {
+            let path = tmp.path().join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        };
+        let bare = Git::isolated(dir("origin.git"));
+        bare.run(["init", "-q", "--bare", "-b", "main"]).unwrap();
+        let work = Git::isolated(dir("work"));
+        work.run(["init", "-q", "-b", "main"]).unwrap();
+        let url = bare.dir().to_str().unwrap().to_string();
+        work.run(["remote", "add", "origin", &url]).unwrap();
+        fixtures::commit(&work, &[plain("code.txt", BASE)], "base");
+        work.run(["push", "-q", "origin", "main"]).unwrap();
+        let state = StateDir::new(dir("state"));
+        World {
+            tmp,
+            bare,
+            work,
+            state,
+        }
+    }
+
+    impl World {
+        /// Another clone pushes a commit to origin's main; returns it.
+        fn move_main(&self, path: &str, text: &str) -> String {
+            let path_dir = self.tmp.path().join("other");
+            std::fs::create_dir_all(&path_dir).unwrap();
+            let other = Git::isolated(path_dir);
+            if other.head().unwrap().is_none() {
+                let url = self.bare.dir().to_str().unwrap().to_string();
+                other.run(["clone", "-q", &url, "."]).unwrap();
+            }
+            fixtures::commit(&other, &[plain(path, text)], "outside change");
+            other.run(["push", "-q", "origin", "main"]).unwrap();
+            other.head().unwrap().unwrap()
+        }
+
+        fn rebase(&self, job: &str) -> Rebase {
+            rebase_job_branch(
+                &self.work,
+                &self.state,
+                "origin",
+                "main",
+                &id(job),
+                &fingerprint(),
+                &Quiet,
+            )
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn rebase_job_branch_lands_second_job_on_the_moved_main() {
+        let w = world();
+        job_commit(&w.work, JOB_A, &[plain("a.txt", "a\n")]);
+        let second = job_commit(&w.work, JOB_B, &[plain("b.txt", "b\n")]);
+        let outside = w.move_main("outside.txt", "o\n");
+        assert!(!w.work.commit_exists(&outside).unwrap(), "not fetched yet");
+        let Rebase::Moved {
+            onto,
+            landed,
+            tip,
+            records_only,
+        } = w.rebase(JOB_B)
+        else {
+            panic!("expected Moved");
+        };
+        assert_eq!(onto, outside);
+        assert!(records_only.is_empty());
+        assert_ne!(landed, second);
+        // The local branch is at the new tip, and the second job's commit sits on main.
+        assert_eq!(w.work.head().unwrap().unwrap(), tip);
+        assert_eq!(landed, tip);
+        assert!(w.work.is_ancestor(&outside, &landed).unwrap());
+        // History is linear: no merge, one parent per new commit, the first job riding along.
+        let range = format!("{outside}..{tip}");
+        assert_eq!(
+            w.work.run(["rev-list", "--merges", &range]).unwrap().trim(),
+            ""
+        );
+        let commits = w.work.run(["rev-list", &range]).unwrap();
+        assert_eq!(commits.lines().count(), 2);
+        for commit in commits.lines() {
+            assert_eq!(w.work.parents(commit).unwrap().len(), 1, "{commit}");
+        }
+        let subjects = w.work.run(["log", "--format=%s", &range]).unwrap();
+        assert_eq!(
+            subjects.lines().collect::<Vec<_>>(),
+            [format!("Job {JOB_B}"), format!("Job {JOB_A}")]
+        );
+        assert_eq!(show(&w.work, &tip, "outside.txt").as_deref(), Some("o\n"));
+        // Nothing was pushed.
+        assert_eq!(w.bare.rev_parse("main").unwrap().unwrap(), outside);
+        // Run again: the branch is current.
+        assert_eq!(w.rebase(JOB_B), Rebase::Current);
+    }
+
+    #[test]
+    fn rebase_job_branch_conflict_changes_nothing() {
+        let w = world();
+        job_commit(&w.work, JOB_A, &[plain("a.txt", "a\n")]);
+        let second = job_commit(&w.work, JOB_B, &[plain("code.txt", JOB_EDIT)]);
+        let outside = w.move_main("code.txt", MAIN_EDIT);
+        match w.rebase(JOB_B) {
+            Rebase::Conflict { commit, .. } => assert_eq!(commit, second),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(w.work.head().unwrap().unwrap(), second);
+        assert_eq!(w.bare.rev_parse("main").unwrap().unwrap(), outside);
+        assert_eq!(show(&w.work, "HEAD", "code.txt").as_deref(), Some(JOB_EDIT));
+    }
+
+    #[test]
+    fn rebase_job_branch_unchecked_when_origin_is_unreachable() {
+        let w = world();
+        let job = job_commit(&w.work, JOB_A, &[plain("a.txt", "a\n")]);
+        let missing = w.tmp.path().join("missing.git");
+        let missing = missing.to_str().unwrap();
+        w.work
+            .run(["remote", "set-url", "origin", missing])
+            .unwrap();
+        assert!(matches!(w.rebase(JOB_A), Rebase::Unchecked(_)));
+        assert_eq!(w.work.head().unwrap().unwrap(), job);
+    }
+
+    #[test]
+    fn rebase_job_branch_unchecked_for_a_published_head() {
+        let w = world();
+        let job = job_commit(&w.work, JOB_A, &[plain("a.txt", "a\n")]);
+        let refname = format!("HEAD:refs/heads/{}", work_branch(&id(JOB_A)));
+        w.work.run(["push", "-q", "origin", &refname]).unwrap();
+        w.move_main("outside.txt", "o\n");
+        match w.rebase(JOB_A) {
+            Rebase::Unchecked(reason) => assert!(reason.contains("published"), "{reason}"),
+            other => panic!("expected Unchecked, got {other:?}"),
+        }
+        assert_eq!(w.work.head().unwrap().unwrap(), job);
     }
 }

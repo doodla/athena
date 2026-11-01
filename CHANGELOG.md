@@ -226,6 +226,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   every exit gives the place up, a panic included. A worker held back says `drain      <job> waits in the
   landing queue`. It does not rebase: landing itself is unchanged, a landing that fails behaves as before, and
   with one job at a time the drain is unchanged. The rebase before landing is a separate, later change.
+- The core of the rebase before landing (second half of build job A6, core part, in
+  `crates/athena-core/src/gh/landing.rs`; `Rebase`, `plan_rebase` and `rebase_job_branch` are re-exported from
+  `crates/athena-core/src/gh/mod.rs`). `plan_rebase` replays the landing commits stacked on the local branch, one
+  at a time, onto origin's main; `rebase_job_branch` fetches main, finds the job's landing commit, takes the
+  repository lock and moves the local branch to the result. It never pushes. The result is `Current` (main is
+  already in the landing commit), `Moved`, `Conflict` (the job's own landing commit conflicts, so the job is held
+  back: nothing lands, nothing moves, no retry, no stop) or `Unchecked` (the fetch failed, the work branch was
+  already published at another head, or no landing commit was found). An earlier commit of the stack that
+  conflicts is kept as records only: its `records/` paths stay and its code paths are dropped, so no job's
+  records leave the branch, and the kept commit carries an `Athena-Records-Only:` line that keeps it from being
+  found as that job's landing commit. Earlier unlanded commits that replay cleanly still ride along in the next
+  job's pull request, as they do today, and the re-check rule of `docs/design/async-drain.md` section 6 does not
+  cover stacked content. A rebased result may differ from the verified content; the re-check is build job 7. The
+  drain does not call this yet: `Steps::rebase`, `Athena::rebase_for_landing` and the drain test of a held-back
+  head are a follow-up request.
 
 - CI runs fmt, clippy and the tests as parallel jobs, the tests in a matrix of 6 shards, and a final job (id `ci`,
   named `fmt, clippy, tests`) says whether a commit is green. The earlier single job of that name ran everything
