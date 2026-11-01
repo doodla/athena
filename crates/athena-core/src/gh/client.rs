@@ -25,7 +25,7 @@ pub enum Checks {
     Green,
     /// A check failed.
     Red,
-    /// A check has not finished, or none has reported yet.
+    /// A check run is still queued or in progress, or the required one has not reported yet.
     Pending,
 }
 
@@ -776,7 +776,7 @@ impl crate::ci_result::CiSource for CiBranchSource<'_> {
 /// How a commit's checks stand, with what the same read found about the checks that do not decide.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckReport {
-    /// The verdict: the state of the required check only.
+    /// The verdict: red only when the required check failed; pending while any check run is unfinished.
     pub checks: Checks,
     /// One line for each optional check that failed. They never change the verdict; the caller reports them.
     pub notes: Vec<String>,
@@ -785,11 +785,13 @@ pub struct CheckReport {
 /// Reads the check-runs reply and the combined-status reply for one commit, and returns the verdict and the
 /// notes from that one read.
 ///
-/// Only the required check decides, and it is found by name: the check run named [`CI_AGGREGATE_JOB`]
-/// (when several carry the name, the one with the highest id, which is the latest try; a run with no id
-/// counts as id 0). A failed one is [`Checks::Red`]; a missing one, or one not yet completed, is
-/// [`Checks::Pending`]; otherwise it is [`Checks::Green`]. Every other check run and every legacy status is
-/// optional: when one failed, it adds a note and nothing else. The pull request head check, for example,
+/// Only the required check can fail the verdict, and it is found by name: the check run named
+/// [`CI_AGGREGATE_JOB`] (when several carry the name, the one with the highest id, which is the latest try;
+/// a run with no id counts as id 0). A failed one is [`Checks::Red`]. Any check run on the commit that is
+/// still queued or in progress (any status but completed), the required one or an optional one, makes the
+/// verdict [`Checks::Pending`], because the host may refuse a merge while a run is unfinished; so does a
+/// missing required run. Otherwise it is [`Checks::Green`]. Every other check run and every legacy status
+/// is optional: when one failed, it adds a note and nothing else. The pull request head check, for example,
 /// always fails on a candidate and says nothing about the change.
 ///
 /// The required name is fixed: a repository whose CI has no job of that name reads as pending and does not
@@ -813,9 +815,14 @@ pub fn classify_checks(runs: &Value, status: &Value) -> CheckReport {
         .iter()
         .filter(|r| r["name"].as_str() == Some(CI_AGGREGATE_JOB))
         .max_by_key(|r| r["id"].as_u64().unwrap_or(0));
+    // A run the host still reports as queued, in progress or waiting: the host's merge rules may hold
+    // the merge until it ends, so it is not safe to ask for the merge yet.
+    let unfinished = runs
+        .iter()
+        .any(|r| r["status"].as_str().is_some_and(|s| s != "completed"));
     let checks = match required {
         Some(r) if run_failed(r) => Checks::Red,
-        Some(r) if r["status"].as_str() == Some("completed") => Checks::Green,
+        Some(r) if r["status"].as_str() == Some("completed") && !unfinished => Checks::Green,
         _ => Checks::Pending,
     };
     let mut notes: Vec<String> = runs

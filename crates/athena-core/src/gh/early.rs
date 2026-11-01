@@ -116,7 +116,9 @@ fn name_failure(host: &dyn PrHost, runs: &[CiRunState]) -> Option<String> {
 
 /// Waits for the checks, in at most three steps that share one look budget of about twice `poll.attempts`.
 ///
-/// 1. Look at the checks up to `attempts` times until they are not pending.
+/// 1. Look at the checks up to `attempts` times until they are not pending. Any check run on the head that
+///    is still queued or in progress, required or not, keeps the verdict pending, so the wait polls until
+///    every run has completed and the merge is not requested while one is unfinished.
 /// 2. If they are red, the failing run may still have sibling jobs running, and the host refuses to re-run a
 ///    run in progress. So look at the commit's runs (the rest of the `attempts` looks, at least one) until
 ///    none is in progress, and name the failing test from the failed job's log.

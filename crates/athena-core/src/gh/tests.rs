@@ -872,10 +872,16 @@ struct FakeHost {
     merge_confirms: Cell<bool>,
     /// Run when a merge request arrives, before the host answers.
     on_merge: RefCell<Option<Box<dyn Fn()>>>,
+    /// A check-runs reply: when set, the checks are read from it with the production `classify_checks`.
+    runs: RefCell<Option<Value>>,
+    /// The text of the refusal a merge request gets, in place of the fixed one of `merge_refused`.
+    merge_error: RefCell<Option<String>>,
 }
 impl FakeHost {
     fn new(checks: Checks) -> Self {
         FakeHost {
+            runs: RefCell::new(None),
+            merge_error: RefCell::new(None),
             merge_refused: Cell::new(false),
             merge_confirms: Cell::new(true),
             on_merge: RefCell::new(None),
@@ -930,6 +936,17 @@ impl PrHost for FakeHost {
             script.remove(0)
         })
     }
+    fn check_report(&self, commit: &str) -> Result<CheckReport> {
+        if let Some(runs) = self.runs.borrow().as_ref() {
+            self.check_reads.set(self.check_reads.get() + 1);
+            self.checked.borrow_mut().push(commit.to_string());
+            return Ok(classify_checks(runs, &json!({"statuses": []})));
+        }
+        Ok(CheckReport {
+            checks: self.checks(commit)?,
+            notes: Vec::new(),
+        })
+    }
     fn check_run(&self, _: &str, _: &str) -> Result<Option<CiRunState>> {
         Ok(None)
     }
@@ -969,6 +986,9 @@ impl PrHost for FakeHost {
         self.merge_heads.borrow_mut().push(head.to_string());
         if let Some(hook) = self.on_merge.borrow().as_ref() {
             hook();
+        }
+        if let Some(error) = self.merge_error.borrow().as_ref() {
+            bail!("{error}");
         }
         if self.merge_refused.get() {
             bail!("the host refused the merge");
@@ -1083,6 +1103,107 @@ fn with_the_setting_off_no_merge_is_requested_and_the_pull_request_stays_open_an
         vec![("athena/bootstrap".to_string(), "cand1".to_string())]
     );
     assert_eq!(host.opened.get(), 1);
+}
+
+/// An optional check run that is `status` and has not concluded.
+fn optional_run(status: &str) -> Value {
+    json!({"id": 60, "name": "history", "status": status, "conclusion": null})
+}
+
+#[test]
+fn an_unfinished_optional_run_makes_the_checks_pending_and_even_a_red_required_run_stays_red() {
+    let none = json!({"state": "pending", "statuses": []});
+    let report = |runs: Vec<Value>| classify_checks(&json!({"check_runs": runs}), &none).checks;
+    for status in ["queued", "in_progress", "waiting"] {
+        assert_eq!(
+            report(vec![required_run(1, "success"), optional_run(status)]),
+            Checks::Pending,
+            "{status}"
+        );
+    }
+    // A finished optional run does not hold the verdict.
+    assert_eq!(
+        report(vec![required_run(1, "success"), head_run("success")]),
+        Checks::Green
+    );
+    // A failed optional run, with the required run green, is a note and the verdict stays green.
+    let r = classify_checks(
+        &json!({"check_runs": [required_run(1, "success"), head_run("failure")]}),
+        &none,
+    );
+    assert_eq!(r.checks, Checks::Green);
+    assert_eq!(r.notes.len(), 1, "{:?}", r.notes);
+    // A failed required run is red, also while an optional run is unfinished.
+    assert_eq!(
+        report(vec![required_run(1, "failure"), head_run("success")]),
+        Checks::Red
+    );
+    assert_eq!(
+        report(vec![
+            required_run(1, "failure"),
+            optional_run("in_progress")
+        ]),
+        Checks::Red
+    );
+}
+
+#[test]
+fn a_pull_request_with_the_required_check_green_and_another_in_progress_is_pending_and_not_merged()
+{
+    let rig = Rig::new();
+    let host = FakeHost::new(Checks::Green);
+    *host.runs.borrow_mut() = Some(json!({"check_runs": [
+        required_run(1, "success"),
+        optional_run("in_progress"),
+    ]}));
+    let report = rig.run(&host, true, "athena/bootstrap").unwrap();
+    assert_eq!(report.checks, Some(Checks::Pending));
+    assert_eq!(host.merges.get(), 0);
+    assert!(!report.merge_requested);
+    assert_eq!(report.link.state, LinkState::Open);
+    // The wait looked at the checks for the whole budget.
+    assert_eq!(host.check_reads.get(), rig.attempts);
+}
+
+#[test]
+fn a_merge_refused_for_rule_violations_while_checks_are_pending_is_a_wait() {
+    let rig = Rig::new();
+    let host = FakeHost::new(Checks::Green);
+    *host.script.borrow_mut() = vec![Checks::Green, Checks::Pending];
+    *host.merge_error.borrow_mut() = Some("Repository rule violations found".to_string());
+    let report = rig.run(&host, true, "athena/bootstrap").unwrap();
+    assert_eq!(host.merges.get(), 1);
+    assert_eq!(report.checks, Some(Checks::Pending));
+    assert_eq!(report.link.state, LinkState::Open);
+    assert!(report.merge_requested);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("Repository rule violations") && w.contains("waiting to merge")),
+        "{:?}",
+        report.warnings
+    );
+    assert_eq!(rig.stored(), report.link);
+}
+
+#[test]
+fn a_merge_refused_for_rule_violations_with_the_checks_settled_stays_an_error() {
+    let rig = Rig::new();
+    let host = FakeHost::new(Checks::Green);
+    *host.merge_error.borrow_mut() = Some("Repository rule violations found".to_string());
+    let problem = rig.run(&host, true, "athena/bootstrap").unwrap_err();
+    assert!(format!("{problem:#}").contains("Repository rule violations"));
+    assert_eq!(host.merges.get(), 1);
+}
+
+#[test]
+fn another_merge_refusal_while_checks_are_pending_stays_an_error() {
+    let rig = Rig::new();
+    let host = FakeHost::new(Checks::Green);
+    *host.script.borrow_mut() = vec![Checks::Green, Checks::Pending];
+    *host.merge_error.borrow_mut() = Some("Pull request is not mergeable".to_string());
+    assert!(rig.run(&host, true, "athena/bootstrap").is_err());
 }
 
 #[test]
