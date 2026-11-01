@@ -1691,11 +1691,12 @@ pub const READING_RULES_HEADING: &str = "# Reading rules";
 
 /// Each rule a reading must pass, one short line each, with the check that enforces it. A reading that
 /// breaks one is refused and read again once, with the refusal as a correction.
-pub const READING_RULES: [&str; 5] = [
+pub const READING_RULES: [&str; 6] = [
     "Previous result: a retry or follow-up names each earlier job, says how its result is addressed, lists deliverables and out_of_scope, and lists or excludes the files it changed (`check_prior_result_and_scope`).",
     "Criteria evidence: each criterion rests on a command, Grep or file the verifier can check, never the producer's report (`check_criteria_evidence`).",
     "Governance files: list one as a deliverable and name it in a criterion when the request names it or a deliverable implies it, or name it in out_of_scope (`check_governance_coverage`).",
     "Code survey: a code or tests reading with a behavior criterion has a `Code survey:` assumption naming a crates/ path (`check_code_survey`).",
+    "Design: an `Existing code:` assumption names crates/ or docs/ paths the job does not create; a criterion needs an existing code section that reuses or extends them (`check_design_existing_code`).",
     "Valid reading: class, capability and producer model from the closed lists; a decline gives a reason; a capability needs a criterion; forecasts are valid (`build_reading`).",
 ];
 
@@ -3403,11 +3404,20 @@ mod tests {
             "check_criteria_evidence",
             "check_governance_coverage",
             "check_code_survey",
+            "check_design_existing_code",
             "build_reading",
         ] {
             assert!(section.contains(check), "no rule for {check}:\n{section}");
         }
-        // The section adds little to the brief: five rule lines and the code survey guide paragraph.
+        assert_eq!(READING_RULES.len(), 6);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("`Existing code:`")
+                    && l.contains("`check_design_existing_code`")),
+            "no rule line names Existing code: and its check:\n{section}"
+        );
+        // The section adds little to the brief: six rule lines and the code survey guide paragraph.
         assert!(section.len() < 2400, "{} bytes", section.len());
     }
 

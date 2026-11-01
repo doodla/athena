@@ -67,7 +67,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 15] = [
+const INPUT_FORMS: [&str; 16] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -83,6 +83,7 @@ const INPUT_FORMS: [&str; 15] = [
     "brand-word-or-env-var",
     "producer-report-evidence",
     "code-survey",
+    "design-existing-code",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -429,6 +430,61 @@ fn reading_check_cases() -> Vec<Case> {
     ];
     out.push(c);
 
+    // A design reading is written from request text alone, with no inventory of the existing code.
+    let design_request = lines(&[
+        "Design a code-health score for the repository.",
+        "- The design says how the score is computed",
+        "- The design says where the score is shown",
+    ]);
+    let design_source = "job 20261026-043137-zc0v, a design request; rebuilt from the job brief";
+    let design = |id: &'static str, expected: Expected| {
+        let mut c = case(
+            id,
+            design_source,
+            &["dash-bullet", "design-existing-code"],
+            &design_request,
+            2,
+            expected,
+        );
+        c.reading.class_of_work = "design".into();
+        c.reading.deliverables = vec![deliverable(
+            "docs/design/code-health-new.md",
+            DeliverableAction::Create,
+        )];
+        c
+    };
+    out.push(design(
+        "design-reading-without-existing-code",
+        Expected::Refuse("check_design_existing_code"),
+    ));
+    let mut c = design(
+        "design-reading-names-only-the-created-file",
+        Expected::Refuse("check_design_existing_code"),
+    );
+    c.reading.assumptions = vec!["Existing code: docs/design/code-health-new.md".into()];
+    out.push(c);
+    let mut c = design(
+        "design-reading-with-opposite-criterion",
+        Expected::Refuse("check_design_existing_code"),
+    );
+    c.reading.assumptions =
+        vec!["Existing code: crates/athena-core/src/reading.rs and docs/design/roadmap.md".into()];
+    c.reading.acceptance_criteria.push(Criterion {
+        text: "No survey needed: the existing code in section 3 is unchanged".into(),
+        kind: CriterionKind::Content,
+    });
+    out.push(c);
+    let mut c = design("design-reading-with-existing-code", Expected::Accept);
+    c.reading.assumptions =
+        vec!["Existing code: crates/athena-core/src/reading.rs and docs/design/roadmap.md".into()];
+    c.reading.acceptance_criteria.push(Criterion {
+        text: "The design has an Existing code section that reuses or extends \
+               crates/athena-core/src/reading.rs"
+            .into(),
+        kind: CriterionKind::Content,
+    });
+    out.push(c);
+
     // A request that names a governance path.
     let governance_request = "Add a timeout setting that is read from athena.toml.";
     out.push(case(
@@ -695,6 +751,55 @@ fn an_extra_check_with_no_case_is_reported() {
         uncovered(&names, &checks_that_refuse()),
         vec!["check_new_rule".to_string()]
     );
+}
+
+#[test]
+fn design_existing_code_refusal_is_declared_intended() {
+    // The declared share is read from the criterion text by the replay.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: "The change refuses more readings: expected 5% of newly refused readings".into(),
+            kind: CriterionKind::Behavior,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(5));
+    // The step line is in refusing_check, and the check's doc comment is one paragraph with the sentence.
+    assert!(
+        acceptance_check_names(READING_SOURCE).contains(&"check_design_existing_code".to_string())
+    );
+    let doc = READING_SOURCE
+        .split("pub fn check_design_existing_code(")
+        .next()
+        .unwrap()
+        .rsplit("\n\n")
+        .next()
+        .unwrap();
+    assert!(
+        doc.lines().all(|l| l.starts_with("///") && l != "///"),
+        "{doc}"
+    );
+    let doc = doc
+        .lines()
+        .map(|l| l.trim_start_matches('/').trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "This check refuses more readings; the higher refusal rate is intended.",
+        "no inventory of existing code",
+        "20261026-043137-zc0v",
+        "20261026-065046-0c1d",
+    ] {
+        assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+    }
+    // The changelog wraps lines, so compare with runs of white space made single spaces.
+    let changelog = include_str!("../../../CHANGELOG.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(changelog.contains("check_design_existing_code"));
+    assert!(changelog.contains("higher refusal rate is intended"));
+    assert!(changelog.contains("expected 5% of newly refused readings"));
 }
 
 #[test]

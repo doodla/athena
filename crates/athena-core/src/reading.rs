@@ -3059,6 +3059,7 @@ pub fn refusing_check(
     ));
     step!(check_criteria_evidence(reading));
     step!(check_code_survey(reading));
+    step!(check_design_existing_code(reading));
     step!(check_governance_coverage(reading, request));
     step!(check_boundary_and_repo_files(reading, repo_files));
     step!(check_reading_references(reading, repo_files));
@@ -3409,6 +3410,133 @@ pub fn check_code_survey(reading: &Reading) -> Result<()> {
              assumption does not name what accepts it; name `check_record_file`, `AnyRecord` or a round-trip test \
              by its function name or path, as read in the records validation, not the word allow-list alone",
             new_records.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// The `Existing code:` assumptions of a reading: those whose trimmed text starts with that label, in any case.
+fn existing_code_assumptions(reading: &Reading) -> Vec<&str> {
+    reading
+        .assumptions
+        .iter()
+        .map(|a| a.trim())
+        .filter(|a| a.to_lowercase().starts_with("existing code:"))
+        .collect()
+}
+
+/// Whether `text` names a path under `crates/` or `docs/` (the root followed by a letter or digit) that is not
+/// in `creates`, the paths the job adds. Tokens split on white space, quotes, brackets, commas, semicolons and
+/// backticks, and a trailing `.` or `:` is dropped.
+fn names_existing_path(text: &str, creates: &[&str]) -> bool {
+    text.split(|c: char| {
+        c.is_whitespace() || matches!(c, ',' | ';' | '\'' | '"' | '(' | ')' | '[' | ']' | '`')
+    })
+    .map(|token| token.trim_end_matches(['.', ':']))
+    .any(|token| {
+        ["crates/", "docs/"].iter().any(|root| {
+            token
+                .strip_prefix(root)
+                .is_some_and(|rest| rest.chars().next().is_some_and(char::is_alphanumeric))
+        }) && !creates.contains(&token)
+    })
+}
+
+/// Whether a criterion requires an existing code section that reuses or extends what it lists: the words
+/// "existing code section", then a reuse or extend word within 12 words, with no negator (no, not, never,
+/// without, nothing, nor, cannot) from 3 words before the phrase through that word. A criterion such as "the
+/// existing code in section 3 is unchanged" or "no existing code section is needed, nothing to reuse" fails.
+fn requires_existing_code_section(text: &str) -> bool {
+    const REUSE: [&str; 8] = [
+        "reuse",
+        "reuses",
+        "reused",
+        "reusing",
+        "extend",
+        "extends",
+        "extended",
+        "extending",
+    ];
+    const NEGATORS: [&str; 7] = ["no", "not", "never", "without", "nothing", "nor", "cannot"];
+    let lower = text
+        .to_lowercase()
+        .replace("n't", " not")
+        .replace("n\u{2019}t", " not");
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    (0..words.len()).any(|i| {
+        if words.get(i..i + 3) != Some(&["existing", "code", "section"][..]) {
+            return false;
+        }
+        let from = i + 3;
+        let Some(offset) = words[from..words.len().min(from + 12)]
+            .iter()
+            .position(|w| REUSE.contains(w))
+        else {
+            return false;
+        };
+        !words[i.saturating_sub(3)..=from + offset]
+            .iter()
+            .any(|w| NEGATORS.contains(w))
+    })
+}
+
+/// Refuses a design reading that does not list the existing code it changes or reuses: it needs an assumption
+/// that starts `Existing code:` and names a `crates/` or `docs/` path the job does not create, and a criterion
+/// that requires an existing code section that reuses or extends it. Root cause this check removes: no
+/// inventory of existing code was required before a design reading was accepted, so a design that rebuilds or
+/// contradicts what the repository already holds was accepted; jobs 20261026-043137-zc0v and
+/// 20261026-065046-0c1d are the design jobs that were accepted that way. It applies when the reading has a
+/// capability and no question and its class of work is `design`; every other class, a question and a decline
+/// are not affected. It reads only the reading (deliverable paths, assumptions, criteria), never the
+/// repository; `check_reading_references` compares the named paths with the snapshot when the files are known.
+/// This check refuses more readings; the higher refusal rate is intended. A replay of accepted readings
+/// (`replay`) holds a job that newly refuses more than 10% unless the job's criteria declare a share, as
+/// "expected N% of newly refused readings". The error names the `Existing code:` label and tells the reader
+/// what to list.
+pub fn check_design_existing_code(reading: &Reading) -> Result<()> {
+    if reading.capability.is_none()
+        || reading.question.is_some()
+        || reading.class_of_work != "design"
+    {
+        return Ok(());
+    }
+    let creates: Vec<&str> = reading
+        .deliverables
+        .iter()
+        .filter(|d| d.action == DeliverableAction::Create)
+        .map(|d| d.path.as_str())
+        .collect();
+    if !existing_code_assumptions(reading)
+        .into_iter()
+        .any(|a| names_existing_path(a, &creates))
+    {
+        bail!(
+            "the reading was refused because it is a design reading with no `Existing code:` assumption that \
+             names a crates/ or docs/ path the job does not create ({}); the design was written without an \
+             inventory of what is already there. Read the code, then add an assumption that starts \
+             `Existing code:` and lists the crates/ or docs/ files, functions and docs the design changes or \
+             reuses, not the files the job creates",
+            if creates.is_empty() {
+                "it creates none".to_string()
+            } else {
+                format!("it creates {}", creates.join(", "))
+            }
+        );
+    }
+    if !reading
+        .acceptance_criteria
+        .iter()
+        .any(|c| requires_existing_code_section(&c.text))
+    {
+        bail!(
+            "the reading was refused because it is a design reading whose criteria do not require the design to \
+             reuse or extend the code its `Existing code:` assumption lists; add a criterion that requires an \
+             existing code section that reuses or extends those files, for example 'The design has an Existing \
+             code section that reuses or extends <path>' (the words existing code section, then reuses or \
+             extends, with no \"no\" or \"not\" before them)"
         );
     }
     Ok(())
@@ -7971,5 +8099,175 @@ mod tests {
             .join(" ");
         assert!(changelog.contains("refuses more readings"));
         assert!(changelog.contains("higher refusal rate is intended"));
+    }
+
+    const EXISTING: &str =
+        "Existing code: crates/athena-core/src/reading.rs and docs/design/jev-code-health.md";
+    const EXISTING_CRITERION: &str =
+        "The design has an Existing code section that reuses or extends check_code_survey";
+
+    /// A design reading with these assumptions, criteria and deliverables.
+    fn design_reading(
+        assumptions: &[&str],
+        criteria: &[&str],
+        deliverables: &[(&str, DeliverableAction)],
+    ) -> Reading {
+        let mut reading = code_reading(assumptions, deliverables);
+        reading.class_of_work = "design".into();
+        reading.acceptance_criteria = criteria
+            .iter()
+            .map(|text| Criterion {
+                text: (*text).into(),
+                kind: CriterionKind::Content,
+            })
+            .collect();
+        reading
+    }
+
+    const NEW_DOC: (&str, DeliverableAction) = ("docs/design/new.md", DeliverableAction::Create);
+
+    #[test]
+    fn design_existing_code_compliant_reading_is_accepted() {
+        for criterion in [
+            EXISTING_CRITERION,
+            "The design has an existing code section that reuses check_code_survey",
+            "An Existing code section extends the gate and does not rewrite it",
+            "Existing code section: it is reusing the survey check",
+        ] {
+            let reading = design_reading(&[EXISTING], &[criterion], &[NEW_DOC]);
+            accept(&reading).unwrap_or_else(|e| panic!("{criterion}: {e}"));
+        }
+        // The label is matched after trimming, in any case; a path may sit in backticks.
+        let lower = design_reading(
+            &["  existing CODE: `crates/athena-core/src/reading.rs`."],
+            &[EXISTING_CRITERION],
+            &[NEW_DOC],
+        );
+        accept(&lower).unwrap();
+        // Without the assumption the same reading is refused by the new step.
+        let bare = design_reading(&[], &[EXISTING_CRITERION], &[NEW_DOC]);
+        let refused = refusing_check(&bare, "change the reading rules", None, &[], None).unwrap();
+        assert_eq!(refused.0, "check_design_existing_code");
+    }
+
+    #[test]
+    fn design_existing_code_opposite_criteria_are_refused() {
+        for criterion in [
+            "no survey needed",
+            "the existing code in section 3 is unchanged",
+            "no existing code section is needed, nothing to reuse or extend",
+            "The design doesn't need an existing code section that reuses anything or extends it",
+            "The design has an existing code section",
+            "The design has an existing code section, one two three four five six seven eight nine ten \
+             eleven twelve that reuses it",
+        ] {
+            let reading = design_reading(&[EXISTING], &[criterion], &[NEW_DOC]);
+            let error = accept(&reading).unwrap_err().to_string();
+            assert!(error.contains("Existing code"), "{criterion}: {error}");
+            assert!(
+                error.contains("existing code section"),
+                "{criterion}: {error}"
+            );
+        }
+        // A reuse word exactly 12 words after the phrase is accepted.
+        let edge = "An existing code section one two three four five six seven eight nine ten eleven reuses it";
+        accept(&design_reading(&[EXISTING], &[edge], &[NEW_DOC])).unwrap();
+    }
+
+    #[test]
+    fn design_existing_code_names_a_path_the_job_does_not_create() {
+        // Only the file the job creates.
+        let only_created = design_reading(
+            &["Existing code: docs/design/new.md"],
+            &[EXISTING_CRITERION],
+            &[NEW_DOC],
+        );
+        let error = accept(&only_created).unwrap_err().to_string();
+        assert!(error.contains("`Existing code:`"), "{error}");
+        assert!(error.contains("docs/design/new.md"), "{error}");
+        assert!(error.contains("does not create"), "{error}");
+        // The same path as a Modify deliverable is existing code.
+        let modified = design_reading(
+            &["Existing code: docs/design/new.md"],
+            &[EXISTING_CRITERION],
+            &[("docs/design/new.md", DeliverableAction::Modify)],
+        );
+        accept(&modified).unwrap();
+        // No such assumption; a code survey does not count.
+        let survey = design_reading(&[SURVEY], &[EXISTING_CRITERION], &[NEW_DOC]);
+        let error = accept(&survey).unwrap_err().to_string();
+        assert!(error.contains("`Existing code:`"), "{error}");
+        // The label with no path, with a bare root, and with another root.
+        for text in [
+            "Existing code: the reading module",
+            "Existing code: crates/ and docs/ were read",
+            "Existing code: xtask/src/main.rs",
+            "The Existing code: crates/athena-core/src/reading.rs",
+        ] {
+            let reading = design_reading(&[text], &[EXISTING_CRITERION], &[NEW_DOC]);
+            assert!(accept(&reading).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn design_existing_code_does_not_apply_outside_its_gate() {
+        let none: &[&str] = &[];
+        // Other classes, with no Existing code assumption.
+        for class in ["code", "tests", "docs", "config"] {
+            let mut reading = code_reading(&[SURVEY], &[MODIFY_READING]);
+            reading.class_of_work = class.into();
+            accept(&reading).unwrap_or_else(|e| panic!("{class}: {e}"));
+            check_design_existing_code(&reading).unwrap();
+        }
+        // A design reading with a question or a decline.
+        let mut asking = design_reading(none, &["the doc names the cause"], &[NEW_DOC]);
+        asking.question = Some("which file?".into());
+        let mut declined = design_reading(none, &["the doc names the cause"], &[NEW_DOC]);
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        for reading in [&asking, &declined] {
+            accept(reading).unwrap();
+            check_design_existing_code(reading).unwrap();
+        }
+        // The same design reading without a question or decline is refused.
+        let plain = design_reading(none, &["the doc names the cause"], &[NEW_DOC]);
+        assert!(check_design_existing_code(&plain).is_err());
+    }
+
+    #[test]
+    fn design_existing_code_refusal_is_declared_intended() {
+        let criterion = Criterion {
+            text: "The change refuses more readings: expected 5% of newly refused readings".into(),
+            kind: CriterionKind::Content,
+        };
+        assert_eq!(replay_declaration(&[criterion], &[]).share, Some(5));
+        let source = include_str!("reading.rs");
+        let doc = source
+            .split("pub fn check_design_existing_code(")
+            .next()
+            .unwrap()
+            .rsplit("\n\n")
+            .next()
+            .unwrap();
+        assert!(
+            doc.lines().all(|l| l.starts_with("///") && l != "///"),
+            "the doc comment is one paragraph: {doc}"
+        );
+        let doc = doc
+            .lines()
+            .map(|l| l.trim_start_matches('/').trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            doc.contains("This check refuses more readings; the higher refusal rate is intended.")
+        );
+        for needle in [
+            "no inventory of existing code",
+            "20261026-043137-zc0v",
+            "20261026-065046-0c1d",
+            "`Existing code:`",
+        ] {
+            assert!(doc.contains(needle), "{needle}");
+        }
     }
 }
