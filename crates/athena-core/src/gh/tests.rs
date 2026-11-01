@@ -49,6 +49,9 @@ use std::collections::BTreeMap;
 /// The repository reply of a host that allows every merge method.
 const ALL_METHODS: &str = r#"{"default_branch": "trunk", "allow_merge_commit": true,
         "allow_squash_merge": true, "allow_rebase_merge": true}"#;
+/// The check-runs reply of a commit whose one required check passed.
+const REQUIRED_GREEN: &str = r#"{"check_runs": [{"id": 1, "name": "fmt, clippy, tests",
+        "status": "completed", "conclusion": "success"}]}"#;
 /// The repository reply of a host that allows only squash merges.
 const SQUASH_ONLY: &str = r#"{"default_branch": "trunk", "allow_merge_commit": false,
         "allow_squash_merge": true, "allow_rebase_merge": false}"#;
@@ -83,7 +86,7 @@ impl Runner for FakeRunner {
         } else if path.contains("/pulls/") && !path.ends_with("/merge") {
             r#"{"merged": true, "merge_commit_sha": "m1"}"#.to_string()
         } else if path.contains("check-runs") {
-            r#"{"check_runs": [{"status": "completed", "conclusion": "success"}]}"#.to_string()
+            REQUIRED_GREEN.to_string()
         } else if path.ends_with("/status") {
             r#"{"state": "success", "statuses": []}"#.to_string()
         } else {
@@ -671,23 +674,58 @@ fn ci_push_run_verdict_comes_from_the_aggregate_job() {
 }
 
 #[test]
-fn checks_are_classified_from_the_two_replies() {
-    let done = |c: &str| json!({"check_runs": [{"status": "completed", "conclusion": c}]});
+fn checks_are_classified_by_the_required_check_alone() {
+    let required = super::client::CI_AGGREGATE_JOB;
+    let done = |c: &str| json!({"check_runs": [{"id": 1, "name": required, "status": "completed", "conclusion": c}]});
     let none = json!({"state": "pending", "statuses": []});
     assert_eq!(classify_checks(&done("success"), &none), Checks::Green);
     assert_eq!(classify_checks(&done("skipped"), &none), Checks::Green);
     assert_eq!(classify_checks(&done("failure"), &none), Checks::Red);
-    let running = json!({"check_runs": [{"status": "in_progress", "conclusion": null}]});
+    assert_eq!(classify_checks(&done("cancelled"), &none), Checks::Red);
+    let running = json!({"check_runs": [
+        {"id": 1, "name": required, "status": "in_progress", "conclusion": null}]});
     assert_eq!(classify_checks(&running, &none), Checks::Pending);
-    // No report at all is not green.
+    // No report at all, or none from the required check, is not green.
     assert_eq!(
         classify_checks(&json!({"check_runs": []}), &none),
         Checks::Pending
     );
-    let failed = json!({"state": "failure", "statuses": [{"state": "failure"}]});
-    assert_eq!(classify_checks(&done("success"), &failed), Checks::Red);
-    let waiting = json!({"state": "pending", "statuses": [{"state": "pending"}]});
-    assert_eq!(classify_checks(&done("success"), &waiting), Checks::Pending);
+    let other_only = json!({"check_runs": [
+        {"id": 2, "name": "pull request head", "status": "completed", "conclusion": "success"}]});
+    assert_eq!(classify_checks(&other_only, &none), Checks::Pending);
+    // A check main does not require, failed or still running, never decides.
+    let optional_red = json!({"check_runs": [
+        {"id": 1, "name": required, "status": "completed", "conclusion": "success"},
+        {"id": 2, "name": "pull request head", "status": "completed", "conclusion": "failure"}]});
+    assert_eq!(classify_checks(&optional_red, &none), Checks::Green);
+    let optional_running = json!({"check_runs": [
+        {"id": 1, "name": required, "status": "completed", "conclusion": "success"},
+        {"id": 2, "name": "pull request head", "status": "in_progress", "conclusion": null}]});
+    assert_eq!(classify_checks(&optional_running, &none), Checks::Green);
+    // A status context is not a required check either.
+    let failed = json!({"state": "failure", "statuses": [{"state": "failure", "context": "x"}]});
+    assert_eq!(classify_checks(&done("success"), &failed), Checks::Green);
+    // After a re-run the newest run of the required check decides.
+    let rerun = json!({"check_runs": [
+        {"id": 5, "name": required, "status": "completed", "conclusion": "failure"},
+        {"id": 8, "name": required, "status": "completed", "conclusion": "success"}]});
+    assert_eq!(classify_checks(&rerun, &none), Checks::Green);
+}
+
+#[test]
+fn the_failed_checks_main_does_not_require_are_named_once_each() {
+    let required = super::client::CI_AGGREGATE_JOB;
+    let runs = json!({"check_runs": [
+        {"id": 1, "name": required, "status": "completed", "conclusion": "failure"},
+        {"id": 2, "name": "pull request head", "status": "completed", "conclusion": "failure"},
+        {"id": 3, "name": "pull request head", "status": "completed", "conclusion": "failure"},
+        {"id": 4, "name": "attribution", "status": "completed", "conclusion": "success"}]});
+    let status = json!({"state": "failure", "statuses": [
+        {"state": "error", "context": "legacy"}, {"state": "success", "context": "fine"}]});
+    assert_eq!(
+        optional_failures(&runs, &status),
+        vec!["pull request head".to_string(), "legacy".to_string()]
+    );
 }
 
 #[test]
@@ -2189,7 +2227,7 @@ impl Runner for Refusing {
                     r#"{"merged": false}"#.to_string()
                 }
             } else if path.contains("check-runs") {
-                r#"{"check_runs": [{"status": "completed", "conclusion": "success"}]}"#.to_string()
+                REQUIRED_GREEN.to_string()
             } else {
                 r#"{"state": "success", "statuses": []}"#.to_string()
             });
@@ -2227,6 +2265,148 @@ fn land_through(runner: &Refusing, rig: &Rig) -> (Result<PrReport>, Vec<HostErro
     };
     let result = rig.run_with(&client, true, "athena/bootstrap", "cand1", &Anc(true));
     (result, log.entries())
+}
+
+/// A host whose check-runs reply is given, so the production classifier judges it. The pull request is
+/// open until the merge request arrives, then merged as `merged1`.
+struct Reporting {
+    check_runs: Value,
+    merged: Cell<bool>,
+    merge_calls: Cell<u32>,
+}
+impl Reporting {
+    fn new(check_runs: Value) -> Self {
+        Reporting {
+            check_runs,
+            merged: Cell::new(false),
+            merge_calls: Cell::new(0),
+        }
+    }
+}
+impl Runner for Reporting {
+    fn gh(&self, args: &[String]) -> Result<String> {
+        let path = args.iter().find(|a| a.starts_with("repos/")).unwrap();
+        if path.ends_with("/merge") {
+            self.merge_calls.set(self.merge_calls.get() + 1);
+            self.merged.set(true);
+            return Ok("{}".to_string());
+        }
+        Ok(if path == "repos/example/project" {
+            ALL_METHODS.to_string()
+        } else if path.ends_with("/pulls") {
+            r#"{"number": 7}"#.to_string()
+        } else if path.contains("/pulls/") {
+            if self.merged.get() {
+                r#"{"merged": true, "merge_commit_sha": "merged1"}"#.to_string()
+            } else {
+                r#"{"merged": false}"#.to_string()
+            }
+        } else if path.contains("check-runs") {
+            self.check_runs.to_string()
+        } else if path.ends_with("/status") {
+            r#"{"state": "failure", "statuses": []}"#.to_string()
+        } else {
+            "{}".to_string()
+        })
+    }
+}
+
+/// The check-runs reply with the required check in the given state and the pull request head check failed.
+fn runs_with(status: &str, conclusion: Value, optional: &str) -> Value {
+    json!({"check_runs": [
+        {"id": 1, "name": super::client::CI_AGGREGATE_JOB, "status": status, "conclusion": conclusion},
+        {"id": 2, "name": "pull request head", "status": "completed", "conclusion": optional},
+    ]})
+}
+
+/// Lands through a real client on `runner`.
+fn land_on(runner: &Reporting, merge_via_rest: bool) -> PrReport {
+    let rig = Rig::new();
+    let client = GhClient::new(runner, "example/project".into());
+    rig.run_with(
+        &client,
+        merge_via_rest,
+        "athena/bootstrap",
+        "cand1",
+        &Anc(true),
+    )
+    .expect("a red optional check is not an error")
+}
+
+#[test]
+fn a_red_optional_check_does_not_fail_the_landing() {
+    let runner = Reporting::new(runs_with("completed", json!("success"), "failure"));
+    let report = land_on(&runner, true);
+    // The required check is green, so the pull request merges and lands; nothing is red.
+    assert_eq!(report.checks, Some(Checks::Green));
+    assert_eq!(report.reruns, 0);
+    assert!(report.merge_requested);
+    assert_eq!(runner.merge_calls.get(), 1);
+    assert_eq!(report.link.state, LinkState::Landed);
+    assert_eq!(report.link.merged_commit.as_deref(), Some("merged1"));
+    // The failed optional check is a note, not the "checks Red" failure.
+    let notes: Vec<_> = report
+        .warnings
+        .iter()
+        .filter(|w| w.contains("pull request head"))
+        .collect();
+    assert_eq!(notes.len(), 1, "{:?}", report.warnings);
+    assert!(notes[0].contains("main does not require it"), "{notes:?}");
+    assert!(notes[0].contains("not a failure"), "{notes:?}");
+    for text in &report.warnings {
+        assert!(
+            !text.contains("checks Red") && !text.contains("not landed"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn with_the_setting_off_a_red_optional_check_leaves_the_pull_request_open_and_green() {
+    let runner = Reporting::new(runs_with("completed", json!("success"), "failure"));
+    let report = land_on(&runner, false);
+    assert_eq!(report.checks, Some(Checks::Green));
+    assert_eq!(report.link.state, LinkState::Open);
+    assert_eq!(runner.merge_calls.get(), 0);
+    assert_eq!(report.reruns, 0);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("pull request head"))
+    );
+}
+
+#[test]
+fn a_required_check_that_failed_is_still_red_and_nothing_merges() {
+    let runner = Reporting::new(runs_with("completed", json!("failure"), "success"));
+    let report = land_on(&runner, true);
+    assert_eq!(report.checks, Some(Checks::Red));
+    assert!(!report.merge_requested);
+    assert_eq!(runner.merge_calls.get(), 0);
+    assert_eq!(report.link.state, LinkState::Open);
+    // The optional check passed, so there is nothing to note.
+    assert!(
+        !report.warnings.iter().any(|w| w.contains("not required")),
+        "{:?}",
+        report.warnings
+    );
+}
+
+#[test]
+fn a_required_check_that_is_pending_or_absent_stays_waiting_and_nothing_merges() {
+    let pending = runs_with("in_progress", Value::Null, "success");
+    let absent = json!({"check_runs": [
+        {"id": 2, "name": "pull request head", "status": "completed", "conclusion": "success"}]});
+    for runs in [pending, absent] {
+        let runner = Reporting::new(runs);
+        let report = land_on(&runner, true);
+        assert_eq!(report.checks, Some(Checks::Pending));
+        assert_eq!(report.reruns, 0);
+        assert!(!report.merge_requested);
+        assert_eq!(runner.merge_calls.get(), 0);
+        assert_eq!(report.link.state, LinkState::Open);
+    }
 }
 
 #[test]

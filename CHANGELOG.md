@@ -9,6 +9,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Drain landings are no longer counted as failed because of a check main does not require, and the records
+  of a held job now pass the pull request head check. Root cause: (1) the checks of a pull request were
+  classified as red when any check run failed, so the pull request head check, which is marked not yet
+  required in `ci.yml`, made the drain report `not landed: pull request is Open, checks Red` and stop the run
+  for a repeated failure; (2) the pre-merge rule treated any job whose closing records (`candidate.json`
+  and the like) were added as a landing and refused it as `adds the records of job ... without its
+  verification`, though a job held for low disk has a candidate and invocations but no verification or
+  outcome yet. Now the checks are judged by the one check main requires, `fmt, clippy, tests` (its name is
+  the `CI_AGGREGATE_JOB` constant): red when it failed, pending when it is missing or not finished, green
+  when it passed. A failed check that is not required is added to the landing report's `warnings` as a note
+  ("not required by main") and never makes the landing red, so a pull request with a green required check
+  merges and lands. The pull request head check stays optional. `classify_pre_merge` (in `athena-gate`) now
+  counts a job's closing records as a landing only when the job has a verification or an outcome in the
+  commit's tree, so a commit that only records a hold or a held job's progress is records only, while a
+  finished job's records without a verification still fail. A red required check, a pending one and a
+  genuine repeated failure are judged as before.
 - The producer's build directory is now removed before the checks start, and a failed check keeps the last
   200 lines of its output. Root cause: the build directory was removed only after every check passed, so a
   job held two full builds (about 20 GB) while the checks compiled in their own directory, and a disk

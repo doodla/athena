@@ -42,8 +42,8 @@ mod transport;
 
 pub use client::{
     CI_WORKFLOW, Checks, CiRunState, EARLY_RUN_WAIT, GhClient, MergeMethod, MergeMethods, NewPr,
-    PrDraft, PrHost, classify_checks, failing_test_name, parse_check_run, parse_ci_run,
-    parse_ci_runs, parse_merged_pr, parse_remote,
+    PrDraft, PrHost, classify_checks, failing_test_name, optional_failures, parse_check_run,
+    parse_ci_run, parse_ci_runs, parse_merged_pr, parse_remote,
 };
 #[cfg(test)]
 use early::EARLY_RUN_JOB;

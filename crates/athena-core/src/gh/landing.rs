@@ -167,7 +167,8 @@ pub struct PrReport {
 
 /// Runs the flow. With no stored link: guard and push the branch, open the pull request, store the link.
 /// Then, while the pull request is open: look for a merge, else read the checks, and merge over REST only if
-/// the setting is on and the checks are green.
+/// the setting is on and the checks are green. The checks are the ones main requires; a failed check main
+/// does not require (such as the pull request head check) is a note in the report's `warnings`, not a failure.
 pub fn land_pr(job: &LandPr) -> Result<PrReport> {
     // The commit an early push left on the branch at verification start, if any.
     let early = load_early(job.state, job.job)?;
@@ -224,6 +225,13 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
         reruns = waited.reruns;
         failing_test = waited.failing_test;
         checks = Some(seen);
+        // A failed check main does not require never decides the landing; it is told as a note. A lookup
+        // that fails names nothing, as for the failing test.
+        for name in job.host.optional_failures(&link.head).unwrap_or_default() {
+            warnings.push(format!(
+                "check {name:?} failed; main does not require it, so it is a note and not a failure"
+            ));
+        }
         // The merge gate: the setting is on and every check is green. Nothing else reaches the host's
         // merge endpoint.
         if job.merge_via_rest && seen == Checks::Green {

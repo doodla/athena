@@ -55,8 +55,13 @@ pub trait PrHost: Host {
     fn default_branch(&self) -> Result<String>;
     /// Opens a pull request and returns its number.
     fn open_pr(&self, pr: &NewPr) -> Result<u64>;
-    /// The state of the checks on a commit.
+    /// The state of the checks on a commit, judged by the checks main requires only ([`classify_checks`]).
     fn checks(&self, commit: &str) -> Result<Checks>;
+    /// The names of the checks on a commit that failed and are not required by main. They never make the
+    /// checks red; the landing reports them as notes. The default knows none.
+    fn optional_failures(&self, _commit: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
     /// Asks the host to merge the pull request, guarded by the head commit it was opened with, by a merge
     /// method the repository allows (see [`MergeMethods::choose`]). `text` is the message a squash carries.
     /// Returns the method the host was asked to use, which the landing record names (§5.3).
@@ -348,6 +353,26 @@ impl<'a> GhClient<'a> {
     pub(super) fn repo_path(&self, rest: &str) -> String {
         format!("repos/{}/{rest}", self.repository)
     }
+
+    /// The check-runs reply of one commit.
+    fn check_runs_reply(&self, commit: &str) -> Result<Value> {
+        self.api(
+            HostOperation::ReadChecks,
+            "GET",
+            &self.repo_path(&format!("commits/{commit}/check-runs?per_page=100")),
+            &[],
+        )
+    }
+
+    /// The combined-status reply of one commit.
+    fn status_reply(&self, commit: &str) -> Result<Value> {
+        self.api(
+            HostOperation::ReadChecks,
+            "GET",
+            &self.repo_path(&format!("commits/{commit}/status")),
+            &[],
+        )
+    }
 }
 
 impl Host for GhClient<'_> {
@@ -403,19 +428,15 @@ impl PrHost for GhClient<'_> {
     }
 
     fn checks(&self, commit: &str) -> Result<Checks> {
-        let runs = self.api(
-            HostOperation::ReadChecks,
-            "GET",
-            &self.repo_path(&format!("commits/{commit}/check-runs?per_page=100")),
-            &[],
-        )?;
-        let status = self.api(
-            HostOperation::ReadChecks,
-            "GET",
-            &self.repo_path(&format!("commits/{commit}/status")),
-            &[],
-        )?;
+        let runs = self.check_runs_reply(commit)?;
+        let status = self.status_reply(commit)?;
         Ok(classify_checks(&runs, &status))
+    }
+
+    fn optional_failures(&self, commit: &str) -> Result<Vec<String>> {
+        let runs = self.check_runs_reply(commit)?;
+        let status = self.status_reply(commit)?;
+        Ok(optional_failures(&runs, &status))
     }
 
     fn merge(&self, number: u64, head: &str, text: &CommitText) -> Result<MergeMethod> {
@@ -513,7 +534,10 @@ const CI_EVENT: &str = "push";
 
 /// The name of the job in `ci.yml` that needs the gate and the three check jobs and fails unless they all
 /// passed. It is the one name the workflow keeps for "this commit is green".
-const CI_AGGREGATE_JOB: &str = "fmt, clippy, tests";
+///
+/// It is also the one check the main branch requires, so it is the name the landing judges a pull request by
+/// ([`classify_checks`]) and the check run the early wait watches.
+pub(super) const CI_AGGREGATE_JOB: &str = "fmt, clippy, tests";
 
 /// The newest run of [`CI_WORKFLOW`] that was started by a `push` event on `branch`.
 ///
@@ -761,36 +785,66 @@ impl crate::ci_result::CiSource for CiBranchSource<'_> {
     }
 }
 
-/// Reads the check-runs reply and the combined-status reply for one commit. A failure anywhere is red;
-/// anything unfinished, or no report at all, is pending; green needs at least one report and no other state.
-pub fn classify_checks(runs: &Value, status: &Value) -> Checks {
-    let runs = runs["check_runs"].as_array().cloned().unwrap_or_default();
-    let statuses = status["statuses"].as_array().cloned().unwrap_or_default();
-    let run_failed = |r: &Value| {
-        matches!(
-            r["conclusion"].as_str(),
-            Some(
-                "failure"
-                    | "cancelled"
-                    | "timed_out"
-                    | "action_required"
-                    | "startup_failure"
-                    | "stale"
-            )
+/// Whether a check run's conclusion is a failure.
+fn run_failed(run: &Value) -> bool {
+    matches!(
+        run["conclusion"].as_str(),
+        Some(
+            "failure" | "cancelled" | "timed_out" | "action_required" | "startup_failure" | "stale"
         )
-    };
-    let status_state = status["state"].as_str();
-    if runs.iter().any(run_failed) || matches!(status_state, Some("failure" | "error")) {
-        return Checks::Red;
-    }
-    let runs_done = runs
-        .iter()
-        .all(|r| r["status"].as_str() == Some("completed"));
-    let statuses_done = statuses.is_empty() || status_state == Some("success");
-    if (runs.is_empty() && statuses.is_empty()) || !runs_done || !statuses_done {
+    )
+}
+
+/// Reads the check-runs reply for one commit and judges it by the one check main requires,
+/// [`CI_AGGREGATE_JOB`]; the combined-status reply is not judged (main requires no status context).
+/// - The required run failed: red.
+/// - The required run is missing or not completed: pending, so nothing merges before it reports.
+/// - The required run completed without failing: green.
+///
+/// Any other check, such as the pull request head check that is not yet required, never decides the
+/// verdict; [`optional_failures`] names the ones that failed so the landing can report them as notes.
+pub fn classify_checks(runs: &Value, _status: &Value) -> Checks {
+    let required = runs["check_runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["name"].as_str() == Some(CI_AGGREGATE_JOB));
+    // A re-run leaves the older run beside the new one: the latest (highest id) decides.
+    let Some(latest) = required.max_by_key(|r| r["id"].as_u64().unwrap_or(0)) else {
         return Checks::Pending;
+    };
+    if run_failed(latest) {
+        Checks::Red
+    } else if latest["status"].as_str() == Some("completed") {
+        Checks::Green
+    } else {
+        Checks::Pending
     }
-    Checks::Green
+}
+
+/// The names of the checks that failed and that main does not require: failed check runs other than
+/// [`CI_AGGREGATE_JOB`], and failed status contexts. A run with no name is listed as `(unnamed check)`.
+/// Each name is listed once, in the order the reply gives them.
+pub fn optional_failures(runs: &Value, status: &Value) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let failed_runs = runs["check_runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["name"].as_str() != Some(CI_AGGREGATE_JOB) && run_failed(r))
+        .map(|r| r["name"].as_str().unwrap_or("(unnamed check)"));
+    let failed_statuses = status["statuses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|s| matches!(s["state"].as_str(), Some("failure" | "error")))
+        .map(|s| s["context"].as_str().unwrap_or("(unnamed status)"));
+    for name in failed_runs.chain(failed_statuses) {
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 /// Splits a remote URL into its host and `owner/name`. Only github.com is supported; the URL is not echoed
