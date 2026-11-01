@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-102128-b1st",
+  "round": 2,
+  "at": "2026-11-01T10:31:55.227235932Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/close.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/close.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say how the new sweep handles a lock error from try_lock_job.",
+      "evidence": "`try_lock_job` returns `Result<Option<_>>` (run/mod.rs:308 uses `?`; disk.rs:167 matches `Ok(Some(_lock))`). Step 4 says 'try_lock_job (skip on None)' and does not say what happens on Err. Fix: Use the same `let Ok(Some(_lock)) = state.try_lock_job(&id) else { continue; }` pattern as sweep_idle_targets, so a lock error skips the job and is never treated as a free lock.",
+      "location": "Plan step 4 (sweep_interrupted_targets) and crates/athena-core/src/disk.rs:167",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 3 test may not account for the first drain retrying the held job in the same run.",
+      "evidence": "The drain reads the queue again after each run (drain.rs:2428). `interrupted_work` (steward.rs:384) lists any Dispatched, not-running, not-yet-retried job on a drained channel. After the pre-producer hold, H fits that rule, so the same drain could pick it up and retry it while space is still low. The asserts on outcome, ui line order and `read_hold(H)` assume that does not happen. The plan does not say which existing guard (`tried`, `begun`) stops it. Fix: Before writing the asserts, check how the existing late-hold drain test (`low_disk_after_the_build_holds_*`) keeps the held job from being retried in the same drain. Mirror that test, and assert there is exactly one dispatch in the first drain.",
+      "location": "Demonstration for criterion 3 (first drain) and crates/athena-cli/src/drain.rs:2428",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "No single test shows a real drain sweeping a newly interrupted job before a later run.",
+      "evidence": "The 'later run' case is shown by calling `Athena::reclaim_interrupted` twice directly, and the per-run call by the Stub, which only records calls. Together they cover the criterion, but the two halves are shown separately. Fix: Acceptable as planned. Optionally, have test (a) say in a comment that the drain's per-run call is the one test (b) shows, so a reader sees how the two halves fit.",
+      "location": "Demonstration for criterion 2 (a)/(b)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan relies on, and its claims match. `produce_and_verify` (run/mod.rs:1217) calls `baseline_stage` at :1230 before `job_worktree` and `producer_snapshot`, and it owns `closing` by value, which `hold_for_disk(ctx, closing, low)` (close.rs:176) needs. `baseline_stage` prints `baseline   …` (producer.rs:59), so the test can trigger on that line. The non-resume path of `dispatch` starts at run/mod.rs:928, after the prediction commit and the `dispatched` line. The old marker is cleared only through `consumed_resume` (close.rs:195), so a job held before the producer needs the new release step; deriving the source with `retried_job` matches how `steward::interrupted_work` (steward.rs:384) already links retries. `go_job` takes the job lock before any Dispatched commit (run/mod.rs:308), so taking the lock with `try_lock_job` after the Records and registry checks is a sound guard. `sweep_idle_targets` (disk.rs:160) is the right body to factor out. Every criterion has a demonstration that enters through production code (`drain::drain` with `RealSteps`, `Athena::reclaim_interrupted`, or the production drain over the recording `Stub`) and that would fail without the change. The move to the integration test file fixes the earlier job's planning failure. I agree with Athena's finding that adding close.rs widens the scope, but it is a doc-only edit with a stated reason, so it stays minor. The approach has no soundness problem: the reclaim predicate is exact (Dispatched, no registry entry, lock free, not on the keep list, `target/` only), and the gate sits where the cause is, between the baseline build and the producer. My remaining findings are minor or nit."
+}

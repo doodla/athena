@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-102128-b1st",
+  "round": 1,
+  "at": "2026-11-01T10:27:26.544116931Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "After a pre-producer hold, the old job's hold marker is never cleared, so it shows as held forever.",
+      "evidence": "Read: `clear_hold` at run/mod.rs:762 clears only the new job's own id. The old job's marker is cleared only through `closing.consumed_resume` (close.rs:195, run/mod.rs:590). That field is set only at run/mod.rs:524, when a job resumes from a kept candidate's resume mark. A job held before the producer has no resume mark. So when the next drain retries it, the retry reads it again as a new job with `consumed_resume = None`, and `disk::read_hold(old)` stays set. status.rs:1662 then shows `environment: low disk` on that interrupted job for good. `go` on it bails with 'A drain resumes it from its kept candidate' (run/mod.rs:348), which is false because no candidate exists. The criterion 3 test checks only the moment of the hold, so it would not catch this. Fix: Give the pre-producer hold a correct lifecycle. One option: when a retry of a held job without a resume mark dispatches, clear the hold of the job it re-reads (the retry knows the source job). Another: have the pre-producer path record the hold in a way the retry spends. Also make the `go` message at run/mod.rs:348 (in scope) say the job is read again, not resumed from a candidate, when it has no resume mark. Extend the criterion 3 test: after a second drain with space free, assert `read_hold(old)` is None and status no longer shows the old job as held.",
+      "location": "Plan Risks ('A job held before the producer…the hold marker is cleared when the retry dispatches'); Decision 2; run/mod.rs:762, :524, :590-593; close.rs:195-198; status.rs:1662",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The docs for `hold_for_disk` and the drain's 'interrupted job' bullet describe the hold as happening only after the candidate is built.",
+      "evidence": "Read: the `hold_for_disk` doc says it 'Holds a job whose candidate is built … at a late gate (before the checks, or before the verifier) … the next drain resumes the job from its kept candidate'. drain.rs:64 says the same. After this change, `hold_for_disk` also runs before the producer, with no candidate. Plan step 7 only extends the 'Low disk holds a job' bullet. Fix: Update the `hold_for_disk` doc to name the third caller and that its resume is a re-read. Update drain.rs:64-65 the same way. close.rs is a one-line doc change; either add it to the deliverables or say why it is left.",
+      "location": "crates/athena-core/src/run/close.rs:170-175 doc; crates/athena-cli/src/drain.rs:64-65 module doc",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The step does not say which id it means by 'the item's job'.",
+      "evidence": "Read: drain.rs:1222-1262. Inside `run_job`, `item.job` is the queue key; for an interrupted item that is the interrupted id. The id passed to `steps.run` is `read.job`, a new job id after a retry. `tried` (drain.rs:989) holds item keys. Leaving `item.job` off the keep list is what lets an interrupted item's old `target/` be reclaimed, so the choice matters. Fix: Say exactly which ids go on the keep list: `read.job` for the run, plus `tried`. State on purpose whether `item.job`, the interrupted source, is kept or swept. Make the Stub wiring test assert that choice.",
+      "location": "Plan Decision 4 / step 6 ('the item's job plus the ids in self.st().tried')",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The closed-job setup is left to the producer to work out.",
+      "evidence": "The plan says it did not check whether `Athena::close` accepts a Proposed job. Without job D, the 'Dispatched, not closed' guard in criterion 2a goes untested. Fix: Pick one route: reuse the closed-job setup from `a_closed_job_stays_out_of_the_queue` (tests/drain.rs:3308), or close an interrupted job with `athena.close`. Either way the job is Closed with a planted `target/`.",
+      "location": "Plan Open questions 3 (closed job D via `Athena::close`)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Most of the plan holds up. The code it names exists. `produce_and_verify` calls `baseline_stage` at run/mod.rs:1230, and the work tree and snapshot come right after it at :1233-1234. `hold_for_disk` takes `Closing` by value (close.rs:176). `try_lock_job` uses std `File::try_lock`, so a second lock taken in the same test process conflicts as the guard test needs. `Registry::register`/`reap` and all the tests/drain.rs helpers the plan cites are at the lines given. Putting the tests in the integration file fixes the earlier compile failure. Reclaiming jobs that are Dispatched, have no registry entry and whose lock can be taken, with a keep list, is sound and reuses the existing sweep. The demonstrations enter through `drain::drain` with `RealSteps` and real records, and each would fail without the change. The one real design gap is the pre-producer hold. It reuses `hold_for_disk`, which assumes a built candidate and a resume mark. For a job held before the producer, the hold marker is never cleared. The plan's own mitigation (\"the hold marker is cleared when the retry dispatches\") is wrong, based on my reading of run/mod.rs:762 and :524. The old job would show as held in status forever, and `go` on it would point to a candidate that does not exist. Fixing this needs a change to the plan, so the verdict is revise."
+}
