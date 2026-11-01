@@ -1417,6 +1417,7 @@ impl Athena {
                         "not run: a nested run skips checks; the outer job runs its own".into(),
                     ),
                     failed_tests: Vec::new(),
+                    reused: false,
                 });
             }
         }

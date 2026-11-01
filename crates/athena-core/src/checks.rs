@@ -224,6 +224,7 @@ pub fn skipped_run(spec: &CheckSpec, note: String) -> CheckRun {
         output_tail: String::new(),
         note: Some(note),
         failed_tests: Vec::new(),
+        reused: false,
     }
 }
 
@@ -253,6 +254,7 @@ pub fn runs_from_record(specs: &[CheckSpec], record: &CiRecord, sha: &str) -> Ve
                 output_tail: String::new(),
                 note: Some(format!("result reused from the {origin} for {sha}")),
                 failed_tests: Vec::new(),
+                reused: true,
             })
         })
         .collect()
@@ -362,6 +364,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
                 output_tail: String::new(),
                 note: Some(format!("could not start {program}: {e}")),
                 failed_tests: Vec::new(),
+                reused: false,
             });
         }
     };
@@ -428,6 +431,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
         output_tail: ctx.redactor.redact(&tail(&output, TAIL_BYTES))?,
         note,
         failed_tests,
+        reused: false,
     })
 }
 
@@ -451,6 +455,7 @@ pub fn baseline_runs(specs: &[CheckSpec], ctx: &CheckContext<'_>) -> Vec<CheckRu
                 output_tail: String::new(),
                 note: Some(format!("baseline check could not run: {e}")),
                 failed_tests: Vec::new(),
+                reused: false,
             },
         })
         .collect()
@@ -921,6 +926,7 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored
             output_tail: String::new(),
             note,
             failed_tests: Vec::new(),
+            reused: false,
         }
     }
 
@@ -1101,6 +1107,11 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored
         );
         assert!(runs[0].passed && !runs[1].passed);
         assert!(runs[0].note.as_ref().unwrap().contains("runs/9"));
+        assert!(
+            runs.iter().all(|r| r.reused && r.exit_code.is_none()),
+            "every record built from a CI result is marked reused"
+        );
+        assert!(!skipped_run(&specs[0], "not run: x".into()).reused);
         let other = "fedcba9876543210fedcba9876543210fedcba98";
         assert!(runs_from_record(&specs, &record, other).is_empty());
     }

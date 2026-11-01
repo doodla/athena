@@ -1735,6 +1735,7 @@ mod tests {
             output_tail: tail.into(),
             note: None,
             failed_tests: Vec::new(),
+            reused: false,
         }
     }
 
