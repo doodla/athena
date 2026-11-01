@@ -86,6 +86,8 @@ struct Stub {
     history: Vec<JobEnd>,
     /// Jobs whose run ends needing a person to accept a changed reading.
     needs_accepting: Vec<&'static str>,
+    /// Each reclaim of interrupted jobs' build directories: how many runs had started, and the jobs it skipped.
+    reclaimed: RefCell<Vec<(usize, Vec<String>)>>,
 }
 
 impl Stub {
@@ -172,6 +174,15 @@ impl Steps for Stub {
             error: None,
             held: false,
         }
+    }
+    fn reclaim_interrupted(&self, own: &[String]) {
+        let runs = self
+            .log
+            .borrow()
+            .iter()
+            .filter(|l| l.starts_with("run "))
+            .count();
+        self.reclaimed.borrow_mut().push((runs, own.to_vec()));
     }
     fn run(&self, job: &str) -> Run {
         let first_run = !self.log.borrow().iter().any(|l| l.starts_with("run "));
@@ -3414,6 +3425,295 @@ fn interrupt(fx: &Fixture, athena: &Athena, job: &str) {
         fx.git.run(["reset", "-q", "--hard", "HEAD~1"]).unwrap();
     }
     panic!("the job never was dispatched without an outcome");
+}
+
+// Reclaiming the build directories of interrupted jobs.
+
+/// Plants a build directory and a work tree under the job directory of `id`, and returns the build file.
+fn plant_build(athena: &Athena, id: &athena_data::JobId) -> std::path::PathBuf {
+    let dir = athena.state.job_dir(id);
+    std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+    std::fs::write(dir.join("target/debug/big"), vec![7u8; 100_000]).unwrap();
+    std::fs::create_dir_all(dir.join("work")).unwrap();
+    std::fs::write(dir.join("work/main.rs"), b"fn main() {}").unwrap();
+    dir.join("target")
+}
+
+#[test]
+fn an_interrupted_jobs_build_directory_is_reclaimed_at_drain_start() {
+    let fx = Fixture::new();
+    let kill = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let athena = fx.athena(killing_producer(kill));
+    // A channel the drain does not work: the only thing that can touch the job is the reclaim at drain start.
+    let web = request_on(&athena, "web", FIRST);
+    interrupt(&fx, &athena, &web);
+    let id = athena_data::JobId::parse(&web).unwrap();
+    let target = plant_build(&athena, &id);
+    let kept = athena.state.kept_work_dir(&id);
+    std::fs::create_dir_all(&kept).unwrap();
+    std::fs::write(kept.join("kept.rs"), b"kept candidate work").unwrap();
+    assert!(target.join("debug/big").exists());
+
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = real_steps_with(&athena, &lander, &lines);
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    assert!(report.jobs.is_empty(), "{}", display::drain(&report));
+
+    assert!(!target.exists(), "the build directory is gone");
+    let dir = athena.state.job_dir(&id);
+    assert_eq!(
+        std::fs::read(dir.join("work/main.rs")).unwrap(),
+        b"fn main() {}",
+        "the work tree stays"
+    );
+    assert_eq!(
+        std::fs::read(kept.join("kept.rs")).unwrap(),
+        b"kept candidate work",
+        "the kept work stays"
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&web].state(), JobState::Dispatched);
+    assert!(records.jobs[&web].job.is_some(), "its records stay");
+    let said = lines_of(&lines);
+    position(
+        &said,
+        &format!("disk       removed build directory of job {web}"),
+    );
+    assert!(
+        athena.state.try_lock_job(&id).unwrap().is_some(),
+        "the lock is released"
+    );
+}
+
+/// Kills the process group of a test child when dropped, so a failed assertion leaves nothing running.
+struct Child(std::process::Child);
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn the_reclaim_keeps_live_locked_closed_and_own_jobs() {
+    use std::os::unix::process::CommandExt;
+    let fx = Fixture::new();
+    let kill = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let athena = fx.athena(killing_producer(kill));
+    let parse = |job: &String| athena_data::JobId::parse(job).unwrap();
+    let mut interrupted = Vec::new();
+    for _ in 0..4 {
+        let job = request_on(&athena, "web", FIRST);
+        interrupt(&fx, &athena, &job);
+        interrupted.push(parse(&job));
+    }
+    let [a, b, c, e] = <[athena_data::JobId; 4]>::try_from(interrupted).unwrap();
+
+    // D closed: dispatched jobs only are reclaimed, so a closed job's directory is left to the other rules.
+    let (d, _) = athena.queue(FIRST).unwrap();
+    athena.go(d.as_str(), AcceptedBy::Flag, &Quiet).unwrap();
+    athena
+        .close(d.as_str(), "no longer wanted", &Quiet)
+        .unwrap();
+
+    let targets: Vec<_> = [&a, &b, &c, &e, &d]
+        .into_iter()
+        .map(|id| plant_build(&athena, id))
+        .collect();
+    let [ta, tb, tc, te, td] = <[std::path::PathBuf; 5]>::try_from(targets).unwrap();
+
+    // B has a live process in the registry; C's lock is held by another command.
+    let child = Child(
+        std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap(),
+    );
+    athena
+        .state
+        .registry()
+        .register(child.0.id() as i32, b.as_str(), "test")
+        .unwrap();
+    let held = athena
+        .state
+        .try_lock_job(&c)
+        .unwrap()
+        .expect("lock is free");
+
+    let lines = Lines::default();
+    let removed = athena.reclaim_interrupted(std::slice::from_ref(&e), &lines);
+    assert!(removed >= 100_000, "{removed}");
+    assert!(
+        !ta.exists(),
+        "an interrupted job with no process and a free lock loses its build"
+    );
+    assert!(tb.exists(), "a job with a live process keeps it");
+    assert!(tc.exists(), "a job whose lock is held keeps it");
+    assert!(te.exists(), "a job on the keep list keeps it");
+    assert!(td.exists(), "a closed job is not an interrupted job");
+    for id in [&a, &b, &c, &e, &d] {
+        assert!(
+            athena.state.job_dir(id).join("work/main.rs").exists(),
+            "work trees stay"
+        );
+    }
+
+    // The process ends and the lock is released; a job interrupted since is new work for the next sweep.
+    drop(held);
+    drop(child);
+    let f = request_on(&athena, "web", FIRST);
+    interrupt(&fx, &athena, &f);
+    let f = parse(&f);
+    let tf = plant_build(&athena, &f);
+    athena.reclaim_interrupted(std::slice::from_ref(&e), &lines);
+    assert!(!tb.exists() && !tc.exists(), "freed jobs lose their build");
+    assert!(!tf.exists(), "a newly interrupted job loses its build");
+    assert!(te.exists() && td.exists());
+}
+
+#[test]
+fn drain_reclaims_at_start_and_before_each_run() {
+    let stub = Stub {
+        interrupted: vec!["x"],
+        items: vec!["y"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1, 1]),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    assert_eq!(report.jobs.len(), 2, "{:?}", stub.log());
+    let ran: Vec<String> = report.jobs.iter().map(|l| l.job.clone()).collect();
+    let calls = stub.reclaimed.borrow();
+    // One sweep at the start, with nothing of this drain to skip, and one before each run.
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert_eq!(calls[0], (0, Vec::new()));
+    for (n, job) in ran.iter().enumerate() {
+        let (runs, own) = &calls[n + 1];
+        assert_eq!(*runs, n, "swept before run {n}");
+        assert_eq!(own.last(), Some(job), "the job about to run is kept");
+        for earlier in &ran[..n] {
+            assert!(own.contains(earlier), "{earlier} was run by this drain");
+        }
+    }
+    assert!(ran.contains(&"x-retry".to_string()), "{ran:?}");
+    assert!(
+        calls.iter().all(|(_, own)| !own.contains(&"x".to_string())),
+        "the interrupted source of a retry is swept on purpose: {calls:?}"
+    );
+}
+
+/// A progress sink that fills the disk once the baseline checks are reported, as their builds do: the
+/// dispatch gate has passed by then and the producer has not started.
+struct FillsAfterBaseline<'a> {
+    inner: &'a Lines,
+    free_file: std::path::PathBuf,
+}
+
+impl athena_core::Ui for FillsAfterBaseline<'_> {
+    fn line(&self, text: &str) {
+        if text.starts_with("baseline") {
+            std::fs::write(&self.free_file, "3000000000").unwrap();
+        }
+        self.inner.line(text);
+    }
+}
+
+#[test]
+fn a_job_is_held_before_the_producer_when_the_disk_fills_after_dispatch() {
+    let fx = disk_fixture();
+    let producers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = producers.clone();
+    let inner = rated_scenario().script();
+    let script: Script = Box::new(move |spec| {
+        if spec.role == Role::Producer {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        inner(spec)
+    });
+    let mut athena = fx.athena(script);
+    athena.state = athena.state.clone().with_free_space(simulated_free);
+    let job = queue_steward_request(&athena, "Add a greeting to the README.");
+    let id = athena_data::JobId::parse(&job).unwrap();
+
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let filling = FillsAfterBaseline {
+        inner: &lines,
+        free_file: athena.state.root().join("simulated_free"),
+    };
+    std::fs::create_dir_all(athena.state.root()).unwrap();
+    let steps = real_steps_with(&athena, &lander, &filling);
+    let first = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&first);
+    assert_eq!(first.failed_item, None, "{text}");
+    assert_eq!(first.landed, 0, "{text}");
+    assert_eq!(first.jobs.len(), 1, "{text}");
+    assert_eq!(first.jobs[0].outcome, "environment: low disk", "{text}");
+    for needle in ["environment: low disk", "3.0 GB", "10.0 GB"] {
+        assert!(text.contains(needle), "{needle}: {text}");
+    }
+    assert_eq!(
+        producers.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the producer never started"
+    );
+    assert!(lander.0.lock().unwrap().is_empty());
+
+    // Dispatched (it passed the dispatch gate), with its records and no outcome, no score.
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let held = &records.jobs[&job];
+    assert_eq!(held.state(), JobState::Dispatched);
+    assert!(held.job.is_some() && held.outcome.is_none() && held.latest_score().is_none());
+    assert!(!held.invocations.iter().any(|i| i.role == Role::Producer));
+    assert!(records.introspections.is_empty(), "not a work failure");
+    let said = lines_of(&lines);
+    let at = position(&said, "dispatched");
+    let baseline = position(&said, "baseline");
+    let hold = position(&said, "held       environment: low disk");
+    assert!(at < baseline && baseline < hold, "{said:#?}");
+    assert!(
+        !text.contains("athena retry") && !said.iter().any(|l| l.contains("athena retry")),
+        "no one is told to retry: {text}\n{said:#?}"
+    );
+    let marker = athena_core::disk::read_hold(&athena.state, &id).expect("a hold marker");
+    assert_eq!(
+        (marker.free, marker.required),
+        (3_000_000_000, 10_000_000_000)
+    );
+    let status = display::status(&athena.status().unwrap());
+    for needle in ["environment: low disk", "3.0 GB free", "10.0 GB required"] {
+        assert!(status.contains(needle), "{needle}: {status}");
+    }
+    let refusal = athena
+        .go(&job, AcceptedBy::Flag, &Quiet)
+        .unwrap_err()
+        .to_string();
+    assert!(refusal.contains("reads it again"), "{refusal}");
+    assert!(
+        !refusal.contains("resumes it from its kept candidate"),
+        "{refusal}"
+    );
+
+    // Space is back: the next drain reads the job again as a new one, runs its producer, and the retry
+    // spends the old hold marker.
+    set_free(&athena, 500_000_000_000);
+    let second_lines = Lines::default();
+    let steps = real_steps_with(&athena, &lander, &second_lines);
+    let second = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&second);
+    assert_eq!(second.jobs.len(), 1, "{text}");
+    assert_eq!(second.jobs[0].item, job, "{text}");
+    assert_ne!(second.jobs[0].job, job, "a retry is a new job");
+    assert_eq!(producers.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(
+        athena_core::disk::read_hold(&athena.state, &id).is_none(),
+        "the retry spent the hold marker"
+    );
+    let status = display::status(&athena.status().unwrap());
+    assert!(!status.contains("3.0 GB free"), "{status}");
 }
 
 #[test]

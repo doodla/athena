@@ -167,12 +167,14 @@ impl Athena {
         })))
     }
 
-    /// Holds a job whose candidate is built because free disk space stayed low at a late gate (before the
+    /// Holds a job because free disk space stayed low at a late gate (before the producer, before the
     /// checks, or before the verifier). The attempt's records are committed, with no score and no outcome, so
     /// the job stays dispatched with no process: it reads as interrupted, which no failure, introspection or
-    /// scope-guard count looks at. A hold marker records the amounts, the job's own resume mark stays, and
-    /// the next drain resumes the job from its kept candidate ([`Athena::retry`]). The error returned is the
-    /// [`LowDisk`] hold; the caller returns it from `go`.
+    /// scope-guard count looks at. A hold marker records the amounts. With a built candidate (the last two
+    /// callers) the job's own resume mark stays, and the next drain resumes the job from its kept candidate
+    /// ([`Athena::retry`]). A hold before the producer has no candidate and no resume mark, so the next drain
+    /// reads the job again, and that retry spends the marker (`release_superseded_hold`). The error returned
+    /// is the [`LowDisk`] hold; the caller returns it from `go`.
     pub(super) fn hold_for_disk(
         &self,
         ctx: &RunContext<'_>,
