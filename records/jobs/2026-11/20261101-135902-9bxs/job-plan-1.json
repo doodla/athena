@@ -1,0 +1,245 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261101-135902-9bxs",
+  "round": 1,
+  "at": "2026-11-01T15:16:04.338917687Z",
+  "invocation_seq": 2,
+  "approach": "Judge a pull request's checks by the one required check name and report the rest as notes. In gh/client.rs, `classify_checks` stops treating any failed check-run as red. It looks only at the check-run named by `CI_AGGREGATE_JOB` (\"fmt, clippy, tests\"), which becomes `pub(super)` and is the one source of the name. It is Red if that run failed, Pending if it is missing or unfinished, and Green if it succeeded or was skipped. A new `PrHost::optional_failures(commit)` has a default of \"none\". `GhClient` implements it by reading the same check-runs and statuses and returning the failed names that are not required. `land_pr` calls it once after the wait and adds each name to `PrReport.warnings` as a note: \"not required by main, so not a failure\". `warnings` is already documented as non-failure notes. The drain's `PrLander` is unchanged. With a green required check, `land_pr` merges and reports Landed, so the drain never sees `NotLanded` and never counts a failure. The thrash-stop rule is untouched. In gate/invariant.rs, `classify_pre_merge` stops treating a job as claiming a landing when the job's records in the commit tree have no verification, no `outcome.json` and no later outcome (a held job: candidate, invocations and plans only). That commit then falls through to the existing intervention, fingerprint and records-only rules. A job with an outcome and no verification still returns `NoVerification`.",
+  "decisions": [
+    {
+      "choice": "Fix the check judgment in `classify_checks` (client.rs), where Red is made, by naming the required check, and keep the `PrHost::checks` signature.",
+      "reason": "The fault starts where any failed run becomes Red. Fixing it there corrects the landing wait, its rerun logic and the refusal text together, and no fake host has to change.",
+      "rejected": [
+        {
+          "option": "Map the optional red to a drain-side exception in `PrLander` or drain.rs",
+          "why": "That treats the symptom. The wait would still rerun and report Red, and the thrash-stop rule is out of scope."
+        },
+        {
+          "option": "Change `Checks` to carry the optional names",
+          "why": "`Checks` is `Copy` and used by many fake hosts and display code. A separate default trait method is smaller."
+        }
+      ]
+    },
+    {
+      "choice": "The required-name set is the existing `CI_AGGREGATE_JOB` constant. Make it `pub(super)` and point `EARLY_RUN_JOB` in early.rs at it. Use a one-element `const REQUIRED_CHECKS: [&str; 1] = [CI_AGGREGATE_JOB]` only if the classifier wants a slice.",
+      "reason": "Criterion 7 needs one source. early.rs currently repeats the literal, so referencing the constant removes a duplicate.",
+      "rejected": [
+        {
+          "option": "Read the names from ci.yml or xtask's REQUIRED_CHECK_NAME at run time",
+          "why": "xtask's constant is in a test file of another crate, and parsing the workflow adds machinery. The xtask test already ties its constant to the workflow."
+        }
+      ]
+    },
+    {
+      "choice": "Ignore combined-status contexts when judging and list only failed ones in the note. Treat a check-run with no name as not required.",
+      "reason": "Main requires only the named job. Judging by anything else is the bug. A missing required run stays Pending, so nothing is merged early.",
+      "rejected": [
+        {
+          "option": "Keep the status-state failure as Red",
+          "why": "A failing non-required status context would reproduce the stop."
+        }
+      ]
+    },
+    {
+      "choice": "Decide 'held job' in `classify_pre_merge`, not in `closing_jobs`. A closing job counts as a landing claim only if it has a verification, an outcome or a later outcome. If none of the three exist, the commit is not a landing claim.",
+      "reason": "The brief names `classify_pre_merge`. `closing_jobs` is documented to keep outcome-less jobs so `landing()` can refuse a squash that lands one, so changing it would alter that refusal. The hold's records have candidate and invocations but no outcome and no verification (disk.rs, third and fourth hold places), so the job's own records identify it. The local hold marker is outside the tree and cannot be used.",
+      "rejected": [
+        {
+          "option": "Read the local hold marker (`read_hold`)",
+          "why": "It is state-dir data, absent from the commit tree and from a pull request check."
+        },
+        {
+          "option": "Skip the verification check for every job that has a candidate",
+          "why": "A finished job's closing records without verification must still fail."
+        }
+      ]
+    },
+    {
+      "choice": "Test the checks end to end by driving the real `GhClient` over a scripted `Runner` through `land_pr`, with a new fixture next to `FakeRunner`.",
+      "reason": "A scripted `FakeHost` returns `Checks` directly, so it cannot show that a red optional run is ignored. A runner that serves check-run JSON puts the production classifier under the test.",
+      "rejected": [
+        {
+          "option": "Only extend `FakeHost` with an optional-red list",
+          "why": "That would test the doubles, not the classifier."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "purpose": "Required-only `classify_checks` using `CI_AGGREGATE_JOB` (now `pub(super)`). Add `PrHost::optional_failures` with a default of none, implement it in `GhClient`, and update the doc comment. The result may carry the failing optional names.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/early.rs",
+      "action": "modify",
+      "purpose": "Define `EARLY_RUN_JOB` from `CI_AGGREGATE_JOB` so the name has one source.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "purpose": "After the wait, add each failing optional check to `PrReport.warnings` as a note. Update the `land_pr` doc comment.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Rename the unnamed check-run fixtures. Add the scripted runner, the green-required/red-optional test, the red-required, pending-required and absent-required tests, and a `classify_checks` unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/invariant.rs",
+      "action": "modify",
+      "purpose": "`classify_pre_merge` ignores a closing job with no verification and no outcome (a held job), and falls through to the existing rules. Update the `Uncovered::NoVerification`, `closing_jobs` and `classify_pre_merge` docs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "purpose": "Held-job tests: a candidate-only commit passes, a candidate and landed outcome without verification returns `NoVerification`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One `### Fixed` entry under Unreleased covering both fixes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Add one decision entry, with the next free D number after the last heading, recording required-check judgment and the held-job rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Only if needed: update the `pr_commits` rule 1 doc text to mention held jobs. No logic change is planned there.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Listed as a deliverable. I found no use of checks or landing there, so no change is planned. Touch it only if the producer finds a held-job or checks reference.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read gh/client.rs 40-120 (the `PrHost` trait) and 766-794, and the gh/mod.rs re-exports. Make `CI_AGGREGATE_JOB` `pub(super)` and set `EARLY_RUN_JOB` in early.rs to it.",
+    "Rewrite `classify_checks` to look only at check-runs named `CI_AGGREGATE_JOB`. Its states: failed conclusions are Red; missing or not completed is Pending; success or skipped is Green. Statuses are not judged. Keep the public name and signature; add a helper that lists the failed non-required run and status names.",
+    "Add `PrHost::optional_failures(&self, commit) -> Result<Vec<String>>` with a default of `Ok(vec![])`. Implement it in `GhClient` by reading the same two replies and calling the helper.",
+    "In `land_pr` (landing.rs), after the wait, when the pull request is still open and the wait is over, call `optional_failures(&link.head)`. Ignore an error, as the failing-test lookup does. Push each name to `warnings` as 'check <name> failed; it is not required by main, so it is a note and not a failure'.",
+    "In gh/tests.rs, rename the unnamed check-run fixtures to 'fmt, clippy, tests'. Add a scripted `Runner` that serves configurable check-run JSON and a merged lookup that flips after the merge PUT. Add the tests for criteria 1, 2 and 4 plus a `classify_checks` unit test, and update the call count at line 121 if needed.",
+    "In invariant.rs, in `classify_pre_merge`, load `JobFiles` for each closing job once and drop jobs with no verification, no outcome and no later outcome. Count the rest for `SeveralJobs`. A job with an outcome and no verification returns `NoVerification`. Update the doc comments and add a short 'held job' note.",
+    "Check land.rs `pr_commits` docs and any other `classify_pre_merge` caller (history.rs:153). Adjust the rule 1 text only.",
+    "In landing_tests.rs, add the held-job test (a candidate and an invocation, no outcome or verification, gives Ok `RecordsOnly`) and the finished-job test (a candidate and a Landed outcome, no verification, gives `NoVerification`). Add a small commit helper if the file lacks one.",
+    "Add the CHANGELOG.md bullet under `## [Unreleased]` / `### Fixed`, and a docs/decisions.md entry with the next D number.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` and `cargo test -p athena-core --test refusal_corpus`."
+  ],
+  "risks": [
+    {
+      "risk": "Fixtures that return an unnamed check-run (tests.rs:86, 677-690, and possibly test_support.rs) read Pending once the required name matters.",
+      "mitigation": "Step 5 renames them to the required name and runs the whole `cargo test -p athena-core`. Keep the `classify_checks(runs, status)` signature."
+    },
+    {
+      "risk": "Ignoring statuses could let a genuinely failing status context through.",
+      "mitigation": "Main requires only the named job, so judging statuses was the bug. Failing contexts appear in the note, and the required run is still Pending when missing."
+    },
+    {
+      "risk": "The held-job rule could let a job that lost its outcome record slip into history without verification.",
+      "mitigation": "The commit still has to pass the governed-fingerprint rules, so any governed change returns `GovernedChange`. A finished or landed job has an outcome record and so still returns `NoVerification`."
+    },
+    {
+      "risk": "The extra `optional_failures` API read adds a call to `land_pr`, which could break call-count assertions (for example `check_reads`).",
+      "mitigation": "The default method makes no call for fake hosts. Only `GhClient` reads, and only once after the wait. The test at tests.rs:106 counts calls, so update its expected count."
+    },
+    {
+      "risk": "Scope creep into land.rs, run/mod.rs and docs.",
+      "mitigation": "Touch only what the change needs; land.rs and run/mod.rs are conditional. The decision entry records the root cause."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new test in gh/tests.rs, `a_red_optional_check_does_not_fail_the_landing`. It runs `land_pr` through `Rig::run_with` with a `GhClient` over a new scripted runner. The runner serves check-runs `[{name:\"fmt, clippy, tests\", success}, {name:\"pull request head\", failure}]`, an unmerged pull request until the merge PUT, then a merged one with commit `merged1`. It uses `merge_via_rest` true, and also false for the waiting case.",
+      "command": "cargo test -p athena-core a_red_optional_check_does_not_fail_the_landing",
+      "observes": "The report has `checks == Some(Checks::Green)`, `reruns == 0`, `link.state == Landed` and `merge_requested`. Nothing is `Red`, so `PrLander::land` returns `Landing::Landed` and drain.rs:1537 `failures` is never incremented. With the setting off the report is Open and Green, and nothing failed. The stop is reached only through `NotLanded`, drain.rs:1445-1449 and 1537-1539, which this path never takes.",
+      "fails_without": "Without required-only judgment, `classify_checks` returns Red for the failed 'pull request head' run, the wait reruns, the report is Red and Open and nothing merges, so the Landed and Green assertions fail.",
+      "seam": "Production entry point `land_pr` (gh/landing.rs) with `GhClient::checks`/`classify_checks`. Fixture: a new scripted `Runner` impl in gh/tests.rs, injected as `&dyn PrHost` via `Rig::run_with(host, ...)`, which takes `&dyn PrHost` today. The new runner is added by plan step 5. `Rig`, `FakeContent` and `GhClient::new(&runner, ..)` exist (tests.rs:56-93, 915-991)."
+    },
+    {
+      "criterion": 2,
+      "method": "Two more tests with the same scripted runner and `land_pr`. In one the required run concludes failure, with a log text for `failing_test`. In the other the required run is `in_progress`, and in a variant it is absent while the optional run is green. A unit test on `classify_checks` pins the three JSON shapes.",
+      "command": "cargo test -p athena-core required_check",
+      "observes": "A red required run gives `checks == Some(Red)`, no merge, `reruns` 0 or 1 as today, and the pull request stays Open. A pending or absent required run gives Pending after exactly `attempts` reads, no merge and no rerun. The existing tests at tests.rs:1026-1116 still pass.",
+      "fails_without": "If the classifier ignored the required check, or treated 'absent' as green, the red case would be Green or merged and the pending case would merge, so the Red and Pending assertions fail.",
+      "seam": "Same as criterion 1: `land_pr` plus `classify_checks` through a scripted `Runner` (added by step 5). The existing fixtures at tests.rs:86 and 677 return unnamed check-runs and must be renamed to 'fmt, clippy, tests' in step 5."
+    },
+    {
+      "criterion": 3,
+      "method": "New tests in crates/athena-gate/src/landing_tests.rs, using `owner_repo()`, `write_records`, `closing()`/`candidate()`/`outcome()` and a commit helper. One commit adds a held job's `candidate.json` and an invocation record, with no outcome and no verification. `classify_pre_merge(git, sha)` is expected to return `Ok(PreMergeCommit)` with kind `RecordsOnly`. Another commit adds `candidate.json` and a Landed `outcome.json` with no verification, and is expected to return `Err(Uncovered::NoVerification(job))`.",
+      "command": "cargo test -p athena-gate held_job",
+      "observes": "The held commit is `Ok` and `RecordsOnly` with `job == None`, and its `clause()` text is never produced. The finished commit is `Err(NoVerification)` and `clause()` contains 'without its verification'. The existing land.rs test `a_landing_without_a_verification_is_refused` still passes.",
+      "fails_without": "Without the held-job rule, the held commit returns `Err(NoVerification)` (invariant.rs:323-328) and the Ok assertion fails.",
+      "seam": "Production entry point `classify_pre_merge` (invariant.rs:311) over a real temp git repository. The fixtures in landing_tests.rs exist (lines 42-310). The commit helper or the test-only record builders for a candidate-only and an outcome-only commit are added by step 8."
+    },
+    {
+      "criterion": 4,
+      "method": "The criterion-1 test also asserts on `report.warnings`. It is the PrReport field the athena land output prints. It is checked by exact content.",
+      "command": "cargo test -p athena-core a_red_optional_check_does_not_fail_the_landing",
+      "observes": "`warnings` has one entry containing 'pull request head' and 'not required', and no entry or error contains 'checks Red' or 'not landed'. No `Err` is returned.",
+      "fails_without": "Without the note, `warnings` is empty and the contains assertion fails. Without the fix the call returns Red and no note.",
+      "seam": "`PrReport.warnings` from `land_pr`, populated by `PrHost::optional_failures` on `GhClient` (added by step 4). The default trait method keeps the other hosts unchanged (test_support.rs:207 and 420, tests.rs:845 and 1599)."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the new entry under `## [Unreleased]` in CHANGELOG.md (`### Fixed`). It names both fixes and says that the pull request head check stays optional.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One added bullet covers: the drain judges a pull request by the required 'fmt, clippy, tests' check and reports other red checks as notes, and records of a held job pass the pull request head check (`classify_pre_merge`).",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three workspace checks.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The renamed fixtures and the new `optional_failures` default method compile in every `PrHost` impl.",
+      "fails_without": "A fixture still using an unnamed check-run would read Pending and break the client test at tests.rs:106. A trait change without a default would fail to compile for the other hosts.",
+      "seam": "The workspace build and test commands, which exist."
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the diff. The literal 'fmt, clippy, tests' is added nowhere in non-test code. client.rs has the one constant, early.rs refers to it, and the new classifier and optional-failure reader use it. No second list of names is added.",
+      "command": "git diff -- crates/athena-core/src/gh/client.rs crates/athena-core/src/gh/early.rs",
+      "observes": "The `EARLY_RUN_JOB` definition becomes a reference to `CI_AGGREGATE_JOB`. No new string literal of the check name appears outside tests.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Both changes only narrow refusals. They touch the landing wait and the pre-merge classification, not a reading parser, a stem list or a stop list. No refusal rule is added, so no new corpus case is needed. I did not read crates/athena-core/tests/refusal_corpus.rs, so I cite no case id. The producer and the verifier run the corpus to confirm no reading refusal changed.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "The corpus test passes unchanged, so no reading is newly refused.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "I did not read crates/athena-core/tests/refusal_corpus.rs. The change adds no reading refusal, so I expect it to pass untouched.",
+    "With `merge_via_rest` off, an open pull request with green checks still gives `NotLanded`, and the drain counts it as a failure (drain.rs:2610-2613 and 1537). The request's 'landed or waiting' is met only for the merging path. I left this alone because the thrash-stop rule is out of scope. The producer should say so in the decision entry.",
+    "I found no `athena-gate` test that calls `classify_pre_merge` directly; the existing ones are in land.rs. If the athena-gate fixtures lack a commit helper for records, the producer adds one (step 8).",
+    "Whether anything else in the gate refuses a candidate-only records commit, beyond `classify_pre_merge`. I read `check()` up to line 165 and saw records-only commits return before the landing check, but I did not read the rest of invariant.rs.",
+    "I did not read ci.yml. I assumed the 'pull request head' check-run has a name different from 'fmt, clippy, tests'. The tests use that assumed name."
+  ],
+  "producer_section_sha256": "be4ee55cb6d17fe1e2e72257665e26aa63074dafae50a554931e65b3e29211d3"
+}
