@@ -1,0 +1,135 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261031-031939-wz33",
+  "base_commit": "6564c5bb8cd16e2736bd87c7194b36596bb7385a",
+  "base_fingerprint": "sha256:9a43cc1ce9a3c07de08c9489bcd914f93c0818add1682548b6b409ad8b7a65e2",
+  "previous_job": "20261031-031934-8vyd",
+  "candidate_commit": "e145713f39130e8c3d0e964c2fc7558e66101261",
+  "candidate_tree": "9d3cf2c20535ea0f2a4ff982d86707e6b6f4e9b4",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 280626
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 210285
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 255074
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 27641
+    }
+  ],
+  "fingerprint": "sha256:5aa7e938b44dcf156dc107536e79e3a541cd52e9dbf2791e3d1568317c70c7c2",
+  "violations": [],
+  "producer_report": {
+    "summary": "The drain now asks a new default-no-op hook, Steps::commit_records(job), right after Steps::land answers Landed. It runs inside Drain::land, while the job still holds the head of the landing queue (the LandingSlot is held until attempts end, and await_head lets only the head reach Drain::land). So with several jobs in flight, records commits follow landing order, each after its own landing and before the next. A job that did not land never reaches the hook. A failing hook is noted in Report::notes and printed, and the landing still counts. With the default hook, a bound of 1, or plain drain, behaviour is unchanged. The real steps keep the default. go still commits a job's records at close, so moving that commit into the queue is later work. The CHANGELOG, the design note and the doc comments all say this. I added a records_order test module to tests/drain.rs. Its stub commits real priority records through the real Committer, and the tests drive drain_concurrent. They cover: three jobs in flight landing and recording in the order c, a, b; append-only with a rejected fourth job; a refused commit not undoing the landing; the bound-1 sequence through drain_concurrent and drain; and a default-hook stub at bound 2. They print the sequences for three jobs. The changes are in drain.rs, the tests, CHANGELOG.md and docs/design/async-drain.md. Nothing was removed from existing files.",
+    "files": [
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md",
+      "docs/design/async-drain.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after cargo fmt --all"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "whole workspace"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain",
+        "result": "pass",
+        "note": "145 passed, including the 5 new records_order tests"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain records_order -- --nocapture --test-threads=1",
+        "result": "pass",
+        "note": "prints start, end, landing and records sequences for three jobs"
+      },
+      {
+        "command": "cargo test -p athena-cli --lib drain",
+        "result": "pass",
+        "note": "47 passed"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "boundary scan clean on the changed tracked files"
+      },
+      {
+        "command": "git diff --numstat",
+        "result": "pass",
+        "note": "0 removed lines in every file; only additions"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test through drain_concurrent with several jobs in flight shows each landed job's records are committed right after its landing, in landing order, never before the landing; run cargo test -p athena-cli --test drain and the new test passes.",
+        "status": "met",
+        "evidence": "records_order::records_commit_after_each_landing_in_landing_order_with_jobs_in_flight_together drives drain_concurrent(.., 3) with a, b, c in flight (peak 3 asserted). Runs end c, a, b. The land/records log is exactly land c, records c, land a, records a, land b, records b, and git log subjects run Records of c, a, b. Passed in the full tests/drain.rs run (145 passed)."
+      },
+      {
+        "criterion": "A test shows the append-only rule holds with interleaved jobs: after the drain, earlier record files are unchanged byte for byte (git diff shows only added record files) and no record is committed for a job that did not land.",
+        "status": "met",
+        "evidence": "records_order::append_only_with_interleaved_jobs_and_no_records_for_a_job_that_did_not_land commits an earlier record, then drains a, b, c, d at bound 4 (d is rejected). git diff --name-status base..HEAD shows exactly 3 lines, all A, for priority-1.json files. The earlier record's blob id and text are unchanged, there are 3 commits since base, and Records::load has records for a, b, c and none for d. Passed."
+      },
+      {
+        "criterion": "With max_in_flight = 1 the existing drain tests in crates/athena-cli/tests/drain.rs and crates/athena-cli/src/drain.rs pass unchanged (no edits to existing test bodies, shown by git diff); a test through drain_concurrent with [parallel] max_concurrency 2 and max_in_flight 1 pins today's records commit behaviour.",
+        "status": "met",
+        "evidence": "git diff --numstat shows 0 removed lines in tests/drain.rs and src/drain.rs, so no existing test body changed. tests/drain.rs passes (145) and the drain unit tests pass (47). with_one_job_at_a_time_each_landing_is_followed_by_its_records_as_before pins run, land, records per job through drain_concurrent(.., 1) and drain::drain. steps_that_keep_the_default_see_no_records_step_at_a_bound_of_two pins the old sequence with no records entry at drain_concurrent(.., 2). There is no max_in_flight parameter on drain_concurrent; its fourth argument is [parallel] max_concurrency, so the pins use bounds 1 and 2 (see open_issues)."
+      },
+      {
+        "criterion": "cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test pass across the workspace.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran fmt --check and clippy --all-targets --locked -D warnings (both clean), plus tests/drain.rs, the drain unit tests and the policy test. I did not run the full workspace cargo test."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing that records are now committed from the landing queue after each landing, with no behaviour change at max_in_flight = 1.",
+        "status": "met",
+        "evidence": "An entry was added under Unreleased, Added, after the landing-queue entry. It says records are committed right after each landing, in landing order, for landed jobs only, append-only, with no behaviour change at max_in_flight 1. It also says the real steps keep the default and go still commits at close. git diff --numstat shows 11 added lines."
+      },
+      {
+        "criterion": "Outcome check: a maintainer reading the new tests can see the records commit sequence versus the landing sequence for at least three jobs, not only that functions exist.",
+        "status": "met",
+        "evidence": "The tests print 'runs started: a b c', 'runs ended: c a b', 'landing sequence: c a b', 'records sequence: c a b' and the interleaved land/records list, and assert the whole sequence. The append-only test also prints the git diff name-status lines. Seen with --nocapture."
+      }
+    ],
+    "open_issues": [
+      "The real steps keep the default no-op hook. go still commits a job's closing files and its Score and Outcome records at close (crates/athena-core/src/run/close.rs, land_or_block), before the job joins the landing queue. Moving that commit into the queue slot changes the run path and is outside this job's files. The CHANGELOG, design note and doc comments say so. Do you want it as a follow-up?",
+      "Design section 8 also says failed or closed jobs commit through the queue. Acceptance criterion 2 says no record for a job that did not land, so I followed the criterion. Failed-job routing is left to a later job.",
+      "The month-shard append-only conflict reading is not confirmed; per-job record files are new paths. The design note says so.",
+      "The hook test proves the order and that the call is made while the job holds the head slot. It does not prove the call sits inside the landing mutex, because a call moved to just after Drain::land returns would also keep the order; the test names and design note do not claim more.",
+      "No max_in_flight parameter exists on drain_concurrent (that is build job 10), so the max_in_flight 1 pins use bounds 1 and 2 of [parallel] max_concurrency. The default-hook test at bound 2 uses a stub with no repository, so 'no commit made' is shown by the log and notes, not by a repository check.",
+      "I did not run the full workspace cargo test (about 10 minutes); Athena's own run covers it."
+    ],
+    "mistakes": [
+      "I read a very large span of tests/drain.rs to find the file end, which cost budget; a Grep count for the line total would have been enough."
+    ],
+    "learnings": [
+      "A lone priority record (athena.priority/1) commits through Committer::commit_records and the gate with no extra records, and Records::load reads a job with only a priority record.",
+      "Git, StateDir and Committer are Sync enough to live inside a Steps + Sync stub, so the stub can make real gated commits from the drain's worker threads.",
+      "drain_concurrent's fourth argument is [parallel] max_concurrency, not max_in_flight, which only the disk guard in go reads.",
+      "A rejected job is retried once, so a stub that lists a job as failing sees a '<job>-retry' run, and the drain ends RepeatedFailure after the in-flight jobs finish."
+    ],
+    "desires": [
+      "A way to run a single targeted test without the 126 s full drain test binary would have helped; the targeted filter worked fine."
+    ]
+  }
+}

@@ -1,0 +1,194 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-031939-wz33",
+  "round": 1,
+  "at": "2026-11-01T21:32:17.108700609Z",
+  "invocation_seq": 2,
+  "approach": "Add one default-no-op hook, `Steps::commit_records(job) -> Result<(), String>`, to drain.rs. `Drain::land` calls it right after `Steps::land` answers `Landed`, still under the landing lock. Landings are one at a time, so each landed job's records commit sits right after its landing, in landing order. It is never called for a job that did not land. A commit error becomes a `Report::notes` line; the landing still counts, because it already happened. The default does nothing, so `drain`, a bound of 1 and every existing stub behave as today. The real steps keep the default, because a landed job's records already travel in its landing commit (`land_or_block` in run/close.rs builds the landing commit with `closing.files`). Deferring them is later wiring, like the rebase default. Tests use a recording stub whose `commit_records` makes a real git commit that only adds the job's record file, in a throwaway repo. The tests check the log order and `git diff` for append-only. store.rs gets one read-only helper that lists a job's record file paths at a commit, so the tests can show that each records commit holds exactly that job's files. No record format changes.",
+  "decisions": [
+    {
+      "choice": "The hook goes on `Steps` with a default no-op, and `Drain::land` calls it inside the landing lock, right after the `Landed` arm updates the run state.",
+      "reason": "The landing lock already makes landings one at a time (the `landing` mutex in `Drain`). A call inside it cannot interleave with another job's landing, so records order equals landing order by construction. A landing never reaches the hook on `NotLanded`/`Waiting`/`Budget`. This matches design section 8: the queue commits a job's records right after its landing, in the same slot.",
+      "rejected": [
+        {
+          "option": "Commit in `attempts` after `land` returns, outside the lock",
+          "why": "Another worker could land and commit between the landing and its records, which breaks the order."
+        },
+        {
+          "option": "Add a records field to `Landing::Landed`",
+          "why": "It changes a public enum used by every existing stub and test, so existing test bodies would need edits. This breaks criterion 3."
+        },
+        {
+          "option": "A separate records queue or writer thread",
+          "why": "It adds a second serial resource. The landing slot already serialises, so it is more code for no gain (small default)."
+        }
+      ]
+    },
+    {
+      "choice": "The real `RealSteps` keeps the default no-op hook.",
+      "reason": "Reading run/close.rs shows a landed job's records are already in its landing commit, and failed jobs commit at close. There is nothing pending to commit afterwards. The design's 'records stay local until the queue commits them' is not built, and A8's scope is the ordering rule in the drain. Doc comment and async-drain.md say so, as they do for the rebase default.",
+      "rejected": [
+        {
+          "option": "Wire `RealSteps::commit_records` to `Athena::commit_records`",
+          "why": "There are no uncommitted per-job record files to commit. It would invent a deferral mechanism and touch the run path, which is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Only landed jobs go through the hook. Failed or closed jobs are not routed through it.",
+      "reason": "The brief's criterion 2 requires that no record is committed for a job that did not land. Closing-time commits of failed jobs stay as they are.",
+      "rejected": [
+        {
+          "option": "Also commit failed jobs' records through the queue, as design section 8 bullet 3 says",
+          "why": "This conflicts with criterion 2 as worded and with the small default. It is left as an open question."
+        }
+      ]
+    },
+    {
+      "choice": "A commit failure is a note in `Report::notes`, not a failed landing and not a stop.",
+      "reason": "The job has landed and cannot be un-landed or retried. Counting it as a failure would retry a landed job.",
+      "rejected": [
+        {
+          "option": "Return NotLanded on a records failure",
+          "why": "The landing retry would land the same job twice."
+        }
+      ]
+    },
+    {
+      "choice": "The max_in_flight = 1 pin runs through `drain_concurrent` with bound 1 and through `drain`, and adds a bound-2 run of a dependent pair. A stub that does not override the hook sees no extra call.",
+      "reason": "In today's code the fourth argument of `drain_concurrent` is `[parallel] max_concurrency`, the only worker knob. `max_in_flight` is read only by the disk guard in `go`. With a bound of 1 the sequence is the old serial one, and with an unchanged default `Steps` nothing new happens.",
+      "rejected": [
+        {
+          "option": "Add a `max_in_flight` parameter to `drain_concurrent`",
+          "why": "Raising max_in_flight is build job 10, which is out of scope."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Steps::commit_records` (default Ok), call it in `Drain::land`'s `Landed` arm under the landing lock, record a failure as a note, and add a header bullet and doc comments. Existing tests are untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Add a read-only helper listing the record file paths of one job at a commit, used by the tests to show which files each records commit holds. No format change. If no test needs it, the producer leaves the file untouched and says so.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add a `records_order` module: a recording stub with a real temp git repo, and tests for criteria 1, 2 and 3. No existing test body is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the Unreleased entry for records committed after each landing, with no change at max_in_flight = 1.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "purpose": "Add a 'Note on build job 8' to section 8: what is built (the hook, the landed-only rule, landing order), that the real steps keep the default, and that failed-job routing and the shard-conflict reading are not built.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `Drain::land` (drain.rs ~1587), `Steps::rebase` and `rerun_cap` (~597-610) and the `Rebasing` stub in tests/drain.rs (~5695), then copy their style.",
+    "In drain.rs add to `Steps`: `fn commit_records(&self, _job: &str) -> Result<(), String> { Ok(()) }` with a doc comment: asked once per landed job, under the landing lock, right after `land` answered `Landed`; never for a job that did not land; the default commits nothing; the real steps keep it because a landed job's records travel in its landing commit.",
+    "In `Drain::land`, in the `Landing::Landed` arm after the state update and `wake.notify_all()`, call `self.steps.commit_records(job)`. On `Err(why)` push a note, naming the job and the reason, with `self.note`, and print a `drain      {job} records not committed: ..` line. Return `LandStep::Landed` either way. Do not change any other arm.",
+    "Add a header bullet to the module doc, 'Records are committed after each landing', and extend the max_in_flight 1 sentence at ~46.",
+    "In store.rs add the read-only helper (`record_paths_of(git, treeish, job) -> Result<Vec<String>>` or similar) using `RecordSet::load` and `job_of`, with a unit test in the file's test module. Skip this step if the tests do not need it.",
+    "Append a `records_order` module to tests/drain.rs: the recording stub (plan, items, staggered run times, a barrier meeting, a `failing` list, a log Mutex, a temp git repo behind a Mutex); a helper that writes `records/<job>.json` and commits with the job id as subject, which only does mechanical git work and makes no ordering decision; and the tests: records_commit_after_each_landing (bound 3, c/a/b), append_only_with_interleaved_jobs (earlier file, the `A`-only diff, the rejected job `d`), records_follow_landing_with_one_job_at_a_time (`drain` and bound 1), and a default-Steps test with a dependent pair at bound 2.",
+    "Add the CHANGELOG.md entry under the Unreleased heading, then add the 'Note on build job 8' to docs/design/async-drain.md section 8.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-cli --test drain`, then `cargo test --locked`. Check with `git diff` that no existing test body changed."
+  ],
+  "risks": [
+    {
+      "risk": "The hook is called while the landing lock is held, so a slow `commit_records` delays the next landing.",
+      "mitigation": "This is intended: it serialises records with landings. The doc comment says the hook should be quick, and the stub's commit is a local git commit."
+    },
+    {
+      "risk": "A test with several threads and a real git repo can be flaky if the stub's git calls overlap.",
+      "mitigation": "The commit runs only inside the landing lock, so calls are serial. The stub also guards its repo with its own Mutex, and the runs pass in a fixed order by staggered sleeps with a margin of at least 50 ms, like the `slow` list of `Rebasing`."
+    },
+    {
+      "risk": "An existing test body gets edited by accident.",
+      "mitigation": "New code goes in a new module appended to tests/drain.rs. The verifier runs `git diff` on both files and checks for added lines only."
+    },
+    {
+      "risk": "The unit tests in src/drain.rs implement `Steps` for several stubs, and a non-default method could break them.",
+      "mitigation": "The method has a default body, so no existing impl needs a change."
+    },
+    {
+      "risk": "The store.rs helper goes unused and clippy flags it.",
+      "mitigation": "It is `pub` in a library crate, so there is no dead-code lint, and the new tests call it. If the producer finds it unneeded, the file stays untouched."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new test in the `parallel` module of crates/athena-cli/tests/drain.rs drives `drain::drain_concurrent` with bound 3 over jobs a, b and c, with a barrier so all three runs are in flight at once. Their run times are staggered so the runs pass in the order c, a, b. The stub logs `land X` and `records X`, and its `commit_records` makes a real git commit in a temp repo. The test asserts the log is exactly `land c, records c, land a, records a, land b, records b`. It also asserts that `git log` subjects in that repo run in the same order and that no `records X` precedes `land X`. The test prints the sequences with its assert messages.",
+      "command": "cargo test -p athena-cli --test drain records_commit_after_each_landing",
+      "observes": "Each landed job's records commit directly follows its own landing, and the commit sequence equals the landing sequence (c, a, b), not the start order (a, b, c).",
+      "fails_without": "Without the hook call in `Drain::land`, no `records X` entry is logged and the exact-sequence assertion fails. If the call sat outside the landing lock, the barrier test would show an interleaved `land a` before `records c` on some run, and the strict alternation would fail.",
+      "seam": "Production entry point is `drain::drain_concurrent(&steps, limits, &Quiet, 3)`. Guards: the plan has independent jobs with disjoint touched paths, the budget is big enough, and the stub reports Landed. The fixture is a `Steps` stub like the existing `Shared`, plus a temp git repo (`Fixture`) that its `commit_records` writes into. It is injected as the `&dyn Steps` argument. `Steps::commit_records` does not exist today; plan step 1 adds it."
+    },
+    {
+      "criterion": 2,
+      "method": "A new test in the same module: a temp repo holds an earlier record file committed before the drain. The same three-job drain runs with bound 3, plus a fourth job `d` whose run is rejected twice, so it never lands. The test then runs `git diff --name-status <base>..HEAD` through the fixture and asserts every line starts with `A`. It asserts the earlier file's blob id is unchanged. It lists the record files with the new store.rs helper and asserts there is none for `d`. It also asserts the commit count is base plus 3.",
+      "command": "cargo test -p athena-cli --test drain append_only_with_interleaved_jobs",
+      "observes": "The diff holds only added files, earlier files are byte-identical, and exactly the three landed jobs gained record files. The rejected job gained none.",
+      "fails_without": "If the hook ran for every job that finished, `d` would gain a file and the count and the helper assertion would fail. If a commit rewrote an earlier file, the diff would show an `M` and the assertion would fail.",
+      "seam": "Production entry point is `drain::drain_concurrent`. Guards: `d` is in `failing`, so it ends with RepeatedFailure after the others land. The fixture is the recording stub with a real temp git repo, injected as the `&dyn Steps` argument. The store.rs helper is added by plan step 2. The stub and its repo are added by step 4."
+    },
+    {
+      "criterion": 3,
+      "method": "I would run the whole `tests/drain.rs` and the drain.rs unit tests unchanged, and `git diff -- crates/athena-cli/tests/drain.rs crates/athena-cli/src/drain.rs` shows no changed or removed existing test body, only added lines. I would add a test that runs `drain_concurrent` with bound 1, and `drain` (the max_in_flight 1 entry), over a, b and c with the recording stub. It asserts the log is `run a, land a, records a, run b, land b, records b, run c, land c, records c`, and that peak concurrency is 1. A second test runs bound 2 over a dependent pair and over a stub that does not override the hook. It asserts the log is the old sequence with no records entry.",
+      "command": "cargo test -p athena-cli --test drain",
+      "observes": "The existing tests pass untouched. With one job at a time the records follow each landing, one job at a time. A default `Steps` shows no new call, which is today's behaviour.",
+      "fails_without": "If the hook changed behaviour for a stub without the override (for example if the default errored or the drain required the hook), existing tests would fail. If a landing and its commit were reordered under a bound of 1, the pin test would fail.",
+      "seam": "Production entry points are `drain::drain` and `drain::drain_concurrent(.., 1)` and `(.., 2)`. Guards: the bound is passed as the fourth argument, which is `[parallel] max_concurrency` today. The fixture is the recording stub from criterion 1, plus the existing `Shared` and `Stub` for the default case, injected as `&dyn Steps`. The recording stub is added by step 4. The existing stubs exist today."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three checks Athena runs on the result, across the workspace.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The docs on the new public items name every link they use, so rustdoc warnings do not appear in clippy.",
+      "fails_without": "A formatting slip, a clippy lint in the new code (for example an unused import or a needless clone), or any failing test in the workspace makes one of the commands fail.",
+      "seam": "Whole-workspace cargo commands, which exist today. No fixture is needed."
+    },
+    {
+      "criterion": 5,
+      "method": "Read CHANGELOG.md. Under `[Unreleased]` there must be a new entry in the Added or Changed section that is under Unreleased. I would find that section by reading the headings at lines 8-200 before writing. The entry says records are now committed from the landing queue right after each landing, in landing order, only for landed jobs, and that nothing changes at max_in_flight = 1.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The diff is added lines only, under Unreleased, naming the landing order, the append-only rule and the no-change case for one job at a time.",
+      "fails_without": "Without the entry, the diff is empty and the check fails."
+    },
+    {
+      "criterion": 6,
+      "method": "The new tests (a) log both sequences in one vector and compare them as whole sequences, (b) build the expected list from the landing order of c, a, b, which differs from the start order, and (c) put both sequences into the assert messages. The verifier reads the tests and runs them with output shown, then reads the printed `land` and `records` sequences for three jobs.",
+      "command": "cargo test -p athena-cli --test drain records_commit -- --nocapture",
+      "observes": "The printed output shows the landing sequence and the records commit sequence side by side for at least three jobs. A reader sees they match and differ from the start order, not just that a function exists.",
+      "fails_without": "A test that only checks that `commit_records` is called, or that a count equals 3, would not show the order, so the sequence comparison fails against a wrong order.",
+      "seam": "Same entry point and fixture as criterion 1: `drain::drain_concurrent` with the recording stub. The `--nocapture` output comes from the test's own sequence printouts, added by step 4."
+    }
+  ],
+  "open_questions": [
+    "Design section 8 says failed or closed jobs also commit through the queue. Criterion 2 says no record is committed for a job that did not land. The plan follows the criterion; the failed-job routing is left for a later job.",
+    "`drain_concurrent`'s fourth argument is `[parallel] max_concurrency`; `max_in_flight` is not a drain parameter yet (the disk guard in `go` reads it). The pin test therefore uses bound 1 and `drain` for max_in_flight = 1. A drain parameter for max_in_flight belongs to build job 10.",
+    "The A6 landing queue (`LandingQueue`, `LandingSlot`) is present in drain.rs, so the plan builds on it. The rebase wiring is still a default (`Rebased::Unchanged`), which this job does not change.",
+    "Whether the real steps ever hold uncommitted per-job record files is not settled by the code. This plan assumes they do not, from run/close.rs, so the real hook stays the default.",
+    "Which `### Added` or `### Changed` heading in CHANGELOG.md sits under `[Unreleased]` was not fully read (headings at lines 8, 10, 197, 425, 597, 686). The producer checks that before inserting."
+  ],
+  "producer_section_sha256": "b944c8b24df9e906d8731b5f5bae9f26ff9c3021dcb6450f797b8962c88e0218"
+}
