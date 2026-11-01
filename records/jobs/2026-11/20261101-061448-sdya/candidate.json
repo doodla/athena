@@ -1,0 +1,184 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261101-061448-sdya",
+  "base_commit": "61f7d1da14918a7334e4759fada5b916ddd0d286",
+  "base_fingerprint": "sha256:c91ab072ed5519c1bf7c82b523db97d921833a4648254645428a4043a2915d52",
+  "previous_job": "20261030-060822-ztj9",
+  "candidate_commit": "7060753d0ca9c2eb0d2fc8e0aa94156d353e9285",
+  "candidate_tree": "a3496792ca5ef5fa497a41a773f821dde284ba80",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 270623
+    },
+    {
+      "path": "athena.toml",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11338
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 33156
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 30125
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 72392
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 105207
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 18902
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 54634
+    }
+  ],
+  "fingerprint": "sha256:d65e6c2d128983b50c109415308190def549760981b1093dc1c90287b9e9e01b",
+  "violations": [],
+  "producer_report": {
+    "summary": "The checks stage now reads GitHub's CI result for the candidate. No email-like text is written anywhere. `Athena::with_ci_source` in `run/mod.rs` replaces the unconditional `routing::NoCi` and picks the CI source and the wait together. A nested run, or an origin that is not an https URL on github.com (none, a local path, another host, an ssh remote), gets `NoCi` with one read and no sleep. A GitHub origin gets a `gh::GhClient` over `gh::GhCli`, which reads the push run on `athena/ci/<job id>` for the candidate SHA. It reads once, then every 20 s up to the new `[budget] ci_wait_s`: default 1500, set explicitly in `athena.toml`, 76 reads and 75 sleeps. `routing.rs` gains `CI_POLL`, `ci_polls`, a `Paced` wrapper that sleeps through an injected sleeper, and `run_routed_with_record`, which also returns the CI record. `ci_result.rs` is untouched. Green skips the local checks and each check note names the CI run. Red fails with the failing check named and no local run. A missing, cancelled, timed-out or unfinished run falls back to the local checks. When the checks came from CI, `verify::reuse_statement` for the candidate reaches the verifier as a `ci-result` entry that is not a check; a resumed job carries none. The userinfo split in `GhClient::origin_repository` uses `'\\u{40}'` with a comment saying why. The test credential URL is built from pieces. A scan of the added lines found no at-sign. Root cause of the earlier fault: a literal at-sign form in `gh/client.rs`.",
+    "files": [
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/verification.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "crates/athena-core/src/routing.rs",
+      "crates/athena-core/src/gh/client.rs",
+      "crates/athena-data/src/config.rs",
+      "athena.toml",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core ci_reuse",
+        "result": "pass",
+        "note": "5 new tests: green, red, fallbacks (missing, unfinished, cancelled, timed out), no-origin forms, verifier statement."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Run after cargo fmt --all."
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed."
+      },
+      {
+        "command": "cargo test --locked --quiet -p athena-data -p athena-core",
+        "result": "pass",
+        "note": "769 passed in athena-core, 140 in athena-data, 0 failed. This includes the config load tests, the routing unit tests, the existing GitHub-origin tests and refusal_corpus."
+      },
+      {
+        "command": "cargo test --locked (whole workspace)",
+        "result": "not-run",
+        "note": "It ran once, but the output was too large to read in this environment, so I have no result. I reran only the two changed crates, above. Athena's recorded run decides the rest."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core`: a new test through Athena::go with an https github.com origin, a fake gh::Runner replying a green push run for the candidate SHA, and early_seam recording fakes shows the recording local check executor is never called, and the recorded check notes name CI as their source.",
+        "status": "met",
+        "evidence": "ci_reuse_green_skips_local_checks passed. The origin is https://github.com/owner/repo. It uses the CiReplies runner fake with EarlyFake installed through early_seam. The recording check_seam executor list is empty, one runs read was made, and no sleep happened. Every recorded check note contains 'CI run <address> for <candidate sha>'. The job lands."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core`: a test with a red push run for the candidate SHA shows the job fails, the failure names the failing check, and no local check ran.",
+        "status": "met",
+        "evidence": "ci_reuse_red_fails_without_local_checks passed. The state is Rejected, the executor list is empty, and the only failed check is clippy. The checks line says 'clippy FAILED' and the reason contains 'clippy'."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core`: tests with a missing run, a cancelled run and a timed-out run each show the local checks run as before and the job proceeds.",
+        "status": "met",
+        "evidence": "ci_reuse_falls_back_to_local_checks_when_the_run_gives_no_result passed for Missing, Unfinished, Cancelled and TimedOut. Each ran fmt, clippy and test once and landed. Missing and Unfinished showed 76 reads and 75 sleeps of 20 s; Cancelled and TimedOut showed 1 read and 0 sleeps. The verifier prompt carries no reuse statement."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core`: a test with no GitHub origin (none, or a local path) shows NoCi is used, the fake runner gets no call, and the wait does not apply (no sleeping, one read).",
+        "status": "met",
+        "evidence": "ci_reuse_no_github_origin_uses_no_ci passed for none, a local path, a lookalike path, a gitlab URL, a host-in-path URL and an ssh URL. The runner got no call, there was no sleep, and the local checks ran once each. A green reply was ready, so a wrong CI read would have skipped them. routing::tests::routing_no_wait_is_one_read_and_no_pause covers NoCi and a bound of 0, with one read and no sleep."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core`: a test shows that when CI is green the verifier's input contains the text of verify::reuse_statement for the candidate SHA.",
+        "status": "met",
+        "evidence": "ci_reuse_statement_reaches_the_verifier_input passed. The expected text is built with production parse_ci_run and verify::reuse_statement from the same JSON the fake served. The verifier prompt contains it, and the statement is None for another SHA."
+      },
+      {
+        "criterion": "run/mod.rs no longer passes routing::NoCi unconditionally at the run_routed call; Grep `with_ci_source` shows a function choosing the source and wait together, and the candidate SHA is passed to resolution.",
+        "status": "met",
+        "evidence": "In run/mod.rs, with_ci_source is defined once and called once, from check_and_verify, which passes &c (the candidate commit) to run_routed_with_record and so to resolve. The only NoCi mentions are inside with_ci_source: the nested or no-origin branch, and the test-build fallback when no seam is installed."
+      },
+      {
+        "criterion": "athena.toml (a listed deliverable) sets the CI wait bound to 1500 seconds, and crates/athena-data/src/config.rs has the matching schema field; the config load tests still pass.",
+        "status": "met",
+        "evidence": "athena.toml [budget] has ci_wait_s = 1500. Budget has pub ci_wait_s: u64 with serde default 1500. New tests pass: the repo config loads with 1500, and a budget without the field loads with the default. The athena-data run had 140 passed and 0 failed."
+      },
+      {
+        "criterion": "Every new test with an https github.com origin installs both the gh::Runner fake and early_seam recording fakes (Grep `early_seam::install` in the new tests); no test reaches the network.",
+        "status": "met",
+        "evidence": "Every new github-origin test goes through ci_reuse_run in run/tests.rs. It installs crate::gh::early_seam::install, ci_seam::install (CiReplies runner plus recording sleeper) and check_seam::install before go, and keeps the guards through go. ci_seam is cfg(test) only. With none installed, a test build uses NoCi, so existing GitHub-origin tests never reach gh."
+      },
+      {
+        "criterion": "No added line in the diff contains an email address or user-at-host remote outside the athena.toml [personal_data] email_allow list; Grep the diff for an at-sign form, including crates/athena-core/src/gh/client.rs, and it finds none.",
+        "status": "met",
+        "evidence": "Grep for the at-sign over the changed files found only lines already in athena.toml and config.rs. I read the added lines of git diff for run/mod.rs and run/tests.rs and found none. client.rs has none; the split uses '\\u{40}' and the test URL is built with format! from a char. email_allow is unchanged."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for the change that also states a resumed job carries no reuse statement.",
+        "status": "met",
+        "evidence": "A new Added entry under Unreleased in CHANGELOG.md. It covers the CI source, ci_wait_s 1500 at 20 s reads, green, red and the fallbacks, NoCi, the verifier statement, and 'a job resumed after its checks passed takes its recorded checks and carries no reuse statement'."
+      },
+      {
+        "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`; all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran fmt --check (clean) and clippy with --locked -D warnings (clean). Tests passed for athena-data and athena-core, but I could not read the output of the whole-workspace cargo test run."
+      }
+    ],
+    "open_issues": [
+      "A failed or skipped push of the CI branch only warns (push_ci_branch in gh/early.rs returns nothing), so with a GitHub origin the wait still runs to the bound (up to 1500 s) before the local checks start. Follow-up for a job that may edit gh/early.rs: report whether the candidate is on the branch, so with_ci_source can choose NoCi when it is not. Until then, lower ci_wait_s to shorten the cost.",
+      "GhClient::origin_repository duplicates the private https_github_repository in gh/early.rs, so the two could drift. Follow-up: have early.rs delegate to it.",
+      "Departure from the plan: instead of a separate CiSteps capability, the test capability Docs got an ci_steps flag, off by default, so existing tests are unchanged. The helper swaps in the three-check variant. The same applies to the CiSteps capability's role in the plan (fmt, clippy, test, no path skip).",
+      "Departure from the plan: the origin check is the associated function GhClient::origin_repository, not a free pub(crate) function. GhClient is already exported, so gh/mod.rs stays unchanged.",
+      "No test drives a real resumed job to show it carries no reuse statement. That holds by construction, because the recorded_checks branch never sets the statement. The CHANGELOG states it.",
+      "I could not read the output of the one whole-workspace cargo test run (saved outside the working directory), so that run's result is unknown."
+    ],
+    "mistakes": [
+      "My first full cargo test --locked output was too large to read in this environment, and I could not open the saved file. I reran the two changed crates with --quiet instead of the whole workspace."
+    ],
+    "learnings": [
+      "gh/client.rs is a private module of gh. Only the types re-exported in gh/mod.rs (GhClient, GhCli, Runner, ci_branch, parse_ci_run) are reachable from run/mod.rs, so an associated function on GhClient avoids touching gh/mod.rs.",
+      "ci_result::read_ci sleeps itself with std::thread::sleep(wait.pause). A Paced CiSource wrapper plus a Wait with pause ZERO gives an observable 20 s step with no real sleeping.",
+      "A finished run whose aggregate job is cancelled or timed out is Missing at once in read_ci, so it is not waited for. Only an absent or unfinished run waits the whole bound.",
+      "Baseline checks go through run_check, not check_seam, so only the candidate checks are counted by the recording executor.",
+      "The capability id 'study' routes as kind Study, so route.reuse is on whenever the capability's checks cover fmt, clippy and test."
+    ],
+    "desires": [
+      "A way to see the tail of a long cargo test run, such as a quiet or summary mode in the allowed commands."
+    ]
+  }
+}

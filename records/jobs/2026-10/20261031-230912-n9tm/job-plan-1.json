@@ -1,0 +1,276 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-230912-n9tm",
+  "round": 1,
+  "at": "2026-11-01T05:21:39.574536592Z",
+  "invocation_seq": 2,
+  "approach": "In check_and_verify, replace the unconditional routing::NoCi and one-poll Wait with a new Athena::with_ci_source(job, bound_s, act). It reads origin, and with an https github.com origin builds GhClient over gh::GhCli (a fake gh::Runner in tests) and passes ci_source(ci_branch(job)) plus a Wait derived from the new budget.ci_wait_s (1500). With no GitHub origin it passes NoCi and Wait{polls:1, pause:0}. A new routing::run_routed_recorded calls the existing resolve with the candidate SHA and also returns the CiRecord when a CI run was used. run_routed keeps its signature and delegates. Green skips local checks and the CI record's reuse_statement goes to the verifier as one more non-check entry (the existing pattern of producer-report-gaps). Red returns failed CI check records, so the existing judge fails with 'check <name> failed' and no local run. Missing, cancelled, timed-out or stale runs fall back to local checks, already done by resolve. Tests drive Athena::go with a new fake Runner (in test_support.rs) injected through a thread-local seam beside early_seam, a three-check test capability (fmt/clippy/test, since route.reuse needs all three names), and check_seam as the recording local executor.",
+  "decisions": [
+    {
+      "choice": "Put with_ci_source in run/mod.rs as an Athena method taking a closure act(&dyn CiSource, Wait), so the source and wait are chosen together and the GhClient lives only for the call.",
+      "reason": "GhClient borrows its Runner and ci_source borrows the client, so a returned boxed source would need self-referential lifetimes. A closure keeps them on the stack. It also matches criterion 6 (Grep with_ci_source in run/mod.rs).",
+      "rejected": [
+        {
+          "option": "Return Box<dyn CiSource> and a Wait",
+          "why": "Lifetime tangle between runner, client and source; needs an owning wrapper type."
+        },
+        {
+          "option": "Put the method in gh/early.rs next to push_ci_branch",
+          "why": "gh/early.rs and gh/mod.rs are 3rze's landed work and out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Reach the origin test through a new associated function GhClient::https_repository(url) in gh/client.rs (reachable outside gh through the already exported GhClient). It repeats the 'https://, host == github.com, parse_remote' rule of private early.rs::https_github_repository.",
+      "reason": "gh/mod.rs, which lists the exports, and early.rs, which holds the private rule, are out of scope. A pinned test runs the same five origin forms as no_github_origin_pushes_no_ci_branch (none, local path, lookalike path, gitlab, github.com in a path) so the two rules cannot drift unseen.",
+      "rejected": [
+        {
+          "option": "Widen early.rs::github_repository to pub(super)/pub(crate)",
+          "why": "Edits a file the brief says to keep unchanged; listed as an open question."
+        },
+        {
+          "option": "Use parse_remote alone",
+          "why": "It accepts any text containing github.com, including local-path lookalikes, which would wait 25 minutes for nothing."
+        }
+      ]
+    },
+    {
+      "choice": "Wait bound is Budget.ci_wait_s with #[serde(default = ...)] of 1500, plus 'ci_wait_s = 1500' in athena.toml [budget]. routing::ci_wait(bound_s) gives polls = ceil(bound/20)+1 and pause 20 s (same step as the early-run wait); bound 0 gives one poll.",
+      "reason": "Budget has deny_unknown_fields and only the real athena.toml is a fixture; a serde default keeps any fixture config without the key loading, while athena.toml states the value. The knob is a schema field, not prose.",
+      "rejected": [
+        {
+          "option": "Required field with no default",
+          "why": "Breaks every fixture athena.toml that lacks it."
+        },
+        {
+          "option": "Hard-coded constant",
+          "why": "The brief asks for a wait bound in athena.toml and the config schema."
+        }
+      ]
+    },
+    {
+      "choice": "Under #[cfg(test)] with_ci_source keeps the polls from the bound but sets the pause to zero, and if no fake Runner is installed uses a Runner that returns an error (reads become Missing at once, never gh).",
+      "reason": "No test sleeps, and a test that forgot to install a runner cannot reach the network. The poll count still shows whether a wait was applied (runner call count equals ci_wait(1500).polls with an origin, 0 without).",
+      "rejected": [
+        {
+          "option": "Tests override ci_wait_s in the config",
+          "why": "athena.toml is appended to by repo_with_config; a duplicate [budget] key would not parse."
+        }
+      ]
+    },
+    {
+      "choice": "Hand the reuse statement to the verifier as one more CheckResultView ('ci-reuse', command 'not a check', passed true, detail = verify::reuse_statement(&record, &candidate_sha)), carried by a new Checked.ci_statement: Option<String> field.",
+      "reason": "Same pattern as producer-report-gaps; no change to the athena-context crate or VerifierInputs. The statement exists only for a green CI record for this SHA, which reuse_statement already enforces. A resumed job takes recorded_checks and sets none (stated in the CHANGELOG).",
+      "rejected": [
+        {
+          "option": "Add a field to VerifierInputs in athena-context",
+          "why": "Larger change in another crate and its brief budget tests; not needed."
+        }
+      ]
+    },
+    {
+      "choice": "New routing::run_routed_recorded returns (Vec<CheckRun>, Option<CiRecord>); run_routed keeps its signature and calls it.",
+      "reason": "resolve already yields the CiRecord; only the Verified record with source Ci is needed for the statement. Existing routing tests stay valid.",
+      "rejected": [
+        {
+          "option": "Change run_routed's return type",
+          "why": "Touches every existing routing test for no gain."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Add Athena::with_ci_source; in check_and_verify call it, call routing::run_routed_recorded with the candidate SHA, keep the CiRecord, build the reuse statement with verify::reuse_statement, put it in Checked; update the push_ci_branch comment ('Nothing reads the CI result yet').",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Not on the expected list but required: add Checked.ci_statement: Option<String> and push the 'ci-reuse' CheckResultView into inputs.checks when set.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "purpose": "Add ci_wait(bound_s) -> Wait and run_routed_recorded; run_routed delegates; update the module doc ('No candidate commit is pushed yet'); unit tests for ci_wait and the recorded record.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "purpose": "Add GhClient::https_repository(url) associated function (the https github.com origin rule), with a unit test of its forms.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add Budget.ci_wait_s (serde default 1500) and a load test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "Add ci_wait_s = 1500 to [budget] with a one-line comment.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Add the thread-local runner seam (install_ci_runner / current guard) and a fake gh::Runner (CiRunner) with a reply enum and a call log, reading the pushed SHA from EarlyFake.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the three-check capability variant, the harness with the runner seam, and the tests for criteria 1-5 and 8.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under [Unreleased] 'Changed'; states the resumed-job limitation.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "No change planned. It stays on the expected list only in case reuse_statement needs a doc tweak; leave untouched otherwise.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read gh/tests.rs ci_run/green_jobs helpers and run/tests.rs ci_run for reuse; read AgentInvocation.user_prompt to capture the verifier brief.",
+    "config.rs: add Budget.ci_wait_s with serde default 1500 (a default fn) and a unit test; athena.toml: add ci_wait_s = 1500.",
+    "test_support.rs: add the thread-local runner seam (install_ci_runner returning a Guard; current_ci_runner) and CiRunner implementing gh::Runner: Reply enum {Green, Red(check), NoRun, Cancelled, TimedOut, OtherSha}, a call log, runs reply with head_sha from EarlyFake.ci_head and the branch from the request path, and a jobs reply containing a failed 'the full history' job beside the aggregate 'fmt, clippy, tests' job.",
+    "routing.rs: add CI_POLL_PAUSE = 20 s, ci_wait(bound_s) and run_routed_recorded -> (Vec<CheckRun>, Option<CiRecord>) (record only for Verified with source Ci); run_routed delegates; fix the module doc; unit tests.",
+    "gh/client.rs: add GhClient::https_repository(url); run/mod.rs: add Athena::with_ci_source (nested or non-GitHub origin gives NoCi and Wait{polls:1,pause:0}; else GhCli, or the test seam, GhClient::new, ci_source(&ci_branch(job)), routing::ci_wait; under cfg(test) pause zero and an erroring default runner); replace the NoCi call at ~1278-1289 with with_ci_source(&id, jc.config.budget.ci_wait_s, ...) calling run_routed_recorded with &c; build the reuse statement with verify::reuse_statement(&record, &c) and keep it; update comments.",
+    "verification.rs: add Checked.ci_statement and push the 'ci-reuse' non-check entry; set None on the resumed path.",
+    "run/tests.rs: add the three-check Docs variant and a ci_go harness (origin, reply, wrapped script capturing the verifier prompt, early_seam::install and install_ci_runner both before go, check_seam counting closure); write the tests for criteria 1-5 including the no-origin forms and the github-origin call-count contrast.",
+    "CHANGELOG.md: add the entry (including the resumed-job note).",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked and fix findings."
+  ],
+  "risks": [
+    {
+      "risk": "Existing tests with an https github.com origin (run/tests.rs ci_run, run_pin_tests.rs:424) now go through with_ci_source and could reach gh or sleep.",
+      "mitigation": "Under cfg(test) the default runner returns an error (read becomes Missing immediately, no network) and the pause is zero; the full cargo test is a demonstration (criterion 10)."
+    },
+    {
+      "risk": "The test capability Docs has one check named 'probe', so route.reuse is false and CI is never consulted, making a green test pass vacuously.",
+      "mitigation": "The CI tests use a three-check variant (fmt, clippy, test); each test also asserts the fake runner was called (and for the green case with the pushed SHA)."
+    },
+    {
+      "risk": "A real gh query in production reads the CI branch the moment the checks stage starts, and a 25-minute wait blocks the drain while the repo's CI runs.",
+      "mitigation": "This is the requested behavior; the bound is a configurable schema field; an unreadable service (Err) ends the wait at once and falls back."
+    },
+    {
+      "risk": "A green run on a candidate that changes a workflow file is not trusted.",
+      "mitigation": "resolve already applies this rule (changed paths passed in); not altered."
+    },
+    {
+      "risk": "Duplicated origin rule drifts from early.rs.",
+      "mitigation": "Same five-form test runs for both the push skip and the wait."
+    },
+    {
+      "risk": "Fake Runner replies must match the production query path shape (actions/runs?head_sha=..&branch=..; actions/runs/<id>/jobs).",
+      "mitigation": "The fake parses head/branch from the path it receives and asserts the shape; gh/tests.rs CiRunner is the model; the production GhClient::ci_source is what is exercised."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Test in run/tests.rs through Athena::go (production entry point). Origin https://github.com/owner/repo, early_seam::install of EarlyFake, the new ci_runner seam holding a fake gh::Runner that replies a push run on the branch it is asked for, head_sha taken from EarlyFake.ci_head (the SHA the production code pushed), a jobs reply with a failed 'the full history' job beside a successful 'fmt, clippy, tests' job, and a three-check (fmt, clippy, test) test capability whose local executor is check_seam::install with a counting closure. Asserts: counter is 0, state is Landed, each recorded CheckRun note contains 'CI run https://example.test/ci/', and the fake runner path contained branch=athena/ci/<job id> and head_sha=<pushed SHA>.",
+      "command": "cargo test -p athena-core ci_green_run_is_reused_and_no_local_check_runs",
+      "observes": "Zero local executions, three checks recorded with the CI source in their notes, a landed job.",
+      "fails_without": "Without the CI source (NoCi unconditionally) resolve falls back and the counting closure records three runs, and the notes carry no 'CI run'.",
+      "seam": "Athena::go (exists). early_seam::install (exists, gh/mod.rs). check_seam::install (exists, run/mod.rs). The runner seam test_support::install_ci_runner and the fake CiRunner are added in step 3; the three-check capability variant of Docs in run/tests.rs is added in step 6."
+    },
+    {
+      "criterion": 2,
+      "method": "Same harness; the fake replies jobs where 'clippy' concluded failure and the aggregate 'fmt, clippy, tests' failure. Asserts the check_seam counter is 0, the job state is Rejected (as a local failure is today), and the reasons (done.reason or the Verification reasons) contain 'check clippy failed' while fmt and test records passed.",
+      "command": "cargo test -p athena-core ci_red_run_fails_the_job_naming_the_check",
+      "observes": "A red CI run closes the job as not landed with 'check clippy failed' and no local run.",
+      "fails_without": "Without red handling the local checks (passing fake) would run, the job would land, and the counter would be 3.",
+      "seam": "Athena::go, early_seam, check_seam (exist); fake CiRunner via the runner seam (step 3)."
+    },
+    {
+      "criterion": 3,
+      "method": "Same harness, one loop over four fake replies: no workflow run; aggregate job concluding cancelled; aggregate job concluding timed_out; a green run for another SHA. Each asserts the counting closure ran 3 times (fmt, clippy, test), the state is Landed, and the notes carry no 'CI run'. The no-run case has zero pause (cfg(test)) and its call count equals routing::ci_wait(1500).polls.",
+      "command": "cargo test -p athena-core ci_without_a_usable_run_falls_back_to_local_checks",
+      "observes": "Local checks run exactly as before and the job proceeds in every one of the four cases.",
+      "fails_without": "If a missing/cancelled/timed-out run were treated as red or Blocked the job would be rejected or fail, and if it were treated as green the counter would be 0.",
+      "seam": "As above; the fake has a reply enum (Green, Red(check), None, Cancelled, TimedOut, OtherSha) added in step 3."
+    },
+    {
+      "criterion": 4,
+      "method": "(a) Through Athena::go, for origins None, a local path, a lookalike path, a gitlab URL and an example.com/github.com/... URL, with the default 1500 s bound: the fake runner's call log is empty, the local counter is 3, the job lands, and the test finishes at once. (b) A direct unit test of Athena::with_ci_source: with no origin the closure sees Wait{polls:1, pause:ZERO} and fetch returns None. (c) Contrast: with the github.com origin and no run, the runner call count equals routing::ci_wait(1500).polls. A unit test in routing.rs checks ci_wait(0) is one poll and ci_wait(1500) is 76 polls of 20 s.",
+      "command": "cargo test -p athena-core ci_no_github_origin_does_not_wait",
+      "observes": "No runner call and one read without an origin; many reads with an origin.",
+      "fails_without": "If the wait were applied without an origin (or NoCi were paired with the GitHub wait) the closure would see polls 76 and (a) would sleep 75 times; the (c) count comparison would also fail.",
+      "seam": "with_ci_source is added in step 5 (pub(crate)/private, testable from run/tests.rs). The fake runner call log is added in step 3."
+    },
+    {
+      "criterion": 5,
+      "method": "Same harness as criterion 1 with the fake agent script recording the Verifier invocation's user_prompt (AgentInvocation.user_prompt in athena-agent). Asserts it contains the exact text of verify::reuse_statement(&CiRecord{source Ci, sha: pushed SHA, run_address Some(url), steps: three success, ..}, sha). Also asserts the red and fallback cases' prompts do not contain 'Check results for'.",
+      "command": "cargo test -p athena-core ci_green_run_gives_the_verifier_the_reuse_statement",
+      "observes": "The verifier's input contains the reuse statement naming the run address and the candidate SHA only for a green CI result.",
+      "fails_without": "Without the ci_statement hand-off to the verifier the prompt lacks the text.",
+      "seam": "Athena::go and the fake agent Script (exist, run/tests.rs base_script is wrapped to capture); ci_statement field is added in steps 4 and 5."
+    },
+    {
+      "criterion": 6,
+      "method": "Content check: Grep 'with_ci_source' in crates/athena-core/src/run/mod.rs finds the definition and the call in check_and_verify; Grep 'routing::NoCi' in check_and_verify finds it only inside with_ci_source; the call passes &c, the candidate commit, to run_routed_recorded. The green test above shows the SHA is the pushed commit because the fake only answers for it (an OtherSha reply falls back).",
+      "command": "cargo test -p athena-core ci_green_run_is_reused_and_no_local_check_runs",
+      "observes": "The single call site passes the chosen source and wait and the candidate SHA.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Content check: Grep 'ci_wait_s' finds 'ci_wait_s = 1500' in athena.toml and the field in config.rs Budget. The existing tests in athena-data that load athena.toml/round-trip the config pass, and a new unit test in config.rs loads the repository athena.toml and asserts budget.ci_wait_s == 1500, and that a [budget] table without the key defaults to 1500.",
+      "command": "cargo test -p athena-data",
+      "observes": "The key loads as 1500 and a missing key still loads.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Content check: every new test in run/tests.rs with an https github.com origin goes through the one helper that calls early_seam::install(fake, fake) and test_support::install_ci_runner before go (Grep 'early_seam::install' and 'install_ci_runner'). No-runner default in cfg(test) is an error-returning Runner, so a missed install cannot reach gh. Existing tests with a github.com origin keep passing without installing a runner and without sleeping.",
+      "command": "cargo test -p athena-core run::tests",
+      "observes": "No call outside the fakes.",
+      "fails_without": null
+    },
+    {
+      "criterion": 9,
+      "method": "Content check: an entry under [Unreleased] 'Changed' describing the checks stage using the job's CI result, the ci_wait_s bound, the red/fallback rules, and the sentence that a resumed job whose recorded checks came from CI carries no reuse statement.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The entry exists and states the resume limitation.",
+      "fails_without": null
+    },
+    {
+      "criterion": 10,
+      "method": "Run the three Athena checks (fmt, clippy -D warnings, test) over the workspace.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three pass.",
+      "fails_without": "A failing existing test (such as a github.com origin test now reading CI), or a lint, would fail the run.",
+      "seam": "Existing check commands."
+    }
+  ],
+  "open_questions": [
+    "Is a small duplicate of early.rs's https-origin rule in GhClient::https_repository acceptable, or may early.rs::github_repository be made pub(super) so there is one rule? The plan duplicates and pins both with the same five-form test because early.rs is out of scope.",
+    "run/verification.rs is not on the expected deliverables list but must change to carry the statement to inputs.checks. The producer should touch it only for the one new field and the one pushed entry.",
+    "If the CI branch push failed (a warning line), the read finds no run and waits up to the bound before falling back; push_ci_branch returns nothing and early.rs is out of scope, so the plan accepts the wait. Is that acceptable?",
+    "How the job reason reads for a red CI run is assumed from verify.rs ('check <name> failed' at verify.rs:330, as for a local failure); the producer confirms whether it lands in done.reason or only in Verification.reasons and asserts there."
+  ],
+  "producer_section_sha256": "24126e3adab44dc6eb4b75bccbd4b76452169b1ca903d4eaca0d6e490493cfc1"
+}
