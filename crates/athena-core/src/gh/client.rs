@@ -1,12 +1,14 @@
 //! The Host API client: the check, merge-method and workflow-run types, the [`PrHost`] trait, and
 //! [`GhClient`], which makes the REST calls through `gh api` for one repository.
 
+use super::landing::is_rule_violation;
 use super::transport::clock_entropy;
 use super::{GhFailure, HOST, HostErrorLog, Retry, Runner};
 use crate::Ui;
 use crate::pr::{Host, PrLink};
 use crate::reconcile::{CommitHost, MergedPr};
 use anyhow::{Context, Result, bail};
+use athena_data::RecordId;
 use athena_data::records::HostOperation;
 use athena_git::CommitText;
 use serde::Serialize;
@@ -262,6 +264,14 @@ pub struct GhClient<'a> {
     pub ui: Option<&'a dyn Ui>,
 }
 
+/// Reads a reply's text as JSON; an empty reply is null.
+fn parse_reply(path: &str, text: &str) -> Result<Value> {
+    if text.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str(text).with_context(|| format!("parsing the reply to {path}"))
+}
+
 impl std::fmt::Debug for GhClient<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GhClient")
@@ -293,10 +303,7 @@ impl<'a> GhClient<'a> {
         fields: &[(&str, &str)],
     ) -> Result<Value> {
         let text = self.api_text(operation, method, path, fields)?;
-        if text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&text).with_context(|| format!("parsing the reply to {path}"))
+        parse_reply(path, &text)
     }
 
     /// The retry and error-log loop of [`GhClient::api`], returning the reply as text (a job log is not JSON).
@@ -306,6 +313,31 @@ impl<'a> GhClient<'a> {
         method: &str,
         path: &str,
         fields: &[(&str, &str)],
+    ) -> Result<String> {
+        self.call(operation, method, path, fields).0
+    }
+
+    /// [`GhClient::api_text`] with the id of the log entry of this call's last refusal (none when the call
+    /// logged no refusal, or the client has no log). The id lets a caller mark the entry of this very call.
+    fn call(
+        &self,
+        operation: HostOperation,
+        method: &str,
+        path: &str,
+        fields: &[(&str, &str)],
+    ) -> (Result<String>, Option<RecordId>) {
+        let mut refused = None;
+        let reply = self.call_loop(operation, method, path, fields, &mut refused);
+        (reply, refused)
+    }
+
+    fn call_loop(
+        &self,
+        operation: HostOperation,
+        method: &str,
+        path: &str,
+        fields: &[(&str, &str)],
+        refused: &mut Option<RecordId>,
     ) -> Result<String> {
         let mut args: Vec<String> = ["api", "--method", method, path]
             .iter()
@@ -325,7 +357,7 @@ impl<'a> GhClient<'a> {
                         return Err(error);
                     };
                     if let Some(log) = self.log {
-                        log.record(operation, failure.status_code);
+                        *refused = Some(log.record(operation, failure.status_code));
                     }
                     let Some(reason) = failure.transient_reason() else {
                         return Err(error);
@@ -444,12 +476,27 @@ impl PrHost for GhClient<'_> {
             fields.push(("commit_title", text.title.as_str()));
             fields.push(("commit_message", text.body.as_str()));
         }
-        self.api(
-            HostOperation::Merge,
-            "PUT",
-            &self.repo_path(&format!("pulls/{number}/merge")),
-            &fields,
-        )?;
+        let path = self.repo_path(&format!("pulls/{number}/merge"));
+        let (reply, refused) = self.call(HostOperation::Merge, "PUT", &path, &fields);
+        match reply {
+            Ok(text) => {
+                parse_reply(&path, &text)?;
+            }
+            Err(refusal) => {
+                // A rule-violation refusal while a check is still running is a wait, not a falsified
+                // assumption about the merge method: mark this call's own entry so the watcher does not
+                // read it as one. A failed read leaves the entry unmarked, the safe side.
+                if let (Some(log), Some(id)) = (self.log, refused.as_ref())
+                    && is_rule_violation(&refusal)
+                    && self
+                        .check_report(head)
+                        .is_ok_and(|report| report.checks == Checks::Pending)
+                {
+                    log.mark_checks_pending(id);
+                }
+                return Err(refusal);
+            }
+        }
         Ok(method)
     }
 

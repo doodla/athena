@@ -45,6 +45,8 @@ pub struct RawSignal {
 }
 
 /// D87's hard signal: the host refusing a merge with 405 or 422 falsifies "the repository allows merge commits".
+/// A refusal logged while required checks were pending is excluded (see [`HostErrorSignal::matches`]): the host
+/// refuses a merge by its rules until the checks finish, which says nothing about the merge method.
 pub const D87_SIGNAL: RawSignal = RawSignal {
     decision: "D87",
     name: "host-error: operation merge, status 405 or 422, phase landing",
@@ -145,10 +147,12 @@ pub fn host_error_signals() -> Result<Vec<HostErrorSignal>, String> {
 
 impl HostErrorSignal {
     /// Exact matching on stored fields: the operation, the phase and one of the statuses are all equal. A
-    /// refusal with no status never matches.
+    /// refusal with no status never matches, and neither does a refusal marked as made while required checks
+    /// were pending (`checks_pending`): that is a wait, not a refusal of the merge method.
     pub fn matches(&self, error: &HostError) -> bool {
         error.operation == self.operation
             && error.phase == self.phase
+            && !error.checks_pending
             && error
                 .status_code
                 .is_some_and(|status| self.status_codes.contains(&status))
@@ -261,6 +265,7 @@ pub fn derive_host_error(intervention: &Intervention) -> Option<HostError> {
         message_class: MessageClass::of_status(Some(status)),
         derived: true,
         source_intervention: Some(intervention.id.clone()),
+        checks_pending: false,
     })
 }
 
@@ -434,6 +439,7 @@ mod tests {
             message_class: MessageClass::of_status(status),
             derived: false,
             source_intervention: None,
+            checks_pending: false,
         }
     }
 
@@ -628,6 +634,42 @@ mod tests {
             assert_eq!(firings[0].decision, "D87");
             assert_eq!(firings[0].firing_records, [errors[0].id.clone()]);
         }
+    }
+
+    #[test]
+    fn a_merge_refusal_marked_as_made_while_checks_were_pending_does_not_fire_d87() {
+        let signals = host_error_signals().unwrap();
+        for status in [405, 422] {
+            let mut marked = error(
+                "20261013-192200-k7q2",
+                JOB,
+                HostOperation::Merge,
+                Some(status),
+            );
+            marked.checks_pending = true;
+            assert!(!signals[0].matches(&marked), "{status}");
+            assert!(
+                evaluate(&signals, &[marked.clone()], &[]).is_empty(),
+                "{status}"
+            );
+            // The same refusal unmarked still fires on the first job.
+            marked.checks_pending = false;
+            let firings = evaluate(&signals, &[marked.clone()], &[]);
+            assert_eq!(firings.len(), 1, "{status}");
+            assert_eq!(firings[0].decision, "D87");
+            assert_eq!(firings[0].firing_records, [marked.id]);
+        }
+    }
+
+    #[test]
+    fn a_marked_and_an_unmarked_refusal_together_fire_citing_only_the_unmarked_one() {
+        let signals = host_error_signals().unwrap();
+        let mut marked = error("20261013-192200-k7q2", JOB, HostOperation::Merge, Some(405));
+        marked.checks_pending = true;
+        let real = error("20261013-192300-m3p9", JOB, HostOperation::Merge, Some(422));
+        let firings = evaluate(&signals, &[marked, real.clone()], &[]);
+        assert_eq!(firings.len(), 1);
+        assert_eq!(firings[0].firing_records, [real.id]);
     }
 
     #[test]
