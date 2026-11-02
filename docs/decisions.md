@@ -4160,3 +4160,52 @@ should replace those estimates with its figures.
   `docs/ontology.toml`, `BRIEF.md` (the lines naming each term), `docs/design/job-planning.md`,
   `docs/design/native-pr-landing.md`, `docs/records.md`. Measured: `cargo test -p athena-cli --test ontology`.
   Not measured: how often a source changes the wording a marker relies on.
+
+## D153 · The reading check refuses boundary words only where they can reach a file
+
+- **Case:** `check_boundary_and_repo_files` refused any reading whose free text held a word the boundary scan
+  rejects. The request for this job states that one request was refused six times on 2026-10-31 and another
+  twice on 2026-10-30, each time for prose alone (counts as stated by the request; the records of those jobs
+  are not in this job's snapshot, so they were not read or measured here).
+- **Root cause:** The check was scoped to every text field, but the risk it guards against is a word reaching a
+  tracked file. A reading is a record, and `xtask/tests/policy.rs` skips `records/`, so a word in the summary,
+  assumptions or out-of-scope list is never scanned as a file. The writer already gets the word list and runs the
+  scan on its own files (D73). The rule was wider than its reason, so it refused readings that no file check
+  would have failed, and each refusal cost the reader another round.
+- **Decision:** Narrows the word check in `check_boundary_and_repo_files`. The boundary scan runs on every
+  deliverable path and on every acceptance criterion of kind `content` (text that says what a file must hold),
+  and nowhere else in the reading. The title, summary, assumptions, out-of-scope list, defaults applied, the
+  decline, hard and urgent reasons, the question, the departures and `behavior` criteria are no longer scanned.
+  `reading_text_fields` became `file_bound_text_fields`. The repository-file checks, the name and signature of
+  the check, the request-text scan and the boundary word list are unchanged. The refusal text now says to
+  reword the "deliverable path or content acceptance criterion". The module docs of `reading.rs` state the
+  scanned and unscanned fields and the reason. Tests: a word in the summary or an assumption is accepted; a
+  word in a deliverable path or a `content` criterion is refused and named; a word in a `behavior` criterion,
+  title, out-of-scope item, defaults, departures or a reason is accepted. The refusal corpus gains a
+  `boundary-word` input form with four cases, and the end-to-end test in `run_pin_tests.rs` that asserted the
+  old summary refusal now puts the word in a content criterion and has a twin for the summary.
+- **Alternatives:** (a) Keep scanning every acceptance criterion and drop only the other prose fields:
+  `behavior` criteria name commands and checks, not file text, so this still refuses for words that cannot reach
+  a file. (b) Remove the word check from readings: a word in a deliverable path or in text a criterion tells the
+  writer to write reaches a file and fails the policy scan at verification, so the early refusal is worth
+  keeping there. (c) Exempt the refused requests, or allow a retry past the check: it leaves the rule too wide
+  and the next prose-only refusal in place. (d) Change the word list or the scan in `athena_context::briefs`:
+  the scan is the one the policy test runs, and only where the reading check applies it is wrong.
+- **Tradeoff:** Criterion kind is the only signal in the record, and it is imperfect. A `content` criterion
+  that describes a document without quoting text is still scanned, so it can be refused when no word would
+  reach a file. A `behavior` criterion that quotes output is not scanned, so a writer could copy a word from it
+  into a test; the writer's scan (D73) and the policy scan at verification catch a word that reaches a tracked
+  file. Separately, the title, summary and criterion texts reach landing commit messages (`run/close.rs`) and
+  the pull request title (`run/mod.rs`, `gh/early.rs`). The writer's scan and the policy scan cover tracked
+  files only, and nothing scans commit messages or the pull request title, so this change leaves that path
+  unscanned; before it, the reading check was the only gate on that text. The proposed follow-up, not done here,
+  is to run that text through `athena_context::briefs::plain_boundary_text` at those sinks, with a test that a
+  landing message and pull request title pass `boundary_scan`. That is a separate behavior change for the user to
+  decide.
+- **Reversal cost:** Low. Return `file_bound_text_fields` to the full field list and restore the old tests.
+- **Provenance:** Stated: the request's counts of refusals and its premise that the risk is a word reaching a
+  tracked file. Read: `crates/athena-core/src/reading.rs`, `crates/athena-core/src/run/close.rs`,
+  `crates/athena-core/src/run/mod.rs`, `xtask/tests/policy.rs`, D73. Measured: `cargo test -p athena-core --lib
+  reading`, `--lib run_pin_tests` and `--test refusal_corpus`, and `cargo test -p xtask --test policy`. Not
+  measured: how many past readings the old rule refused for prose alone, and how often a writer copies a word
+  from a `behavior` criterion.

@@ -1,0 +1,171 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-215030-b0nv",
+  "round": 1,
+  "at": "2026-11-02T13:48:17.239832203Z",
+  "invocation_seq": 2,
+  "approach": "In crates/athena-core/src/reading.rs, replace `reading_text_fields` with a narrower helper `file_bound_text_fields` that returns only the acceptance criteria of kind `Content`, labelled `acceptance_criteria[i]`. `check_boundary_and_repo_files` scans those and the deliverable paths with `athena_context::briefs::boundary_scan`. Title, summary, decline_reason, question, departures, hard_reason, urgent_reason, assumptions, out_of_scope, defaults_applied and `behavior` criteria are no longer scanned. The repository-file checks (create/modify/delete against the base commit) and the request-text scan (`scan_request_input`, about line 2276) are untouched. Reword the refusal message so it names \"deliverable paths and content criteria\" and not \"text\". Rewrite the two existing prose-refusal tests and the text-and-path test, and add tests for the accepted prose and the still-refused file-bound text. Expand the module docs, which are one line today, and the doc comments of `check_boundary_and_repo_files` and `reading_text_fields` to give the reason (records are outside the policy scan; the writer already gets the word list and runs the scan, D73). Add D153 to docs/decisions.md and a CHANGELOG.md entry under Unreleased/Changed.",
+  "decisions": [
+    {
+      "choice": "Scan only `content`-kind acceptance criteria plus deliverable paths; skip `behavior` criteria and all other prose.",
+      "reason": "A `content` criterion describes text that will be written into a file, so a word there can reach a tracked file. A `behavior` criterion names commands to run and does not tell the writer what text to write. The word can reach a file only by being written there, and the producer brief already lists the words and the writer runs the scan itself (D73). Records are outside the policy scan, so prose alone never reaches a scanned file.",
+      "rejected": [
+        {
+          "option": "Keep scanning every acceptance criterion and drop only the other prose fields",
+          "why": "Behavior criteria are commands and checks, not file text. Scanning them would still refuse readings for words that cannot reach a file."
+        },
+        {
+          "option": "Remove the word check from readings entirely",
+          "why": "A banned word in a deliverable path or in text a criterion tells the writer to write would reach a file and fail the policy scan at verification. The request keeps the check there."
+        },
+        {
+          "option": "Special-case the refused requests (an allow-list or a retry exemption)",
+          "why": "The rule is wrong in scope, so fix the scope. A per-request exception leaves the next prose-only refusal in place (root-cause default)."
+        },
+        {
+          "option": "Change the boundary scan or word list in athena_context::briefs",
+          "why": "Out of scope. The scan is the same one the policy test runs; only where the reading check applies it changes."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the function name `check_boundary_and_repo_files` and its signature; only its scan set and messages change.",
+      "reason": "Callers (`check_reading_acceptance` at about line 3064 and work_decisions.rs line 574) and the refusal corpus (`Expected::Refuse(\"check_boundary_and_repo_files\")`) name it. The change stays small and the corpus keeps working.",
+      "rejected": [
+        {
+          "option": "Rename it or split it into a words check and a repo-files check",
+          "why": "Wider diff, breaks the corpus name, no behavior gain."
+        }
+      ]
+    },
+    {
+      "choice": "Name the narrowed rule in the refusal message: 'reword the deliverable path or content criterion without the banned words'.",
+      "reason": "After the change the reader should be told that only those two places are scanned. A vague 'the text' would send it to reword prose that was never the problem. No test or doc matches the old strings (grep of *.rs and *.md found only reading.rs).",
+      "rejected": [
+        {
+          "option": "Leave the message unchanged",
+          "why": "It says 'its text', which no longer matches what is scanned."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Narrow the boundary scan to deliverable paths and content criteria (replace `reading_text_fields`, update `check_boundary_and_repo_files` and its refusal message), expand the module docs and doc comments, rewrite the prose-refusal tests and add the new ones.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Add D153 after D152: the reason, alternatives, the cited refusals and the citation of D73.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under Unreleased/Changed for the narrowed reading check.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read reading.rs around `reading_text_fields` (about line 2707), `check_boundary_and_repo_files` (about line 2771) and the tests module at about lines 6964-7170. Grep prompts/ for a statement that every field is scanned, and report it without editing.",
+    "In reading.rs replace `reading_text_fields` with `file_bound_text_fields(reading) -> Vec<(String, &str)>`. It returns `(format!(\"acceptance_criteria[{i}]\"), text)` for each criterion whose `kind == CriterionKind::Content`. Its doc comment gives the reason. In `check_boundary_and_repo_files` loop over that helper and the deliverable paths. Keep the repo-file branch as it is. Reword the repair strings and the final message to say 'deliverable path or content acceptance criterion'.",
+    "Rewrite `a_reading_whose_summary_holds_a_boundary_word_is_refused_and_the_word_is_named` as `a_boundary_word_in_prose_fields_is_accepted` (criterion 1): summary and an assumption with the word, accepted on the replay path, with `Some(&files)` and via `check_reading_text`; a content criterion with the word on the same reading is still refused.",
+    "Rewrite `a_boundary_word_in_any_text_field_or_path_is_refused_with_the_field_named` as `a_boundary_word_in_a_path_or_content_criterion_is_still_refused` (criterion 2), covering the word and the fragment in a deliverable path and in a content criterion, and asserting the path and `acceptance_criteria[0]` are named.",
+    "Add `boundary_words_outside_paths_and_content_criteria_are_not_scanned` (criterion 3): table over title, out_of_scope[0], defaults_applied[0], departures, hard_reason, urgent_reason and a behavior criterion, all accepted. Add the question and decline_reason cases as separate readings. Keep the embedded-word check.",
+    "Update `the_text_and_path_problems_are_reported_together` so it puts the word in a content criterion (not the summary) and still asserts both the word and `docs/missing.md` are named.",
+    "Expand the module docs (`//!`, currently one line) with a paragraph on the boundary check: scanned places, unscanned places, and why (readings are records outside the policy scan, the writer already has the list, D73). Update the doc comment of `check_boundary_and_repo_files` ('Every free-text field' becomes the new scope), and the `check_reading_acceptance` doc about line 3009 where it says 'the reading's text against the boundary words'.",
+    "Add `## D153 · The reading check refuses boundary words only where they can reach a file` after D152 in docs/decisions.md, using D152's fields. The Case cites the six refusals on 2026-10-31 and the two on 2026-10-30 as stated by the request, and D73. The alternatives are those in `decisions`. Avoid writing any listed banned word.",
+    "Add a bullet under `## [Unreleased]` / `### Changed` in CHANGELOG.md: what changed, the root cause, D153, and the alternatives rejected.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-core --lib reading`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p xtask --test policy`, then `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "The narrowing drops a scan that matters, and a banned word reaches a file through a title or summary that the writer copies into a commit message or doc.",
+      "mitigation": "The deliverable-path scan is unchanged. Content criteria are still scanned, with the label `acceptance_criteria[i]`. Test 2 asserts both."
+    },
+    {
+      "risk": "A word in a summary is copied by the producer into a tracked file.",
+      "mitigation": "The policy scan (`xtask/tests/policy.rs`) and the writer's own scan still fail tracked files at verification. D73 gives the writer the word list. D153 records the tradeoff."
+    },
+    {
+      "risk": "An existing test or caller outside reading.rs depends on prose being scanned.",
+      "mitigation": "Step 1 lists the callers (`check_reading_acceptance`, work_decisions.rs line 574, the corpus). The function keeps its name and signature, and the check only narrows, so no accepted reading becomes refused. The full test suite runs in criterion 5."
+    },
+    {
+      "risk": "New tests, docs or the decision entry contain a banned word themselves and fail the policy scan.",
+      "mitigation": "Build the word in tests from pieces with `banned_word()` and `banned_fragment()`. Keep the D153 and CHANGELOG text free of the listed words, and describe them as 'a boundary word'. Run `cargo test -p xtask --test policy` as an extra check."
+    },
+    {
+      "risk": "The content-criterion test is refused earlier by the criteria-evidence or references check, so it passes for the wrong reason.",
+      "mitigation": "Test 2 picks criterion text that has no producer-report phrasing and no unknown repo path, as the existing governed_reading tests do. The assertions look for the boundary message, which the other checks cannot produce."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New unit test `a_boundary_word_in_prose_fields_is_accepted` in the tests module of reading.rs, next to the rewritten boundary tests. It builds the word with `banned_word()`, which concatenates pieces so reading.rs passes the policy scan. It starts from `governed_reading(&[\"README.md\"], &[\"the greeting prints\"], &[\"x\"])`, sets `summary` and `assumptions` to text holding the word, and calls `check_reading_acceptance(&reading, \"add a greeting\", None, &[], None)`. It repeats with `Some(&files_at_head())` and through `check_reading_text(...)`, which must return `ReadingCheck::Accept`.",
+      "command": "cargo test -p athena-core --lib reading::tests::a_boundary_word_in_prose_fields_is_accepted",
+      "observes": "Ok(()) from `check_reading_acceptance` and `ReadingCheck::Accept` from `check_reading_text` for a reading with the word in the summary and an assumption.",
+      "fails_without": "With the old `reading_text_fields` scan, `check_reading_acceptance` returns Err on the summary and on the assumption, so the `.unwrap()` in the test panics and it fails.",
+      "seam": "Entry point `check_reading_acceptance` (pub fn, reading.rs about line 3014) with guards: capability set, no question, governance coverage and criteria-evidence checks pass for the `governed_reading` fixture. The fixtures `governed_reading`, `banned_word` and `files_at_head` exist (read at about lines 6685, 6967, 6976). No fake is used; the new test is added in step 3."
+    },
+    {
+      "criterion": 2,
+      "method": "New unit test `a_boundary_word_in_a_path_or_content_criterion_is_still_refused` (the rewritten successor of `a_boundary_word_in_any_text_field_or_path_is_refused_with_the_field_named`). For each of the word and the `banned_fragment()` text it makes two readings. (a) A deliverable path `docs/<word>.md` via `reading_with_deliverable(path, Create)`. (b) A reading from `governed_reading`, whose criteria are `CriterionKind::Content`, with criterion 0 set to text such as 'README.md says: the <word> decides'. It asserts each `unwrap_err()` string names the word, and names the path in (a) and `acceptance_criteria[0]` in (b).",
+      "command": "cargo test -p athena-core --lib reading::tests::a_boundary_word_in_a_path_or_content_criterion_is_still_refused",
+      "observes": "Err containing the word and the path for a deliverable path, and Err containing `acceptance_criteria[0]` and the word for a content criterion.",
+      "fails_without": "If the narrowing also dropped the path or content-criterion scan, `check_reading_acceptance` would return Ok and `.unwrap_err()` would panic. If the labels changed, the `contains(\"acceptance_criteria\")` and path assertions would fail.",
+      "seam": "Entry point `check_reading_acceptance` with the same guards as criterion 1. The content criterion text must also pass the criteria-evidence and references checks that run before the boundary check, so it avoids producer-report phrasing and unknown repo paths. Fixtures `governed_reading` (Content kind) and `reading_with_deliverable` exist. Step 4 adds the test."
+    },
+    {
+      "criterion": 3,
+      "method": "New table-driven unit test over the same `Edit` fn-pointer table as the old test (title, out_of_scope[0], defaults_applied[0] via `DefaultApplied`, departures, hard_reason, urgent_reason, and a `Behavior` criterion made by setting `acceptance_criteria[0].kind = CriterionKind::Behavior`). Each edit puts the word in the field and the test asserts `check_reading_acceptance(...)` is Ok. The question and decline cases are asserted separately because they change the reading's branch; each builds a reading as the existing path tests do (question set, or capability None with decline_reason). The test also asserts that a word embedded in a longer word ('Cooperators accrue the opcode') is accepted, as the old test did.",
+      "command": "cargo test -p athena-core --lib reading::tests::boundary_words_outside_paths_and_content_criteria_are_not_scanned",
+      "observes": "Ok(()) for every non-scanned field, and the new refusal message for a refused reading names deliverable paths and content criteria.",
+      "fails_without": "With the old scan, a word in a behavior criterion, out_of_scope, title, defaults_applied, decline_reason, question, departures, hard_reason or urgent_reason makes `check_reading_acceptance` return Err, and the table-driven `unwrap()` fails naming the field.",
+      "seam": "Entry point `check_reading_acceptance`; fixtures as in criterion 1; `Criterion`, `CriterionKind` and `DefaultApplied` are imported in the tests module (used at about lines 6591 and 7036). Step 5 adds the test."
+    },
+    {
+      "criterion": 4,
+      "method": "Narrowing shows through three things. (1) The scanned set after the change is a subset of the old set: deliverable paths plus content criteria, against all fields plus paths. The only new scanning code is a filter on `CriterionKind::Content`, and nothing is added to the problem list. (2) The repository-file branch is unchanged, so its refusals are the same. (3) The refusal corpus (`crates/athena-core/tests/refusal_corpus.rs`) holds Accept cases such as `full-deliverable-path` and `request-names-a-governance-file-the-reading-excludes`, and Refuse cases such as `crate-relative-deliverable-path`, which expects `check_boundary_and_repo_files`. After the change every Accept case must still be accepted and every Refuse case must still be refused by the same check. I read the corpus for `boundary` and `banned` and found no case that relies on a word in prose. Running it is a producer and verifier step; I did not run it.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "The whole corpus passes: no Accept case turns into a refusal, and `crate-relative-deliverable-path` is still refused by `check_boundary_and_repo_files`. The 0% figure is by construction (subset of scanned fields) and by the corpus, and is not a measured rate over past readings.",
+      "fails_without": "If the narrowed check refused a reading the old check accepted, a corpus case with `Expected::Accept` would turn into a refusal and the corpus test would fail. The new sets are subsets of the old ones, so none is expected.",
+      "seam": "Entry point is the corpus harness in crates/athena-core/tests/refusal_corpus.rs, which calls the public reading checks on built `Reading` values. It exists today. No fake is added."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks. Pay attention to dead code: `reading_text_fields` is replaced and not left unused. Tests that expected refusals for prose (`a_reading_whose_summary_holds_a_boundary_word_is_refused_and_the_word_is_named`, `a_boundary_word_in_any_text_field_or_path_is_refused_with_the_field_named`, `the_text_and_path_problems_are_reported_together`) are rewritten in step 3 and later steps. The work_decisions.rs test at line 574 calls the check on a reading and still passes, because the check only narrowed.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three commands exit 0.",
+      "fails_without": "A formatting slip, an unused helper left behind (such as the old `reading_text_fields` or its imports), or a test still expecting the old refusal fails one of the three commands.",
+      "seam": "Whole-workspace commands; no seam."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the module-level `//!` docs (a new paragraph added to the existing one-line doc) and the doc comment above `check_boundary_and_repo_files`. Check that each lists the scanned places (deliverable paths and `content` criteria) and the unscanned ones (title, summary, assumptions, out_of_scope, defaults_applied, reasons, question, departures, `behavior` criteria). Check that each gives the reason: readings are records, records are outside the policy scan (`xtask/tests/policy.rs` skips records/), and the writer gets the word list and runs the scan (D73). Also check that the doc on `file_bound_text_fields` agrees.",
+      "command": "Grep pattern 'D73' in crates/athena-core/src/reading.rs, then Read the module docs at the top of the file and the doc comment above `check_boundary_and_repo_files`",
+      "observes": "The docs name the scanned and unscanned fields and cite D73 and records being outside the boundary scan.",
+      "fails_without": "Not applicable (content criterion)."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the new D153 entry after D152 in docs/decisions.md (same fields as D152: Case, Root cause, Decision, Alternatives, Tradeoff, Reversal cost, Provenance). Check that it cites the six refusals on 2026-10-31 and the two on 2026-10-30, as stated in the request and not measured here, and cites D73. Check that the alternatives are listed (keep all criteria, remove the check, per-request exception, change the word list). Read the new bullet under `## [Unreleased]` / `### Changed` in CHANGELOG.md, which names D153 and the root cause.",
+      "command": "Grep pattern '^## D153' in docs/decisions.md, and Grep pattern 'D153' in CHANGELOG.md",
+      "observes": "D153 exists with the reason, alternatives and the cited refusal counts; the CHANGELOG.md Unreleased section has a bullet that mentions D153.",
+      "fails_without": "Not applicable (content criterion)."
+    }
+  ],
+  "open_questions": [
+    "Request criteria 1 and 3 and the reading's assumption decide that a `behavior` criterion is not scanned, so a banned word in one is accepted. A behavior criterion could still be copied by the writer into a test name or a comment. Is that risk acceptable? The plan follows the reading.",
+    "The counts of six and two refusals come from the request text. The records are absent from the snapshot, so D153 must say they are stated by the request and not measured here.",
+    "The reader prompt files may still tell the reader that every text field is scanned. Prompt files are out of scope, so this plan does not change them; the implementer should grep prompts/ and report any such line in the output instead of editing it."
+  ],
+  "producer_section_sha256": "0f1908362db9b74f79b5f20f3933822d253dc74ab8d6563bc17157493bf14059"
+}
