@@ -238,12 +238,14 @@ Two introspections of one job are one job, so a single job that failed twice is 
 
 **Request and dedupe.** When the just-recorded introspection makes its cause a repeat, and no open or landed
 request cites any introspection of that cause, the review queues one request through the shared steward request
-builder (`steward::StewardRequest`). The request is at `Priority: urgent`, asks for the root cause to be fixed
+builder (`steward::StewardRequest`). The request is at `Priority: high` (Hestia never queues urgent; that level is for a person), asks for the root cause to be fixed
 where it originates, cites every introspection id of the group with the job and the prevention each proposed,
 and has acceptance bullets that are checked by the builder's own parse. A request cites a cause when its text
 contains one of the group's introspection ids, so a third introspection of a cause finds the open request and
 queues nothing. A request counts while it is open (not closed) or landed. A request that was rejected, failed or
-closed does not, so a cause whose fix did not land can get a new request. The review does not fix the cause
+closed by Hestia itself (to queue it again) does not, so a cause whose fix did not land can get a new request.
+A request a person closed with `athena close` counts until an introspection of the cause is recorded after the
+close, so the review does not queue again what a person turned down. The review does not fix the cause
 itself; the request runs as a job under the usual checks and the independent verifier.
 
 **Status.** `athena status` lists each open repeated cause (`StatusView::repeated_causes`): the count of
@@ -292,8 +294,8 @@ inside one stage), and the minutes per landed job it expects the change to save.
 **Request and priority.** The top proposal is queued as a design request through the shared steward request
 builder (`steward::StewardRequest`), so `athena plan` accepts it. Its title starts `Throughput design: `, its body
 carries the bottleneck, the proposed change, the predicted saving and the review's id, and it asks that a change
-which implements the design cites that id. The priority follows the predicted saving, speed first: at least 10
-minutes per landed job is urgent, at least 5 high, at least 2 normal, and less is low
+which implements the design cites that id. The priority follows the predicted saving, speed first: at least 5
+minutes per landed job is high (never urgent), at least 2 normal, and less is low
 (`priority_for_minutes`). While a request with that title is open (not closed), a later review queues no second
 one and does not ask the model; it still writes its record so the cadence moves on.
 

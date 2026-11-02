@@ -15,7 +15,7 @@
 //! owner and a measure. [`Athena::spec_review`] (a review pass, see [`Athena::review_passes`], because a [`Check`]
 //! cannot reach the records or the queue) queues one request through [`StewardRequest`] for each active
 //! requirement whose mechanism is `none` or whose measure is blank or names a label `athena status` does not
-//! print ([`measure_problem`]). The request is urgent when the requirement is about speed ([`is_speed`]), and an
+//! print ([`measure_problem`]). The request is high when the requirement is about speed ([`is_speed`]), and an
 //! open request that holds the line `Spec requirement: <id>` stops a second one. At most
 //! [`SPEC_REQUESTS_PER_PASS`] are queued in one pass, speed first. `athena status` lists the same gaps
 //! ([`spec_gaps`]).
@@ -23,7 +23,7 @@
 //! Hestia also reviews errors across jobs (`docs/design/hestia.md`, "Error review"). Every failure gets an
 //! introspection with a cause, but each one is written about one job. After an introspection is recorded,
 //! [`Athena::error_review`] groups it with the earlier ones by cause ([`cause_key`]). A cause that has occurred
-//! in two or more distinct jobs, and that no open or landed request cites, gets one urgent root-cause request,
+//! in two or more distinct jobs, and that no open or landed request cites, gets one high-priority root-cause request,
 //! built by [`crate::steward::StewardRequest`] and citing the introspection ids. [`repeated_causes`] lists the
 //! repeated causes for `athena status`.
 //!
@@ -32,8 +32,13 @@
 //! each sweep ([`Athena::review_passes`]); `athena hestia review --backfill` runs it on request: a cause whose stage is
 //! switched off in `athena.toml` is dormant and skipped; an open request that already addresses a cause is
 //! re-queued through the same builder and the old one closed; any other cause gets a new root-cause request.
-//! The five highest-ranked causes (most occurrences, then most recent) are urgent and the rest normal. A second
+//! The five highest-ranked causes (most occurrences, then most recent) are high and the rest normal. A second
 //! run finds every cause covered and changes nothing.
+//!
+//! Hestia never queues a request above high: urgent is for the person running Athena (`athena priority`, or a
+//! `Priority: urgent` line they write). A cause whose request a person closed with `athena close` is not queued
+//! again until a new introspection of that cause is recorded after the close ([`addressing_request`]); a
+//! request Hestia closed to queue it again, or one that was rejected or failed, does not hold the cause back.
 //!
 //! The throughput review (`docs/design/hestia.md`, "Throughput review") asks a different question: not what
 //! failed but what the pipeline waits on. It runs in [`Athena::review_passes`] when [`throughput_due`] says so:
@@ -252,20 +257,41 @@ pub fn cause_key(records: &Records, i: &IntrospectionRecord) -> Option<String> {
 
 /// The request that addresses a group of introspections: an open or landed request job whose text cites one of
 /// their ids. An open one is preferred to a landed one. A request that was rejected, failed or closed does not
-/// address the cause, so the review may queue another.
+/// address the cause, so the review may queue another. The exception is a request a person closed with
+/// `athena close` ([`closed_by_person`]): it keeps addressing the cause until an introspection of the cause is
+/// recorded after that close, so the review does not queue again what a person turned down. An open or landed
+/// request is preferred to such a closed one.
 fn addressing_request(records: &Records, introspections: &[String]) -> Option<AddressingRequest> {
     let mut found: Option<AddressingRequest> = None;
+    let mut turned_down: Option<AddressingRequest> = None;
+    let newest = records
+        .introspections
+        .iter()
+        .filter(|i| introspections.contains(&i.id.to_string()))
+        .map(|i| i.at)
+        .max();
     for job in records.request_jobs() {
         let state = job.state();
         let landed = state == JobState::Closed(OutcomeState::Landed);
-        if matches!(state, JobState::Closed(_)) && !landed {
-            continue;
-        }
         let cites = job
             .request
             .as_ref()
             .is_some_and(|r| introspections.iter().any(|id| r.text.contains(id.as_str())));
         if !cites {
+            continue;
+        }
+        if matches!(state, JobState::Closed(_)) && !landed {
+            let closed_at = job.outcome.as_ref().map(|o| o.at);
+            if closed_by_person(job)
+                && closed_at.is_some_and(|at| newest.is_none_or(|n| n <= at))
+                && turned_down.is_none()
+            {
+                turned_down = Some(AddressingRequest {
+                    job: job.id().as_str().to_string(),
+                    state: state.name().to_string(),
+                    landed: false,
+                });
+            }
             continue;
         }
         if found.as_ref().is_none_or(|f| f.landed && !landed) {
@@ -276,7 +302,25 @@ fn addressing_request(records: &Records, introspections: &[String]) -> Option<Ad
             });
         }
     }
-    found
+    found.or(turned_down)
+}
+
+/// The words a reason starts with when Hestia itself closed a request to queue it again ([`Athena::close`] is
+/// called with them in the backfill). Any other close of a request that was waiting is a person's.
+const REQUEUE_CLOSE_REASON: &str = "re-queued as ";
+
+/// Whether a person closed the request with `athena close`: it was dropped, declined or abandoned, and the
+/// reason is not the one Hestia writes when it closes a request to queue it in its place.
+fn closed_by_person(job: &JobRecords) -> bool {
+    matches!(
+        job.state(),
+        JobState::Closed(OutcomeState::Dropped | OutcomeState::Declined | OutcomeState::Abandoned)
+    ) && job.outcome.as_ref().is_some_and(|o| {
+        !o.reason
+            .strip_prefix("closed: ")
+            .unwrap_or(&o.reason)
+            .starts_with(REQUEUE_CLOSE_REASON)
+    })
 }
 
 /// The causes that occurred in [`REPEAT_JOBS`] or more distinct jobs, with their introspections and the
@@ -325,10 +369,11 @@ pub fn repeated_causes(records: &Records) -> Vec<RepeatedCause> {
         .collect()
 }
 
-/// The text of the urgent root-cause request for a repeated cause, built with [`StewardRequest`]. No body line
-/// starts like a bullet: the builder refuses one, since `athena plan` would read it as acceptance.
+/// The text of the high-priority root-cause request for a repeated cause, built with [`StewardRequest`]. High is
+/// the most Hestia queues: urgent is for a person. No body line starts like a bullet: the builder refuses one,
+/// since `athena plan` would read it as acceptance.
 pub fn root_cause_request(cause: &RepeatedCause, records: &Records) -> Result<String, String> {
-    root_cause_request_at(cause, records, Priority::Urgent)
+    root_cause_request_at(cause, records, Priority::High)
 }
 
 /// [`root_cause_request`] at the given priority: the one place the text of a root-cause request is built.
@@ -486,7 +531,7 @@ pub fn measure_problem(measure: &str) -> Option<String> {
 }
 
 /// Whether a requirement is about speed: its measure is shown in a status section about time. Such a
-/// requirement's request is urgent.
+/// requirement's request is high.
 pub fn is_speed(requirement: &SpecRequirement) -> bool {
     measure_label(&requirement.measure).is_some_and(|label| SPEED_LABELS.contains(&label))
 }
@@ -564,7 +609,7 @@ pub fn spec_gaps_at(git: &athena_git::Git, head: &str) -> Result<Vec<SpecGap>> {
 }
 
 /// The request that asks for a requirement's mechanism or measure, built with [`StewardRequest`]. It is
-/// urgent for a requirement about speed and normal otherwise.
+/// high for a requirement about speed and normal otherwise.
 pub fn spec_request(gap: &SpecGap) -> Result<String, String> {
     let title = if gap.no_mechanism {
         format!("Give requirement {} a mechanism", gap.id)
@@ -601,7 +646,7 @@ pub fn spec_request(gap: &SpecGap) -> Result<String, String> {
         "fmt, clippy and test pass".to_string(),
     ];
     let priority = if gap.speed {
-        Priority::Urgent
+        Priority::High
     } else {
         Priority::Normal
     };
@@ -671,7 +716,7 @@ pub struct SpecReport {
 
 impl Athena {
     /// The spec review: for each active requirement of `docs/spec.toml` at HEAD that has no mechanism or a
-    /// failing measure, queues one request through the steward request builder, urgent when the requirement is
+    /// failing measure, queues one request through the steward request builder, high when the requirement is
     /// about speed. A requirement that an open request already covers gets none, so a second run changes
     /// nothing. Athena runs it in [`Athena::review_passes`], at the start of every drain and in each sweep.
     pub fn spec_review(&self, ui: &dyn Ui) -> Result<SpecReport> {
@@ -706,8 +751,9 @@ impl Athena {
 // ---------------------------------------------------------------------------------------------------------
 // Backfill
 
-/// How many of the highest-ranked causes a backfill makes urgent. The rest are normal.
-pub const BACKFILL_URGENT: usize = 5;
+/// How many of the highest-ranked causes a backfill makes high. The rest are normal. Hestia never queues
+/// urgent: that level is for a person.
+pub const BACKFILL_HIGH: usize = 5;
 
 /// A stage of the job pipeline that `athena.toml` can switch off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1056,6 +1102,8 @@ fn backfill_step(
     };
     let id = old.id().clone();
     used.insert(id.as_str().to_string());
+    // A request a person already made urgent keeps that level: the backfill never lowers it.
+    let priority = priority.min(old.priority());
     let state = old.state();
     let skip = |reason: String| Step::Skip {
         job: Some(id.as_str().to_string()),
@@ -1097,7 +1145,8 @@ fn backfill_step(
 
 /// Plans a backfill over the records. Dormant causes (stage in `disabled`) and causes whose request has landed
 /// are skipped. The rest are ranked by occurrences, then by the newest introspection, and the first
-/// [`BACKFILL_URGENT`] are urgent. The plan lists the ranked causes first, in rank order.
+/// [`BACKFILL_HIGH`] are high (never urgent) and the rest normal. A cause whose request a person closed is
+/// skipped until it recurs ([`addressing_request`]). The plan lists the ranked causes first, in rank order.
 fn plan_backfill(records: &Records, disabled: &[Stage]) -> Vec<Planned> {
     let mut skipped: Vec<Planned> = Vec::new();
     let mut ranked: Vec<(Option<Timestamp>, RepeatedCause)> = Vec::new();
@@ -1129,8 +1178,8 @@ fn plan_backfill(records: &Records, disabled: &[Stage]) -> Vec<Planned> {
         .into_iter()
         .enumerate()
         .map(|(rank, (_, cause))| {
-            let priority = if rank < BACKFILL_URGENT {
-                Priority::Urgent
+            let priority = if rank < BACKFILL_HIGH {
+                Priority::High
             } else {
                 Priority::Normal
             };
@@ -1156,9 +1205,7 @@ pub const WORSEN_RATIO: f64 = 1.2;
 /// means the last proposal is still being worked, and the review queues no second one.
 pub const THROUGHPUT_MARKER: &str = "Throughput design: ";
 
-/// Expected minutes saved per landed job at or above which a design request is urgent.
-pub const URGENT_MINUTES: f64 = 10.0;
-/// ... high.
+/// Expected minutes saved per landed job at or above which a design request is high, the most Hestia queues.
 pub const HIGH_MINUTES: f64 = 5.0;
 /// ... normal. Below this a request is low.
 pub const NORMAL_MINUTES: f64 = 2.0;
@@ -1205,11 +1252,9 @@ pub fn throughput_due(
 }
 
 /// The priority a design request gets from the minutes per landed job it is expected to save: more minutes,
-/// higher priority (speed first).
+/// higher priority (speed first), and never above high: urgent is for a person.
 pub fn priority_for_minutes(expected_minutes_saved: f64) -> Priority {
-    if expected_minutes_saved >= URGENT_MINUTES {
-        Priority::Urgent
-    } else if expected_minutes_saved >= HIGH_MINUTES {
+    if expected_minutes_saved >= HIGH_MINUTES {
         Priority::High
     } else if expected_minutes_saved >= NORMAL_MINUTES {
         Priority::Normal
@@ -1713,13 +1758,13 @@ impl Athena {
 
     /// The error review, run after `recorded` was committed as an introspection: groups it with the earlier
     /// introspections by cause and, when the cause now occurs in two or more distinct jobs and no open or
-    /// landed request cites it, queues one urgent root-cause request citing the introspection ids. Returns the
+    /// landed request cites it, queues one high-priority root-cause request citing the introspection ids. Returns the
     /// job queued, if any. Never fails: a problem is a line to the user, since the review never blocks a job.
     pub fn error_review(&self, recorded: &IntrospectionRecord, ui: &dyn Ui) -> Option<JobId> {
         match self.try_error_review(recorded) {
             Ok(Some((job, cause))) => {
                 ui.line(&format!(
-                    "hestia     repeated cause in {} jobs ({} introspections); root-cause request {job} queued at urgent priority",
+                    "hestia     repeated cause in {} jobs ({} introspections); root-cause request {job} queued at high priority",
                     cause.jobs.len(),
                     cause.count()
                 ));
@@ -2433,7 +2478,7 @@ mod tests {
     }
 
     #[test]
-    fn a_speed_requirement_is_urgent_and_a_statement_with_faster_is_not_enough() {
+    fn a_speed_requirement_is_high_never_urgent_and_a_statement_with_faster_is_not_enough() {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let athena = athena_in(dir.path(), state.path());
@@ -2464,16 +2509,17 @@ mod tests {
         put_spec(dir.path(), &athena, &spec);
         let report = athena.spec_review(&crate::Quiet).unwrap();
         assert_eq!(report.queued.len(), 3);
-        assert!(spec_request_text(&athena, "R-1").starts_with("Priority: urgent\n"));
-        assert!(spec_request_text(&athena, "R-3").starts_with("Priority: urgent\n"));
+        assert!(spec_request_text(&athena, "R-1").starts_with("Priority: high\n"));
+        assert!(spec_request_text(&athena, "R-3").starts_with("Priority: high\n"));
         assert!(spec_request_text(&athena, "R-2").starts_with("Priority: normal\n"));
         let known = records(&athena);
-        let urgent = known
-            .request_jobs()
+        let jobs = known.request_jobs();
+        assert!(jobs.iter().all(|j| j.priority() != Priority::Urgent));
+        let high = jobs
             .iter()
-            .filter(|j| j.priority() == Priority::Urgent)
+            .filter(|j| j.priority() == Priority::High)
             .count();
-        assert_eq!(urgent, 2);
+        assert_eq!(high, 2);
     }
 
     #[test]
@@ -2612,13 +2658,13 @@ mod tests {
         assert!(by("OLY-7-04").statement.contains("faster"));
         assert!(by("OLY-A-22").mechanism.contains("throughput_review"));
 
-        // If the acceleration requirement ever had no mechanism, its request would be urgent.
+        // If the acceleration requirement ever had no mechanism, its request would be high.
         let mut acceleration = by("OLY-A-22").clone();
         acceleration.mechanism = "none".into();
         let gaps = spec_gaps(&[acceleration]);
         assert_eq!(gaps.len(), 1);
         let text = spec_request(&gaps[0]).unwrap();
-        assert!(text.starts_with("Priority: urgent\n"), "{text}");
+        assert!(text.starts_with("Priority: high\n"), "{text}");
         assert!(text.contains("Spec requirement: OLY-A-22\n"), "{text}");
     }
 
@@ -2638,7 +2684,7 @@ mod tests {
     }
 
     #[test]
-    fn two_introspections_of_one_cause_in_different_jobs_queue_one_urgent_request_and_a_third_queues_none()
+    fn two_introspections_of_one_cause_in_different_jobs_queue_one_high_request_and_a_third_queues_none()
      {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
@@ -2674,13 +2720,13 @@ mod tests {
         assert_eq!(known.request_jobs().len(), 1, "exactly one request");
         let request = known.jobs[queued.as_str()].request.as_ref().unwrap();
         assert!(
-            request.text.starts_with("Priority: urgent\n"),
+            request.text.starts_with("Priority: high\n"),
             "{}",
             request.text
         );
         assert_eq!(
             known.jobs[queued.as_str()].priority(),
-            crate::plan::Priority::Urgent
+            crate::plan::Priority::High
         );
         assert!(request.text.contains(first.id.as_str()), "{}", request.text);
         assert!(
@@ -2985,7 +3031,7 @@ mod tests {
     }
 
     #[test]
-    fn the_root_cause_request_is_urgent_and_refuses_a_cause_that_reads_as_acceptance() {
+    fn the_root_cause_request_is_high_and_refuses_a_cause_that_reads_as_acceptance() {
         let cause = |text: &str| RepeatedCause {
             key: "cause:x".into(),
             class: None,
@@ -3003,6 +3049,8 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Cause: - first - second\n"), "{text}");
+        assert!(text.starts_with("Priority: high\n"), "{text}");
+        assert!(!text.to_lowercase().contains("urgent"), "{text}");
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -3066,7 +3114,7 @@ mod tests {
     }
 
     #[test]
-    fn the_backfill_skips_dormant_requeues_an_existing_request_queues_the_rest_and_ranks_the_top_five_urgent()
+    fn the_backfill_skips_dormant_requeues_an_existing_request_queues_the_rest_and_ranks_the_top_five_high_never_urgent()
      {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
@@ -3090,7 +3138,7 @@ mod tests {
         let expected: Vec<&str> = [0, 1, 2, 3, 4, 6, 5].iter().map(|&i| LIVE[i].0).collect();
         assert_eq!(ranked, expected);
         for (rank, l) in report.lines[..7].iter().enumerate() {
-            let want = if rank < 5 { "urgent" } else { "normal" };
+            let want = if rank < 5 { "high" } else { "normal" };
             assert_eq!(l.priority.as_deref(), Some(want), "{}", l.cause);
         }
 
@@ -3138,7 +3186,7 @@ mod tests {
         assert!(reason.contains(&format!("re-queued as {new}")), "{reason}");
         let text = &known.jobs[new].request.as_ref().unwrap().text;
         assert!(
-            text.starts_with("Priority: urgent\n\nSplit large readings\n"),
+            text.starts_with("Priority: high\n\nSplit large readings\n"),
             "{text}"
         );
         assert!(text.contains("keep failing on the deadline."), "{text}");
@@ -3164,7 +3212,7 @@ mod tests {
             assert_eq!(address.state, "queued");
             let job = &known.jobs[address.job.as_str()];
             let want = if rank < 5 {
-                Priority::Urgent
+                Priority::High
             } else {
                 Priority::Normal
             };
@@ -3193,6 +3241,214 @@ mod tests {
         assert!(
             rendered.contains("why: dormant: the planner stage"),
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn plan_backfill_over_more_than_five_causes_queues_every_request_at_high_or_lower() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        backlog(dir.path(), &athena);
+        let plan = plan_backfill(&records(&athena), &[Stage::Planner]);
+        let worked: Vec<&Planned> = plan.iter().filter(|p| p.priority.is_some()).collect();
+        assert!(worked.len() > BACKFILL_HIGH, "{} causes", worked.len());
+        for p in &worked {
+            assert!(p.priority.unwrap() >= Priority::High, "{}", p.cause.cause);
+            let text = match &p.step {
+                Step::Queue { text } | Step::Requeue { text, .. } => text,
+                _ => continue,
+            };
+            assert!(
+                text.starts_with("Priority: high\n") || text.starts_with("Priority: normal\n"),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            worked
+                .iter()
+                .filter(|p| p.priority == Some(Priority::High))
+                .count(),
+            BACKFILL_HIGH
+        );
+    }
+
+    /// Two introspections of one cause in two jobs, the review's request for it, and that request closed with
+    /// `athena close` (so the outcome is a person's). Returns the class, the cause and the closed request.
+    fn cause_whose_request_a_person_closed(
+        dir: &std::path::Path,
+        athena: &Athena,
+    ) -> (FailureClass, JobId) {
+        let c = class(1, "Reading ignores the earlier verdict");
+        put(dir, athena, vec![AnyRecord::FailureClass(c.clone())]);
+        let first = introspection(10, 'a', Some(&c.id), "The verdict is not read.");
+        let second = introspection(20, 'b', Some(&c.id), "The earlier verdict is never read.");
+        put_introspection(dir, athena, &first);
+        put_introspection(dir, athena, &second);
+        let queued = athena
+            .error_review(&second, &crate::Quiet)
+            .expect("the second job makes it a repeat");
+        athena
+            .close(queued.as_str(), "not wanted", &crate::Quiet)
+            .unwrap();
+        let known = records(athena);
+        assert_eq!(
+            known.jobs[queued.as_str()].state(),
+            JobState::Closed(OutcomeState::Dropped)
+        );
+        (c, queued)
+    }
+
+    #[test]
+    fn a_cause_a_person_closed_is_not_queued_again_until_it_recurs_after_the_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let (c, closed) = cause_whose_request_a_person_closed(dir.path(), &athena);
+
+        // The backfill neither queues nor re-queues it.
+        let report = athena.error_review_backfill(&crate::Quiet).unwrap();
+        assert_eq!(
+            report.count(BackfillAction::Queued),
+            0,
+            "{}",
+            report.render()
+        );
+        assert_eq!(report.count(BackfillAction::Requeued), 0);
+        assert!(report.changed_nothing(), "{}", report.render());
+        assert_eq!(records(&athena).request_jobs().len(), 1);
+
+        // An introspection recorded before the close does not count as a recurrence.
+        let older = introspection(30, 'c', Some(&c.id), "Nothing reads the verdict.");
+        put_introspection(dir.path(), &athena, &older);
+        assert_eq!(athena.error_review(&older, &crate::Quiet), None);
+        assert_eq!(records(&athena).request_jobs().len(), 1);
+
+        // A new introspection of the cause, recorded after the close, queues it again, at high.
+        let mut later = introspection(40, 'd', Some(&c.id), "The verdict is still not read.");
+        later.at = "2999-01-01T00:00:00Z".parse().unwrap();
+        put_introspection(dir.path(), &athena, &later);
+        let queued = athena
+            .error_review(&later, &crate::Quiet)
+            .expect("the cause recurred after the close");
+        assert_ne!(queued, closed);
+        let known = records(&athena);
+        assert_eq!(known.request_jobs().len(), 2);
+        assert_eq!(known.jobs[queued.as_str()].priority(), Priority::High);
+    }
+
+    #[test]
+    fn the_backfill_queues_a_cause_again_once_it_recurs_after_a_persons_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let (c, _) = cause_whose_request_a_person_closed(dir.path(), &athena);
+        let mut later = introspection(40, 'd', Some(&c.id), "The verdict is still not read.");
+        later.at = "2999-01-01T00:00:00Z".parse().unwrap();
+        put_introspection(dir.path(), &athena, &later);
+
+        let report = athena.error_review_backfill(&crate::Quiet).unwrap();
+        assert_eq!(
+            report.count(BackfillAction::Queued),
+            1,
+            "{}",
+            report.render()
+        );
+        let known = records(&athena);
+        assert_eq!(known.request_jobs().len(), 2);
+        assert!(
+            known
+                .request_jobs()
+                .iter()
+                .all(|j| j.priority() != Priority::Urgent)
+        );
+    }
+
+    #[test]
+    fn a_cause_whose_request_hestia_closed_to_queue_it_again_is_still_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let c = class(1, "Check output is cut");
+        let (a, b) = (
+            introspection(10, 'a', Some(&c.id), "The tail is cut."),
+            introspection(11, 'b', Some(&c.id), "The tail is cut."),
+        );
+        put(
+            dir.path(),
+            &athena,
+            vec![
+                AnyRecord::FailureClass(c),
+                AnyRecord::Introspection(Box::new(a.clone())),
+                AnyRecord::Introspection(Box::new(b.clone())),
+            ],
+        );
+        let text = StewardRequest::new(
+            Some(Priority::Normal),
+            "Keep the whole check output",
+            &format!("See introspections {} and {}.", a.id, b.id),
+            &["The output is whole".to_string()],
+            &["crates/".to_string()],
+        )
+        .unwrap()
+        .render();
+        let (old, _) = athena.queue(&text).unwrap();
+        // The reason Hestia writes when it closes a request to queue another in its place.
+        athena
+            .close(
+                old.as_str(),
+                "re-queued as 20261027-000000-aaaa through the steward request builder",
+                &crate::Quiet,
+            )
+            .unwrap();
+        assert!(!closed_by_person(&records(&athena).jobs[old.as_str()]));
+
+        let report = athena.error_review_backfill(&crate::Quiet).unwrap();
+        assert_eq!(
+            report.count(BackfillAction::Queued),
+            1,
+            "{}",
+            report.render()
+        );
+        assert_eq!(records(&athena).request_jobs().len(), 2);
+    }
+
+    #[test]
+    fn the_backfill_does_not_lower_a_request_a_person_made_urgent() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let c = class(1, "Check output is cut");
+        let (a, b) = (
+            introspection(10, 'a', Some(&c.id), "The tail is cut."),
+            introspection(11, 'b', Some(&c.id), "The tail is cut."),
+        );
+        put(
+            dir.path(),
+            &athena,
+            vec![
+                AnyRecord::FailureClass(c),
+                AnyRecord::Introspection(Box::new(a.clone())),
+                AnyRecord::Introspection(Box::new(b.clone())),
+            ],
+        );
+        let text = StewardRequest::new(
+            Some(Priority::Normal),
+            "Keep the whole check output",
+            &format!("See introspections {} and {}.", a.id, b.id),
+            &["The output is whole".to_string()],
+            &["crates/".to_string()],
+        )
+        .unwrap()
+        .render();
+        let (job, _) = athena.queue(&text).unwrap();
+        athena.set_priority(job.as_str(), "urgent").unwrap();
+
+        let report = athena.error_review_backfill(&crate::Quiet).unwrap();
+        assert!(report.changed_nothing(), "{}", report.render());
+        assert_eq!(
+            records(&athena).jobs[job.as_str()].priority(),
+            Priority::Urgent
         );
     }
 
@@ -3532,7 +3788,7 @@ mod tests {
         let known = records(&athena);
         assert_eq!(known.request_jobs().len(), 1, "no second request");
         assert_eq!(known.jobs[job.as_str()].state(), JobState::Queued);
-        assert_eq!(known.jobs[job.as_str()].priority(), Priority::Urgent);
+        assert_eq!(known.jobs[job.as_str()].priority(), Priority::High);
         assert!(
             athena
                 .error_review_backfill(&crate::Quiet)
@@ -3787,7 +4043,7 @@ mod tests {
         let proposal = first.proposal.as_ref().expect("a proposal is recorded");
         assert_eq!(proposal.request_job.as_ref(), Some(open[0].id()));
         assert_eq!(proposal.expected_minutes_saved, 12.0);
-        assert_eq!(proposal.priority, "urgent");
+        assert_eq!(proposal.priority, "high");
         assert_eq!(known.throughput_reviews, vec![first.clone()]);
         assert_eq!(known.steward_runs.len(), 1, "the invocation is recorded");
 
@@ -3925,13 +4181,13 @@ mod tests {
         assert_eq!(priority_for_minutes(0.5), Priority::Low);
         assert_eq!(priority_for_minutes(2.0), Priority::Normal);
         assert_eq!(priority_for_minutes(5.0), Priority::High);
-        assert_eq!(priority_for_minutes(10.0), Priority::Urgent);
-        assert_eq!(priority_for_minutes(25.0), Priority::Urgent);
+        assert_eq!(priority_for_minutes(10.0), Priority::High);
+        assert_eq!(priority_for_minutes(25.0), Priority::High);
         let rank = |p: Priority| match p {
             Priority::Low => 0,
             Priority::Normal => 1,
             Priority::High => 2,
-            Priority::Urgent => 3,
+            Priority::Urgent => panic!("Hestia never queues urgent"),
         };
         let series: Vec<i32> = [0.0, 1.9, 2.0, 4.9, 5.0, 9.9, 10.0, 60.0]
             .iter()
@@ -3941,10 +4197,9 @@ mod tests {
         assert!(series.first() < series.last());
 
         // The queued request carries the priority its prediction set.
-        for (saving, level, expected) in [
-            (12.0, "urgent", Priority::Urgent),
-            (1.0, "low", Priority::Low),
-        ] {
+        for (saving, level, expected) in
+            [(12.0, "high", Priority::High), (1.0, "low", Priority::Low)]
+        {
             let dir = tempfile::tempdir().unwrap();
             let state = tempfile::tempdir().unwrap();
             let (model, _) = throughput_model(saving);

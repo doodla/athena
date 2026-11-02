@@ -7,6 +7,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- Hestia's requests are capped at high, so urgent orders the queue for the person running Athena again. The
+  error review backfill (`athena hestia review --backfill`) made its five top-ranked causes urgent on every run,
+  and each new root-cause request was queued urgent; on 2026-10-31 the queue held 13 urgent and 14 high items.
+  The five top-ranked causes are now high and the rest normal, a new root-cause request is high, a spec request
+  for a speed requirement is high, and a throughput design request is high from 5 minutes saved per landed job
+  (there is no urgent step). Urgent stays available to people (`athena priority`, a `Priority: urgent` line),
+  and the backfill does not lower a request a person made urgent.
+- The error review and the backfill no longer queue again a cause whose request a person closed with
+  `athena close`. The cause is queued again, at high, only once a new introspection of it is recorded after the
+  close. A request that Hestia closed to queue another in its place, or one that was rejected or failed, does
+  not hold the cause back. Root cause: the review treated every closed request that had not landed as if it
+  never existed, so a person's close was undone at the next backfill (request gdgv was queued again as 7ym7).
+
 ### Fixed
 
 - `athena drain` now passes over a queued item whose line the scope guard has paused, before it reads the item,
