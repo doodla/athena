@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-184832-4gah",
+  "round": 2,
+  "at": "2026-11-02T02:48:55.297430076Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The stale-pause test passes even when `RealSteps::paused` is broken. The live RealSteps case is the only test that shows the real path returns a pause, and the plan lets the producer drop it.",
+      "evidence": "Step 1 defaults `Steps::paused` to `Vec::new()`. A `RealSteps::paused` that always returns nothing passes the stale assertion (`steps.paused(&[job])` is empty). The fallback 'the no-attempt stale case and the Stub-based live pause' leaves only the Stub, a double, to report a pause. The core rig behind `t4_pause_via_go_and_ask` (scope_guard.rs:1230) is private to athena-core. But `Scenario` in tests/common/mod.rs:411 carries a scriptable `report: Value`, so two rejections of one criterion through `Fixture` look possible (not run). Fix: Make the live RealSteps case required. Script two rejections of one criterion through `Scenario`/`Fixture`, assert that `steps.paused(&[later_job])` equals `athena.pause_refusal(&mark)`, and then delete the pause file and assert it is empty. If it truly cannot be scripted, say so as a stated gap and do not present the Stub as covering it.",
+      "location": "Demonstrations, criterion 6 (live companion) and Open questions 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The fallback 'a pause is written with `pause_path` and a `LineMark`' cannot work: a pause file written by hand with no rejected attempts is stale, so the test would find nothing held.",
+      "evidence": "`Athena::line_pause` (scope_guard.rs:782-790) returns the mark only when `line_state(...).overall() == Level::Pause`. A line with no attempts does not reach that level, so a hand-written mark is filtered out. That is exactly the stale case of criterion 6. Fix: For the RealSteps plan test, use only the scripted pause (two rejections of one criterion). Drop the hand-written `LineMark` option, or move it to the stale test where it belongs.",
+      "location": "Demonstrations, criterion 3 (RealSteps plan test)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Taking pause holds out of `Report.refused` means the drain's final report no longer names the paused item or its reason. The accepted reading says the final report lists it as passed over.",
+      "evidence": "`Report` (drain.rs:2688-2712) has no passed-over field. Its only per-item reasons are `refused` and `notes`, and the plan strips pause holds from both. The `passed over` text then exists only as a live Ui line. `queued` still lists the item, with no reason. Fix: Either keep one rendering in the report and let the criterion-1 count treat 'the printed line during the run' and 'the report' as separate, named places, or state in the plan and CHANGELOG that the only record is the live `passed over` line. Then the reading's assumption 4 is knowingly narrowed, not silently dropped.",
+      "location": "Decision 3 / Step 4 (Report.refused filter) vs reading assumption 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Each `attempts` loop iteration now loads all records through `RealSteps::records()`.",
+      "evidence": "The plan's own risk note says 'one load per attempt'. `prepare` already loads once per wave. Fix: No change needed. Optionally note the measured cost in the PR description if it shows up in drain timings.",
+      "location": "Step 5 / Risks (records load per attempt)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read drain.rs (`prepare`, `attempts`, `finish`, `pass_over`, `sweep`, `batches_for`, `drain_with`), scope_guard.rs (`line_pause`, `pause_refusal`) and plan.rs (`Refusal::held`, `build_with`, `unmet_dependency`). The plan's claims about the code hold. Production already refuses with `line_pause` and `pause_refusal`, in run/mod.rs:704 and reading.rs:1034, so the drain checks the same thing the real refusal does, and a stale pause holds nothing. `batches_for` gets the unfiltered `view.plan`, so a paused item with a plan entry drops out of the groups. The new skip of refused no-entry items covers the case where an item has no entry. `build_with` treats a dependency missing from its entries as met unless the history shows it failed, which justifies the step that holds dependents explicitly. The reason wording matches line 567. `pass_over` already dedupes by id, so `sweep` adds nothing. The fix is where the fault starts: before the read and before `run_job`, with a new non-failure `ItemEnd`. It does not match error text in the stop rule. The demonstrations drive the production `drain::drain` and `drain::plan` through the existing `Stub` seam. Each would fail without the change: the reads, `RepeatedFailure` and the next item not running are all observable. Remaining weaknesses, all minor: the live `RealSteps::paused` test is optional, so the stale test alone would pass with the default empty answer. The criterion-3 fallback of a hand-written pause file contradicts `line_pause`'s staleness rule. Taking pause holds out of `Report.refused` narrows the reading's assumption that the final report lists the item. There are no blocker or major findings."
+}

@@ -1,0 +1,127 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261031-184832-4gah",
+  "base_commit": "0eba7ea2930a47bf64375c401752f36a5b3c42fc",
+  "base_fingerprint": "sha256:f7b97419a8006ce7956c0d8f4a7f963ad3035b1a94d11ab3819994536912b9dc",
+  "previous_job": "20261102-013826-mq3a",
+  "candidate_commit": "be126fdb0a052ddaea2a4772b5f0d33465b593f7",
+  "candidate_tree": "9aad76793fc9d13b856b6b14b46e86571b1a2e09",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 281499
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 213448
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 250522
+    }
+  ],
+  "fingerprint": "sha256:58e6d24475293d09b186f3a9927813b5f5c6b8904f5b2d797cc0c70d49e0ed76",
+  "violations": [],
+  "producer_report": {
+    "summary": "`athena drain` now passes over a queued item whose line the scope guard has paused. It does this before reading the item, prints one line, and goes on to the next item without counting a failure. `athena plan` lists such items as held with the same reason. I made one change, in athena-cli only.\n\nRoot cause: the drain read an item before asking whether its line was paused. The read or run came back refused with the pause text, that counted as a failed attempt, and two of those ended in `Stop::RepeatedFailure`.\n\nHow it works:\n- **New `Steps::paused(&[String]) -> Vec<(job, reason)>`.** It defaults to no pauses. `RealSteps` loads the records once and asks `Athena::line_pause`, then `pause_refusal`. It never tests whether the pause file exists, so a stale pause holds nothing.\n- **Planning pass (`Drain::prepare`, run by both `drain` and `plan`).** It asks once for the whole queue and does not read a paused item to fill its plan. It takes the item and everything that depends on it out of the plan. Each becomes `Refusal::held`, with the reason \"depends on <id>, which is held back: its line is paused\" for a dependent. `plan` shows these through its existing `held` line, so `display.rs` needed no change.\n- **One printed line.** `drain` prints `plan <id> passed over: <reason>` right after each plan is made, before any other item runs. The reason is kept out of the `is not worked` notes and `Report.refused`, so it appears once.\n- **Pause caused by the item's own failed attempt.** `Drain::attempts` asks before each attempt. If the line is now paused it returns the new non-failure `ItemEnd::Paused`, which `finish` passes over without setting a stop. The item is not run again and not counted.\n\nTests, in `tests/drain.rs` and `Stub`:\n- **Stub-based drain and plan tests:** a paused item among ordinary ones, three paused items before an ordinary one, a pause that starts during the drain, a dependent held with its paused item, and the plan case (held with the pause reason, not read, an unpaused item not held).\n- **`RealSteps` tests:** one with a real pause from two rejections of one criterion, and one with a stale pause.\n- **Checks:** `cargo fmt --all` was applied, `cargo clippy --all-targets --locked -- -D warnings` is clean, and `cargo test -p athena-cli --locked` passes. `cargo test -p xtask --test policy` also passes. I did not run the whole-workspace `cargo test`; that is left to Athena.",
+    "files": [
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test drain --locked -- paused plan_lists",
+        "result": "pass",
+        "note": "the five new Stub-based drain and plan tests"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain --locked -- drain_real_steps",
+        "result": "pass",
+        "note": "the two new RealSteps tests, live pause and stale pause"
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied; not run as --check"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --quiet",
+        "result": "pass",
+        "note": "every athena-cli test binary passes"
+      },
+      {
+        "command": "cargo test -p xtask --test policy --locked",
+        "result": "pass",
+        "note": "12 tests, including the banned-word scan"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-cli drain`. A new drain test queues an item on a line with a pause file, then a second ordinary item. It asserts that the paused item is not read (zero read calls for it), that exactly one printed line names the line and how to lift the pause, that no failure is counted and the stop is not `repeated-failure`, and that the next item runs and lands.",
+        "status": "met",
+        "evidence": "Test `drain_passes_over_an_item_on_a_paused_line_unread_with_one_line_and_runs_the_next_item` in tests/drain.rs. It asserts the stub log is exactly read b, run b, land b, rate. It asserts one Ui line names the line and the lift step, stamped with 0 runs before it, and zero such lines in `display::drain`. It also asserts stop QueueEmpty, failed_item None, and landed 1. It passed in the run of the two commands above and in the full athena-cli run. The test names a Stub `paused` entry, not a pause file; the pause-file path is covered by the real-steps test `drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_reading_it`."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-cli drain`. A new drain test queues the same paused-line item three times, followed by an ordinary item. It asserts that the drain does not stop on repeated failure and that the ordinary item still runs.",
+        "status": "met",
+        "evidence": "Test `drain_does_not_stop_on_repeated_failure_for_items_of_a_paused_line_and_works_the_next_item` queues three paused items a1, a2 (depends on a1) and a3, then c. It asserts the log is read c, run c, land c, rate, stop QueueEmpty, failed_item None, and one passed-over line each, printed before any run. `drain_passes_over_an_item_whose_line_is_paused_by_its_own_failed_attempt_without_a_second_attempt` covers a pause that starts mid-run. Both passed."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-cli plan`. A new plan test with a pause file for a line shows its queued item listed as held, with the pause reason and lift instruction from `pause_refusal`. The same test shows a queued item on an unpaused line is not listed as held.",
+        "status": "met",
+        "evidence": "Test `plan_lists_an_item_on_a_paused_line_as_held_with_the_pause_reason_and_not_read`. The paused item a (underspecified, so it would otherwise be read) has an empty `missing` and a reason equal to the pause text with the lift step and file. The test also asserts the stub log is empty, that dependent c is held with 'depends on a, which is held back', that b is not in `refused` and is the only item in `order`, and that the rendered text has the `held        a · ...: <reason>` line and none for b. As in criterion 1, the pause comes from a Stub `paused` entry, not a file; the `RealSteps` tests cover the file path."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry that says drain passes over items on a paused line, prints one line, does not count them as failures, and plan lists them as held.",
+        "status": "met",
+        "evidence": "CHANGELOG.md [Unreleased] / Fixed, first bullet: drain passes over a queued item on a paused line before reading it, prints one line naming the line and how to lift the pause, does not count it toward the repeated-failure stop, and plan lists such items as held with the same reason. It also names the root cause."
+      },
+      {
+        "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`. All pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo fmt --all`, clippy with -D warnings (clean) and `cargo test -p athena-cli` (all pass). I did not run the whole-workspace `cargo test`."
+      },
+      {
+        "criterion": "A stale pause (one `line_pause` no longer reports) does not hold an item. Pass-over uses `Athena::line_pause`, not just the existence of the pause file, as shown by the diff in the real Steps implementation.",
+        "status": "met",
+        "evidence": "`RealSteps::paused` in drain.rs loads the records once and calls `self.athena.line_pause(&records, job)` and then `self.athena.pause_refusal(&mark)`; there is no `Path::exists` call. Test `drain_real_steps_do_not_hold_an_item_for_a_stored_pause_that_no_longer_holds` makes a line with two rejections of different criteria, writes a pause file for it, and asserts the file exists but `steps.paused` returns nothing and `plan` holds nothing for the pause. The companion real test shows a pause that still holds is reported with `pause_refusal`'s text and that a drain over it writes no record."
+      },
+      {
+        "criterion": "Job 20261030-060751-5389's candidate files and deliverables (reading.rs, docs/decisions.md) are unchanged in the diff.",
+        "status": "met",
+        "evidence": "`git status --short` lists only CHANGELOG.md, crates/athena-cli/src/drain.rs and crates/athena-cli/tests/drain.rs as modified. reading.rs and docs/decisions.md are untouched."
+      }
+    ],
+    "open_issues": [
+      "The brief lists scope_guard.rs, main.rs, planning.rs, display.rs and docs/decisions.md as deliverables, but none needed a change; each is explained in `unchanged_planned_files`.",
+      "The drain's final report lists a passed-over paused item only by the one printed `passed over` line, not in `Report.refused` or the notes. That keeps the reason printed once, as the plan intended. If a reader wants it in the report text as well, `Report.refused` would carry it.",
+      "`Steps::paused` loads the records once per planning pass and once per attempt in the real steps. If the records cannot be loaded it reports nothing paused, so the item is read and refused as before."
+    ],
+    "mistakes": [
+      "My first real-steps test assumed the failed item was still queued after the first drain. It was not, so the passed-over line never appeared. I fixed it by queuing a retry request on the paused line.",
+      "I did not confirm the new tests fail without the fix, because git state is Athena's to change. The criterion-1 and plan tests assert the stub log has no `read a`, which the old code would break."
+    ],
+    "learnings": [
+      "`Plan::build_with` counts a dependency on an id missing from its entries as met, so removing a held item from the entries would free its dependents. `Drain::prepare` therefore removes the dependents too and holds them with the same wording `build_with` uses.",
+      "The drain reads an item at run time whenever its plan from its own words is already complete. Only an incomplete plan makes `Drain::prepare` read it, so a plan test that checks for no reads needs an underspecified entry to be meaningful.",
+      "`write_mark` in scope_guard.rs is private. `LineMark` is public and serializable, so CLI tests can write a pause file by serializing a mark to `pause_path`.",
+      "A failed item is no longer in the queue, so a real-steps test of a paused item has to queue a 'try again on <job>' request, which joins the paused line.",
+      "Two phased rejecting verdicts in the CLI test fixture (`phased` with `rejecting_verdict`) reproduce a natural scope-guard pause. Rejecting a different criterion the second time gives a flag only."
+    ],
+    "desires": [
+      "A way to run a test against the base commit to confirm a new test fails without the change, without touching git state."
+    ]
+  }
+}

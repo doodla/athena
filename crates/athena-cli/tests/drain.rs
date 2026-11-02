@@ -86,6 +86,13 @@ struct Stub {
     history: Vec<JobEnd>,
     /// Jobs whose run ends needing a person to accept a changed reading.
     needs_accepting: Vec<&'static str>,
+    /// Jobs on a line the scope guard has paused, each with the reason `pause_refusal` would give.
+    paused: Vec<(&'static str, &'static str)>,
+    /// When set, the line of this job is paused with this reason as soon as the job has been run once, as the
+    /// scope guard's watcher does after a rejection.
+    pause_on_run: Option<(&'static str, &'static str)>,
+    /// Pauses that began during the drain.
+    paused_now: RefCell<Vec<(String, String)>>,
 }
 
 impl Stub {
@@ -142,6 +149,16 @@ impl Steps for Stub {
     fn stop_requested(&self) -> bool {
         self.stop.get()
     }
+    fn paused(&self, jobs: &[String]) -> Vec<(String, String)> {
+        let configured = self
+            .paused
+            .iter()
+            .map(|(job, why)| (job.to_string(), why.to_string()));
+        configured
+            .chain(self.paused_now.borrow().iter().cloned())
+            .filter(|(job, _)| jobs.contains(job))
+            .collect()
+    }
     fn plan_entry(&self, job: &str) -> Option<PlanEntry> {
         self.after_read.iter().find(|e| e.id == job).cloned()
     }
@@ -181,6 +198,13 @@ impl Steps for Stub {
             .push((job.to_string(), self.build.borrow().clone()));
         if self.stop_when_running == Some(job) {
             self.stop.set(true);
+        }
+        if let Some((paused, why)) = self.pause_on_run
+            && paused == job
+        {
+            self.paused_now
+                .borrow_mut()
+                .push((job.to_string(), why.to_string()));
         }
         if self.needs_accepting.contains(&job) {
             return Run {
@@ -505,6 +529,253 @@ fn plan_prints_order_groups_details_and_flagged_items_and_says_so_when_nothing_i
     let report = drain::plan(&unread, 0.0, &Quiet).unwrap();
     assert!(unread.log().is_empty());
     assert_eq!(report.plan.refused.len(), 1);
+}
+
+/// What `pause_refusal` says for a paused line: the line, the signal, how to lift it and the pause file.
+fn pause_text(line: &str) -> &'static str {
+    let text = format!(
+        "line {line} is paused (T4): two rejections of one criterion. To lift it: narrow the request. \
+         The pause is the file /state/scope/{line}.pause.json"
+    );
+    Box::leak(text.into_boxed_str())
+}
+
+/// A Ui that keeps each line with the number of runs the stub had started when it was printed.
+struct Stamped<'a> {
+    stub: &'a Stub,
+    lines: RefCell<Vec<(usize, String)>>,
+}
+
+impl<'a> Stamped<'a> {
+    fn new(stub: &'a Stub) -> Stamped<'a> {
+        Stamped {
+            stub,
+            lines: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The lines that name `line` and say how to lift its pause, with the runs started before each.
+    fn lift_lines(&self, line: &str) -> Vec<(usize, String)> {
+        self.lines
+            .borrow()
+            .iter()
+            .filter(|(_, l)| l.contains(&format!("line {line} is paused")) && l.contains("lift"))
+            .cloned()
+            .collect()
+    }
+}
+
+impl athena_core::Ui for Stamped<'_> {
+    fn line(&self, text: &str) {
+        let runs = self
+            .stub
+            .log()
+            .iter()
+            .filter(|l| l.starts_with("run "))
+            .count();
+        self.lines.borrow_mut().push((runs, text.to_string()));
+    }
+}
+
+/// How many lines of `text` name the paused `line` and say how to lift the pause.
+fn lift_mentions(text: &str, line: &str) -> usize {
+    text.lines()
+        .filter(|l| l.contains(&format!("line {line} is paused")) && l.contains("lift"))
+        .count()
+}
+
+#[test]
+fn drain_passes_over_an_item_on_a_paused_line_unread_with_one_line_and_runs_the_next_item() {
+    let stub = Stub {
+        items: vec!["a", "b"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1]),
+        plan: vec![
+            planned("a", Ladder::Implementation, &["src/a.rs"], &[]),
+            planned("b", Ladder::Implementation, &["src/b.rs"], &[]),
+        ],
+        paused: vec![("a", pause_text("a"))],
+        ..Stub::default()
+    };
+    let ui = Stamped::new(&stub);
+    let report = drain::drain(&stub, limits(9.0), &ui).unwrap();
+    // The paused item was neither read nor run; the ordinary one ran and landed.
+    assert_eq!(stub.log(), ["read b", "run b", "land b", "rate"]);
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_eq!(report.failed_item, None, "no failure is counted");
+    assert_eq!(report.landed, 1);
+    assert!(
+        report.jobs.iter().all(|j| j.item == "b"),
+        "{:?}",
+        report.jobs
+    );
+    // The reason is printed once: as a line of the run, before anything else ran, and nowhere else.
+    let text = display::drain(&report);
+    let printed = ui.lift_lines("a");
+    assert_eq!(printed.len(), 1, "{printed:?}");
+    assert_eq!(lift_mentions(&text, "a"), 0, "{text}");
+    let (runs_before, line) = &printed[0];
+    assert_eq!(*runs_before, 0, "printed before the next item ran");
+    assert!(
+        line.starts_with("plan       a passed over: line a is paused"),
+        "{line}"
+    );
+    assert!(line.contains("To lift it: narrow the request"), "{line}");
+    assert!(line.contains("a.pause.json"), "{line}");
+    assert!(
+        report.notes.iter().all(|n| !n.contains("item a ")),
+        "{:?}",
+        report.notes
+    );
+    assert!(report.refused.iter().all(|r| r.id != "a"));
+    let queued: Vec<&str> = report.queued.iter().map(|i| i.job.as_str()).collect();
+    assert_eq!(queued, ["a"], "it stays queued");
+}
+
+#[test]
+fn drain_does_not_stop_on_repeated_failure_for_items_of_a_paused_line_and_works_the_next_item() {
+    // Three queued items of one paused line, the second waiting on the first, then an ordinary item.
+    let stub = Stub {
+        items: vec!["a1", "a2", "a3", "c"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1]),
+        plan: vec![
+            planned("a1", Ladder::Implementation, &["src/a1.rs"], &[]),
+            planned("a2", Ladder::Implementation, &["src/a2.rs"], &["a1"]),
+            planned("a3", Ladder::Implementation, &["src/a3.rs"], &[]),
+            planned("c", Ladder::Implementation, &["src/c.rs"], &[]),
+        ],
+        paused: vec![
+            ("a1", pause_text("a1")),
+            ("a2", pause_text("a1")),
+            ("a3", pause_text("a1")),
+        ],
+        ..Stub::default()
+    };
+    let ui = Stamped::new(&stub);
+    let report = drain::drain(&stub, limits(9.0), &ui).unwrap();
+    assert_eq!(stub.log(), ["read c", "run c", "land c", "rate"]);
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_eq!(report.failed_item, None);
+    assert_eq!(report.landed, 1);
+    for item in ["a1", "a2", "a3"] {
+        let lines = ui.lines.borrow();
+        let own: Vec<_> = lines
+            .iter()
+            .filter(|(_, l)| l.starts_with(&format!("plan       {item} passed over:")))
+            .collect();
+        assert_eq!(own.len(), 1, "{item}: {lines:?}");
+        assert_eq!(own[0].0, 0, "{item} is passed over before anything runs");
+    }
+}
+
+#[test]
+fn drain_passes_over_an_item_whose_line_is_paused_by_its_own_failed_attempt_without_a_second_attempt()
+ {
+    // x is rejected once and the scope guard then pauses its line: the retry is not made and not counted.
+    let stub = Stub {
+        items: vec!["x", "c"],
+        outcomes: RefCell::new(vec![
+            OutcomeState::Rejected,
+            OutcomeState::Landed,
+            OutcomeState::Landed,
+        ]),
+        ratings: RefCell::new(vec![1]),
+        pause_on_run: Some(("x", pause_text("x"))),
+        ..Stub::default()
+    };
+    let ui = Stamped::new(&stub);
+    let report = drain::drain(&stub, limits(9.0), &ui).unwrap();
+    assert_eq!(
+        stub.log(),
+        ["read x", "run x", "read c", "run c", "land c", "rate"],
+        "x is not read again or run again"
+    );
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_eq!(report.failed_item, None);
+    assert_eq!(report.landed, 1);
+    let printed = ui.lift_lines("x");
+    assert_eq!(printed.len(), 1, "{printed:?}");
+    assert!(
+        printed[0].1.starts_with("plan       x passed over:"),
+        "{printed:?}"
+    );
+}
+
+#[test]
+fn drain_holds_the_items_that_depend_on_an_item_of_a_paused_line() {
+    let stub = Stub {
+        items: vec!["a", "b", "c"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1]),
+        plan: vec![
+            planned("a", Ladder::Implementation, &["src/a.rs"], &[]),
+            planned("b", Ladder::Implementation, &["src/b.rs"], &["a"]),
+            planned("c", Ladder::Implementation, &["src/c.rs"], &[]),
+        ],
+        paused: vec![("a", pause_text("a"))],
+        ..Stub::default()
+    };
+    let ui = Stamped::new(&stub);
+    let report = drain::drain(&stub, limits(9.0), &ui).unwrap();
+    // b waits on a, which is not worked: b does not run on its own.
+    assert_eq!(stub.log(), ["read c", "run c", "land c", "rate"]);
+    assert_eq!(report.failed_item, None);
+    let lines = ui.lines.borrow();
+    let b: Vec<_> = lines
+        .iter()
+        .filter(|(_, l)| l.starts_with("plan       b passed over:"))
+        .collect();
+    assert_eq!(b.len(), 1, "{lines:?}");
+    assert!(
+        b[0].1
+            .contains("depends on a, which is held back: its line is paused"),
+        "{b:?}"
+    );
+}
+
+#[test]
+fn plan_lists_an_item_on_a_paused_line_as_held_with_the_pause_reason_and_not_read() {
+    let reason = pause_text("a");
+    let stub = Stub {
+        items: vec!["a", "b", "c"],
+        plan: vec![
+            // Underspecified: without the hold the planning pass would read it.
+            vague("a"),
+            planned("b", Ladder::Implementation, &["src/b.rs"], &[]),
+            planned("c", Ladder::Implementation, &["src/c.rs"], &["a"]),
+        ],
+        paused: vec![("a", reason)],
+        ..Stub::default()
+    };
+    let report = drain::plan(&stub, 5.0, &Quiet).unwrap();
+    assert!(stub.log().is_empty(), "nothing is read: {:?}", stub.log());
+    let held = |id: &str| report.plan.refused.iter().find(|r| r.id == id);
+    let a = held("a").expect("a is held");
+    assert!(a.missing.is_empty(), "held, not flagged as incomplete");
+    assert_eq!(a.reason, reason);
+    let c = held("c").expect("c waits on a");
+    assert!(c.missing.is_empty());
+    assert!(
+        c.reason.contains("depends on a, which is held back"),
+        "{}",
+        c.reason
+    );
+    assert!(
+        held("b").is_none(),
+        "the item on an unpaused line is not held"
+    );
+    assert_eq!(report.plan.order, ["b"]);
+    let text = display::plan(&report);
+    assert!(
+        text.contains(&format!("held        a · make it better: {reason}")),
+        "{text}"
+    );
+    assert!(text.contains("held        c · "), "{text}");
+    assert!(!text.contains("held        b"), "{text}");
+    assert!(!text.contains("flagged     a"), "{text}");
+    // `plan` works nothing, so it prints no "passed over" line either.
+    assert_eq!(lift_mentions(&text, "a"), 1, "{text}");
 }
 
 #[test]
@@ -3667,6 +3938,107 @@ fn seeded_proposals(fx: &Fixture) {
     fx.git
         .run(["commit", "-q", "-m", "Seed proposals"])
         .unwrap();
+}
+
+/// A verdict that rejects the work for the second criterion, not the first.
+fn rejecting_second_criterion() -> serde_json::Value {
+    let mut verdict = rejecting_verdict();
+    verdict["criteria"][0]["met"] = json!(true);
+    verdict["criteria"][1]["met"] = json!(false);
+    verdict
+}
+
+/// A drain over the real steps in which the one queued request is rejected twice, with the given verdicts, so
+/// its two attempts are on one line for the scope guard.
+fn rejected_twice(
+    first_verdict: serde_json::Value,
+    second_verdict: serde_json::Value,
+) -> (Fixture, Athena, String) {
+    let fx = Fixture::new();
+    let mut first = Scenario::default();
+    first.verdict = first_verdict;
+    let mut second = Scenario::default();
+    second.verdict = second_verdict;
+    let athena = fx.athena(phased(first, second));
+    let job = queue_steward_request(&athena, "Add a greeting to the README.");
+    let lander = RecordingLander::default();
+    let steps = real_steps_with(&athena, &lander, &Quiet);
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    assert_eq!(report.failed_item.as_deref(), Some(job.as_str()));
+    (fx, athena, job)
+}
+
+#[test]
+fn drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_reading_it() {
+    use athena_core::scope_guard::{LineMark, pause_path};
+    // Two rejections of one criterion: the scope guard pauses the line.
+    let (fx, athena, job) = rejected_twice(rejecting_verdict(), rejecting_verdict());
+    let file = pause_path(&athena.state, &job);
+    assert!(file.exists(), "the line is paused");
+    let mark: LineMark = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let lander = RecordingLander::default();
+    let steps = real_steps_with(&athena, &lander, &Quiet);
+    assert_eq!(
+        steps.paused(&[job.clone(), "20260101-000000-zzzz".into()]),
+        [(job.clone(), athena.pause_refusal(&mark))],
+        "the item of the paused line is reported, an unknown job is not"
+    );
+
+    // A request to try again joins the paused line. A drain passes it over: nothing is read or run for it,
+    // so no record is written.
+    let again = queue_steward_request(&athena, &format!("try again on {job}"));
+    let head = fx.head();
+    let ui = Lines::default();
+    let report = drain::drain(&steps, work_everything(), &ui).unwrap();
+    assert_eq!(report.failed_item, None);
+    assert_ne!(report.stop, Stop::RepeatedFailure);
+    assert_eq!(fx.head(), head, "nothing was read or run");
+    let lines = ui.0.lock().unwrap().clone();
+    let passed: Vec<&String> = lines
+        .iter()
+        .filter(|l| {
+            l.starts_with(&format!(
+                "plan       {again} passed over: line {job} is paused"
+            ))
+        })
+        .collect();
+    assert_eq!(passed.len(), 1, "{lines:?}");
+    assert!(passed[0].contains("To lift it:"), "{}", passed[0]);
+}
+
+#[test]
+fn drain_real_steps_do_not_hold_an_item_for_a_stored_pause_that_no_longer_holds() {
+    use athena_core::scope_guard::{LineMark, flag_path, pause_path};
+    // Two rejections of different criteria: the line is flagged, and the scope guard writes no pause.
+    let (_fx, athena, job) = rejected_twice(rejecting_verdict(), rejecting_second_criterion());
+    assert!(!pause_path(&athena.state, &job).exists());
+    let flag: LineMark =
+        serde_json::from_slice(&std::fs::read(flag_path(&athena.state, &job)).unwrap()).unwrap();
+    // A pause an earlier rule wrote for the line: the file is there, but the records no longer reach a pause.
+    let stale = LineMark {
+        level: "pause".into(),
+        ..flag
+    };
+    let file = pause_path(&athena.state, &job);
+    std::fs::write(&file, serde_json::to_vec_pretty(&stale).unwrap()).unwrap();
+    assert!(file.exists());
+    let lander = RecordingLander::default();
+    let steps = real_steps_with(&athena, &lander, &Quiet);
+    assert_eq!(
+        steps.paused(std::slice::from_ref(&job)),
+        [],
+        "the file exists, but `line_pause` does not report it"
+    );
+    let report = drain::plan(&steps, 5.0, &Quiet).unwrap();
+    assert!(
+        report
+            .plan
+            .refused
+            .iter()
+            .all(|r| !r.reason.contains("paused")),
+        "{:?}",
+        report.plan.refused
+    );
 }
 
 /// A scenario whose job adds a study (a pin, claims and an intro), so its landing changes what the explainer

@@ -1,0 +1,178 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-184832-4gah",
+  "n": 1,
+  "at": "2026-11-02T02:39:50.207394936Z",
+  "invocation_seq": 2,
+  "base_commit": "620c6577c0e97b5d969dd6e26fe01263aebe3c3b",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Pass over queued items on a paused line instead of failing them",
+  "summary": "`athena drain` passes over a queued item whose line the scope guard has paused (before reading it), prints one line naming the line and how to lift the pause, and runs the next item without counting a failure. `athena plan` lists such items as held with the same reason. The audience is whoever runs drains; it is the follow-up to job 20261030-060751-5389, whose work is unrelated and dropped.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New drain and plan tests; fmt, clippy -D warnings and test pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "The paused line is stopped before it is read and counted as a non-failure end, rather than hiding the failure in the stop rule."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests that check reads, printed lines, failure counts and the next item running."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is that a drain no longer stops on a paused line and does other work."
+    },
+    {
+      "id": "verified",
+      "how": "Criteria name commands the verifier can run."
+    },
+    {
+      "id": "mechanism",
+      "how": "Enforced in code and tests, not prose."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in drain and plan."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-cli/src/drain.rs: `Drain::attempts` (about line 1642) runs `run_job`, and a paused line reaches it as a not-attempted result that `failures += 1` counts toward `ATTEMPTS`, so `ItemEnd::Failed` and `Stop::RepeatedFailure` follow. `ItemEnd::Held` and `ItemEnd::Skipped` are the existing non-failure ends, and `pass_over` (about line 2214) prints the one-line notes. `plan(steps, ...)` at about line 2748 builds `PlanReport`. crates/athena-core/src/scope_guard.rs: `Athena::line_pause(records, job_id)` returns the `LineMark` while the pause still holds, `pause_refusal` gives the text with the lift instruction and pause file, and `pause_path` gives the file. No record or data file is added under crates/, so `check_record_file`, `AnyRecord` and the round-trip test are not touched. The property is measured directly: the number of `read` calls and failure counts on a fake `Steps`, and the printed notes, in crates/athena-cli/tests/drain.rs and the drain tests module.",
+    "Job 20261030-060751-5389 is a failed root-cause job on reading references. Its deliverables (reading.rs, CHANGELOG.md, docs/decisions.md) concern a different cause. Its work is dropped, not kept: this change does not touch reading.rs or docs/decisions.md, and it has no candidate files to keep. Its findings (Part 3 false positives, symbol-shape rule, crate-relative paths) do not apply to this request. The two jobs only share the paused line.",
+    "The pause check is a new Steps method, or an extension of an existing one, that the real implementation backs with `line_pause`. The fake Steps used in tests lets a test mark a line paused.",
+    "The passed-over item ends as a new non-failure ItemEnd, or the existing Held/Skipped path. The drain's final report lists it as passed over, with the same reason shown for `athena plan`.",
+    "This adds no new refusal of readings, so no newly-refused-readings percentage applies. It removes a failure count; the drain still stops on a real repeated failure of any other item."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-cli drain`. A new drain test queues an item on a line with a pause file, then a second ordinary item. It asserts that the paused item is not read (zero read calls for it), that exactly one printed line names the line and how to lift the pause, that no failure is counted and the stop is not `repeated-failure`, and that the next item runs and lands.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli drain`. A new drain test queues the same paused-line item three times, followed by an ordinary item. It asserts that the drain does not stop on repeated failure and that the ordinary item still runs.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli plan`. A new plan test with a pause file for a line shows its queued item listed as held, with the pause reason and lift instruction from `pause_refusal`. The same test shows a queued item on an unpaused line is not listed as held.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry that says drain passes over items on a paused line, prints one line, does not count them as failures, and plan lists them as held.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`. All pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A stale pause (one `line_pause` no longer reports) does not hold an item. Pass-over uses `Athena::line_pause`, not just the existence of the pause file, as shown by the diff in the real Steps implementation.",
+      "kind": "content"
+    },
+    {
+      "text": "Job 20261030-060751-5389's candidate files and deliverables (reading.rs, docs/decisions.md) are unchanged in the diff.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing crates/athena-core/src/reading.rs or the reading-reference check of job 20261030-060751-5389; that job's work is dropped",
+    "Changing how the scope guard decides to pause or lift a line",
+    "Changing athena.toml, defaults.toml, or planner and critic prompts",
+    "Changing how `athena go` or other commands handle a paused line"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.65,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.6
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7193717277486912,
+      "p_verification_passes": 0.6750700280112045,
+      "p_user_intervenes": 0.09569620253164557,
+      "cost_usd": {
+        "p10": 0.554002713038285,
+        "p50": 1.2991123999999998,
+        "p90": 3.5886781980848683
+      },
+      "wall_time_s": {
+        "p10": 541.9690476993549,
+        "p50": 1832.3181987494588,
+        "p90": 4001.0140550086467
+      }
+    }
+  },
+  "departures": "Slightly higher cost and time than the reference: the change touches both the drain loop and plan, and needs fake-Steps tests.",
+  "urgent_reason": "Cuts wasted time: three drains stopped on a paused line's items, each stopping before any other work ran.",
+  "hard_reason": "Changes the drain pipeline and its repeated-failure stop rule, so a mistake could hide real failures or stall work.",
+  "producer_effort": "high"
+}

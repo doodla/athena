@@ -1,0 +1,182 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-184832-4gah",
+  "round": 1,
+  "at": "2026-11-02T02:42:49.932082774Z",
+  "invocation_seq": 3,
+  "approach": "The fault is that the drain reads a queued item before asking whether its line is paused. The read/go call refuses it with the pause text (reading.rs and run/mod.rs call `line_pause`), so it comes back as a failed attempt. Two failed attempts hit `ATTEMPTS` and stop the drain with `RepeatedFailure`. Fix it in athena-cli only. Add a defaulted `Steps::paused(&[String]) -> Vec<(job, refusal text)>`. `RealSteps` backs it with one `Records` load, `Athena::line_pause` (so a stale pause holds nothing) and `Athena::pause_refusal` (line, reason, lift step, pause file). In `Drain::prepare`, ask once for all queued items. A paused item is not read to fill its plan and is kept out of the plan's entries. It is added to `plan.refused` as `Refusal::held(id, title, reason)`, with `missing` empty. `display::plan` already prints such a refusal as `held        id · title: reason`, and `sweep` already prints one `plan       <id> passed over: <reason>` line for it, so `athena plan` and `drain` share the reason. `batches_for` also skips no-entry items that are in `plan.refused`. As a second guard, `Drain::attempts` asks `paused` for the item before each `run_job`. This covers a line paused by the item's own first failed attempt. It returns a new non-failure `ItemEnd::Paused(reason)`, which `finish` passes over without `set_stop`. Neither path calls `read`, and neither adds to `failures`. No scope_guard, reading, display, main, planning or decisions change is needed.",
+  "decisions": [
+    {
+      "choice": "New defaulted Steps method `paused(&[String]) -> Vec<(String, String)>`; RealSteps loads Records once and returns `pause_refusal(line_pause(..))` text. Default returns nothing.",
+      "reason": "The drain is tested against fake Steps, so the pause check must be a seam. The real side reuses `Athena::line_pause`, so a stale pause holds nothing (criterion 6). One records load serves a whole queue.",
+      "rejected": [
+        {
+          "option": "Check the pause file's existence in the drain",
+          "why": "A pause file can be stale; `line_pause` recomputes the signals. The drain would also read state files directly."
+        },
+        {
+          "option": "One `line_pause` call per item",
+          "why": "Loads the records once per item on every prepare, which runs before each wave."
+        }
+      ]
+    },
+    {
+      "choice": "Hold paused items in `Drain::prepare` through `Refusal::held`, so `athena plan` and `drain` share it.",
+      "reason": "`prepare` is the one pass both commands run. `Refusal::held` and the `held` line in `display::plan` already exist, so plan needs no display change. `sweep` prints the one passed-over line, and the final report lists the item under `refused`.",
+      "rejected": [
+        {
+          "option": "Filter only inside `plan()` in drain.rs",
+          "why": "The drain would still read these items to fill an underspecified plan, and would still plan them."
+        },
+        {
+          "option": "Carry paused refusals in `carry.forced`",
+          "why": "`forced` persists for the run. A lifted pause would stay held, and one paused later would be missed."
+        }
+      ]
+    },
+    {
+      "choice": "Keep a second guard in `attempts` and add `ItemEnd::Paused(String)`, which `finish` passes over with no stop and no failure.",
+      "reason": "A pause can start while the item is working: its first attempt fails, the watcher pauses the line, and the retry would be refused. Items with no plan entry also reach `attempts` without a prepare check. `Held` and `Skipped` take their reason from job lines, and none is pushed here, so a variant that carries its reason is simpler.",
+      "rejected": [
+        {
+          "option": "Reuse `ItemEnd::Held`",
+          "why": "Its `finish` text reads `last_reason`, which is a job line that does not exist for an unread item."
+        },
+        {
+          "option": "Make `RunStep::Failed` not count when the reason mentions 'paused'",
+          "why": "Matching error text hides the failure in the stop rule instead of passing the item over before it is read."
+        }
+      ]
+    },
+    {
+      "choice": "Leave scope_guard.rs, main.rs, display.rs, planning.rs and docs/decisions.md untouched, although the brief lists them as deliverables.",
+      "reason": "The work fits drain.rs plus tests plus the changelog, which suits one focused change. Criterion 7 says docs/decisions.md must stay unchanged, which conflicts with listing it as a deliverable. No scope_guard API is missing.",
+      "rejected": [
+        {
+          "option": "Add a decisions.md entry",
+          "why": "Contradicts criterion 7 and the out-of-scope text."
+        },
+        {
+          "option": "Add a `paused_lines` helper to scope_guard.rs",
+          "why": "`line_pause` plus `pause_refusal` are sufficient and tested."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Steps::paused` with a default. Implement it in `RealSteps` through `line_pause` and `pause_refusal`. Hold paused items in `Drain::prepare` (skip the fill-read, drop from entries, push `Refusal::held`). Make `batches_for` skip refused no-entry items. Add `ItemEnd::Paused` and the pause check in `attempts`. Pass it over in `finish`. Update the module doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add `paused`/`pause_on_run` to `Stub` with a `Steps::paused` override, a recording Ui, the drain and plan tests, and the RealSteps live/stale tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under [Unreleased] / Fixed.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In drain.rs add `Steps::paused(&self, jobs: &[String]) -> Vec<(String, String)>` with a default of `Vec::new()` and a doc comment. Add `ItemEnd::Paused(String)`.",
+    "In `Drain`, add a helper that returns the pause reason for one item through `self.steps.paused(&[item.job.clone()])`. In `attempts`, when `passed.is_none()` and after the `stop_requested` check, return `ItemEnd::Paused(reason)` before `run_job`. In `finish`, add `ItemEnd::Paused(reason) => self.pass_over(&item.job, &reason)`, with no `set_stop` and no failure.",
+    "In `RealSteps` implement `paused`: load `self.records()` once; for each job call `self.athena.line_pause(&records, job)` and map the mark to `self.athena.pause_refusal(&mark)`. Return an empty list when the records cannot be loaded.",
+    "In `Drain::prepare`, ask `steps.paused` for all `view.items` ids at the start. In the fill-read loop, `continue` for a paused id before the budget check, so the item is not read. Filter paused ids out of `entries`, and after `plan.refused.extend(forced)` append `Refusal::held(&id, &title, &reason)` for each paused item (title from the plan entry, else the item). Let `batches_for` skip no-entry items that are in `plan.refused`. Update the existing `batches_for` unit test only if its call signature changes.",
+    "In tests/drain.rs, add `paused: Vec<(&'static str, &'static str)>` and `pause_on_run: Option<(&'static str, &'static str)>` (a `RefCell` for the live set) to `Stub`, with a `Steps::paused` override that only returns what the test configured. Add a recording `Ui` (RefCell of lines). Write the tests of criteria 1, 2, 3 and 6: single paused item, three paused items before an ordinary one, mid-run pause, plan held and not-held, RealSteps live and stale. Name the plan tests with `plan` and the drain tests with `drain` so the two filters select them.",
+    "Add the CHANGELOG.md entry under [Unreleased] / Fixed.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Confirm that `git diff --stat` shows only the three files."
+  ],
+  "risks": [
+    {
+      "risk": "Adding a trait method could break other Steps impls.",
+      "mitigation": "`Steps::paused` is a trait method with a default of no pauses, so every other `Steps` impl and test fake compiles and behaves as before. Step 5 runs the whole suite."
+    },
+    {
+      "risk": "`prepare` runs before every wave and now loads records.",
+      "mitigation": "A single records load per `prepare` call, not per item. `paused` returns an empty list on a load error, which matches today's behavior, where the read itself reports the pause."
+    },
+    {
+      "risk": "If `line_pause` errs, a paused item is read and fails as before.",
+      "mitigation": "A failed `Records` load or a missing job returns nothing for that item, and a real pause is still refused by `go` and `retry` (unchanged). The guard only removes the failure count."
+    },
+    {
+      "risk": "The concurrent read-ahead pump may read a paused item that was paused mid-run.",
+      "mitigation": "The worker's `attempts` guard runs before `run_job`, and the read-ahead's result is dropped by the guard's early return. The cost is a read that dispatch refuses before any model call. The plan does not change the read-ahead."
+    },
+    {
+      "risk": "The same item could be passed over twice (once from `sweep`, once from `finish`) and print twice.",
+      "mitigation": "The tests count `read` and `run` entries in the stub's log and the recorded Ui lines, and compare the stop reason. `passed_over` dedupes by id, and a test asserts exactly one line per item."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test in crates/athena-cli/tests/drain.rs, named with `drain` in the name. It builds a `Stub` with `items: [a, b]`, `outcomes: passing()` and `paused: [(a, reason)]`. The reason holds the line id, the lift text and the pause file name. It calls `drain::drain(&stub, limits(9.0), &lines)`, where `lines` is a small recording `Ui` added to the test file. It asserts: no `read a` in `stub.log()`; exactly one recorded line contains the line id, the lift text and `a`; `report.stop` is not `Stop::RepeatedFailure` and `report.failed_item` is None; the log has `read b`, `run b` and `land b`; and the jobs list has no job line for `a`.",
+      "command": "cargo test -p athena-cli drain",
+      "observes": "The log shows no `read a`. One printed line names the line and how to lift the pause. The stop is `QueueEmpty` with no failed item. `b` is read, run and landed.",
+      "fails_without": "Without the pause check, `Stub::read` logs `read a`. The item ends as a failure after two attempts, `stop` is `RepeatedFailure`, and `b` never runs. All of those assertions fail.",
+      "seam": "Production entry point `drain::drain` (calls `Drain::prepare`, then `Drain::attempts`). Fixture is the existing `Stub` in tests/drain.rs. This plan's step 4 adds a `paused` field and a `Steps::paused` override to it, and step 1 adds the trait method with a default. The recording `Ui` is added by step 4."
+    },
+    {
+      "criterion": 2,
+      "method": "Two new tests in tests/drain.rs. (a) Three queued items a1, a2 and a3 are all on the paused line, then ordinary `c`. The stub pauses all three, and plan entries are present for each. Assert `report.stop` is not `RepeatedFailure`, `c` is read, run and landed, and each of a1, a2 and a3 has one printed line. (b) The mid-run case: `Stub` gets `pause_on_run: Option<(&str run_job, &str item)>`. Item `x` has no plan entry, and its first run is rejected. The stub then marks `x` paused, as the watcher would. Assert the second attempt is not made, so there is no `reread x` and no second `run x`. Also assert no `RepeatedFailure`, and that `c` runs.",
+      "command": "cargo test -p athena-cli drain",
+      "observes": "The drain does not stop on repeated failure with three paused items ahead of `c`. In the mid-run case it passes `x` over once, with no stop, and then runs `c`. The `x` case needs `ItemEnd::Paused`.",
+      "fails_without": "Without the guard, two or three paused items reach `attempts`, each ends `Failed`, and the first one stops the drain with `RepeatedFailure`, so `read c` and `run c` never occur.",
+      "seam": "`drain::drain`. `Stub` fields `paused` and `pause_on_run` are added by step 4 and set the answer of `Steps::paused`. The method on the trait is added by step 1. Production code decides what to do with the answer."
+    },
+    {
+      "criterion": 3,
+      "method": "New tests in tests/drain.rs with `plan` in the name. (a) A `Stub` with plan entries for paused `a` and ordinary `b`, and `paused: [(a, reason)]`. Call `drain::plan(&stub, 5.0, &Quiet)`. Assert `a` is in `report.plan.refused` with `missing` empty and the reason equal to the stub's text, that `a` is not in `report.plan.order`, and that `b` is in the order and not refused. Assert `display::plan(&report)` contains `held        a · title of a: <reason>` and no `held` line for `b`. Assert `stub.log()` has no `read a`. (b) A `RealSteps` test: with `athena.pause_refusal(&mark)` as the expected text, `steps.paused(&[job])` equals `[(job, that text)]`, and `drain::plan` through `RealSteps` lists the item as held with that text. If no natural pause can be scripted, see open question 1.",
+      "command": "cargo test -p athena-cli plan",
+      "observes": "The item is listed as `held` with the pause reason and the lift instruction. The item on an unpaused line is planned and not listed as held.",
+      "fails_without": "Without the hold in `prepare`, `a` stays in `plan.order` and in the groups, and `plan.refused` is empty. The `held` line is absent and the assertion fails.",
+      "seam": "`drain::plan(&dyn Steps, f64, &dyn Ui)` and `display::plan`. Fake is `Stub` with `paused` (step 4). The real-world test uses the existing `RealSteps` with the existing `Fixture` and `Scenario` in tests/common."
+    },
+    {
+      "criterion": 4,
+      "method": "Add a bullet under `## [Unreleased]`, `### Fixed` in CHANGELOG.md. It says: `athena drain` passes over a queued item whose line the scope guard has paused, before it is read, and prints one line naming the line and how to lift the pause. The item is not counted as a failed attempt, so it no longer ends the drain with `repeated failure`. `athena plan` lists such items as `held` with the same reason. Read the diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The entry is present and mentions all four points: pass over, one printed line, not a failure, and `plan` lists them as held.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three commands. Existing tests that call `batches_for`, `Steps` fakes or `finish` keep compiling, because `paused` has a default and `ItemEnd` has one new variant.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "A clippy warning (for example an unused `ItemEnd` variant field) or any test regression fails this.",
+      "seam": "Existing check commands; no new seam."
+    },
+    {
+      "criterion": 6,
+      "method": "New `RealSteps` test in tests/drain.rs (`drain` in the name). Write a pause file at `athena_core::scope_guard::pause_path(&athena.state, first)` by serializing a `LineMark` with `level: pause` for a line whose attempts do not reach a pause. Assert `steps.paused(&[job])` is empty. Also read the diff of `RealSteps::paused` in drain.rs: it calls `self.athena.line_pause(&records, job)` and `self.athena.pause_refusal(&mark)`, and does not call `Path::exists`.",
+      "command": "cargo test -p athena-cli drain",
+      "observes": "The existing but stale pause file holds nothing. The code calls `line_pause`.",
+      "fails_without": "If `RealSteps::paused` only tested that the pause file exists, the stale-pause assertion would return a reason and fail.",
+      "seam": "`RealSteps::paused` (added by step 3), run with the existing `Fixture`/`Scenario` and the public `LineMark` and `pause_path`."
+    },
+    {
+      "criterion": 7,
+      "method": "Run it and list the changed paths. Only crates/athena-cli/src/drain.rs, crates/athena-cli/tests/drain.rs and CHANGELOG.md should appear. crates/athena-core/src/reading.rs and docs/decisions.md must not.",
+      "command": "git diff --stat",
+      "observes": "Neither file appears in the diff.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Can the RealSteps test script a natural pause (two rejections on one criterion, as `t4_pause_via_go_and_ask` in scope_guard.rs does) with `Scenario` in tests/common? If not, the live-pause check stays in the Stub test and only the stale-pause test uses RealSteps; the producer should say which it did.",
+    "The brief lists main.rs, display.rs, planning.rs, scope_guard.rs and docs/decisions.md as expected deliverables, but this plan touches none of them. docs/decisions.md is also named in criterion 7 as unchanged. Confirm that is intended.",
+    "`Plan::build_with` treats a dependency on an id missing from the entries as done. A dependent of a paused item may therefore be planned. Forced refusals behave the same way today. Should dependents of a paused item be held too?"
+  ],
+  "producer_section_sha256": "46abfb74c2af3e17038f8156f4928a3f39ad65b21e3950e790f42dc2e0236e79"
+}
