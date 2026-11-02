@@ -3,8 +3,15 @@
 //!
 //! The unit of sharding is a workspace test target: each library, binary and integration-test file, plus one
 //! `--doc` unit per library with doctests. `cargo metadata` lists them, the list is sorted by
-//! (package, selector), and unit `i` belongs to shard `i % n`. Shards are numbered from 0, so `k` is in `0..n`.
-//! The `n` shards together run exactly what `cargo test --workspace` runs.
+//! (package, selector). Shards are numbered from 0, so `k` is in `0..n`. The `n` shards together run exactly
+//! what `cargo test --workspace` runs.
+//!
+//! Balance: `xtask/shard-timings.txt` records how many seconds each unit takes. Timed units are sorted longest
+//! first and each goes to the shard with the least total so far, so the slowest shard stays near the mean.
+//! A unit with no recorded time (a new test file, say) falls back to the sorted-position rule: among the
+//! untimed units, the one at position `i` goes to shard `i % n`. Either way each unit is in exactly one shard.
+//! After adding or reshaping tests, refresh the file with `cargo run -p xtask -- shard-timings` (it runs every
+//! unit, so it takes about as long as the whole suite) and commit the result.
 //!
 //! Buy-first call (docs/conventions): `cargo metadata` and `cargo test` already meet the need, so no sharding
 //! tool is added. `cargo-nextest` was rejected: it is a new pinned tool and changes how doctests run.
@@ -16,11 +23,15 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
+use std::time::Instant;
 
 pub const USAGE: &str = "cargo run -p xtask -- test-shard <k> <n> [--dry-run]\n       \
-     runs shard k (0-based, k < n) of n of the workspace's test targets; --dry-run only lists them";
+     runs shard k (0-based, k < n) of n of the workspace's test targets, balanced by xtask/shard-timings.txt; --dry-run only lists them\n       \
+     cargo run -p xtask -- shard-timings\n       \
+     runs every test unit once and rewrites xtask/shard-timings.txt with the measured seconds";
 
 /// One slice of `cargo test --workspace`: a package and the cargo selector for one of its test targets.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -95,14 +106,166 @@ pub fn plan_units(metadata: &Value) -> Result<Vec<Unit>> {
     Ok(units)
 }
 
-/// The units of shard `k` of `n`: those at sorted position `i` with `i % n == k`.
-pub fn select(units: &[Unit], k: u32, n: u32) -> Vec<Unit> {
-    units
+/// Recorded seconds per unit, keyed by `Unit::line()`.
+pub type Timings = BTreeMap<String, f64>;
+
+/// Where the recorded timings live, relative to the repository root.
+pub const TIMINGS_FILE: &str = "xtask/shard-timings.txt";
+
+/// Parses the timings file: one `<package> <selector> <seconds>` line per unit (the unit's `--dry-run` line,
+/// then its duration). Blank lines and lines starting with `#` are skipped. A malformed line is an error that
+/// names the line number and its text.
+pub fn parse_timings(text: &str) -> Result<Timings> {
+    let mut timings = Timings::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let bad = |why: &str| {
+            anyhow!(
+                "{TIMINGS_FILE} line {}: {why}: {raw:?} (expected `<package> <selector> <seconds>`)",
+                i + 1
+            )
+        };
+        let (unit, seconds) = line
+            .rsplit_once(char::is_whitespace)
+            .ok_or_else(|| bad("no duration"))?;
+        let seconds: f64 = seconds
+            .parse()
+            .map_err(|_| bad("the duration is not a number"))?;
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err(bad("the duration must be a finite number of seconds >= 0"));
+        }
+        let key = unit.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !key.contains(' ') {
+            return Err(bad("no selector"));
+        }
+        if timings.insert(key, seconds).is_some() {
+            return Err(bad("the unit appears twice"));
+        }
+    }
+    Ok(timings)
+}
+
+/// Splits `units` into `n` shards. Units with a recorded timing are sorted by descending duration (ties by unit
+/// order) and each goes to the shard with the least total so far (ties to the lowest shard). Units with no
+/// timing keep the old rule: sorted among themselves, the one at position `i` goes to shard `i % n`. Every unit
+/// lands in exactly one shard; the result depends only on the inputs.
+pub fn assign(units: &[Unit], timings: &Timings, n: u32) -> Vec<Vec<Unit>> {
+    let n = n as usize;
+    let mut shards: Vec<Vec<Unit>> = vec![Vec::new(); n];
+    let mut load = vec![0.0f64; n];
+    let (mut timed, mut untimed): (Vec<&Unit>, Vec<&Unit>) = units
         .iter()
-        .enumerate()
-        .filter(|(i, _)| (*i as u64) % u64::from(n) == u64::from(k))
-        .map(|(_, unit)| unit.clone())
-        .collect()
+        .partition(|unit| timings.contains_key(&unit.line()));
+    untimed.sort();
+    for (i, unit) in untimed.into_iter().enumerate() {
+        shards[i % n].push(unit.clone());
+    }
+    timed.sort_by(|a, b| {
+        timings[&b.line()]
+            .total_cmp(&timings[&a.line()])
+            .then_with(|| a.cmp(b))
+    });
+    for unit in timed {
+        let lightest = (0..n)
+            .min_by(|a, b| load[*a].total_cmp(&load[*b]).then(a.cmp(b)))
+            .expect("n is at least 1");
+        load[lightest] += timings[&unit.line()];
+        shards[lightest].push(unit.clone());
+    }
+    for shard in &mut shards {
+        shard.sort();
+    }
+    shards
+}
+
+/// The units of shard `k` of `n`, sorted.
+pub fn select(units: &[Unit], timings: &Timings, k: u32, n: u32) -> Vec<Unit> {
+    assign(units, timings, n).swap_remove(k as usize)
+}
+
+/// The timings file text for `timings`, with a header that says how to refresh it.
+pub fn render_timings(timings: &Timings) -> String {
+    let mut out = String::from(
+        "# Seconds one `cargo test` run of each workspace test unit takes, used by `test-shard` to balance shards.\n\
+         # Line format: <package> <selector> <seconds>. A unit missing here is still sharded, by sorted position.\n\
+         # Refresh from a local run with: cargo run -p xtask -- shard-timings\n",
+    );
+    for (unit, seconds) in timings {
+        out.push_str(&format!("{unit} {seconds:.2}\n"));
+    }
+    out
+}
+
+/// Reads the timings file under `root`; a missing file means no timings, so every unit falls back.
+fn load_timings(root: &Path) -> Result<Timings> {
+    match std::fs::read_to_string(root.join(TIMINGS_FILE)) {
+        Ok(text) => parse_timings(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Timings::new()),
+        Err(e) => Err(e).with_context(|| format!("could not read {TIMINGS_FILE}")),
+    }
+}
+
+fn workspace_units(root: &Path) -> Result<Vec<Unit>> {
+    let out = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
+        .current_dir(root)
+        .output()
+        .context("could not run cargo metadata")?;
+    if !out.status.success() {
+        bail!(
+            "cargo metadata failed with {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let metadata: Value =
+        serde_json::from_slice(&out.stdout).context("cargo metadata did not print JSON")?;
+    plan_units(&metadata)
+}
+
+/// `shard-timings`: builds every test target, runs each unit alone, and rewrites the timings file with the
+/// wall time of each run. Run it on a quiet machine. The file is written even if some units fail (the command then
+/// exits with an error naming them), so a red unit never leaves the file short of a unit.
+pub fn timings_command(root: &Path) -> Result<()> {
+    let units = workspace_units(root)?;
+    crate::step("shard-timings: building every test target");
+    crate::run(
+        Command::new("cargo")
+            .args(["test", "--locked", "--workspace", "--no-run"])
+            .current_dir(root),
+    )?;
+    let mut timings = Timings::new();
+    let mut failed = Vec::new();
+    for unit in &units {
+        crate::step(&format!("shard-timings: {}", unit.line()));
+        let start = Instant::now();
+        let status = Command::new("cargo")
+            .args(["test", "--locked", "-p", &unit.package])
+            .args(unit.selector.split_whitespace())
+            .current_dir(root)
+            .status()
+            .context("could not run cargo test")?;
+        if !status.success() {
+            failed.push(unit.line());
+        }
+        timings.insert(unit.line(), start.elapsed().as_secs_f64());
+    }
+    std::fs::write(root.join(TIMINGS_FILE), render_timings(&timings))
+        .with_context(|| format!("could not write {TIMINGS_FILE}"))?;
+    println!("\nwrote {} timings to {TIMINGS_FILE}", timings.len());
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        // The times are still written: a failing unit's time is a fair guide, and the file must name every unit.
+        bail!(
+            "{} units failed, so their times may be too short: {}",
+            failed.len(),
+            failed.join("; ")
+        )
+    }
 }
 
 /// The parsed command line.
@@ -137,21 +300,8 @@ pub fn parse_args(args: &[String]) -> Result<Args> {
 /// `test-shard <k> <n> [--dry-run]`.
 pub fn command(args: &[String], root: &Path) -> Result<()> {
     let Args { k, n, dry_run } = parse_args(args)?;
-    let out = Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
-        .current_dir(root)
-        .output()
-        .context("could not run cargo metadata")?;
-    if !out.status.success() {
-        bail!(
-            "cargo metadata failed with {}: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let metadata: Value =
-        serde_json::from_slice(&out.stdout).context("cargo metadata did not print JSON")?;
-    let chosen = select(&plan_units(&metadata)?, k, n);
+    let timings = load_timings(root)?;
+    let chosen = select(&workspace_units(root)?, &timings, k, n);
     if dry_run {
         for unit in &chosen {
             println!("{}", unit.line());
@@ -239,13 +389,17 @@ mod tests {
         assert!(plan_units(&json!({})).is_err());
     }
 
+    fn no_timings() -> Timings {
+        Timings::new()
+    }
+
     #[test]
     fn select_is_disjoint_and_complete_for_any_n() {
         let units = plan_units(&fixture()).unwrap();
         for n in [1u32, 2, 3, 5, 6, 9] {
             let mut seen: Vec<Unit> = Vec::new();
             for k in 0..n {
-                seen.extend(select(&units, k, n));
+                seen.extend(select(&units, &no_timings(), k, n));
             }
             assert_eq!(seen.len(), units.len(), "n={n}: no unit twice");
             seen.sort();
@@ -254,9 +408,121 @@ mod tests {
     }
 
     #[test]
+    fn without_timings_the_split_is_the_sorted_position_rule() {
+        let units = plan_units(&fixture()).unwrap();
+        let shard1 = select(&units, &no_timings(), 1, 2);
+        assert_eq!(lines(&shard1), ["b-pkg --bin bee", "b-pkg --lib"]);
+    }
+
+    #[test]
     fn more_shards_than_units_leaves_some_shards_empty() {
         let units = plan_units(&fixture()).unwrap();
-        assert!(select(&units, 7, 9).is_empty());
+        assert!(select(&units, &no_timings(), 7, 9).is_empty());
+    }
+
+    /// 40 units with uneven fixture durations: a few long ones and a tail of short ones.
+    fn many_units() -> (Vec<Unit>, Timings) {
+        let mut units = Vec::new();
+        let mut timings = Timings::new();
+        for i in 0..40u32 {
+            let unit = Unit {
+                package: format!("pkg{:02}", i / 4),
+                selector: format!("--test t{i:02}"),
+            };
+            let seconds = match i % 10 {
+                0 => 300.0,
+                1 => 120.0,
+                2 | 3 => 60.0,
+                4..=6 => 20.0,
+                _ => 5.0,
+            } + f64::from(i);
+            timings.insert(unit.line(), seconds);
+            units.push(unit);
+        }
+        units.sort();
+        (units, timings)
+    }
+
+    #[test]
+    fn timed_shards_are_balanced_and_partition_the_units() {
+        let (units, timings) = many_units();
+        let n = 6u32;
+        let mut seen = Vec::new();
+        let mut totals = Vec::new();
+        for k in 0..n {
+            let shard = select(&units, &timings, k, n);
+            totals.push(shard.iter().map(|u| timings[&u.line()]).sum::<f64>());
+            seen.extend(shard);
+        }
+        assert_eq!(seen.len(), units.len(), "no unit twice");
+        seen.sort();
+        assert_eq!(seen, units, "no unit missing");
+        let mean = totals.iter().sum::<f64>() / f64::from(n);
+        let largest = totals.iter().cloned().fold(0.0, f64::max);
+        assert!(
+            largest <= 1.25 * mean,
+            "largest {largest} vs mean {mean}: {totals:?}"
+        );
+    }
+
+    #[test]
+    fn the_longest_unit_goes_first_to_the_lowest_shard() {
+        let (units, timings) = many_units();
+        let longest = units
+            .iter()
+            .max_by(|a, b| timings[&a.line()].total_cmp(&timings[&b.line()]))
+            .unwrap();
+        assert!(select(&units, &timings, 0, 6).contains(longest));
+    }
+
+    #[test]
+    fn a_unit_with_no_timing_is_still_assigned_exactly_once() {
+        let (mut units, timings) = many_units();
+        let extra = Unit {
+            package: "new-pkg".into(),
+            selector: "--test brand_new".into(),
+        };
+        units.push(extra.clone());
+        units.sort();
+        let shards = assign(&units, &timings, 6);
+        let holding = shards.iter().filter(|s| s.contains(&extra)).count();
+        assert_eq!(holding, 1);
+        let mut all: Vec<Unit> = shards.into_iter().flatten().collect();
+        all.sort();
+        assert_eq!(all, units, "every unit is covered once");
+    }
+
+    #[test]
+    fn assignment_is_deterministic() {
+        let (units, timings) = many_units();
+        assert_eq!(assign(&units, &timings, 6), assign(&units, &timings, 6));
+    }
+
+    #[test]
+    fn timings_parse_and_round_trip() {
+        let text = "# note\n\nxtask --test ci_shards 12.5\nathena-cli --bin athena 0.25\n";
+        let timings = parse_timings(text).unwrap();
+        assert_eq!(timings["xtask --test ci_shards"], 12.5);
+        assert_eq!(timings["athena-cli --bin athena"], 0.25);
+        assert_eq!(parse_timings(&render_timings(&timings)).unwrap(), timings);
+    }
+
+    #[test]
+    fn a_malformed_timings_line_is_an_error_naming_the_line() {
+        for bad in [
+            "xtask --lib\n",
+            "xtask --lib fast\n",
+            "xtask --lib -3\n",
+            "xtask --lib NaN\n",
+            "lonely 4\n",
+            "justone\n",
+            "xtask --lib 1\nxtask --lib 2\n",
+        ] {
+            let err = parse_timings(bad).unwrap_err().to_string();
+            assert!(err.contains("shard-timings.txt line"), "{bad:?}: {err}");
+        }
+        let err = parse_timings("# ok\nxtask --lib x\n").unwrap_err();
+        assert!(err.to_string().contains("line 2"), "{err}");
     }
 
     #[test]

@@ -4,7 +4,9 @@
 //!   Every step is idempotent. `./setup.sh` installs rustup if needed and then runs this.
 //! - `cargo run -p xtask -- ci`: fmt, clippy and tests in sequence, runnable locally. CI itself runs them as
 //!   parallel jobs (see `.github/workflows/ci.yml`), the tests split by `test-shard`.
-//! - `cargo run -p xtask -- test-shard <k> <n>`: one of `n` disjoint slices of the workspace's tests (see `shard`).
+//! - `cargo run -p xtask -- test-shard <k> <n>`: one of `n` disjoint slices of the workspace's tests (see `shard`),
+//!   balanced by the recorded seconds in `xtask/shard-timings.txt`.
+//! - `cargo run -p xtask -- shard-timings`: runs every test unit and rewrites that timings file.
 //! - `cargo run -p xtask -- walltime`: wall time per verified result from the job records.
 //! - `cargo run -p xtask -- fingerprint` and `ci-cache`: let the CI gate job reuse an earlier pass for
 //!   unchanged governed content (see `ci_cache`).
@@ -33,6 +35,7 @@ fn main() -> ExitCode {
         Some("setup") => setup(&Flags::parse(&args[1..])),
         Some("ci") => ci(),
         Some("test-shard") => shard::command(&args[1..], &repo_root()),
+        Some("shard-timings") => shard::timings_command(&repo_root()),
         Some("site") => site_command(&args[1..]),
         Some("walltime") => walltime::command(&args[1..], &repo_root()),
         Some("fingerprint") => ci_cache::fingerprint_command(),

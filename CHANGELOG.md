@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `xtask test-shard` now balances the CI test shards by recorded time instead of file count. The checked-in
+  `xtask/shard-timings.txt` holds the seconds each test unit takes (`<package> <selector> <seconds>` per line);
+  units are sorted longest first and each goes to the shard with the least total so far. A unit with no
+  recorded time still gets a shard by the old sorted-position rule, so every unit runs in exactly one shard.
+  `cargo run -p xtask -- shard-timings` runs every unit locally and rewrites the file; run it after adding or
+  reshaping test targets. Reason: in GitHub run 41221582236 shard 4 tested for 5m51s and shard 0 for 46s, so the
+  slowest shard set a 9-minute run when an even split is about 2.6 minutes of tests.
+
 - Hestia's requests are capped at high, so urgent orders the queue for the person running Athena again. The
   error review backfill (`athena hestia review --backfill`) made its five top-ranked causes urgent on every run,
   and each new root-cause request was queued urgent; on 2026-10-31 the queue held 13 urgent and 14 high items.
