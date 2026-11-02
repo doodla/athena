@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The ontology test compares each term in `docs/ontology.toml` with the sources that govern it (D152). Root cause:
+  content was checked for structure, not against sources (job 20261017-173508-0wtc seeded it, and job
+  20261025-214509-y179 asked for the check), and the check added in job 20261027-054251-33v7 had an unbounded
+  file-wide excuse, so it was met by excusing and read nothing for six of seven terms. Now every term lists
+  `senses` (a source file, a whole-word marker found on a line naming the term, and a phrase its definition must
+  hold); a stale marker, a missing phrase or a term with no checked claim fails; and every line where a source
+  defines the term or gives it a role must be covered by a sense, so Hermes with only the tool sense fails against
+  the pantheon row. An optional excuse needs one file, a marker and a reason, and is flagged when stale or covering
+  more than two lines; the file has none. Alternatives rejected: a prose-only rule, and a measure-first stage. The
+  check lives in the ontology test so it runs on every change. Corrected definitions: `planning` (job planning is
+  built, turned off by its rule (D135), and runs for hard jobs only (D143)), `Athena` (also the third studied
+  instance), `landed` (`merged-unverified`, and identified from records), and `Sri` (owns the requirements).
 - CI caches what its setup step installs, so a warm runner restores instead of reinstalling. Two new
   `actions/cache` entries are restored before `./setup.sh --ci` in every job that runs it: gitleaks, keyed on
   runner OS, architecture and `hashFiles('athena.toml')` (the pin lives there); and the athena binary, keyed on

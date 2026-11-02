@@ -1,0 +1,212 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261102-121640-efaa",
+  "round": 1,
+  "at": "2026-11-02T12:21:55.326294744Z",
+  "invocation_seq": 2,
+  "approach": "Add a claim check to crates/athena-cli/tests/ontology.rs and the optional fields it reads to docs/ontology.toml. For each term the test scans BRIEF.md and the term's file sources for lines that name the term (or an alias), whole word only. Each term lists `senses`: a source file, a whole-phrase `marker` that must occur on a line naming the term, and a `says` phrase that must occur in the definition. The test flags a definition missing a sense's `says`, a sense whose marker finds no line (stale), and a term with no checked sense. It also flags every 'identifying' line (the term or alias opens a bullet, heading or table row, followed by `:` or `|`) that no sense marker and no excuse covers. This is how a Hermes entry that names only the tool fails while BRIEF.md:597 names the Orchestration role. Excuses are optional, per marker, and need exactly one file, a marker and a reason. An excuse is flagged when it matches no line (stale) or too many lines. Excuses are never file-wide. The real file gets senses for all seven terms and no excuses. Definitions that disagree with their sources are corrected: planning is built and runs for hard jobs only (job-planning.md, D135, D143); Athena also names the studied instance; landed adds merged-unverified and identified from records. D152 in docs/decisions.md and a CHANGELOG entry record the root cause.",
+  "decisions": [
+    {
+      "choice": "A claim is a sense: {in, marker, says}. The marker is a whole-phrase match on a line that names the term or an alias in BRIEF.md or one of the term's file sources, and `says` must be in the definition. The check is generic over all terms.",
+      "reason": "It compares each definition with the source line behind it, and an altered definition or missing sense changes the result. Terms with 100+ hit lines (Athena has 132 in BRIEF.md) stay tractable because markers are needed only where the next decision requires them.",
+      "rejected": [
+        {
+          "option": "Classify every hit line of every term",
+          "why": "Athena has 132 hit lines in BRIEF.md, and the five design docs have about 440 hits for these terms. That would force broad markers or blanket excuses, which is the failure that got job 20261027-054251-33v7 rejected."
+        },
+        {
+          "option": "Check only that markers exist, with no line-coverage rule",
+          "why": "A tool-only Hermes entry would pass while the source names a role, so criterion 3's Hermes case could not fail."
+        }
+      ]
+    },
+    {
+      "choice": "Coverage is required for 'identifying' lines only: the term or alias opens the bullet, heading or table row and is followed by `:` or `|`. If the line ends with `:`, the next line is added to its context. Grep of the five docs and BRIEF.md found only BRIEF.md 11, 367, 411, 596 and 597 (plus job: in native-pr-landing.md:148, which is not a job source). Those are where a source defines or assigns a role, as in the pantheon table.",
+      "reason": "These lines define the term, so a sense missed there is the Hermes class of fault. The set is small enough that the real file covers every one with a sense and no excuse.",
+      "rejected": [
+        {
+          "option": "Treat any line with a gloss word (`is`, `(`) as identifying",
+          "why": "A trial grep matched hundreds of ordinary lines."
+        }
+      ]
+    },
+    {
+      "choice": "Excuses are optional, `{files = [one file], marker, reason}`. The test flags an excuse that has an empty marker, an empty reason, or a files list that is not exactly one entry. It also flags an excuse that covers no identifying line (stale), covers more than MAX_EXCUSED_LINES (2) lines, or whose marker is only the term name. The real file ships with none.",
+      "reason": "This answers the rejection: no source-wide or marker-less excuse exists, and BRIEF.md is excusable only per marker and reason.",
+      "rejected": [
+        {
+          "option": "File-wide `source-only` excuse",
+          "why": "It disabled the content check for 6 of 7 terms in the rejected job."
+        }
+      ]
+    },
+    {
+      "choice": "Markers and names match case-sensitively as whole words or phrases. A boundary is required only at the alphanumeric edges, so `Athena:` works. A name may take a trailing `s` or `'s` (`units (jobs)` hits `job`). A marker must contain text beyond the term name. Optional `aliases` are scanned like the name, and `product versus system` uses `Loop B` and `first product`.",
+      "reason": "Substring matching was the minor finding. The phrase `product versus system` never appears in the sources, so without aliases that term would have no checked claim.",
+      "rejected": [
+        {
+          "option": "Substring or regex markers",
+          "why": "Substring matching reads `cat` in `concatenate`, and regex adds a dependency and hides the sense."
+        }
+      ]
+    },
+    {
+      "choice": "Tests mutate the parsed `File` (remove a sense's `says` from the definition, drop a sense) and call a `claim_problems(&File, root)` function. They never use a hand-copied definition.",
+      "reason": "The production check sits between the test and the real data, and nothing in the test double contains the logic under test. The changed term is flagged by name and fails without the claim check.",
+      "rejected": [
+        {
+          "option": "Hard-coded altered strings per term",
+          "why": "They drift from the real file."
+        }
+      ]
+    },
+    {
+      "choice": "Fix definitions that really disagree: planning (job planning is not 'proposed, not built'; it ran, was turned off by its rule (D135) and now runs for hard jobs only (D143), per job-planning.md lines 273-293); Athena (add the studied-instance sense); landed (add merged-unverified and identified-from-records, from native-pr-landing.md lines 497 and 499). The decision lists them.",
+      "reason": "The goal is that seeded content stops contradicting its sources.",
+      "rejected": [
+        {
+          "option": "Excuse the disagreements",
+          "why": "This hides them."
+        }
+      ]
+    },
+    {
+      "choice": "The check lives in the ontology test, not in a prose rule or a measure-first stage.",
+      "reason": "It runs under `cargo test --locked` on every change and reads the real sources. D152 gives the root cause: content was checked for structure only, and an unbounded file-wide excuse let a check be met by excusing, as in jobs 20261017-173508-0wtc, 20261025-214509-y179 and 20261027-054251-33v7.",
+      "rejected": [
+        {
+          "option": "Prose-only rule in the ontology header",
+          "why": "No mechanism, and the defaults say to enforce by mechanism."
+        },
+        {
+          "option": "Measure-first stage (a stage that measures drift before the check exists)",
+          "why": "It is the speed-work direction of job 20261025-214509-y179, out of scope, and it adds a stage where a test suffices."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/tests/ontology.rs",
+      "action": "modify",
+      "purpose": "Add the optional `aliases`, `senses` and `excused` fields. Add the scan helpers and `claim_problems`. Extend `GOOD` and `scratch_root`. Add the real-file test and the unit tests for criteria 2-4. Describe the rule in the header.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/ontology.toml",
+      "action": "modify",
+      "purpose": "Document the optional fields in the header comment (and [about] if short). Add `senses` to all seven terms and `aliases` to `product versus system`. Correct the planning, Athena and landed definitions. No `excused` entries.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D152 at the end of the file: Case, Root cause (naming the three jobs), Decision, Alternatives, Tradeoff, and the list of corrected definitions.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add one bullet under `## [Unreleased]` → `### Changed` naming the cause, the three jobs, the check and the corrected definitions.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read BRIEF.md lines 11, 43, 275, 367, 411, 537, 596, 597, 1007-1009 and the lines named in the decisions, plus job-planning.md 273-293, native-pr-landing.md 497-499 and records.md 35. Confirm each marker below on the line it names.",
+    "In ontology.rs add serde-default fields: `Term.aliases: Vec<String>`, `Term.senses: Vec<Sense{in_file (rename \"in\"), marker, says}>`, `Term.excused: Vec<Excuse{files: Vec<String>, marker, reason}>` (all `#[serde(default)]`). Add `name_hits(line, name)`: whole word, optional trailing `s` or `'s`, case-sensitive. Add `phrase_in(text, phrase)` with word boundaries only at alphanumeric edges, and `is_identifying(line, name)`: strip leading `* # > - |`, digits, `.`, `)` and spaces; the name is followed by `**`, spaces, then `:` or `|`. Add a context helper (line plus next line when the line ends with `:`). Add `scanned_files(term)` (BRIEF.md plus path sources) and `claim_problems(&File, &Path) -> Vec<String>`. For each term it flags: a sense with an empty marker or `says`, or a marker that is only the term name; a sense whose `in` is not a scanned file; a `says` not in the definition; a marker with no hit context in its file (stale); no sense verified (no checked claim); every uncovered identifying line (file:line); and each excuse that has an empty marker or reason, files.len() != 1, covers no identifying line (stale), or covers more than MAX_EXCUSED_LINES (2).",
+    "Update `GOOD` with senses and `scratch_root` to write a BRIEF.md with an identifying line and one docs file. Update `the_ontology_file_is_sound` to also assert `claim_problems` is empty. Keep `problems` as it is.",
+    "Add tests: `the_real_file_claims_are_checked_against_the_sources`; a helper `parse_real()` and `with_term(file, name, f)`; `altered_definition_is_flagged_for_each_seed_term`; `hermes_with_only_the_tool_sense_is_flagged_until_both_senses_are_listed`; Athena role and program sense removal; the excuse tests (no reason, no marker, two files, stale, overbroad); `a_term_without_a_checked_claim_is_flagged`; `markers_match_whole_words_only`; `a_marker_equal_to_the_term_is_flagged`. Write the rule and optional fields in the file header.",
+    "Edit docs/ontology.toml. Hermes: senses {BRIEF.md, 'Hermes Agent', says 'Hermes Agent'}, {BRIEF.md, 'Orchestration', says 'Orchestration god'}. Athena: {BRIEF.md, 'orchestration system you build', says 'the program that does the work'}, {BRIEF.md, 'Strategy and learning', says 'strategy and learning role'}, and studied-instance senses {BRIEF.md, 'Athena itself', 'studied instance'}, {BRIEF.md, 'its architecture', same says}, {BRIEF.md, 'Its core is separate', same says}. Add to the definition a sentence that Athena is also the third studied instance after firstmate and Hermes Agent. Planning: {docs/design/job-planning.md, 'a planner and a critic before the producer', ...}, {job-planning.md, 'planning for hard jobs only', says 'hard jobs only'}, {BRIEF.md, 'planning first', says 'Queue planning'}. Correct job planning in the definition (built, turned off by its rule (D135), now for hard jobs only (D143)). Job: {BRIEF.md, 'units (jobs)', says 'One unit of work'}, {docs/records.md, 'the dispatched job', says 'a reading'}. Landed: {native-pr-landing.md, 'merged-unverified', says 'merged-unverified'}, {native-pr-landing.md, 'identified from records', says 'identified from records'}, and a definition sentence for each. Product versus system: aliases ['Loop B', 'first product'], {BRIEF.md, 'Loop B work', ...}, {BRIEF.md, 'The study is the first product', ...}. Sri: {BRIEF.md, 'Sri is the owner (Zeus)', says 'owner of Olympus (Zeus)'}, {BRIEF.md, \"Sri's words, verbatim\", says 'verbatim'}. Add no `excused`. Update the header comment with the new fields and the rule.",
+    "Run `cargo test -p athena-cli --test ontology` and fix markers, `says` phrases and definitions until it passes. Prefer adding a sense to adding an excuse.",
+    "Append D152 to docs/decisions.md in the D151 form (Case, Root cause, Decision, Alternatives, Tradeoff), citing 20261017-173508-0wtc, 20261025-214509-y179 and 20261027-054251-33v7, and listing the corrected definitions. Add the CHANGELOG bullet under Unreleased → Changed.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, then `git status` to confirm only the four files changed."
+  ],
+  "risks": [
+    {
+      "risk": "A sense marker was guessed wrong, because the planner did not read every scanned line, so the real-file test fails first time.",
+      "mitigation": "The producer runs `cargo test -p athena-cli --test ontology` and fixes each message. It picks markers only from lines read with Grep, copying no line verbatim but a phrase that describes the sense, and it prefers adding a sense to excusing."
+    },
+    {
+      "risk": "A boundary rule that is wrong at punctuation edges (`Athena:`, `(jobs)`).",
+      "mitigation": "Markers contain a phrase from the line beyond the term name, and the term name is trimmed. Test `markers_match_whole_words_only` covers the boundary rule."
+    },
+    {
+      "risk": "The identifying-line heuristic is arbitrary and may miss definitional forms.",
+      "mitigation": "The identifying-line rule is stated in the test header and unit-tested on a bullet, heading and table row. The real set is small (BRIEF.md 11, 367, 411, 596, 597)."
+    },
+    {
+      "risk": "Definition edits drift beyond the sources, or scope creeps into other docs.",
+      "mitigation": "Edit only the four listed files. Take the definition corrections from lines already read, and cite them in D152."
+    },
+    {
+      "risk": "The seven-term test and existing structural tests break from the new required `senses`.",
+      "mitigation": "Keep the existing tests' structural behaviour: new fields are `#[serde(default)]`, and `problems` (structure) is unchanged. `claim_problems` runs separately in `the_ontology_file_is_sound`."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the added D152 section at the end of docs/decisions.md and the new bullet under `## [Unreleased]` → `### Changed` in CHANGELOG.md.",
+      "command": "git diff -- docs/decisions.md CHANGELOG.md",
+      "observes": "Both name the root cause (content checked for structure, not against sources; an unbounded file-wide excuse met the check by excusing). Both cite 20261017-173508-0wtc, 20261025-214509-y179 and 20261027-054251-33v7. Both list the alternatives (prose-only rule, measure-first stage) and why the check lives in the ontology test. D152 also lists the corrected definitions.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "The new test `the_real_file_claims_are_checked_against_the_sources` parses docs/ontology.toml and calls `claim_problems` against the repository root, which reads BRIEF.md and each term's file sources. It asserts there are no problems, that all seven terms have at least one verified sense, and that the scan found hits for each term.",
+      "command": "cargo test -p athena-cli --test ontology the_real_file_claims_are_checked_against_the_sources",
+      "observes": "The test passes on the real file. The assertion output lists problems if it fails.",
+      "fails_without": "Without the claim scan, a definition with no sense or a source line the definition cannot back would pass. The real-file test fails if any sense marker matches no line, any `says` is missing from its definition, any term has no checked claim, or an identifying line is uncovered.",
+      "seam": "Production entry point: `claim_problems(&File, &Path)` in crates/athena-cli/tests/ontology.rs, added in step 2. Fixture: the real docs/ontology.toml and the real BRIEF.md and docs files, read through `repo_root()`, which exists today. No fake."
+    },
+    {
+      "criterion": 3,
+      "method": "Tests `altered_definition_is_flagged_for_each_seed_term` (a loop over the seven term names, removing each sense's `says` from that term's definition in the parsed real file) and `hermes_with_only_the_tool_sense_is_flagged_until_both_senses_are_listed` (drop the Orchestration sense, then restore it). Further tests drop the Athena role and program senses.",
+      "command": "cargo test -p athena-cli --test ontology",
+      "observes": "Each of Hermes, planning, job, Athena, product versus system, landed and Sri is flagged with a message naming the term and the missing phrase. The Hermes tool-only entry is flagged as BRIEF.md line 597 uncovered. With both senses it returns no problems.",
+      "fails_without": "Without the claim check, altered definitions pass. Hermes with only the Hermes Agent sense passes even though BRIEF.md:597 names the Orchestration role, and the test asserting it is flagged fails.",
+      "seam": "Entry point `claim_problems(&File, &Path)`. The fixture is the real file parsed with `toml::from_str` and mutated in memory in the test, injected by passing the mutated `File`. The function is added in step 2 and the mutation helper in step 4."
+    },
+    {
+      "criterion": 4,
+      "method": "Tests `an_excuse_without_a_reason_is_flagged`, `an_excuse_without_a_marker_is_flagged`, `an_excuse_covering_two_files_is_flagged`, `a_stale_excuse_is_flagged`, `an_overbroad_excuse_is_flagged`, `a_term_without_a_checked_claim_is_flagged`, and `markers_match_whole_words_only`. They run `claim_problems` over TOML fixtures built from `GOOD`, written to a tempdir by `scratch_root()`.",
+      "command": "cargo test -p athena-cli --test ontology",
+      "observes": "Each fixture produces a problem whose text names the fault (no reason, no marker, more than one file, matches no line, no checked claim). A well-formed excuse on an identifying line produces none. A marker `cat` does not match `concatenate`.",
+      "fails_without": "Without the bounds, an excuse with no reason, no marker or two files would pass, a stale excuse would pass, and a term with no sense would pass.",
+      "seam": "Entry point `claim_problems`. The fixture is the tempdir from `scratch_root()` (exists today, extended in step 3 to write a BRIEF.md with an identifying line and a docs file) plus TOML text from `GOOD` (exists today, extended with senses in step 3)."
+    },
+    {
+      "criterion": 5,
+      "method": "The verifier may use the Grep tool on docs/ontology.toml for `excused`, `source-only` and `files =`. The test `the_ontology_file_is_sound` also fails on any excuse without a marker or reason. Read the header of crates/athena-cli/tests/ontology.rs and the comment above `[about]` in docs/ontology.toml.",
+      "command": "grep -nE \"excused|files =|marker|reason|source-only\" docs/ontology.toml",
+      "observes": "Grep finds no excuse entries and no file-wide field. The header of ontology.rs and the comment in ontology.toml describe senses, aliases, excused, identifying lines, whole-word markers and the excuse bounds. The check is a loop over `file.terms` with no term name in the code except in the tests.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three commands Athena runs, as simple commands: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "A clippy lint such as needless borrow, or a fixture left without senses, fails this.",
+      "seam": "Existing workspace checks."
+    },
+    {
+      "criterion": 7,
+      "method": "`git status` (and `git diff --stat`) on the candidate.",
+      "command": "git status",
+      "observes": "Only crates/athena-cli/tests/ontology.rs, docs/ontology.toml, docs/decisions.md and CHANGELOG.md are changed. There is no athena.toml, defaults.toml, workflow, studies/ or speed-work change.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "D151 is the last decision heading found by grep; the producer should confirm there is no later heading before numbering D152.",
+    "I did not read every line of docs/design/job-planning.md, docs/records.md, roadmap.md and native-pr-landing.md. The identifying-line grep found no hit in those files for the terms they govern. If the producer finds one, it needs a sense or an excuse.",
+    "Queue-planning has no clear scanned source line. The plan uses BRIEF.md 537, 'planning first'. The producer may pick a better BRIEF.md or job-planning.md line.",
+    "MAX_EXCUSED_LINES = 2 is a judgement. The real file has no excuses, so it only bounds future ones."
+  ],
+  "producer_section_sha256": "b82e7a4da17c65df0bbfb9b3f6fe18052845d4db9dd6aa1c80024d4ad3db920d"
+}

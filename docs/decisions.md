@@ -4107,3 +4107,56 @@ should replace those estimates with its figures.
   `crates/athena-cli/tests/lifecycle.rs`, and the D124 entry. Measured: `cargo test -p athena-cli --test
   lifecycle` and the unit tests in `crates/athena-core/src/run/tests.rs`. Not measured: how often a deadline
   produces a change list that a retry can finish, or the effect on cost per job.
+
+## D152 · The ontology test compares each term with its governing sources, and excuses are bounded
+
+- **Case:** `docs/ontology.toml` was seeded in job 20261017-173508-0wtc with seven terms, and its test checked only
+  structure: each term has a definition, a misread, sources that exist and relations that resolve. A Hermes entry
+  that named only the studied tool, and not the Orchestration role that `BRIEF.md` gives Hermes in the pantheon
+  table, would have passed. Job 20261025-214509-y179 named the gap (as stated in this job's request; the records
+  of that job were not read here). Job 20261027-054251-33v7 added a content check and was rejected: it let a term
+  excuse a whole file, six of the seven terms did, and for those the check read nothing (the verifier's finding,
+  as quoted in this job's brief).
+- **Root cause:** Two faults, one behind the other. (1) The test checked the file's shape and never read the
+  sources it cites, so a definition could disagree with them, and three did (below). (2) The check added in
+  job 20261027-054251-33v7 had an unbounded excuse, a file-wide one with no marker. A check that can be met by
+  excusing is met by excusing, so it became the prose-only guard again, only longer.
+- **Decision:** (1) `claim_problems` in `crates/athena-cli/tests/ontology.rs` is generic over all terms. For each
+  term it scans `BRIEF.md` and the term's file sources for lines naming the term or an optional alias, as a whole
+  word, case-sensitive. (2) Each term lists `senses`, `{ in, marker, says }`: the marker is a whole-word phrase that
+  must be on such a line in that file, and the definition must hold the `says` phrase. A stale marker is flagged,
+  and so is a term with no sense that passes both ways. (3) A line where the term opens a bullet, heading or table
+  row and is followed by `:` or `|` defines it or gives it a role. Every such line must be covered by a sense
+  marker, so a source that names a second sense cannot be missed: dropping the Orchestration sense from Hermes
+  flags the pantheon row. (4) `excused` is optional, per marker: exactly one file, a marker that says more than the
+  term's name, and a reason. There is no file-wide excuse. An excuse that covers no identifying line is stale, and
+  one that covers more than two lines is too broad; both are flagged. The real file has none. (5) Tests change the
+  parsed real file (drop a `says` phrase from each term's definition, drop a sense) and assert that the term is
+  flagged by name. (6) Three definitions disagreed with their sources and are corrected: `planning` said job
+  planning was proposed and not built, but `docs/design/job-planning.md` records that it was built, turned off by
+  its keep rule (D135) and now runs for hard jobs only (D143); `Athena` omitted that it is also the third studied
+  instance, and now says how the opening of the brief calls the program the system; `landed` omitted
+  `merged-unverified` and that a landed job is identified from records, both from
+  `docs/design/native-pr-landing.md`. `Sri` gains that Sri owns the requirements, and `product versus system` gains
+  aliases `Loop B` and `first product`, which the sources use where the phrase itself never appears.
+- **Alternatives:** (a) A prose rule in the ontology header that definitions must agree with sources: no mechanism,
+  and the defaults say rules that matter are enforced by mechanism. (b) A measure-first stage that measures drift
+  before any check exists: that is the speed-work direction of job 20261025-214509-y179, it adds a stage where a
+  test suffices, and it is out of scope here. (c) Keep the file-wide excuse and bound it by review: that is the
+  rejected design. (d) Classify every line that names a term: Athena alone is named on about 130 lines of `BRIEF.md` (estimate), so it
+  would force broad markers or blanket excuses. (e) Match markers as substrings or regular expressions: a substring
+  reads `cat` in `concatenate`, and a regular expression adds a dependency and hides the sense.
+- **Why the check is in the ontology test:** it runs under `cargo test --locked` on every change, reads the real
+  sources, and sits next to the file it protects. No new stage, record kind or production code is needed.
+- **Tradeoff:** Only identifying lines must be covered, so a new sense that is named only in running prose passes
+  until someone lists it; the check bounds the common case (a definition or role line) and not every mention. The
+  identifying-line rule is a heuristic on line shape, and a wrapped line that starts with a term name and a colon
+  needs an excuse. Markers are tied to current wording of the sources, so a reworded source line makes a marker
+  stale and the test asks for it to be updated. The limit of two lines per excuse is a judgement, not measured.
+- **Reversal cost:** Low. Remove `senses`, `aliases` and `excused` from the file and `claim_problems` from the
+  test; the structural check is unchanged.
+- **Provenance:** Stated: the request to retry job 20261027-054251-33v7 and its verifier's finding that source-only
+  excuses disabled the content check for six of seven terms. Read: `crates/athena-cli/tests/ontology.rs`,
+  `docs/ontology.toml`, `BRIEF.md` (the lines naming each term), `docs/design/job-planning.md`,
+  `docs/design/native-pr-landing.md`, `docs/records.md`. Measured: `cargo test -p athena-cli --test ontology`.
+  Not measured: how often a source changes the wording a marker relies on.
