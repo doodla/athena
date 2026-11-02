@@ -2474,6 +2474,207 @@ fn a_refusal_that_is_not_transient_is_recorded_once_and_not_retried() {
     }
 }
 
+/// A host that refuses the merge request with the scripted replies (status and text), one per call, then lets
+/// it through. Its required check is green until a refusal other than a 5xx is answered, and then in progress
+/// when `pending_after` is set. After that refusal one read of the commit status fails with a 500 (so a
+/// check read is logged after the refusal and retried).
+struct PendingMerge {
+    refusals: RefCell<std::collections::VecDeque<(u16, &'static str)>>,
+    pending_after: bool,
+    pending: Cell<bool>,
+    status_failures: Cell<u32>,
+    merged: Cell<bool>,
+}
+impl PendingMerge {
+    fn new(refusals: &[(u16, &'static str)], pending_after: bool) -> Self {
+        PendingMerge {
+            refusals: RefCell::new(refusals.iter().copied().collect()),
+            pending_after,
+            pending: Cell::new(false),
+            status_failures: Cell::new(0),
+            merged: Cell::new(false),
+        }
+    }
+}
+impl Runner for PendingMerge {
+    fn gh(&self, args: &[String]) -> Result<String> {
+        let path = args.iter().find(|a| a.starts_with("repos/")).unwrap();
+        if path.ends_with("/merge") {
+            return match self.refusals.borrow_mut().pop_front() {
+                Some((status, text)) => {
+                    if status < 500 && self.pending_after {
+                        self.pending.set(true);
+                        self.status_failures.set(1);
+                    }
+                    Err(GhFailure {
+                        call: "api".into(),
+                        status_code: Some(status),
+                        text: text.into(),
+                    }
+                    .into())
+                }
+                None => {
+                    self.merged.set(true);
+                    Ok("{}".to_string())
+                }
+            };
+        }
+        if path.ends_with("/status") && self.status_failures.get() > 0 {
+            self.status_failures.set(self.status_failures.get() - 1);
+            return Err(GhFailure {
+                call: "api".into(),
+                status_code: Some(500),
+                text: "server error".into(),
+            }
+            .into());
+        }
+        Ok(if path == "repos/example/project" {
+            ALL_METHODS.to_string()
+        } else if path.ends_with("/pulls") {
+            r#"{"number": 7}"#.to_string()
+        } else if path.contains("/pulls/") {
+            if self.merged.get() {
+                r#"{"merged": true, "merge_commit_sha": "merged1"}"#.to_string()
+            } else {
+                r#"{"merged": false}"#.to_string()
+            }
+        } else if path.contains("check-runs") {
+            if self.pending.get() {
+                json!({"check_runs": [
+                    {"id": 1, "name": EARLY_RUN_JOB, "status": "in_progress", "conclusion": null}
+                ]})
+                .to_string()
+            } else {
+                required_green_reply()
+            }
+        } else {
+            r#"{"state": "success", "statuses": []}"#.to_string()
+        })
+    }
+}
+
+const RULES: &str = "Repository rule violations found";
+
+/// Lands over REST through a client on `runner`; returns the result and the log of refusals.
+fn land_pending(runner: &PendingMerge) -> (Result<PrReport>, Vec<HostError>) {
+    let rig = Rig::new();
+    let log = HostErrorLog::new(rig.job.clone(), WorkPhase::Landing);
+    let client = GhClient {
+        log: Some(&log),
+        retry: Retry {
+            attempts: 3,
+            delay: Duration::ZERO,
+        },
+        ..GhClient::new(runner, "example/project".into())
+    };
+    let result = rig.run_with(&client, true, "athena/bootstrap", "cand1", &Anc(true));
+    (result, log.entries())
+}
+
+#[test]
+fn a_rule_refusal_while_checks_are_pending_is_marked_on_its_own_merge_entry() {
+    for status in [405, 422] {
+        let runner = PendingMerge::new(&[(status, RULES)], true);
+        let (result, errors) = land_pending(&runner);
+        let report = result.expect("a refusal while checks are pending is a wait");
+        assert_eq!(report.checks, Some(Checks::Pending));
+        let merge: Vec<usize> = (0..errors.len())
+            .filter(|i| errors[*i].operation == HostOperation::Merge)
+            .collect();
+        assert_eq!(merge.len(), 1, "{status}");
+        let at = merge[0];
+        assert_eq!(errors[at].status_code, Some(status));
+        assert!(errors[at].checks_pending, "{status}");
+        // Entries come after the refusal (the failed read of the checks), and none of them is marked.
+        assert!(at + 1 < errors.len(), "{status}: {errors:?}");
+        assert!(
+            errors
+                .iter()
+                .filter(|e| e.operation != HostOperation::Merge)
+                .all(|e| !e.checks_pending && e.status_code == Some(500))
+        );
+        assert_eq!(errors.iter().filter(|e| e.checks_pending).count(), 1);
+    }
+}
+
+#[test]
+fn only_the_pending_refusal_is_marked_when_an_earlier_merge_call_was_retried() {
+    let runner = PendingMerge::new(&[(500, "server error"), (422, RULES)], true);
+    let (result, errors) = land_pending(&runner);
+    assert!(result.is_ok());
+    let merges: Vec<&HostError> = errors
+        .iter()
+        .filter(|e| e.operation == HostOperation::Merge)
+        .collect();
+    assert_eq!(merges.len(), 2);
+    assert_eq!(merges[0].status_code, Some(500));
+    assert!(!merges[0].checks_pending);
+    assert_eq!(merges[1].status_code, Some(422));
+    assert!(merges[1].checks_pending);
+    assert_eq!(errors.iter().filter(|e| e.checks_pending).count(), 1);
+}
+
+#[test]
+fn a_rule_refusal_with_the_checks_settled_is_logged_unmarked() {
+    for status in [405, 422] {
+        let runner = PendingMerge::new(&[(status, RULES)], false);
+        let (result, errors) = land_pending(&runner);
+        assert!(result.is_err(), "{status}");
+        assert_eq!(errors.len(), 1, "{status}");
+        assert_eq!(errors[0].status_code, Some(status));
+        assert!(!errors[0].checks_pending, "{status}");
+    }
+}
+
+#[test]
+fn a_refusal_that_is_not_a_rule_violation_is_unmarked_even_while_checks_are_pending() {
+    for status in [405, 422] {
+        let runner = PendingMerge::new(&[(status, "Merge commits are not allowed")], true);
+        let (result, errors) = land_pending(&runner);
+        assert!(result.is_err(), "{status}");
+        assert!(errors.iter().all(|e| !e.checks_pending), "{status}");
+        assert_eq!(errors[0].status_code, Some(status));
+    }
+}
+
+#[test]
+fn a_failed_read_of_the_checks_leaves_the_refusal_unmarked() {
+    // The status read fails on every try, so the check read after the refusal gives no answer.
+    struct NoStatus(PendingMerge);
+    impl Runner for NoStatus {
+        fn gh(&self, args: &[String]) -> Result<String> {
+            let path = args.iter().find(|a| a.starts_with("repos/")).unwrap();
+            if path.ends_with("/status") && self.0.pending.get() {
+                return Err(GhFailure {
+                    call: "api".into(),
+                    status_code: Some(404),
+                    text: "gone".into(),
+                }
+                .into());
+            }
+            self.0.gh(args)
+        }
+    }
+    let runner = NoStatus(PendingMerge::new(&[(405, RULES)], true));
+    let rig = Rig::new();
+    let log = HostErrorLog::new(rig.job.clone(), WorkPhase::Landing);
+    let client = GhClient {
+        log: Some(&log),
+        ..GhClient::new(&runner, "example/project".into())
+    };
+    assert!(
+        rig.run_with(&client, true, "athena/bootstrap", "cand1", &Anc(true))
+            .is_err()
+    );
+    let merge = log
+        .entries()
+        .into_iter()
+        .find(|e| e.operation == HostOperation::Merge)
+        .unwrap();
+    assert_eq!(merge.status_code, Some(405));
+    assert!(!merge.checks_pending);
+}
+
 #[test]
 fn a_failure_that_is_not_a_host_refusal_is_not_recorded() {
     struct Missing;

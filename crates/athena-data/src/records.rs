@@ -1103,6 +1103,11 @@ pub struct HostError {
     /// The intervention a derived record was derived from. Present exactly when `derived` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_intervention: Option<RecordId>,
+    /// True when the host refused a merge while the required checks were still pending: a wait, not a refusal
+    /// of the merge method. Absent (false) otherwise, so a record written before this field existed reads and
+    /// writes back unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checks_pending: bool,
 }
 
 /// The state a decision is in beside its `status`.
@@ -3284,7 +3289,34 @@ mod tests {
             message_class: MessageClass::of_status(status),
             derived: false,
             source_intervention: None,
+            checks_pending: false,
         }
+    }
+
+    #[test]
+    fn an_old_format_host_error_still_validates_and_writes_back_unchanged() {
+        // A record written before `checks_pending` existed: the field is absent.
+        let path = "records/host-errors/2026-11/20261101-174051-3t6g.json";
+        let old = "{\n  \"schema\": \"athena.host-error/1\",\n  \"id\": \"20261101-174051-3t6g\",\n  \"at\": \"2026-11-01T17:40:51Z\",\n  \"status_code\": 405,\n  \"operation\": \"merge\",\n  \"job\": \"20261101-171216-w4rd\",\n  \"phase\": \"landing\",\n  \"message_class\": \"method-not-allowed\"\n}\n";
+        let Ok(Some(AnyRecord::HostError(error))) = check_record_file(path, old.as_bytes()) else {
+            panic!("the old record must validate at its canonical path");
+        };
+        assert!(!error.checks_pending);
+        let record = AnyRecord::HostError(error.clone());
+        assert_eq!(record.canonical_path(), path);
+        assert_eq!(record.to_json(), old);
+        // The field is written only when true, and then reads back.
+        let mut marked = error;
+        marked.checks_pending = true;
+        let marked_text = AnyRecord::HostError(marked.clone()).to_json();
+        assert!(marked_text.contains("\"checks_pending\": true"));
+        assert_eq!(
+            check_record_file(path, marked_text.as_bytes()).unwrap(),
+            Some(AnyRecord::HostError(marked))
+        );
+        // A field outside the record is still refused.
+        let stray = old.replace("\"phase\"", "\"stderr\": \"x\", \"phase\"");
+        assert!(check_record_file(path, stray.as_bytes()).is_err());
     }
 
     #[test]

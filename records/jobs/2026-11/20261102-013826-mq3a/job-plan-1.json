@@ -1,0 +1,225 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261102-013826-mq3a",
+  "round": 1,
+  "at": "2026-11-02T01:42:30.871624036Z",
+  "invocation_seq": 3,
+  "approach": "Keep the earlier code fix, with its three flaws corrected. (1) `HostError` in records.rs gains an optional `checks_pending` bool, serde-default and skipped when false, so old `athena.host-error/1` records parse and re-serialise byte for byte. (2) `HostSignal::matches` in watcher.rs also requires `!error.checks_pending`; the D87_SIGNAL doc comment says so, and its `name` string is unchanged. (3) The mark is made on the merge call itself. `HostErrorLog::record` returns the new entry's `RecordId`. `GhClient::api_text` is split into a private `call` that returns the reply plus the id of that call's final logged refusal. `GhClient::merge` uses `call` for the PUT. If the PUT is refused, the refusal is a rule violation (`is_rule_violation`, made `pub(super)` in landing.rs) and `check_report(head)` reads Pending, it calls `log.mark_checks_pending(&id)` with that local id. No shared \"last entry\" state is read, so entries logged later (such as the probe's own reads) cannot be marked by mistake. A failed probe leaves the entry unmarked, so D87 still fires. `land_pr`'s own decision logic is unchanged; transport.rs holds the log type, so it is a deliverable. Separately, docs/decisions.md gets a new final entry D150, appended after D149 and citing D87 without the words 'supersedes' or 'amends' (backtest.rs parses those as links). CHANGELOG.md gets one Fixed bullet. No file under records/ is touched.",
+  "decisions": [
+    {
+      "choice": "Mark the refusal inside GhClient::merge, using the id returned for that call, and mark by RecordId.",
+      "reason": "The client is the only place that holds both the failed call and its log entry. A local id ties the mark to the call without ordering assumptions, which the earlier review flagged as a minor finding (mark tied to the last logged Merge entry). Probe reads logged after the refusal land after the marked entry, and the test proves they are not marked.",
+      "rejected": [
+        {
+          "option": "Mark the last Merge entry in HostErrorLog from land_pr (the previous candidate)",
+          "why": "Relies on call order and breaks if another merge entry is logged later; the reviewer asked for the mark on the call it belongs to."
+        },
+        {
+          "option": "Carry the entry id on the error as anyhow context or a wrapper error type, and have land_pr call a new PrHost method",
+          "why": "Context text changes every merge error message. A wrapper hides GhFailure from downcast_ref, which test a_persistent_500_stops_at_the_bound_and_the_error_reaches_the_user relies on."
+        },
+        {
+          "option": "Add a log-id field to GhFailure",
+          "why": "GhFailure is built by struct literal in host_rules.rs, tests.rs and athena-cli/tests/external_calls.rs, so every constructor would break and a non-deliverable file would change."
+        },
+        {
+          "option": "Change the PrHost::merge signature to take a pending probe or return the id",
+          "why": "Every PrHost fake (FakeHost, RunHost) would change; a larger change than the fault needs."
+        }
+      ]
+    },
+    {
+      "choice": "The matcher excludes records with checks_pending instead of special-casing one instance, and the signal name string stays the same.",
+      "reason": "This fixes the root cause at the signal. Existing decision-state records cite the name, so it must not change. Hard signal threshold, operation, phase and status codes stay as they are.",
+      "rejected": [
+        {
+          "option": "Drop 422 or add text matching to the signal",
+          "why": "A real merge-method refusal must still fire on the first job; only the pending-check cause is excluded."
+        },
+        {
+          "option": "Change the name string to mention pending checks",
+          "why": "Breaks the link to existing state records and criterion 6."
+        }
+      ]
+    },
+    {
+      "choice": "New optional field `checks_pending` with `#[serde(default, skip_serializing_if = \"std::ops::Not::not\")]`, the same pattern as `derived`.",
+      "reason": "The old format is accepted and written back unchanged (criterion 3). The schema name `athena.host-error/1` stays.",
+      "rejected": [
+        {
+          "option": "Bump to athena.host-error/2",
+          "why": "Needs a new AnyRecord variant, path and migration; far beyond the fault."
+        }
+      ]
+    },
+    {
+      "choice": "Append decision D150 at the end of docs/decisions.md, leaving D87 and every other entry byte for byte unchanged, with a **Provenance:** bullet and the words 'follows D87' only.",
+      "reason": "The guard in crates/athena-cli/src/decisions.rs pins the first 230046 bytes and requires a Provenance bullet in each entry. Avoiding 'supersedes' and 'amends' keeps backtest.rs from parsing a supersession link on D87. D149 is the last entry, so D150 is next.",
+      "rejected": [
+        {
+          "option": "Edit D87 in place (the failed attempt)",
+          "why": "Violates append-only and trips the guard."
+        },
+        {
+          "option": "Raise PINNED_LEN or PINNED_SHA256 in decisions.rs",
+          "why": "Not needed for an append after D121 and not a deliverable."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `checks_pending: bool` (serde default, skipped when false) to HostError with a doc comment. Update the `host_error()` test helper. Add the old-format record test through check_record_file.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/watcher.rs",
+      "action": "modify",
+      "purpose": "`HostErrorSignal::matches` requires `!error.checks_pending`. Update the D87_SIGNAL and matches doc comments. `derive_host_error` and the test helper set `checks_pending: false`. Add the marked/unmarked evaluate tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/transport.rs",
+      "action": "modify",
+      "purpose": "`HostErrorLog::record` returns the new entry's RecordId and sets `checks_pending: false`. Add `mark_checks_pending(&RecordId)`, which marks only the entry with that id.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "purpose": "Split `api_text` into a private `call` that returns the reply and the call's final logged-refusal id; `api_text` keeps its signature. `merge` uses `call`, and on a rule-violation refusal with Pending checks marks that id.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "purpose": "Make `is_rule_violation` `pub(super)` so the client uses the same predicate. Update the `land_pr` doc to say the refusal is logged with the pending mark.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Add the `PendingMerge` runner fake and the landing tests for cases (a) to (d).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a Fixed bullet under Unreleased: the pending-check 405 false positive of D87, the root cause, and that existing records/ are untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D150 at the end with Case, Root cause, Decision, Alternatives, Reversal cost and a Provenance bullet. It cites D87 and does not edit it; no 'supersedes' or 'amends' wording.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read watcher.rs (D87_SIGNAL, `matches`, `derive_host_error`, tests), transport.rs `HostErrorLog`, client.rs `api_text` and `merge`, landing.rs `is_rule_violation`, and the end of docs/decisions.md.",
+    "records.rs: add `pub checks_pending: bool` to HostError with `#[serde(default, skip_serializing_if = \"std::ops::Not::not\")]` and a doc comment (true when the refusal came on a merge while required checks were pending). Update the `host_error()` helper with `checks_pending: false`.",
+    "transport.rs: make `HostErrorLog::record` return the new entry's RecordId and set `checks_pending: false`. Add `mark_checks_pending(&self, id: &RecordId)`, which sets the flag on the entry with that id and nothing else. Callers that ignore the return value need no change.",
+    "records.rs tests: add a test with the literal old-format record JSON at path records/host-errors/2026-11/20261101-174051-3t6g.json. Run it through `check_record_file`, assert `checks_pending` is false, assert `to_json()` equals the input, assert the flag appears only when true, and assert an unknown field is still refused.",
+    "watcher.rs: add `&& !error.checks_pending` to `matches`. Update the D87_SIGNAL doc comment to say refusals made while required checks were pending are excluded (name string untouched). Set `checks_pending: false` in `derive_host_error` and in the test helper. Add tests: marked 405 and 422 do not fire; unmarked ones fire on the first job; a mixed set cites only the unmarked id.",
+    "client.rs: move the body of `api_text` into a private `call` that returns `(Result<String>, Option<RecordId>)`, where the id is the one returned by `log.record` for the final refused attempt of that call. Keep `api_text` as a wrapper that drops the id. In `merge`, call `call` for the PUT; on Err where `is_rule_violation(&err)` and `self.check_report(head)` returns Pending, call `log.mark_checks_pending(&id)` with that call's id; a probe error means no mark. Return the original error unchanged.",
+    "landing.rs: change `is_rule_violation` to `pub(super)` and adjust the `land_pr` doc comment. Leave the pending-wait logic itself unchanged.",
+    "gh/tests.rs: add the `PendingMerge` Runner fake (scripted replies as in the demonstration; one 500 on a status GET after the refusal) and the landing tests for cases (a) to (d) through `GhClient` with a HostErrorLog and `Rig::run_with`. Assert by id, not by position, that the 405 or 422 merge entry is marked, that it is not last, and that every other entry is unmarked.",
+    "CHANGELOG.md: add the Fixed bullet under Unreleased naming the pending-check 405 false positive of D87, the root cause (the matcher could not tell a pending-check refusal from a merge-method refusal), the fix, and that existing records/ and the open D87 review are untouched.",
+    "docs/decisions.md: append `## D150 · Pending-check merge refusals no longer fire D87's signal` after D149, with Case, Root cause, Decision, Alternatives, Reversal cost and Provenance, citing D87 and leaving it unedited. Do not touch any earlier byte.",
+    "Run `cargo test -p athena-core watcher`, `cargo test -p athena-core gh`, `cargo test -p athena-data`, `cargo test -p athena-cli decisions`, then the Athena checks (`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`). These are not acceptance criteria. Confirm with `git status` that nothing under records/ changed."
+  ],
+  "risks": [
+    {
+      "risk": "`HostError` has `deny_unknown_fields`, so an older Athena build reading a new record that has `checks_pending` would reject it.",
+      "mitigation": "The field is written only when true, so old records and every record of a run without a pending refusal are unchanged. D150 and the changelog note the reader-compatibility cost."
+    },
+    {
+      "risk": "The extra check read inside `GhClient::merge` adds API calls that fakes with call counters might notice.",
+      "mitigation": "The probe runs only when a merge is refused with the rule-violation text. FakeHost-based tests do not use GhClient, and Runner-based tests that count merge calls do not see it. A failed probe leaves the entry unmarked, so D87 still fires, the safe direction."
+    },
+    {
+      "risk": "Adding the `checks_pending` field breaks the other struct literals of HostError.",
+      "mitigation": "All four sites were found by search: transport.rs, watcher.rs (twice), records.rs test helper. The producer adds `checks_pending: false` to each, and `cargo clippy --all-targets` catches any miss."
+    },
+    {
+      "risk": "The D150 wording trips the supersession parser or the Provenance guard.",
+      "mitigation": "Use 'follows D87' only, include `- **Provenance:**`, and run `cargo test -p athena-cli decisions` and the backtest tests in crates/athena-cli."
+    },
+    {
+      "risk": "Refactoring `api_text` changes retry or logging behavior for every call.",
+      "mitigation": "`call` holds the existing loop unchanged and only also returns the last logged id. `api_text` keeps its signature and result, and the existing Refusing/retry tests (a_500_twice_then_success..., a_persistent_500...) must still pass."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in watcher.rs. They build host-error records with the existing test helper `error(id, job, op, status)`, set `checks_pending = true` on a copy, and call the production `evaluate(&host_error_signals().unwrap(), &errors, &[])`.",
+      "command": "cargo test -p athena-core watcher",
+      "observes": "A merge 405 and a merge 422 with checks_pending give no firing. The same errors unmarked fire D87 on the first job (one job, hard signal), with the signal name unchanged. A marked and an unmarked record mixed together fire citing only the unmarked id.",
+      "fails_without": "With `matches` ignoring checks_pending, the marked 405 fires D87 and the test fails.",
+      "seam": "`evaluate` and `host_error_signals` in watcher.rs, plus the test helper `error` already in the tests module. The only change is a new field in the helper's struct literal (added in step 3), so the seam exists today."
+    },
+    {
+      "criterion": 2,
+      "method": "New tests in gh/tests.rs run the production `land_pr` through a real `GhClient` with a `HostErrorLog` and a new scripted `Runner` fake (`PendingMerge`), built like the existing `Refusing` and `land_through` helpers. The fake answers repos GET with ALL_METHODS and check-runs with the required run green until the merge PUT is refused, then in_progress (pending). The merge PUT fails with `GhFailure{status_code:Some(405), text:\"Repository rule violations found\"}`. After that refusal, one status GET fails once with 500, so a later ReadChecks entry is logged and retried (Retry attempts 3, zero delay). Cases: (a) 405 with checks pending: the entry for the 405 merge call has checks_pending, it is not the last entry, and the later ReadChecks 500 entry is unmarked. (b) An earlier merge 500 retried and then 422 pending: only the 422 entry is marked. (c) 405 with the same text while checks are settled (green): the entry is unmarked and land_pr returns the error. (d) 405 without the rule-violation text while pending: unmarked.",
+      "command": "cargo test -p athena-core gh",
+      "observes": "The marked entry is the merge refusal that was made while checks were pending, even though entries come after it; settled-check and non-rule-violation refusals are logged without the mark, as before. Existing gh tests such as a_refusal_that_is_not_transient_is_recorded_once_and_not_retried still pass.",
+      "fails_without": "Marking the last logged Merge entry, or nothing, fails (a)/(b): the marked flag is absent on the 405/422 entry, or lands on the wrong one. Never marking fails (a) and (b); always marking fails (c) and (d).",
+      "seam": "Production entry points: `land_pr` (landing.rs) driven by the `Rig::run_with` helper, and `GhClient::merge` (client.rs). The fake `Runner` is injected as `GhClient::new(&fake, ..)` with `log: Some(&log)`, as `land_through` does today. The `Rig`, `Runner` trait and `land_through` pattern exist; the `PendingMerge` fake is added in step 8. The fake only answers canned replies; the pending decision comes from production `classify_checks`."
+    },
+    {
+      "criterion": 3,
+      "method": "A new test in records.rs holds the literal JSON of an old-format athena.host-error/1 record: id 20261101-174051-3t6g, path records/host-errors/2026-11/20261101-174051-3t6g.json, no checks_pending, no derived field. It passes through `check_record_file(path, bytes)`, matches `AnyRecord::HostError`, asserts `checks_pending == false`, and asserts that `to_json()` equals the input text. A second assertion round-trips a record with checks_pending true and shows the field is written only then.",
+      "command": "cargo test -p athena-data",
+      "observes": "The old record validates at its canonical path, is unmarked, and re-serialises to identical bytes; the new field appears only when true; deny_unknown_fields still rejects a stray field.",
+      "fails_without": "If the new field were required or always written, parsing or the byte comparison fails.",
+      "seam": "`check_record_file` and `AnyRecord::to_json` in records.rs. Both exist; the fixture is an inline string in the test (records/ is absent from the producer snapshot, so the producer copies the field layout from `to_json` output of the existing `host_error()` helper). Added in step 4."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the existing guard test over the modified docs/decisions.md. It checks the pinned first 230046 bytes, ascending unique ids, and a Provenance bullet in every entry, including D150.",
+      "command": "cargo test -p athena-cli decisions",
+      "observes": "`the_decision_log_is_well_formed_and_only_appended_to` passes with D150 appended; a changed D87 byte would fail the hash check.",
+      "fails_without": "An edit inside D87 or any earlier entry changes the pinned prefix hash and the test panics; a D150 without a Provenance bullet also fails.",
+      "seam": "`check_log` in crates/athena-cli/src/decisions.rs reads the real docs/decisions.md; it exists and is not changed."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff of docs/decisions.md.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "Only `+` lines after the final line of D149. The new entry is headed `## D150 · ...`, cites D87 and says that pending-check merge refusals no longer fire its signal. No `-` line and no changed hunk before the end.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of watcher.rs.",
+      "command": "git diff -- crates/athena-core/src/watcher.rs",
+      "observes": "The D87_SIGNAL doc comment now says pending-check refusals are excluded. The `name:` line \"host-error: operation merge, status 405 or 422, phase landing\" appears only as context, not as `-` or `+`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Read the CHANGELOG diff and the list of changed files.",
+      "command": "git diff --stat",
+      "observes": "CHANGELOG.md has a new Fixed bullet naming the pending-check 405 false positive (D87) and saying the existing records/ are untouched. No path under records/ appears in the stat.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The old record records/host-errors/2026-11/20261101-174051-3t6g.json is not in the planner snapshot (no records/ directory), so its exact bytes were not read. The test uses a literal in the same field layout as to_json output; the verifier can compare it with the real file if it has records/.",
+    "Whether the next free number is D150 was read from the last `## D` heading in the snapshot (D149). The producer should re-check the end of the file before writing, and keep a blank line after D149's last bullet.",
+    "The client's probe and land_pr's own check_report are two separate reads and could disagree if a check finishes in between. The result is then a pending-marked refusal that land_pr returns as an error. This is harmless to D87 but is noted in D150.",
+    "Reading the repo shows no refusal_corpus case for host-error records. The corpus holds request and reading shapes, and none of its matches mention host, merge or 405. This change adds no request-text parser, stem list or reading check, so no corpus case is added. The D87 matcher takes typed records, and its input forms (unmarked 405, 422, marked 405, no status, other operation or phase) are covered by the watcher tests."
+  ],
+  "producer_section_sha256": "cd1c79e3f739e780ab910f7a0d2fe6712463baa8df5b35e68a91ae2ed5bb95f9"
+}

@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261102-005332-8gkv",
+  "round": 1,
+  "at": "2026-11-02T00:57:12.618547995Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/transport.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/transport.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan says an existing test loads the 1y06 review fixture and checks the D87 name mechanically. No such test exists.",
+      "evidence": "Grep of watcher.rs for '1y06' finds nothing. The D87 tests at lines 472, 582, 592 and 628 check `decision == \"D87\"` and matching. None of them asserts the exact `name` string. If the name drifted, review 20261031-085139-1y06 would stop matching and no test would fail. Fix: Add a watcher test asserting `D87_SIGNAL.name == \"host-error: operation merge, status 405 or 422, phase landing\"` (the reading's mechanism default). Otherwise, describe criterion 4 as a grep check only and drop the claim about a fixture.",
+      "location": "Demonstrations, criterion 4; crates/athena-core/src/watcher.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan puts a D87-specific exclusion into the generic `matches`, so every future host-error signal will skip pending-flagged records, and the doc comment saying matching is 'exact on stored fields' will become wrong.",
+      "evidence": "`matches` is shared by every signal built by `host_error_signals()` (watcher.rs:142-143). Today that list holds only D87_SIGNAL. The plan rejects a per-signal field for now. Fix: Keep the guard in `matches` as planned. Update its doc comment (watcher.rs:147-148) and the module header to say that a record flagged `checks_pending` never matches any host-error signal. Then the global scope is a documented rule rather than a side effect.",
+      "location": "Decision 4 / Step 5, HostErrorSignal::matches (watcher.rs:146-155)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code by reading it; I ran nothing. The plan holds up. In landing.rs:253-270, `land_pr` already treats a \"Repository rule violations\" refusal as a wait when a fresh `check_report` reads Pending. `HostErrorLog` (transport.rs:296-340) keeps entries in memory until the caller commits them, so flagging the latest Merge entry afterwards works. `GhClient` holds `log: Option<&HostErrorLog>` (client.rs:258). `HostErrorSignal::matches` (watcher.rs:149) is the single place where matching is decided. The only `PrHost` implementations are `GhClient` and test fakes (client.rs:382, tests.rs:917 and 1788, test_support.rs:198 and 407). No production wrapper exists that could silently fall back to the default no-op. The four HostError struct literals the plan lists are all there and there are no others. The `Refusing`/`land_through` seam exists (tests.rs:2354-2426). `GhFailure`'s Display prints its text (transport.rs:56), so test A can trigger `is_rule_violation` by setting that text. The merge gate needs checks to read Green before merging (landing.rs:233), and the plan handles this by switching check-runs to pending only after a merge attempt. Each demonstration runs production code (`evaluate`/`matches`, `land_pr` through a real `GhClient`, `check_record_file`), and each would fail without the change. Test (b) in criterion 1 and tests B and C in criterion 2 catch an exclusion that is too wide. On Athena's own finding about transport.rs: the extra file is needed and the plan says why, because the HostError literal and `HostErrorLog` both live there. The approach is sound: the marker is a stored fact on the record and is set only on the narrow branch that landing already treats as a wait. I found two minor issues and nothing that blocks."
+}

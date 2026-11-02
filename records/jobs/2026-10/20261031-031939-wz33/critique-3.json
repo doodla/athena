@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-031939-wz33",
+  "round": 3,
+  "at": "2026-11-01T21:40:47.93142056Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The real steps stay on the no-op hook, so live drains still commit close-time records before landing.",
+      "evidence": "docs/design/async-drain.md:214-216 says each job keeps its records uncommitted while it runs, and the queue commits them right after the landing commit, so 'a records commit never refers to a job that has not landed'. The plan leaves `RealSteps` on the no-op default, so in a live drain the close-time Score and Outcome records are still committed before landing (run/close.rs, as the plan itself says). This matches the build job 7 precedent (async-drain.md:320-322), and the plan states it openly. Fix: Keep the narrow wording. Also make sure the final report puts open question 1 to the user as the main unfinished part of A8, and add it to the item-8 line in section 10 of async-drain.md, as the build job 7 line does.",
+      "location": "Decision 2 / Open question 1 (RealSteps keeps the default no-op)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 'earlier file unchanged' check of criterion 2 cannot fail because of the drain code under test.",
+      "evidence": "Every record the stub writes goes to a new per-job path (records/jobs/<month>/<id>/priority-1.json), and the stub never touches the earlier file. So the 'only A lines, earlier blob unchanged' assertion tests the stub's choice of paths, not drain behaviour. Only the `d` (not landed) assertion tests the drain. Fix: Label the byte-identical check in the test comment as a guard on the real committer's paths, not as proof of drain ordering. Keep the `d` assertion as the behavioural check.",
+      "location": "Demonstration for criterion 2, 'Fails without the behavior' (rewrite case)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "`Fixture` holds a TempDir, not a StateDir.",
+      "evidence": "`Fixture` (tests/common/mod.rs:114-117) holds `git: Git` and `state: tempfile::TempDir`. `Git` and `StateDir` both derive Clone (athena-git lib.rs:103, state.rs:52). Fix: Clone `fx.git` and take the `StateDir` from `fx.athena(..).state.clone()` (or build one the same way `fx.athena` does).",
+      "location": "Step 5 / Decision 3 ('an owned Git and StateDir taken from the Fixture')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code it names, using Read and Grep on the snapshot. `LandingQueue` (drain.rs:1132), `LandingSlot` (1161), `enter_queue` and `await_head` (1512-1533) exist, and so do `Drain::land` (1587) with its `landing` mutex and its `Landing::Landed` arm (1593-1612). `attempts` exists (1642), and its comment at 1648-1650 says the slot is kept until the function returns. `priority_record` (tests/drain.rs:3941), `commit_records_to` (4233), `request_on` (3266, which commits a lone record through the real `Committer`) and the `parallel` module (5371) are all where the plan says. `Committer`'s fields are public (commits.rs:95-97). So the hook in the Landed arm runs while the job still holds the head of the queue, which gives the claimed order: once per landed job, in landing order. The gated test that makes `c`'s hook wait for `a` would catch a hook that is missing, released too early or called for the wrong job, and the plan does not claim more than that. Every demonstration names a real seam (`drain_concurrent` or `drain`) and makes real commits through the gated committer. The pin at bound 1 and the default-hook stub at bound 2 cover criterion 3 without editing existing tests. No athena.toml field is added, and the work fits one producer run. Main caveat: the real steps stay on the no-op, so production records still commit at close, before landing. The plan states this openly, it matches the build job 7 precedent, and it is raised as an open question. That makes it a minor finding, not a soundness defect. The other findings are minor or nit, so the verdict is accept."
+}

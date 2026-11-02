@@ -4026,3 +4026,33 @@ should replace those estimates with its figures.
   `crates/athena-core/src/run/close.rs` (`push_closing_records`). Measured:
   `cargo test -p athena-core gh::`, `cargo test -p athena-gate landing_tests`,
   `cargo test -p athena-cli --test external_calls`.
+
+## D150 · Pending-check merge refusals no longer fire D87's signal
+
+- **Case:** D87's hard signal (a merge refused with 405 or 422 in the landing phase) fired on a merge the host
+  refused only because a required check was still running. The host answers such a merge with 405 and "Repository
+  rule violations found", and `land_pr` already treats that as a wait. The refusal still reached the host-error
+  log like any other, so D87 went under review though the repository allows merge commits.
+- **Root cause:** The signal matched on operation, phase and status alone, and a host-error record had no field
+  that told a refusal made while checks were pending from a refusal of the merge method.
+- **Decision:** (1) `athena.host-error/1` gains an optional `checks_pending` field, written only when true, so a
+  record written before it reads and writes back unchanged. (2) `GhClient::merge` marks the log entry of its own
+  refused call when the refusal is a rule violation and a read of the checks then says pending; the mark is set by
+  the entry's id, so entries logged later cannot be marked by mistake, and a failed read leaves the entry
+  unmarked. (3) The D87 signal ignores a marked record. This follows D87: its signal, threshold and name are
+  unchanged, and a merge refusal that is not marked still fires on the first job. Pending-check merge refusals no
+  longer fire D87's signal.
+- **Alternatives:** (a) Mark the last logged merge entry from `land_pr`: that depends on call order. (b) Carry the
+  entry id on the error, or add a field to `GhFailure`, or change `PrHost::merge`: each changes many callers and
+  fakes. (c) Drop 422 or match on text: a real merge-method refusal must still fire. (d) A new schema version of
+  the record: a new variant and migration for one flag.
+- **Tradeoff:** The client reads the checks once more when a merge is refused by the rules, and `land_pr` reads
+  them again; if a check finishes between the two reads, a refusal is marked and `land_pr` returns it as an error.
+  That cannot fire D87 wrongly. A build older than this change rejects a record that carries the field
+  (`deny_unknown_fields`), so only a record of a pending refusal is affected.
+- **Reversal cost:** Low. Remove the field, the mark and the extra condition in the matcher.
+- **Provenance:** Read: `crates/athena-core/src/watcher.rs` (`D87_SIGNAL`, `HostErrorSignal::matches`),
+  `crates/athena-core/src/gh/client.rs` (`call`, `merge`), `gh/landing.rs` (`land_pr`),
+  `gh/transport.rs` (`HostErrorLog`), `crates/athena-data/src/records.rs` (`HostError`). Measured:
+  `cargo test -p athena-core watcher`, `cargo test -p athena-core gh`, `cargo test -p athena-data`,
+  `cargo test -p athena-cli decisions`.
