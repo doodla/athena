@@ -10,6 +10,9 @@
 //! - `cargo run -p xtask -- walltime`: wall time per verified result from the job records.
 //! - `cargo run -p xtask -- fingerprint` and `ci-cache`: let the CI gate job reuse an earlier pass for
 //!   unchanged governed content (see `ci_cache`).
+//! - `cargo run -p xtask -- build-inputs`: prints the globs the athena binary is built from
+//!   (`BUILD_INPUT_GLOBS`). `setup --ci` skips the build when a stamp beside the binary equals their digest, and
+//!   the `athena-bin` cache key in `.github/workflows/ci.yml` hashes the same globs.
 //!
 //! Setup reads every pin from `athena.toml`, reads credentials only to report whether they work, and never
 //! stores them.
@@ -40,9 +43,10 @@ fn main() -> ExitCode {
         Some("walltime") => walltime::command(&args[1..], &repo_root()),
         Some("fingerprint") => ci_cache::fingerprint_command(),
         Some("ci-cache") => ci_cache::command(&args[1..]),
+        Some("build-inputs") => build_inputs_command(),
         _ => {
             eprintln!(
-                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       {}\n       {SITE_USAGE}\n       {}\n       {}",
+                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       cargo run -p xtask -- build-inputs\n       {}\n       {SITE_USAGE}\n       {}\n       {}",
                 shard::USAGE,
                 walltime::USAGE,
                 ci_cache::USAGE
@@ -241,15 +245,128 @@ fn built_binary(messages: &str) -> Option<PathBuf> {
         .next_back()
 }
 
+/// Whether the gitleaks at `target` exists and reports exactly the pinned version. A copy restored from the CI
+/// cache passes only if it is this version, so a stale entry is never trusted.
+fn gitleaks_present(target: &Path, version: &str) -> bool {
+    target.exists()
+        && found(target.to_str().unwrap_or(""), "version").is_some_and(|v| v.trim() == version)
+}
+
+/// Everything the athena binary is built from, as repository-relative paths. An entry ending in `/**` is a
+/// directory and every file below it; any other entry is one file. This is the single list: `inputs_digest` hashes
+/// it, `xtask build-inputs` prints it, and `xtask/tests/policy.rs` requires every `athena-bin` cache key in
+/// `.github/workflows/ci.yml` to hash exactly these globs and to cover every file the binary compiles in.
+///
+/// The directories are whole, not just `*.rs`, because the binary embeds prompts (`include_str!` of
+/// `crates/*/prompts/*.md`) and `docs/system-facts.md`. `docs/` as a whole is not listed: the other documents are
+/// not compiled in, and listing them would discard the cache on every documentation change.
+const BUILD_INPUT_GLOBS: [&str; 9] = [
+    "crates/**",
+    "xtask/**",
+    "rust-toolchain.toml",
+    "Cargo.toml",
+    "Cargo.lock",
+    "athena.toml",
+    "defaults.toml",
+    "setup.sh",
+    "docs/system-facts.md",
+];
+
+/// `xtask build-inputs`: prints `BUILD_INPUT_GLOBS`, one per line.
+fn build_inputs_command() -> Result<()> {
+    for glob in BUILD_INPUT_GLOBS {
+        println!("{glob}");
+    }
+    Ok(())
+}
+
+/// The files under `root` that `BUILD_INPUT_GLOBS` names, as sorted repository-relative paths. A file that does
+/// not exist is simply absent, which changes the digest like any other difference.
+fn input_files(root: &Path) -> Result<Vec<PathBuf>> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+        if !dir.is_dir() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                walk(root, &path, out)?;
+            } else if path.is_file() {
+                out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    for glob in BUILD_INPUT_GLOBS {
+        match glob.strip_suffix("/**") {
+            Some(dir) => walk(root, &root.join(dir), &mut files)?,
+            None if root.join(glob).is_file() => files.push(PathBuf::from(glob)),
+            None => {}
+        }
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+/// A SHA-256 over the OS, the architecture, and each input file's path and content (length-prefixed), in path
+/// order. Any change to a compiled-in file, a manifest or a pin changes it.
+fn inputs_digest(root: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(std::env::consts::OS.as_bytes());
+    hasher.update([0]);
+    hasher.update(std::env::consts::ARCH.as_bytes());
+    hasher.update([0]);
+    for rel in input_files(root)? {
+        let content = std::fs::read(root.join(&rel))
+            .with_context(|| format!("reading {} for the inputs digest", rel.display()))?;
+        hasher.update(rel.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update((content.len() as u64).to_le_bytes());
+        hasher.update(&content);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// The stamp beside the adopted binary: the digest of the inputs it was built from.
+fn stamp_path(home: &Path) -> PathBuf {
+    home.join("bin/athena.inputs")
+}
+
+/// Whether `setup --ci` may skip the build: only with `--ci`, an adopted binary that is a file, and a stamp equal
+/// to `digest`. Without `--ci` the build always runs, so a local setup keeps its dirty-tree check.
+fn can_skip_build(ci: bool, home: &Path, digest: &str) -> bool {
+    ci && home.join("bin/athena").is_file()
+        && std::fs::read_to_string(stamp_path(home)).is_ok_and(|s| s.trim() == digest)
+}
+
+/// Runs `build` with the stamp removed, and writes the stamp (holding `digest`, taken before the build) only if
+/// `build` succeeded. A failed build, or one that stops partway, therefore never leaves a stamp that vouches
+/// for a binary built from other inputs.
+fn rebuild_stamped<T>(home: &Path, digest: &str, build: impl FnOnce() -> Result<T>) -> Result<T> {
+    let stamp = stamp_path(home);
+    match std::fs::remove_file(&stamp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("removing {}", stamp.display())),
+    }
+    let built = build()?;
+    std::fs::create_dir_all(stamp.parent().expect("stamp has a parent"))?;
+    std::fs::write(&stamp, digest)?;
+    Ok(built)
+}
+
 fn install_gitleaks(config: &Config) -> Result<()> {
     let pin = &config.tools.gitleaks;
     let target = paths::tool_path("gitleaks", &pin.version);
-    if target.exists()
-        && let Some(v) = found(target.to_str().unwrap_or(""), "version")
-        && v.trim() == pin.version
-    {
+    if gitleaks_present(&target, &pin.version) {
         println!(
-            "gitleaks {} already installed at {}",
+            "gitleaks {} already installed at {}; skipped the install",
             pin.version,
             target.display()
         );
@@ -354,7 +471,32 @@ fn install_sccache_at(
     Ok(())
 }
 
+/// Builds and adopts the athena binary, or with `--ci` reuses a cached one built from the same inputs.
+///
+/// The skip needs `--ci`, an adopted binary and a stamp equal to the digest of `BUILD_INPUT_GLOBS`. It runs
+/// before the dirty-tree refusal, which CI does not need because its checkout is clean; a local setup never
+/// skips. Every other path removes the stamp, builds, and writes the stamp only after the build and adoption
+/// succeeded, so a later non-CI build cannot leave a stale stamp. A skipped build keeps the binary of the run that
+/// built it, so `athena --version` there names that run's commit.
 fn build_and_adopt(root: &Path, flags: &Flags) -> Result<PathBuf> {
+    let home = paths::athena_home();
+    let digest = inputs_digest(root)?;
+    if can_skip_build(flags.ci, &home, &digest) {
+        let adopted = home.join("bin/athena");
+        set_executable(&adopted)?;
+        println!(
+            "--ci: skipped the athena build; the cached binary at {} was built from these inputs (digest {}). \
+             The dirty-tree check does not run on this path",
+            adopted.display(),
+            &digest[..12]
+        );
+        link_local_bin(&adopted)?;
+        return Ok(adopted);
+    }
+    rebuild_stamped(&home, &digest, || build_fresh(root, flags))
+}
+
+fn build_fresh(root: &Path, flags: &Flags) -> Result<PathBuf> {
     let commit = output(
         Command::new("git")
             .args(["rev-parse", "HEAD"])
@@ -410,16 +552,22 @@ fn build_and_adopt(root: &Path, flags: &Flags) -> Result<PathBuf> {
             adopted.display()
         );
     }
+    link_local_bin(&adopted)?;
+    Ok(adopted)
+}
+
+/// Points `~/.local/bin/athena` at the adopted binary.
+fn link_local_bin(adopted: &Path) -> Result<()> {
     if let Some(home) = std::env::var_os("HOME") {
         let local_bin = PathBuf::from(home).join(".local/bin");
         std::fs::create_dir_all(&local_bin)?;
         let link = local_bin.join("athena");
-        let points_here = std::fs::read_link(&link).ok().as_deref() == Some(adopted.as_path());
+        let points_here = std::fs::read_link(&link).ok().as_deref() == Some(adopted);
         if !points_here {
             if link.symlink_metadata().is_ok() {
                 std::fs::remove_file(&link)?;
             }
-            symlink(&adopted, &link)?;
+            symlink(adopted, &link)?;
         }
         let on_path = std::env::var_os("PATH")
             .is_some_and(|p| std::env::split_paths(&p).any(|d| d == local_bin));
@@ -434,7 +582,7 @@ fn build_and_adopt(root: &Path, flags: &Flags) -> Result<PathBuf> {
             }
         );
     }
-    Ok(adopted)
+    Ok(())
 }
 
 fn install_hooks(root: &Path, binary: &Path, force: bool) -> Result<()> {
@@ -625,6 +773,126 @@ mod tests {
         std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
         std::fs::write(&binary, "").unwrap();
         install_sccache_at(home.path(), "9.9.9", |_| bail!("must not run")).unwrap();
+    }
+
+    #[test]
+    fn skip_only_with_ci_matching_stamp_and_binary() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        // No binary and no stamp: build.
+        assert!(!can_skip_build(true, h, "abc"));
+        std::fs::create_dir_all(h.join("bin")).unwrap();
+        std::fs::write(h.join("bin/athena"), "x").unwrap();
+        // A binary without a stamp: build.
+        assert!(!can_skip_build(true, h, "abc"));
+        std::fs::write(stamp_path(h), "abc\n").unwrap();
+        // A binary, a matching stamp, and --ci: skip.
+        assert!(can_skip_build(true, h, "abc"));
+        // Built from other inputs: build.
+        assert!(!can_skip_build(true, h, "def"));
+        // Without --ci: build, whatever the stamp says.
+        assert!(!can_skip_build(false, h, "abc"));
+        // A stamp whose binary is gone: build.
+        std::fs::remove_file(h.join("bin/athena")).unwrap();
+        assert!(!can_skip_build(true, h, "abc"));
+    }
+
+    #[test]
+    fn a_non_ci_build_leaves_no_stale_stamp() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        std::fs::create_dir_all(h.join("bin")).unwrap();
+        std::fs::write(h.join("bin/athena"), "old").unwrap();
+        std::fs::write(stamp_path(h), "D1").unwrap();
+        assert!(can_skip_build(true, h, "D1"));
+        // A successful build: the stamp is gone while it runs, and holds the new digest afterwards.
+        let ran = rebuild_stamped(h, "D2", || {
+            assert!(!stamp_path(h).exists(), "the old stamp is removed first");
+            Ok(7)
+        })
+        .unwrap();
+        assert_eq!(ran, 7);
+        assert_eq!(std::fs::read_to_string(stamp_path(h)).unwrap(), "D2");
+        assert!(!can_skip_build(true, h, "D1"));
+        assert!(can_skip_build(true, h, "D2"));
+        // A failed build leaves no stamp, so it cannot vouch for whatever binary is there.
+        let failed: Result<()> = rebuild_stamped(h, "D3", || bail!("cargo failed"));
+        assert!(failed.is_err());
+        assert!(!stamp_path(h).exists());
+        assert!(!can_skip_build(true, h, "D2"));
+        assert!(!can_skip_build(true, h, "D3"));
+    }
+
+    /// A temp tree holding one file for every entry of `BUILD_INPUT_GLOBS`, with the compiled-in kinds a plain
+    /// `*.rs` filter would miss: a prompt under `crates/` and `docs/system-facts.md`.
+    fn input_tree() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        for glob in BUILD_INPUT_GLOBS {
+            let rel = match glob.strip_suffix("/**") {
+                Some("crates") => "crates/athena-context/prompts/producer.md".to_string(),
+                Some(dir) => format!("{dir}/src/main.rs"),
+                None => glob.to_string(),
+            };
+            let path = root.path().join(&rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, format!("content of {rel}")).unwrap();
+        }
+        std::fs::write(root.path().join("CHANGELOG.md"), "log").unwrap();
+        root
+    }
+
+    #[test]
+    fn the_inputs_digest_changes_when_a_compiled_in_file_is_edited() {
+        let tree = input_tree();
+        let r = tree.path();
+        let before = inputs_digest(r).unwrap();
+        assert_eq!(before, inputs_digest(r).unwrap());
+        // A prompt, which the binary embeds with include_str!.
+        let prompt = r.join("crates/athena-context/prompts/producer.md");
+        std::fs::write(&prompt, "a changed prompt").unwrap();
+        let after_prompt = inputs_digest(r).unwrap();
+        assert_ne!(before, after_prompt);
+        // docs/system-facts.md, also embedded.
+        std::fs::write(r.join("docs/system-facts.md"), "changed facts").unwrap();
+        let after_facts = inputs_digest(r).unwrap();
+        assert_ne!(after_prompt, after_facts);
+        // A new file under crates/, and each exact file.
+        std::fs::write(r.join("crates/new.txt"), "new").unwrap();
+        assert_ne!(after_facts, inputs_digest(r).unwrap());
+        for glob in BUILD_INPUT_GLOBS.iter().filter(|g| !g.ends_with("/**")) {
+            let base = inputs_digest(r).unwrap();
+            std::fs::write(r.join(glob), "edited").unwrap();
+            assert_ne!(base, inputs_digest(r).unwrap(), "{glob}");
+        }
+        // A file outside the list does not matter.
+        let base = inputs_digest(r).unwrap();
+        std::fs::write(r.join("CHANGELOG.md"), "other log").unwrap();
+        assert_eq!(base, inputs_digest(r).unwrap());
+    }
+
+    #[test]
+    fn input_files_follow_the_shared_list() {
+        let tree = input_tree();
+        let files = input_files(tree.path()).unwrap();
+        assert_eq!(files.len(), BUILD_INPUT_GLOBS.len());
+        assert!(files.contains(&PathBuf::from("crates/athena-context/prompts/producer.md")));
+        assert!(files.contains(&PathBuf::from("docs/system-facts.md")));
+        assert!(!files.contains(&PathBuf::from("CHANGELOG.md")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cached_gitleaks_is_skipped_only_when_it_reports_the_pinned_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("gitleaks");
+        // Missing: install.
+        assert!(!gitleaks_present(&fake, "8.1.0"));
+        std::fs::write(&fake, "#!/bin/sh\necho 8.1.0\n").unwrap();
+        set_executable(&fake).unwrap();
+        // Present and the pinned version: skip.
+        assert!(gitleaks_present(&fake, "8.1.0"));
+        // Present but another version: install.
+        assert!(!gitleaks_present(&fake, "9.0.0"));
     }
 
     #[test]

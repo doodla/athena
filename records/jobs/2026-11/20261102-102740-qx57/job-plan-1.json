@@ -1,0 +1,269 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261102-102740-qx57",
+  "round": 1,
+  "at": "2026-11-02T10:32:55.693733816Z",
+  "invocation_seq": 3,
+  "approach": "Keep all code inside the listed deliverables. xtask/src/main.rs gains one const, `BUILD_INPUT_GLOBS` (crates/**, xtask/**, rust-toolchain.toml, Cargo.toml, Cargo.lock, athena.toml, defaults.toml, setup.sh, docs/system-facts.md). Three things read it: `inputs_digest(root)`, a new `xtask build-inputs` subcommand that prints it, and, through that subcommand run as CARGO_BIN_EXE_xtask, the policy tests. `build_and_adopt` is split. With `--ci`, an adopted binary and a stamp (`<athena home>/bin/athena.inputs`) equal to the digest, it skips cargo build and still links ~/.local/bin/athena. Every other path deletes the stamp, builds and adopts, then writes the stamp from the digest taken before the build. A failed or non-CI build therefore never leaves a stale stamp. ci.yml gets gitleaks and athena-bin restores before 'Set up' and default-branch-only saves with the existing condition. The athena-bin key hashes the same globs, with no restore-keys. policy.rs gets pure checks on ci.yml text. They run on the real file (must pass) and on mutants (must fail). The compiled-in set is enumerated independently by scanning production include_str!/include_bytes! targets, plus manifests. CHANGELOG gets one entry. setup.sh and ci_shards.rs stay unchanged unless a test there fails, because `--ci` still goes through `xtask setup`.",
+  "decisions": [
+    {
+      "choice": "Put BUILD_INPUT_GLOBS, inputs_digest, the stamp helpers and the build-inputs subcommand in xtask/src/main.rs, with no new module file.",
+      "reason": "Round-1 finding 3: a new xtask/src/build_inputs.rs is outside the reading's deliverables, which list only main.rs for xtask code. The shared const still has one definition. xtask is bin-only, so the policy test reads it by running the built binary (CARGO_BIN_EXE_xtask), the way xtask/tests/fingerprint.rs and site_page.rs already do. The addition is small (about 100 lines) next to the existing 23 KB main.rs.",
+      "rejected": [
+        {
+          "option": "A new module xtask/src/build_inputs.rs",
+          "why": "It widens scope beyond the listed deliverables (finding 3)."
+        },
+        {
+          "option": "Copy the list into policy.rs",
+          "why": "Two lists drift, which was the root cause of the rejected job."
+        },
+        {
+          "option": "#[path]-include main.rs pieces into policy.rs",
+          "why": "It couples the test to a source path and recompiles code; the binary route is the pattern in use."
+        }
+      ]
+    },
+    {
+      "choice": "Key and digest cover the same nine globs. The digest is sha256 over OS, architecture, then each file's relative path and length-prefixed content, sorted by path. An absent exact file hashes as absent. The athena-bin key is exact-only, with no restore-keys.",
+      "reason": "The cache key decides whether a binary is restored, and the stamp is a second guard. Both must see every compiled-in file, including prompts/*.md and docs/system-facts.md (the rejected job's major finding).",
+      "rejected": [
+        {
+          "option": "Key on Cargo.lock and crates/**/src/** only",
+          "why": "This is the rejected gap: prompts and docs/system-facts.md are compiled in."
+        },
+        {
+          "option": "restore-keys prefix fallback",
+          "why": "It would restore a binary built from different inputs."
+        }
+      ]
+    },
+    {
+      "choice": "The stamp is deleted before every build, written only after a successful build and adopt, and holds the pre-build digest. The skip needs `--ci` and runs before the dirty-tree check. A main.rs comment, the ci.yml comment and the CHANGELOG say so.",
+      "reason": "A failed or non-CI build cannot leave a stamp that vouches for a binary from other inputs (the earlier minor finding). CI checkouts are clean. Non-CI setup keeps its refusal.",
+      "rejected": [
+        {
+          "option": "Write the stamp only on --ci builds",
+          "why": "A later non-CI build would leave an old stamp in place."
+        },
+        {
+          "option": "Dirty-tree check before the skip",
+          "why": "It adds git calls to the fast path for no gain on clean CI checkouts."
+        }
+      ]
+    },
+    {
+      "choice": "The policy test enumerates compiled-in files independently. It scans include_str!/include_bytes! string literals in crates/ and xtask/ .rs files, resolves them against the including file's directory, and counts production includes only. Those are files under src/, excluding tests.rs and *_tests.rs, with the include before the file's first `#[cfg(test)]` line. It adds the manifests (root Cargo.toml, Cargo.lock, rust-toolchain.toml, crates/*/Cargo.toml, xtask/Cargo.toml) and setup.sh. It requires a non-empty set containing crates/athena-context/prompts/producer.md and docs/system-facts.md.",
+      "reason": "Test-only includes (CHANGELOG.md, README.md, BRIEF.md, docs/design/*) never reach the binary, and keying on them would bust the cache on every change. An independent scan means a new compiled-in file outside the list fails the test. The test comment states the limit: a production include after an early #[cfg(test)] item, or a concat!-built path, would be missed. The producer re-greps for such forms.",
+      "rejected": [
+        {
+          "option": "Count every include target",
+          "why": "It would force CHANGELOG.md and docs into the key."
+        },
+        {
+          "option": "Hand-kept list of test-only exceptions",
+          "why": "It needs upkeep and can hide a real compiled-in file."
+        }
+      ]
+    },
+    {
+      "choice": "policy.rs gets text-taking forms `job_text_in(text, id)` and `job_steps_in(text, id)`. `job_text` and `job_steps` delegate to them. New pure checks `check_athena_bin_keys(yml, required)` and `check_restore_before_setup(yml)` run on the real ci.yml and on mutated copies.",
+      "reason": "A repo test must fail on a bad ci.yml. Running the same function on the real file (Ok) and on mutants (Err) shows the check is not vacuous.",
+      "rejected": [
+        {
+          "option": "Assert only on the real ci.yml",
+          "why": "It would pass even if the check did nothing."
+        }
+      ]
+    },
+    {
+      "choice": "Restore both caches in fmt, clippy, test, history, attribution and pr-head, all before 'Set up'. Save both in fmt, clippy, test (matrix.shard == 0) and history, with the existing default-branch condition and `cache-hit != 'true'`. A comment says attribution and pr-head restore only. pr-head never runs on the default branch, and the other jobs save the same keys.",
+      "reason": "Every one of those jobs runs `./setup.sh --ci`, so restoring helps all of them. Saving from every job would race on one key.",
+      "rejected": [
+        {
+          "option": "Save from every job",
+          "why": "It races to write one key."
+        },
+        {
+          "option": "No restore in history, attribution and pr-head",
+          "why": "They run the same setup; a restore is two steps and the same test covers it."
+        }
+      ]
+    },
+    {
+      "choice": "The gitleaks cache needs no xtask change. Its path is ~/.local/share/athena/tools/gitleaks and its key is gitleaks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('athena.toml') }}.",
+      "reason": "`install_gitleaks` already returns early when the pinned binary exists, and athena.toml holds the version and checksum pins.",
+      "rejected": [
+        {
+          "option": "A gitleaks stamp",
+          "why": "install_gitleaks already checks the version itself."
+        }
+      ]
+    },
+    {
+      "choice": "Criterion 6 gets a concrete seam: the three Athena check commands run against the real edited repository. The fixtures are the real ci.yml, parsed by the existing xtask/tests/ci_shards.rs `parse_workflow` and `check_jobs` and by policy.rs, plus the new unit tests.",
+      "reason": "It answers round-1 findings 1 and 2. The demonstration says what fails without the behavior: a malformed new ci.yml step, an unformatted file, a lint in the new code, or a failing new test each turns one of the three commands red.",
+      "rejected": [
+        {
+          "option": "State the three commands with no seam",
+          "why": "The reviewer rejected this form (findings 1 and 2)."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "purpose": "Add the shared const BUILD_INPUT_GLOBS, `inputs_digest(root)`, the `build-inputs` subcommand and usage text, and the stamp helpers `stamp_path`, `can_skip_build`, `rebuild_stamped` and `link_into_local_bin`. Reshape `build_and_adopt` to skip or rebuild and stamp. Update the module doc comment. Add unit tests for the digest, the skip and the stale stamp. No new module file.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/tests/policy.rs",
+      "action": "modify",
+      "purpose": "Refactor job_text/job_steps into text-taking forms. Add the compiled-in file scan, check_athena_bin_keys, check_restore_before_setup, the save-guard and SHA-pin checks, and the mutant tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Governance file, listed as a deliverable. Add gitleaks and athena-bin restore steps before 'Set up' in fmt, clippy, test, history, attribution and pr-head, and default-branch-only saves in fmt, clippy, test and history. Update the header comment with the key coverage, the older source commit effect and the dirty-tree note.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One Unreleased entry for the gitleaks and athena binary caches, their keys, the stamp and --ci skip, the older-commit effect, and the unmeasured speed-up.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "setup.sh",
+      "action": "modify",
+      "purpose": "Listed deliverable. Expected to stay unchanged because `--ci` still goes through `xtask setup`. Touch it only if a test shows it needs a change; it is hashed in the key.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "xtask/tests/ci_shards.rs",
+      "action": "modify",
+      "purpose": "Listed deliverable. Expected to stay unchanged. Edit it only if the new ci.yml steps break its parser.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Grep ci.yml, setup.sh and crates/athena-data/src/paths.rs (`athena_home`) for ATHENA_HOME and XDG_DATA_HOME to settle the cache paths (~/.local/share/athena/tools/gitleaks and ~/.local/share/athena/bin). Grep crates/ and xtask/ for include_str!/include_bytes!/concat! forms to confirm they are all string literals.",
+    "In xtask/src/main.rs add `const BUILD_INPUT_GLOBS: [&str; 9]` (`dir/**` entries are recursive directories, the rest exact files) and `fn inputs_digest(root: &Path) -> Result<String>`. The digest is sha256 over OS, architecture, then each file's relative path and length-prefixed content, sorted by path, with an absent exact file hashed as absent. Add `fn build_inputs_command()` that prints the globs one per line.",
+    "Add `mod`-free dispatch `Some(\"build-inputs\") => build_inputs_command()` to main(), extend the usage text and update the module doc comment.",
+    "Add `stamp_path(home)` (= home/bin/athena.inputs), `can_skip_build(ci, home, digest)` (true only if ci, the adopted binary is a file and the stamp equals the digest), `rebuild_stamped(home, digest, build)` (remove the stamp, run the closure, write the stamp only on Ok) and `link_into_local_bin(adopted)` (the HOME/.local/bin symlink block moved out of `build_and_adopt`).",
+    "Reshape `build_and_adopt`: compute the digest first. If `can_skip_build(flags.ci, ...)`, ensure the executable bit, link, print a line naming the digest and saying the dirty-tree check does not run on this path, and return. Otherwise run the existing git, cargo and adopt body inside `rebuild_stamped`. Add a comment that the skip needs --ci and that CI checkouts are clean.",
+    "Add the main.rs tests from demonstration 4: the digest test, `skip_only_with_ci_matching_stamp_and_binary` and `a_non_ci_build_leaves_no_stale_stamp` with its failing-build case. Keep the existing tests.",
+    "In xtask/tests/policy.rs split `job_text` and `job_steps` into `job_text_in` and `job_steps_in`, keeping the old names as wrappers. Add `compiled_in_files()` (regex scan with the production rule, plus the manifests and setup.sh), `covers(glob, path)`, `check_athena_bin_keys` and `check_restore_before_setup`, and read the list by running `CARGO_BIN_EXE_xtask build-inputs`. Add the tests from demonstrations 1, 2 and 5, with the mutated ci.yml texts, a SHA-pin test and a save-guard test. Update the module header comment.",
+    "Edit ci.yml. In fmt, clippy, test and history, insert 'Restore the gitleaks cache' (id cache-gitleaks) and 'Restore the athena binary cache' (id cache-athena-bin) steps. They use actions/cache/restore with the 40-character SHA already used in the file, and sit after the existing restores and before 'Set up (pinned toolchain, gitleaks, athena)'. Add the same two restores to attribution and pr-head. Keys: gitleaks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('athena.toml') }} and athena-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/**', 'xtask/**', 'rust-toolchain.toml', 'Cargo.toml', 'Cargo.lock', 'athena.toml', 'defaults.toml', 'setup.sh', 'docs/system-facts.md') }}. Add matching actions/cache/save steps in fmt, clippy, test (with `matrix.shard == 0`) and history, using the existing default-branch condition and `cache-hit != 'true'`. Update the header comment: exact-only keys, what they cover and do not cover, the older-source-commit effect, the dirty-tree note, the attribution/pr-head restore-only note, and that the speed-up is not measured here. Do not change any job id, timeout, needs or shard line.",
+    "Add one entry under [Unreleased] in CHANGELOG.md for outside readers: the two caches with paths and keys, the nine globs, the stamp and the `--ci` skip, the older-commit effect, that pull requests changing crates/ or xtask/ rebuild, and that the speed-up is not measured here.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p xtask` and `cargo test --locked`. Fix failures, in particular in ci_shards.rs and the existing policy tests. Leave setup.sh and ci_shards.rs unchanged unless a test there fails. Run `cargo run -p xtask -- build-inputs` once and compare its output with the ci.yml key."
+  ],
+  "risks": [
+    {
+      "risk": "A compiled-in file missed by the key gives a stale restored binary (the rejected job's failure).",
+      "mitigation": "The key is exact-only. The stamp is a second guard in setup. The policy test compares the key globs with the xtask list and with the independent include scan."
+    },
+    {
+      "risk": "The digest's walk and GitHub's hashFiles disagree on edge cases such as symlinks and dotfiles.",
+      "mitigation": "None exist under crates/ or xtask/ today. The producer compares the `build-inputs` output with the key once, and the ci.yml comment states that the sets are compared by path rule."
+    },
+    {
+      "risk": "The include scan misses a new form of include and passes vacuously.",
+      "mitigation": "The test also requires set equality with the xtask list, a non-empty set and the sanity paths. The producer greps crates/ for include forms before finishing."
+    },
+    {
+      "risk": "Several jobs write one cache key at once.",
+      "mitigation": "Saves are guarded by `cache-hit != 'true'` and the default-branch condition. The test job saves from shard 0 only. Attribution and pr-head do not save."
+    },
+    {
+      "risk": "A restored binary reports an older build commit in `athena --version`.",
+      "mitigation": "The ci.yml comment and the CHANGELOG state this. CI jobs only run read-only checks, and the reading accepts it."
+    },
+    {
+      "risk": "The skip path bypasses the dirty-tree refusal.",
+      "mitigation": "The skip needs --ci, a binary file and an exact stamp match, and each leg is tested. A comment documents that CI checkouts are clean."
+    },
+    {
+      "risk": "New ci.yml steps break the parsers in ci_shards.rs and policy.rs.",
+      "mitigation": "New steps use the same 6-space `- name:` layout. No job id, timeout, needs or shard line changes. Step 10 runs both suites."
+    },
+    {
+      "risk": "Putting the code in main.rs makes it larger.",
+      "mitigation": "The addition is about 100 lines and follows the existing helper style. A new module would leave the listed deliverables."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A policy test reads the real ci.yml. It requires every athena-bin step (all restore and save steps) to use a hashFiles list equal to the `xtask build-inputs` output, which is the nine globs. In fmt, clippy and test it requires the gitleaks and athena-bin restore steps to precede the step named 'Set up (pinned toolchain, gitleaks, athena)'. The verifier may also read `git diff -- .github/workflows/ci.yml`.",
+      "command": "cargo test -p xtask --test policy",
+      "observes": "athena_bin_keys_cover_every_compiled_in_file and every_job_restores_gitleaks_and_athena_before_setup pass on the real ci.yml.",
+      "fails_without": "A key missing docs/system-facts.md or another glob, or a restore placed after setup or deleted, fails these tests. The mutant test in criterion 5 shows it.",
+      "seam": "Entry points: the pure functions `check_athena_bin_keys(yml, required)` and `check_restore_before_setup(yml)` in policy.rs, and the `xtask` binary via CARGO_BIN_EXE_xtask (the pattern already in xtask/tests/fingerprint.rs). Fixture: the real .github/workflows/ci.yml. No double. Step 7 adds the check functions and step 3 adds the subcommand; neither exists today."
+    },
+    {
+      "criterion": 2,
+      "method": "Policy tests check three things. Every athena-bin and gitleaks save step is actions/cache/save, guarded by the default-branch condition and `cache-hit != 'true'`, and in the test job also by `matrix.shard == 0`. Every `uses:` line ends in @ plus 40 hex characters. history, attribution and pr-head restore before setup. The existing pass-marker test and the ci_shards tests show no other workflow behavior changed. The verifier reads the ci.yml comment for attribution and pr-head, which states that they restore only.",
+      "command": "cargo test -p xtask --test policy",
+      "observes": "The new save-guard and SHA-pin tests pass, as do the existing the_pass_is_marked_and_saved_only_after_the_checks_and_the_shared_caches_stay_default_branch_only and the ci_shards tests.",
+      "fails_without": "A save step with no default-branch guard, an unpinned or short-SHA uses: line, or a missing restore in history, attribution or pr-head fails the new tests.",
+      "seam": "Entry points: `job_steps_in(text, id)`, `check_restore_before_setup`, and a save-guard check over the real ci.yml text in policy.rs. Fixtures: the real ci.yml and string mutants of it. No double. Step 7 adds the text-taking forms; today only the file-reading `job_text` and `job_steps` exist."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the subcommand and compare its output with the hashFiles(...) arguments in ci.yml. The policy test asserts set equality between the two. `inputs_digest` in xtask/src/main.rs reads the same const. The verifier reads the ci.yml comment and the CHANGELOG entry with git diff. They claim only the nine globs and say that docs/design, CHANGELOG.md, README.md and other docs are not in the key.",
+      "command": "cargo run -p xtask -- build-inputs",
+      "observes": "It prints the nine globs, one per line, matching the ci.yml key. The comment and the CHANGELOG entry claim nothing beyond them.",
+      "fails_without": "If the digest used its own list or the key drifted from the const, the set-equality assertion in athena_bin_keys_cover_every_compiled_in_file fails.",
+      "seam": "Entry point: the `build-inputs` dispatch in main() printing `BUILD_INPUT_GLOBS`. Step 3 adds it; it does not exist today."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit tests in xtask/src/main.rs run the real functions over temp directories (tempfile is already an xtask dependency). (a) `inputs_digest_changes_when_a_compiled_in_file_is_edited` builds a temp tree with a file for every glob, including crates/athena-context/prompts/producer.md and docs/system-facts.md. It takes `inputs_digest(root)`, edits the prompt, and asserts the digest differs. It does the same for docs/system-facts.md and for a new file under crates/, and asserts that a CHANGELOG.md edit leaves the digest unchanged. (b) `skip_only_with_ci_matching_stamp_and_binary` calls `can_skip_build(ci, home, digest)`. It skips only with ci true, a binary file and a stamp equal to the digest. It does not skip with a different digest, no binary, no stamp, or ci false. (c) `a_non_ci_build_leaves_no_stale_stamp` calls `rebuild_stamped(home, digest, build)` with a stamp holding the old digest D1. The build closure asserts the stamp is already gone. Afterwards the stamp holds D2 and `can_skip_build(true, home, D1)` is false. A second case has the closure return Err and asserts no stamp remains.",
+      "command": "cargo test -p xtask",
+      "observes": "All three tests pass among the xtask unit tests.",
+      "fails_without": "If the digest skipped any glob, (a) fails because the digest stays equal. Without the digest comparison, (b) fails because a mismatched digest or a missing binary would skip. If the stamp were not deleted before the rebuild, (c) fails because the closure sees the old stamp, and a failed build would leave it vouching for the old binary.",
+      "seam": "Entry points: `inputs_digest`, `can_skip_build` and `rebuild_stamped` in xtask/src/main.rs, which `build_and_adopt` calls. Fixtures: temp home and temp source tree. Injection: the cargo build is the closure parameter of `rebuild_stamped`, and the other collaborators are passed as arguments. The digest, comparison and stamp logic run for real; only the cargo build is replaced. Steps 2 to 5 add this seam; today `build_and_adopt` inlines the build."
+    },
+    {
+      "criterion": 5,
+      "method": "`athena_bin_keys_cover_every_compiled_in_file` runs `xtask build-inputs`. It scans crates/ and xtask/ .rs files for include_str!/include_bytes! literals and keeps production includes (the rule is in the decisions). It adds the manifests and setup.sh. It asserts that every such path is covered by a glob in every athena-bin hashFiles of the real ci.yml, that the key globs equal the xtask list, that the set is non-empty, and that the prompt and docs/system-facts.md sanity paths are present. `a_stale_or_incomplete_ci_yml_is_flagged` runs `check_athena_bin_keys` on a copy of ci.yml with docs/system-facts.md removed from one key and on a copy with another glob removed. It also runs it on the real ci.yml with an extra required path crates/x/prompts/new.md. It runs `check_restore_before_setup` on a copy with the athena-bin restore deleted from fmt and on a copy with the restore moved after 'Set up'. Every mutant must return Err and the real file Ok.",
+      "command": "cargo test -p xtask --test policy",
+      "observes": "The real-file tests pass and every mutated ci.yml variant is rejected.",
+      "fails_without": "Without key coverage, a key missing docs/system-facts.md or a prompt glob is accepted and the mutant test fails. Without the order check, a restore placed after setup or deleted is accepted.",
+      "seam": "Entry points: the xtask binary (CARGO_BIN_EXE_xtask) and `check_athena_bin_keys` / `check_restore_before_setup` in policy.rs. Fixtures: the real ci.yml and string mutations of it, passed as arguments. The scan reads the real repository files and no double holds the logic. Steps 3 and 7 add the subcommand and the functions; neither exists today."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena check commands on the finished tree. `cargo test --locked` runs xtask/tests/ci_shards.rs and the existing and new policy tests. The existing `parse_workflow` and `check_jobs` in ci_shards.rs parse the edited ci.yml, and the new unit tests in main.rs and policy.rs run too.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The ci_shards tests still accept the edited ci.yml: shard layout, job ids, timeouts and needs are unchanged.",
+      "fails_without": "A malformed or reordered new ci.yml step makes ci_shards.rs or policy.rs fail in `cargo test`. Unformatted code fails `cargo fmt --check`. A lint in the new main.rs code fails clippy -D warnings. A broken new test fails `cargo test`. Each leg fails on a defect in the change.",
+      "seam": "Entry points: the three cargo commands themselves, the same ones Athena runs (fmt, clippy, test). Fixtures: the real edited repository and the real .github/workflows/ci.yml, read by the existing `parse_workflow` / `check_jobs` in xtask/tests/ci_shards.rs (exists, read). No fake or double. Step 10 runs them."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff of CHANGELOG.md. The new entry sits under [Unreleased]. It names the gitleaks cache and the athena-bin cache with their paths and keys, and lists the globs. It says that `setup --ci` skips the build only with a matching stamp, and that a restored binary reports its older source commit. It says that pull requests changing crates/ or xtask/ always rebuild. It says the speed-up on GitHub Actions is not measured here. Existing policy tests that read CHANGELOG.md then run.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The entry exists, is under [Unreleased], and states those facts. `cargo test -p xtask --test policy` still passes.",
+      "fails_without": "Without the entry, the diff is empty and the content check fails. A CHANGELOG format break fails the existing policy tests that read the file.",
+      "seam": "Entry point: the CHANGELOG.md file under [Unreleased]; the existing CHANGELOG-reading policy tests are the guard. Fixture: the real file. No double. Step 9 adds the entry."
+    }
+  ],
+  "open_questions": [
+    "Whether runners set ATHENA_HOME or XDG_DATA_HOME. ci.yml sets neither (checked by grep in step 1), so the cache paths assume ~/.local/share/athena as returned by `athena_home`.",
+    "Pull requests that change crates/** or xtask/** always miss the exact-only athena-bin key, because only the default branch saves. The saving then mostly helps docs-only pull requests, post-merge pushes, and the history, attribution and pr-head jobs. The throughput review measures that; this plan does not.",
+    "A production include after an early #[cfg(test)] item, or a concat!-built include path, would be missed by the scan. The producer re-greps crates/ and xtask/ for such forms and the test comment names the limit.",
+    "Whether hashFiles('crates/**') and the digest's walk agree on dotfiles and symlinks. The policy test compares paths by rule, not by hash, and the ci.yml comment says so."
+  ],
+  "producer_section_sha256": "e9682a20c22f83a54f6e3f5e677fa34dcf9006085b6f139fd6e98ac65e14d9cc"
+}
