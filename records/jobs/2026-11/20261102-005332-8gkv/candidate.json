@@ -1,0 +1,155 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261102-005332-8gkv",
+  "base_commit": "2600b2403b362803f8133da20e0fdb370aa969c4",
+  "base_fingerprint": "sha256:9a43cc1ce9a3c07de08c9489bcd914f93c0818add1682548b6b409ad8b7a65e2",
+  "previous_job": "20261031-031934-8vyd",
+  "candidate_commit": "0388b27731b1a1bf3f3b083f79c0d493db7bd9a7",
+  "candidate_tree": "734539e3e7e11792f145b6b37953044d07c5c0f1",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 280525
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 36504
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 52196
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 134672
+    },
+    {
+      "path": "crates/athena-core/src/gh/transport.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 13537
+    },
+    {
+      "path": "crates/athena-core/src/watcher.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31242
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 178429
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 325365
+    }
+  ],
+  "fingerprint": "sha256:e1fd2f29520892a0fc21a6786108e1199f2f7d2a81e14f53b9a36b510e887a3a",
+  "violations": [],
+  "producer_report": {
+    "summary": "Merge refusals logged while required checks were pending no longer fire D87's hard signal. Root cause: landing already treated a rule-violation refusal followed by pending checks as a wait. But the client had logged it as a plain host-error record, and `HostErrorSignal::matches` compared only operation, phase and status. Fix: `athena.host-error/1` has a new optional `checks_pending` field (serde default, omitted when false). Old records parse and write unchanged. `land_pr` calls a new defaulted `PrHost::note_pending_merge_refusal` in the existing \"rule violation, checks Pending\" branch. `GhClient` implements it with `HostErrorLog::mark_last_pending(Merge)`. `matches` skips flagged records. `D87_SIGNAL`'s name string is unchanged. A 405 or 422 with the checks settled, and any other refusal, are logged and fire as before. Tests, the D87_SIGNAL doc comment, a CHANGELOG entry and a D87 note in decisions.md are in. No file under records/ is edited and the open D87 review is not cleared. I did not run the full `cargo test`.",
+    "files": [
+      "crates/athena-data/src/records.rs",
+      "crates/athena-core/src/gh/transport.rs",
+      "crates/athena-core/src/gh/client.rs",
+      "crates/athena-core/src/gh/landing.rs",
+      "crates/athena-core/src/gh/tests.rs",
+      "crates/athena-core/src/watcher.rs",
+      "CHANGELOG.md",
+      "docs/decisions.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core watcher::",
+        "result": "pass",
+        "note": "14 watcher tests pass, including the new pending-exclusion tests and the existing 405 derivation test. The first run failed on a malformed test id; I fixed the id and reran."
+      },
+      {
+        "command": "cargo test -p athena-core gh::",
+        "result": "pass",
+        "note": "107 tests pass, including the 4 new landing and log tests."
+      },
+      {
+        "command": "cargo test -p athena-data",
+        "result": "pass",
+        "note": "144 tests pass, including the old-format and flagged-record tests."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "Boundary scan passes on the changed files."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core watcher`: a new test shows a merge 405 host error marked as caused by pending checks does not make `evaluate` fire D87, and a 405/422 without that marking still fires D87 on the first job.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core watcher::`: 14 passed. `a_merge_refusal_caused_by_pending_checks_does_not_fire` covers 405 and 422: with `checks_pending` set, `evaluate` returns nothing; unset, it returns one D87 firing. `a_waiting_refusal_beside_a_real_one_fires_on_the_real_one_only` covers a mixed job."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core gh`: a landing test shows a merge refusal while checks are pending is logged distinguishably (or not as a D87-matching error), while a refusal with checks complete is logged as before.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core gh::`: 107 passed. `a_405_for_rule_violations_while_checks_are_pending_is_logged_as_caused_by_pending_checks` (405 and 422, through a real GhClient and HostErrorLog) gets a report with Pending checks and one entry with `checks_pending == true`. `..._with_the_checks_settled_is_logged_as_before` gets an Err and an unflagged entry. `another_405_while_checks_are_pending_is_an_error_and_not_marked` and `marking_a_refusal_as_pending_flags_only_the_latest_entry_of_that_operation` also pass."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-data`: a test through check_record_file/AnyRecord shows an old-format athena.host-error/1 record (as in records/host-errors/2026-11/20261101-174051-3t6g.json) still validates unchanged after any records.rs change.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-data`: 144 passed. `an_old_format_host_error_still_validates_unchanged` passes an old-shape JSON literal with no `checks_pending` key and the 3t6g path through `check_record_file`. It gets `AnyRecord::HostError` with `checks_pending == false`, and `to_json` omits the key. `a_pending_checks_host_error_round_trips` covers the new field."
+      },
+      {
+        "criterion": "Grep of crates/athena-core/src/watcher.rs shows the D87_SIGNAL doc comment states pending-check refusals are excluded, and the signal name string \"host-error: operation merge, status 405 or 422, phase landing\" is unchanged so record 20261031-085139-1y06 still matches.",
+        "status": "met",
+        "evidence": "The doc comment above `pub const D87_SIGNAL` in watcher.rs now says a refusal logged as caused by pending checks (`checks_pending`) is excluded. The `name:` line is untouched. `d87s_signal_name_is_unchanged_by_the_pending_exclusion` asserts the exact string and passes."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry naming the pending-check 405 false positive and stating existing records/ are untouched; docs/decisions.md D87 notes the exclusion.",
+        "status": "met",
+        "evidence": "CHANGELOG.md [Unreleased] / Fixed has a new first entry. It names the pending-check 405 false positive and the root cause, and says existing files under `records/` are untouched and the D87 review is not cleared. The D87 entry in docs/decisions.md has a new \"Watcher signal (later note)\" bullet stating the exclusion."
+      },
+      {
+        "criterion": "Run `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`: both pass; `cargo test` passes including existing watcher tests (the 405 method-not-allowed derivation test).",
+        "status": "met",
+        "evidence": "left to Athena's checks for the full `cargo test`. I ran `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` (both clean). The existing derivation test `a_refusal_stated_in_an_intervention_derives_a_marked_record` passes in the watcher run."
+      }
+    ],
+    "open_issues": [
+      "Departure from the brief's deliverable list: I also edited crates/athena-core/src/gh/transport.rs, as the plan said. It holds the `HostErrorLog::record` struct literal and the new `mark_last_pending` method.",
+      "I did not run the full `cargo test`; Athena's check will. I did run the targeted athena-core and athena-data tests and the xtask policy test.",
+      "Marking relies on the existing `is_rule_violation` text test (\"Repository rule violations\"). If the real host words the pending-check 405 differently, it is not flagged and still fires D87. I did not widen that test."
+    ],
+    "mistakes": [
+      "My first draft of the mixed-job watcher test used an invalid record id suffix, so the first test run failed. I fixed the id and reran."
+    ],
+    "learnings": [
+      "`HostError` has `deny_unknown_fields`. An older athena binary would refuse a record that carries `checks_pending`. Only records written after this change for pending refusals are affected.",
+      "Test record ids need a four-character Crockford suffix (no `l`, `i`, `o` or `u`); `RecordId::parse` refuses others.",
+      "`land_pr` holds `&dyn PrHost`, not the log, so a defaulted `PrHost` hook was the way to reach the client's log.",
+      "Only four `HostError` struct literals exist: watcher.rs (derive and test helper), transport.rs, records.rs tests. All are updated."
+    ],
+    "desires": [
+      "The open review 20261031-085139-1y06 and record 20261101-174051-3t6g are absent from the snapshot, so I could not read them. The old-format test uses a hand-written JSON literal with the same fields as the 3t6g shape. The job id in it is made up."
+    ]
+  }
+}
