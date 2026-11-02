@@ -1,0 +1,166 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261102-102740-qx57",
+  "n": 1,
+  "at": "2026-11-02T10:28:13.203773307Z",
+  "invocation_seq": 1,
+  "base_commit": "680f79ed8360366870eebd1b5f844481ba6897aa",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Cache gitleaks and athena binary in CI with complete input keys",
+  "summary": "Retry of job 20261031-172040-kq9v: redo the CI caches for gitleaks and the athena binary, with the athena-bin key and the setup --ci skip digest covering every compiled-in file, derived from one shared list that a repo test checks. Audience: CI maintainers and the throughput review.",
+  "class_of_work": "build",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All code and tests are Rust in xtask."
+    },
+    {
+      "id": "tested",
+      "how": "New xtask tests; cargo test and clippy -D warnings must pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "A policy test enforces key coverage and restore-before-setup order."
+    },
+    {
+      "id": "root-cause",
+      "how": "The key and digest derive from one shared list, not a patched list."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests edit a compiled-in file and check the digest changes."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs the cargo commands."
+    },
+    {
+      "id": "strangers",
+      "how": "Comments and the CHANGELOG are written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261031-172040-kq9v is rejected; its candidate is discarded and this job starts from the base. Its files .github/workflows/ci.yml, CHANGELOG.md, xtask/src/main.rs and xtask/tests/policy.rs are kept as deliverables, redone from scratch. xtask/tests/ci_shards.rs and setup.sh are dropped unless a test there needs updating (setup.sh's --ci path calls xtask setup, so it is likely unchanged).",
+    "Findings of 20261031-172040-kq9v addressed: (major) the key and skip digest omitted prompts/*.md, docs/system-facts.md and other include_str! inputs, so a restored binary could be stale. Fixed by hashing crates/** and xtask/** plus rust-toolchain.toml, Cargo.toml, Cargo.lock, athena.toml, defaults.toml, setup.sh and docs/system-facts.md, in the key and in the digest. (minor) no test tied the hashFiles list to input_files: now a policy test compares them. (minor) stamp written only on --ci builds: now written on every build, or removed on a non-CI build. (minor) restored binary reports the older source commit: stated in the ci.yml comment and CHANGELOG, accepted since the CI jobs only run read-only checks. (nit) skip path bypassed the dirty-tree refusal: the skip applies only with --ci, and this is documented.",
+    "Code survey: I read xtask/src/main.rs (main dispatches to setup(); setup runs numbered steps, step 4 is sccache, skipped under --ci; the build and adopt step is later), crates/athena-core/src/status.rs (BUILD_PATHS = crates/, xtask/, Cargo.toml, Cargo.lock, setup.sh), and the claim that crates/athena-context/src/lib.rs and briefs.rs include prompts and docs/system-facts.md with include_str!. No record or data file is added under crates/, so check_record_file and AnyRecord are not touched. The property (a compiled-in file change changes the key and the digest) is measured directly: the test hashes a temp tree, edits one file, and compares digests, and it parses the hashFiles globs from ci.yml.",
+    "The shared list is one const in xtask (the athena build input globs). The digest function and a policy test both read it, and the test parses every athena-bin hashFiles in ci.yml and fails if any input path is not covered by a glob.",
+    "The test enumerates compiled-in files independently by scanning include_str!/include_bytes! targets under crates/ and xtask/ plus the manifests, so a new compiled-in file outside the list fails the test.",
+    "The gitleaks cache and the restore-before-setup ordering test from the original request are kept. Restore steps come before 'Set up (pinned toolchain, gitleaks, athena)' in fmt, clippy, test, history, attribution and pr-head jobs. Saves run on the default branch only, as today. All uses: lines stay pinned by a 40-character SHA.",
+    "No rule is made stricter on readings, so no refusal-rate criterion applies."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Grep of .github/workflows/ci.yml: every athena-bin cache key (all restore and save steps) uses hashFiles covering crates/**, xtask/**, rust-toolchain.toml, Cargo.toml, Cargo.lock, athena.toml, defaults.toml, setup.sh and docs/system-facts.md. In each of the fmt, clippy and test jobs, actions/cache/restore steps for gitleaks and the athena binary come before the step named 'Set up (pinned toolchain, gitleaks, athena)'.",
+      "kind": "content"
+    },
+    {
+      "text": "ci.yml has matching actions/cache/save steps with the existing condition (not a pull request, ref equal to the default branch, no exact cache hit). Every uses: line is pinned by a 40-character SHA. History, attribution and pr-head also restore before setup, or a comment states why they do not. No other workflow behavior changes.",
+      "kind": "content"
+    },
+    {
+      "text": "xtask has one shared list of athena build inputs that both the skip digest and the policy test read. The comment in ci.yml and the CHANGELOG do not claim more than the key covers.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p xtask`. A test edits one compiled-in file (a prompt .md under a temp copy of the tree) and asserts the inputs digest changes. Another asserts the skip happens with a matching digest and cached binary and does not happen with a mismatched digest or no binary, and a third asserts the stamp is not left stale after a non-CI build.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p xtask --test policy`. The new tests derive the compiled-in file set from include_str!/include_bytes! targets and the manifests, and fail if any athena-bin hashFiles key in ci.yml misses one. They also fail on a ci.yml variant with a restore step removed or placed after the setup step.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test` all pass, including xtask/tests/ci_shards.rs and the existing policy tests.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry describing the gitleaks and athena binary caches, their keys, and that the speed-up on GitHub Actions is not measured here.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "xtask/tests/policy.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "setup.sh",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "xtask/tests/ci_shards.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Measuring the real time saved on GitHub Actions; the later throughput review does that.",
+    "Changing the toolchain, registry or target caches, the gate and pass logic, or the shard layout.",
+    "Changing athena.toml, defaults.toml, tool pins or action SHAs (they are only hashed, not edited).",
+    "Changing the build commit that a restored binary reports."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.6
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7203603603603603,
+      "p_verification_passes": 0.6666666666666666,
+      "p_user_intervenes": 0.09338235294117647,
+      "cost_usd": {
+        "p10": 0.4260314732261818,
+        "p50": 1.0948822000000002,
+        "p90": 3.2283085368810758
+      },
+      "wall_time_s": {
+        "p10": 396.89648535621296,
+        "p50": 1662.492352892,
+        "p90": 3951.4178403978935
+      }
+    }
+  },
+  "departures": "A hard CI-pipeline change with a new cross-file consistency test is slightly more likely to fail verification than the reference rate.",
+  "urgent_reason": "Cuts 65 to 105 s of repeated installs in each of nine CI jobs per run, and avoids a second rejected attempt.",
+  "hard_reason": "Changes the CI pipeline and the setup path that decides whether a stale binary runs the checks, and adds a policy test that gates CI workflow content.",
+  "producer_effort": "high"
+}
