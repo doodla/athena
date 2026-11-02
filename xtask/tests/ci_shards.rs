@@ -408,6 +408,19 @@ fn test_shard_6_is_disjoint_and_equals_the_workspace_target_set() {
 }
 
 #[test]
+fn checked_in_timings_cover_every_workspace_test_unit() {
+    // A unit missing from xtask/shard-timings.txt still runs, but falls back to the sorted-position split,
+    // so the file must be refreshed (`cargo run -p xtask -- shard-timings`) when test targets change.
+    let text = std::fs::read_to_string(root().join("xtask/shard-timings.txt")).unwrap();
+    let timed: BTreeSet<String> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .map(|l| l.rsplit_once(' ').expect("unit and seconds").0.to_string())
+        .collect();
+    assert_eq!(timed, oracle());
+}
+
+#[test]
 fn test_shard_1_equals_the_workspace() {
     let one: BTreeSet<String> = shard_units(0, 1).unwrap().into_iter().collect();
     assert_eq!(one, oracle());
