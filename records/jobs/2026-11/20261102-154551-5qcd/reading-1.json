@@ -1,0 +1,150 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261102-154551-5qcd",
+  "n": 1,
+  "at": "2026-11-02T23:29:16.445323954Z",
+  "invocation_seq": 4,
+  "base_commit": "dc100b818c0d6e9dd510f54d48fb1970cd57d477",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Split athena-core unit tests into module-prefix parts across CI shards",
+  "summary": "Teach `xtask test-shard` to split one test binary into parts by test-name (module-path) prefix, split athena-core's `--lib` (255s, 821–822 tests) into several parts that the balancer spreads over the six shards, add a coverage test, update shard timings and CHANGELOG. Audience: CI maintainers/verifier judging shard balance and exactly-once coverage.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Implementation and tests are Rust in xtask."
+    },
+    {
+      "id": "tested",
+      "how": "New unit and integration tests cover the filtered units and the exactly-once coverage."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run test-shard --dry-run and the coverage test rather than checking that fields exist."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuses cargo test name filters and --skip instead of adding a sharding tool."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments in shard.rs and the timings header explain parts and estimates."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code Survey: I read xtask/src/shard.rs (the entry point `command` -> `parse_args` -> `load_timings` -> `workspace_units`/`plan_units` -> `select`/`assign`; units are (package, selector) from `cargo metadata`, timed units go longest-first to the lightest shard, untimed by sorted position; each unit runs as `cargo test --locked -p <pkg> <selector>`), xtask/shard-timings.txt (`<package> <selector> <seconds>` lines, parsed by `parse_timings`), xtask/tests/ci_shards.rs (oracle of workspace targets, `check_cover`, partition tests, `checked_in_timings_cover_every_workspace_test_unit`) and .github/workflows/ci.yml line 411 (`test-shard ${{ matrix.shard }} 6`, which already needs no change). Test names in athena-core live under crates/athena-core/src (lib.rs, checks.rs, hestia.rs, reading.rs, gh/mod.rs, ...). The change adds no record or data file under crates/, so the records allow-list (`check_record_file`/`AnyRecord`, in crates/athena-gate/src/records.rs) is untouched. The property (every test runs once, shards balanced) is measured directly: `cargo test -p athena-core --lib -- --list` names vs each part's filter, and `xtask test-shard k 6 --dry-run` output, not a stand-in.",
+    "Design: a `Unit` gains an optional name filter; parts are written as module-prefix groups (e.g. gh::, reading::, run::/run_pin_tests::, hestia::/status::, and a catch-all part using `--skip` for every other part's prefixes so a new module still runs exactly once). Parts run as `cargo test --locked -p athena-core --lib -- <filters>` (or `-- --skip ...` for the catch-all). Cargo filters are substrings, so prefixes include the trailing `::` and are checked for accidental overlap by the new test.",
+    "Times in shard-timings.txt are labeled estimates: the 255.11s is divided among parts roughly by test count/known weight (gh and reading and run-heavy modules larger), summing to about 255s; the other binaries use the given figures (lifecycle 143.22, drain 79.32, retry 49.45, job_plan 46.35). Existing estimate lines are replaced where the request gives numbers.",
+    "The request says 821 tests in prose but the pasted list ends with `822 tests`; the coverage test compares against the live `--list` output so the exact count is not hard-coded.",
+    "ci.yml and athena.toml are not changed; the workflow already runs six shards through test-shard."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "xtask/src/shard.rs lets a Unit carry a test-name filter (module prefixes, plus a skip-based catch-all), prints it in the `--dry-run` line, and runs it as `cargo test --locked -p athena-core --lib -- ...`; Grep shows athena-core `--lib` is no longer a single unit in xtask/shard-timings.txt but at least two part lines.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo run -p xtask -- test-shard K 6 --dry-run` for K=0..5: athena-core's unit-test parts appear in at least two different shards, no part appears twice, and no other target is lost or duplicated (cargo test -p xtask --test ci_shards passes).",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test in xtask/tests shows that every name from `cargo test -p athena-core --lib -- --list` matches the filters of exactly one part (union covers all, no overlap); run `cargo test -p xtask --test ci_shards` and it passes, and a mutated part list (dropped or duplicated prefix) is rejected by a negative test there.",
+      "kind": "behavior"
+    },
+    {
+      "text": "xtask/shard-timings.txt lists the athena-core parts with estimated seconds summing to about 255s, notes they are estimates derived from run 41469096430, and no shard's estimated total exceeds roughly the mean plus the largest remaining single unit (lifecycle, 143.22s).",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for this change that states the before numbers: athena-core --lib one binary of 821 tests at 255.11s (97% of shard 0's test time), shard 0 test step 5m45s vs shard 4 1m45s, and the next slowest binaries (lifecycle 143.22s, drain 79.32s, retry 49.45s, job_plan 46.35s).",
+      "kind": "content"
+    },
+    {
+      "text": "Unit tests in xtask/src/shard.rs for filtered units (assignment keeps every part exactly once, parts sort deterministically, timings round-trip with a filtered selector) pass under `cargo test -p xtask`.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "xtask/src/shard.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "xtask/tests/ci_shards.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "xtask/tests/shard_parts.rs",
+      "action": "create",
+      "p": 0.3
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Changing the number of shards or .github/workflows/ci.yml",
+    "Adopting cargo-nextest",
+    "Speeding up or editing the athena-core tests themselves",
+    "Fetching anything from GitHub or re-measuring timings",
+    "Splitting other binaries such as lifecycle.rs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 3.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7201044386422977,
+      "p_verification_passes": 0.6758241758241759,
+      "p_user_intervenes": 0.09402985074626866,
+      "cost_usd": {
+        "p10": 0.5537699423918236,
+        "p50": 1.3031956585970657,
+        "p90": 3.606743534472445
+      },
+      "wall_time_s": {
+        "p10": 543.7645075859656,
+        "p50": 1888.177548489,
+        "p90": 4094.958250458458
+      }
+    }
+  },
+  "departures": "Slightly above reference: touches the shard planner and a coverage test over ~820 test names, and the full xtask test run is slow."
+}
