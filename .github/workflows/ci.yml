@@ -28,6 +28,16 @@
 # compile some of their packages cold. New keys also start cold, so the first runs after this change are
 # slower. Both are for the throughput review to judge.
 #
+# Tool caches: gitleaks (path ~/.local/share/athena/tools/gitleaks) is keyed on runner OS and architecture and
+# on athena.toml, where the pin lives. The athena binary (path ~/.local/share/athena/bin, with a stamp file
+# `athena.inputs`) is keyed on runner OS and architecture and on rust-toolchain.toml, Cargo.lock, athena.toml,
+# defaults.toml, every manifest and every Rust source under crates/ and xtask/. There is no restore-keys
+# fallback, so a stale binary is never restored; `setup.sh --ci` also compares the stamp with the current inputs
+# and rebuilds on a mismatch. Each runs as a restore step before the setup step in every job that calls it
+# (xtask/tests/policy.rs fails otherwise). fmt, clippy and test shard 0 save them, on the default branch only.
+# The athena binary reports the commit of the run that built it, not of the run that restored it. The time saved is not
+# measured here; the throughput review measures it.
+#
 # Reuse of an earlier pass (docs/decisions.md D121): the `gate` job looks up `ci-pass-<governed fingerprint>`; a
 # marker naming that fingerprint makes fmt, clippy and test skip (their `if`), and `ci` accepts that. The
 # `pass` job needs all three, has no status override, and so runs only if every one succeeded; it alone writes
@@ -142,6 +152,18 @@ jobs:
           path: target
           key: target-fmt-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: target-fmt-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Restore the gitleaks cache
+        id: cache-gitleaks
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/tools/gitleaks
+          key: gitleaks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('athena.toml') }}
+      - name: Restore the athena binary cache
+        id: cache-athena
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/bin
+          key: athena-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'athena.toml', 'defaults.toml', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'xtask/**/*.rs', 'xtask/Cargo.toml') }}
       - name: Report the cache outcome (exact, restore key, miss)
         env:
           TOOLCHAIN_HIT: ${{ steps.cache-toolchain.outputs.cache-hit }}
@@ -186,6 +208,18 @@ jobs:
         with:
           path: target
           key: target-fmt-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+      - name: Save the gitleaks cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-gitleaks.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/tools/gitleaks
+          key: gitleaks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('athena.toml') }}
+      - name: Save the athena binary cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-athena.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/bin
+          key: athena-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'athena.toml', 'defaults.toml', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'xtask/**/*.rs', 'xtask/Cargo.toml') }}
 
   clippy:
     name: clippy
@@ -221,6 +255,18 @@ jobs:
           path: target
           key: target-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: target-clippy-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Restore the gitleaks cache
+        id: cache-gitleaks
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/tools/gitleaks
+          key: gitleaks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('athena.toml') }}
+      - name: Restore the athena binary cache
+        id: cache-athena
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/bin
+          key: athena-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'athena.toml', 'defaults.toml', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'xtask/**/*.rs', 'xtask/Cargo.toml') }}
       - name: Report the cache outcome (exact, restore key, miss)
         env:
           TOOLCHAIN_HIT: ${{ steps.cache-toolchain.outputs.cache-hit }}
@@ -265,6 +311,18 @@ jobs:
         with:
           path: target
           key: target-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+      - name: Save the gitleaks cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-gitleaks.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/tools/gitleaks
+          key: gitleaks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('athena.toml') }}
+      - name: Save the athena binary cache (default branch only)
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-athena.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/bin
+          key: athena-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'athena.toml', 'defaults.toml', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'xtask/**/*.rs', 'xtask/Cargo.toml') }}
 
   # The tests, split into shards that together run every workspace test target exactly once (see the header).
   # fail-fast is off so one failing shard does not hide what the others found.
@@ -306,6 +364,18 @@ jobs:
           path: target
           key: target-test-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: target-test-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Restore the gitleaks cache
+        id: cache-gitleaks
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/tools/gitleaks
+          key: gitleaks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('athena.toml') }}
+      - name: Restore the athena binary cache
+        id: cache-athena
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/bin
+          key: athena-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'athena.toml', 'defaults.toml', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'xtask/**/*.rs', 'xtask/Cargo.toml') }}
       - name: Report the cache outcome (exact, restore key, miss)
         env:
           TOOLCHAIN_HIT: ${{ steps.cache-toolchain.outputs.cache-hit }}
@@ -352,6 +422,18 @@ jobs:
         with:
           path: target
           key: target-test-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+      - name: Save the gitleaks cache (default branch only)
+        if: matrix.shard == 0 && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-gitleaks.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/tools/gitleaks
+          key: gitleaks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('athena.toml') }}
+      - name: Save the athena binary cache (default branch only)
+        if: matrix.shard == 0 && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.cache-athena.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/bin
+          key: athena-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'athena.toml', 'defaults.toml', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'xtask/**/*.rs', 'xtask/Cargo.toml') }}
 
   # Writes the D121 marker. It has the default `success()` condition and needs fmt, clippy and test, so it runs
   # only when all three succeeded; when the gate reused a pass they are skipped and so is this job. `mark` also
@@ -477,6 +559,19 @@ jobs:
           path: target
           key: target-history-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: target-history-${{ hashFiles('rust-toolchain.toml') }}-
+      # Restore only: fmt, clippy and test save these two entries, so this job never writes them.
+      - name: Restore the gitleaks cache
+        id: cache-gitleaks
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/tools/gitleaks
+          key: gitleaks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('athena.toml') }}
+      - name: Restore the athena binary cache
+        id: cache-athena
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/bin
+          key: athena-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'athena.toml', 'defaults.toml', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'xtask/**/*.rs', 'xtask/Cargo.toml') }}
       - name: Report the cache outcome (exact, restore key, miss)
         env:
           TOOLCHAIN_HIT: ${{ steps.cache-toolchain.outputs.cache-hit }}
@@ -540,6 +635,19 @@ jobs:
           ref: ${{ github.sha }}
       - name: Fetch the records branch
         run: git fetch origin athena/records:athena/records
+      # Restore only: fmt, clippy and test save these two entries, so this job never writes them.
+      - name: Restore the gitleaks cache
+        id: cache-gitleaks
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/tools/gitleaks
+          key: gitleaks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('athena.toml') }}
+      - name: Restore the athena binary cache
+        id: cache-athena
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/bin
+          key: athena-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'athena.toml', 'defaults.toml', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'xtask/**/*.rs', 'xtask/Cargo.toml') }}
       - name: Set up (pinned toolchain, gitleaks, athena)
         run: ./setup.sh --ci
       # CI never writes a checkpoint: the token is read-only (contents: read) and the check also writes nothing
@@ -569,6 +677,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
+      # Restore only: this job runs on pull requests, which never save a cache here.
+      - name: Restore the gitleaks cache
+        id: cache-gitleaks
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/tools/gitleaks
+          key: gitleaks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('athena.toml') }}
+      - name: Restore the athena binary cache
+        id: cache-athena
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.local/share/athena/bin
+          key: athena-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'athena.toml', 'defaults.toml', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'xtask/**/*.rs', 'xtask/Cargo.toml') }}
       - name: Set up (pinned toolchain, gitleaks, athena)
         run: ./setup.sh --ci
       - name: athena check --pr-head

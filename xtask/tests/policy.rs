@@ -544,7 +544,11 @@ fn job_text(id: &str) -> String {
 
 /// The steps of the job `<id>`, each as its text (name line included, comment lines left out).
 fn job_steps(id: &str) -> Vec<String> {
-    let text = job_text(id);
+    steps_of(&job_text(id))
+}
+
+/// The steps in a job's text, as `job_steps` returns them.
+fn steps_of(text: &str) -> Vec<String> {
     let mut steps: Vec<String> = Vec::new();
     for line in text.lines().skip(1) {
         if line.starts_with("      - ") {
@@ -624,6 +628,99 @@ fn the_checks_job_looks_up_its_earlier_pass_before_setup_and_skips_on_a_hit() {
             "{id}"
         );
     }
+}
+
+/// Every job that runs the setup step; each must restore the gitleaks and athena binary caches before it.
+const SETUP_JOBS: [&str; 6] = ["fmt", "clippy", "test", "history", "attribution", "pr-head"];
+
+/// What is wrong with a job's steps: the setup step runs without a restore step for each tool cache (gitleaks
+/// and the athena binary, `actions/cache/restore`, keyed with `hashFiles`) before it.
+fn tool_cache_problems(steps: &[String]) -> Vec<String> {
+    let Some(setup) = steps
+        .iter()
+        .position(|s| s.contains("name: Set up (pinned toolchain, gitleaks, athena)"))
+    else {
+        return vec!["no setup step".to_string()];
+    };
+    let mut problems = Vec::new();
+    for (cache, path) in [
+        ("gitleaks", "tools/gitleaks"),
+        ("athena binary", "athena/bin"),
+    ] {
+        let restore = steps.iter().position(|s| {
+            s.contains("actions/cache/restore@") && s.contains(path) && s.contains("hashFiles(")
+        });
+        match restore {
+            None => problems.push(format!("no restore step for the {cache} cache")),
+            Some(i) if i > setup => problems.push(format!(
+                "the {cache} cache is restored after the setup step"
+            )),
+            Some(_) => {}
+        }
+    }
+    problems
+}
+
+#[test]
+fn every_job_restores_the_tool_caches_before_it_runs_the_setup_step() {
+    for id in SETUP_JOBS {
+        assert_eq!(
+            tool_cache_problems(&job_steps(id)),
+            Vec::<String>::new(),
+            "{id}"
+        );
+    }
+    // The three check jobs also save both caches, on the default branch only and not after an exact hit.
+    for id in CHECK_JOBS {
+        let steps = job_steps(id);
+        for (name, hit) in [
+            ("Save the gitleaks cache", "cache-gitleaks"),
+            ("Save the athena binary cache", "cache-athena"),
+        ] {
+            let save = &steps[step_index(&steps, name)];
+            assert!(save.contains("actions/cache/save@"), "{id}: {name}");
+            assert!(save.contains(DEFAULT_BRANCH_ONLY), "{id}: {name}");
+            assert!(
+                save.contains("github.event_name != 'pull_request'"),
+                "{id}: {name}"
+            );
+            assert!(
+                save.contains(&format!("steps.{hit}.outputs.cache-hit != 'true'")),
+                "{id}: {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_tool_cache_check_fails_when_a_restore_is_missing_or_after_setup() {
+    let steps = job_steps("fmt");
+    // Removing the gitleaks restore step, or the athena one, is caught.
+    for name in [
+        "Restore the gitleaks cache",
+        "Restore the athena binary cache",
+    ] {
+        let removed: Vec<String> = steps
+            .iter()
+            .filter(|s| !s.contains(&format!("name: {name}")))
+            .cloned()
+            .collect();
+        assert_eq!(tool_cache_problems(&removed).len(), 1, "{name} removed");
+    }
+    // Moving a restore step after the setup step is caught.
+    let mut moved = steps.clone();
+    let at = step_index(&moved, "Restore the athena binary cache");
+    let restore = moved.remove(at);
+    let setup = step_index(&moved, "Set up");
+    moved.insert(setup + 1, restore);
+    let problems = tool_cache_problems(&moved);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("after the setup step"));
+    // A restore without a hashed key does not count.
+    let unkeyed: Vec<String> = steps_of(&job_text("fmt").replace("hashFiles(", "noHash("));
+    assert!(!tool_cache_problems(&unkeyed).is_empty());
+    // A job with no setup step is reported too.
+    assert!(!tool_cache_problems(&[]).is_empty());
 }
 
 #[test]
