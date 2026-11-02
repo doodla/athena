@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- CI caches what its setup step installs, so a warm runner restores instead of reinstalling. Two new
+  `actions/cache` entries are restored before `./setup.sh --ci` in every job that runs it: gitleaks, keyed on
+  runner OS, architecture and `hashFiles('athena.toml')` (the pin lives there); and the athena binary, keyed on
+  runner OS, architecture and `hashFiles` of `rust-toolchain.toml`, `Cargo.lock`, `Cargo.toml`, `athena.toml`,
+  `defaults.toml`, and every manifest and Rust source under `crates/` and `xtask/`, with no restore-key fallback.
+  fmt, clippy and test shard 0 save them, on the default branch only and not after an exact hit. `setup --ci`
+  skips the gitleaks install when the cached copy reports the pinned version, and skips the athena build when a
+  stamp file beside the cached binary matches a digest of the same inputs; each skip is printed. An xtask policy
+  test fails if a job runs the setup step without both restore steps before it. KNOWN EFFECT: a restored binary
+  reports the commit of the run that built it. The time saved is not measured here; the throughput review
+  measures it.
 - A producer's work is kept when it reaches its deadline, and `athena retry` resumes from it. At the deadline
   Athena now commits the producer's changed files as a candidate in the repository (the same commit shape as any
   candidate, not on a branch), records it in the job's `candidate.json` and outcome, and closes the job

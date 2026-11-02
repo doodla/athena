@@ -191,7 +191,22 @@ fn setup(flags: &Flags) -> Result<()> {
     }
 
     step("5. Athena");
-    let binary = build_and_adopt(&root, flags)?;
+    let binary = if flags.ci
+        && let Some(cached) = cached_athena(&root)?
+    {
+        println!(
+            "--ci: skipped the athena build; the cached binary at {} matches the current sources",
+            cached.display()
+        );
+        link_local_bin(&cached)?;
+        cached
+    } else {
+        let built = build_and_adopt(&root, flags)?;
+        if flags.ci {
+            write_stamp(&athena_stamp(), &inputs_digest(&root)?)?;
+        }
+        built
+    };
 
     if flags.ci {
         println!("\n--ci: skipping hooks, Claude Code, and credentials.");
@@ -241,15 +256,96 @@ fn built_binary(messages: &str) -> Option<PathBuf> {
         .next_back()
 }
 
+/// Whether the gitleaks at `target` exists and reports exactly the pinned version. A copy restored from the CI
+/// cache passes only if it is this version, so a stale entry is never trusted.
+fn gitleaks_present(target: &Path, version: &str) -> bool {
+    target.exists()
+        && found(target.to_str().unwrap_or(""), "version").is_some_and(|v| v.trim() == version)
+}
+
+/// The stamp beside the adopted binary: the digest of the inputs it was built from.
+fn athena_stamp() -> PathBuf {
+    paths::athena_home().join("bin/athena.inputs")
+}
+
+/// The files that decide the athena binary: the toolchain pin, the lock file, `athena.toml` and `defaults.toml`
+/// (some crates embed them), every manifest, and every Rust source under `crates/` and `xtask/`. The CI cache key in `.github/workflows/ci.yml` hashes the same set.
+fn input_files(root: &Path) -> Result<Vec<PathBuf>> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+        if !dir.is_dir() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                walk(&path, out)?;
+            } else if path
+                .file_name()
+                .is_some_and(|n| n == "Cargo.toml" || n.to_string_lossy().ends_with(".rs"))
+            {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut files: Vec<PathBuf> = [
+        "rust-toolchain.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "athena.toml",
+        "defaults.toml",
+    ]
+    .iter()
+    .map(|f| root.join(f))
+    .filter(|p| p.is_file())
+    .collect();
+    walk(&root.join("crates"), &mut files)?;
+    walk(&root.join("xtask"), &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+/// A digest over the names and contents of `input_files`.
+fn inputs_digest(root: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    for file in input_files(root)? {
+        let rel = file.strip_prefix(root).unwrap_or(&file);
+        hasher.update(rel.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update(std::fs::read(&file)?);
+        hasher.update([0]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+fn write_stamp(stamp: &Path, digest: &str) -> Result<()> {
+    std::fs::create_dir_all(stamp.parent().expect("stamp has a parent"))?;
+    std::fs::write(stamp, digest)?;
+    Ok(())
+}
+
+/// Whether the binary at `adopted` exists and its stamp equals `digest`.
+fn athena_cache_matches(adopted: &Path, stamp: &Path, digest: &str) -> bool {
+    adopted.is_file() && std::fs::read_to_string(stamp).is_ok_and(|s| s.trim() == digest)
+}
+
+/// The adopted binary when a cached copy is present and was built from the current inputs.
+fn cached_athena(root: &Path) -> Result<Option<PathBuf>> {
+    let adopted = paths::athena_home().join("bin/athena");
+    let digest = inputs_digest(root)?;
+    Ok(athena_cache_matches(&adopted, &athena_stamp(), &digest).then_some(adopted))
+}
+
 fn install_gitleaks(config: &Config) -> Result<()> {
     let pin = &config.tools.gitleaks;
     let target = paths::tool_path("gitleaks", &pin.version);
-    if target.exists()
-        && let Some(v) = found(target.to_str().unwrap_or(""), "version")
-        && v.trim() == pin.version
-    {
+    if gitleaks_present(&target, &pin.version) {
         println!(
-            "gitleaks {} already installed at {}",
+            "gitleaks {} already installed at {}; skipped the install",
             pin.version,
             target.display()
         );
@@ -410,16 +506,22 @@ fn build_and_adopt(root: &Path, flags: &Flags) -> Result<PathBuf> {
             adopted.display()
         );
     }
+    link_local_bin(&adopted)?;
+    Ok(adopted)
+}
+
+/// Points `~/.local/bin/athena` at the adopted binary.
+fn link_local_bin(adopted: &Path) -> Result<()> {
     if let Some(home) = std::env::var_os("HOME") {
         let local_bin = PathBuf::from(home).join(".local/bin");
         std::fs::create_dir_all(&local_bin)?;
         let link = local_bin.join("athena");
-        let points_here = std::fs::read_link(&link).ok().as_deref() == Some(adopted.as_path());
+        let points_here = std::fs::read_link(&link).ok().as_deref() == Some(adopted);
         if !points_here {
             if link.symlink_metadata().is_ok() {
                 std::fs::remove_file(&link)?;
             }
-            symlink(&adopted, &link)?;
+            symlink(adopted, &link)?;
         }
         let on_path = std::env::var_os("PATH")
             .is_some_and(|p| std::env::split_paths(&p).any(|d| d == local_bin));
@@ -434,7 +536,7 @@ fn build_and_adopt(root: &Path, flags: &Flags) -> Result<PathBuf> {
             }
         );
     }
-    Ok(adopted)
+    Ok(())
 }
 
 fn install_hooks(root: &Path, binary: &Path, force: bool) -> Result<()> {
@@ -625,6 +727,55 @@ mod tests {
         std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
         std::fs::write(&binary, "").unwrap();
         install_sccache_at(home.path(), "9.9.9", |_| bail!("must not run")).unwrap();
+    }
+
+    #[test]
+    fn a_cached_athena_is_skipped_only_when_present_and_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin/athena");
+        let stamp = dir.path().join("bin/athena.inputs");
+        // No cached copy: build.
+        assert!(!athena_cache_matches(&bin, &stamp, "abc"));
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "x").unwrap();
+        // Binary without a stamp: build.
+        assert!(!athena_cache_matches(&bin, &stamp, "abc"));
+        write_stamp(&stamp, "abc").unwrap();
+        // Present and matching: skip.
+        assert!(athena_cache_matches(&bin, &stamp, "abc"));
+        // Built from other inputs: build.
+        assert!(!athena_cache_matches(&bin, &stamp, "def"));
+    }
+
+    #[test]
+    fn the_inputs_digest_changes_with_a_source_and_ignores_other_files() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        std::fs::write(r.join("Cargo.lock"), "lock").unwrap();
+        std::fs::create_dir_all(r.join("crates/a/src")).unwrap();
+        std::fs::write(r.join("crates/a/src/lib.rs"), "fn a() {}").unwrap();
+        std::fs::write(r.join("crates/a/README.md"), "one").unwrap();
+        let before = inputs_digest(r).unwrap();
+        assert_eq!(before, inputs_digest(r).unwrap());
+        std::fs::write(r.join("crates/a/README.md"), "two").unwrap();
+        assert_eq!(before, inputs_digest(r).unwrap());
+        std::fs::write(r.join("crates/a/src/lib.rs"), "fn b() {}").unwrap();
+        assert_ne!(before, inputs_digest(r).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cached_gitleaks_is_skipped_only_when_it_reports_the_pinned_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("gitleaks");
+        // Missing: install.
+        assert!(!gitleaks_present(&fake, "8.1.0"));
+        std::fs::write(&fake, "#!/bin/sh\necho 8.1.0\n").unwrap();
+        set_executable(&fake).unwrap();
+        // Present and the pinned version: skip.
+        assert!(gitleaks_present(&fake, "8.1.0"));
+        // Present but another version: install.
+        assert!(!gitleaks_present(&fake, "9.0.0"));
     }
 
     #[test]
