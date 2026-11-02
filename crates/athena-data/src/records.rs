@@ -1103,6 +1103,11 @@ pub struct HostError {
     /// The intervention a derived record was derived from. Present exactly when `derived` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_intervention: Option<RecordId>,
+    /// True when a merge was refused for repository rules while the required checks were still pending, so the
+    /// refusal is a wait and not a verdict on the merge method. Absent (false) otherwise, and for every record
+    /// written before this field existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checks_pending: bool,
 }
 
 /// The state a decision is in beside its `status`.
@@ -3284,7 +3289,46 @@ mod tests {
             message_class: MessageClass::of_status(status),
             derived: false,
             source_intervention: None,
+            checks_pending: false,
         }
+    }
+
+    #[test]
+    fn an_old_format_host_error_still_validates_unchanged() {
+        // The shape of records/host-errors/2026-11/20261101-174051-3t6g.json: no `checks_pending` key.
+        let old = r#"{
+  "schema": "athena.host-error/1",
+  "id": "20261101-174051-3t6g",
+  "at": "2026-11-01T17:40:51Z",
+  "status_code": 405,
+  "operation": "merge",
+  "job": "20261101-170001-ab1c",
+  "phase": "landing",
+  "message_class": "method-not-allowed"
+}
+"#;
+        let path = "records/host-errors/2026-11/20261101-174051-3t6g.json";
+        let record = check_record_file(path, old.as_bytes())
+            .expect("the old record validates")
+            .expect("the path is a record path");
+        match &record {
+            AnyRecord::HostError(h) => {
+                assert!(!h.checks_pending);
+                assert_eq!(h.status_code, Some(405));
+            }
+            other => panic!("expected a host error, got {other:?}"),
+        }
+        assert!(!record.to_json().contains("checks_pending"));
+    }
+
+    #[test]
+    fn a_pending_checks_host_error_round_trips() {
+        let mut flagged = host_error(Some(405));
+        flagged.checks_pending = true;
+        let record = AnyRecord::HostError(flagged);
+        let text = record.to_json();
+        assert!(text.contains("\"checks_pending\": true"));
+        assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), record);
     }
 
     #[test]

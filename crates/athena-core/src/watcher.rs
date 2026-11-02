@@ -4,7 +4,8 @@
 //! The watcher reads stored fields only and decides by code, with no model. This slice has one signal source,
 //! `host-error`, and one decision with a typed signal, D87. A host-error signal names an operation, the HTTP
 //! statuses that falsify the decision's assumption, the phase and a threshold in distinct jobs. A hard signal
-//! (a refusal by the host) fires on the first job; the threshold of a hard signal cannot be raised.
+//! (a refusal by the host) fires on the first job; the threshold of a hard signal cannot be raised. A refusal
+//! that landing marked as caused by pending checks is a wait and never matches.
 //!
 //! * [`load`] checks a signal's values against the record vocabulary and refuses one outside it, naming the
 //!   valid values. The signals in this module pass through it when they are read, so a wrong value is an error
@@ -45,6 +46,9 @@ pub struct RawSignal {
 }
 
 /// D87's hard signal: the host refusing a merge with 405 or 422 falsifies "the repository allows merge commits".
+/// A refusal that landing logged as caused by pending checks (`checks_pending`) is excluded: the host refuses a
+/// merge by its rules while a required check runs, and that refusal says nothing about the merge method. A
+/// 405 or 422 with the checks settled still fires on the first job.
 pub const D87_SIGNAL: RawSignal = RawSignal {
     decision: "D87",
     name: "host-error: operation merge, status 405 or 422, phase landing",
@@ -145,9 +149,11 @@ pub fn host_error_signals() -> Result<Vec<HostErrorSignal>, String> {
 
 impl HostErrorSignal {
     /// Exact matching on stored fields: the operation, the phase and one of the statuses are all equal. A
-    /// refusal with no status never matches.
+    /// refusal with no status never matches. A refusal marked as caused by pending checks never matches: it
+    /// was a wait for a required check, not a verdict.
     pub fn matches(&self, error: &HostError) -> bool {
-        error.operation == self.operation
+        !error.checks_pending
+            && error.operation == self.operation
             && error.phase == self.phase
             && error
                 .status_code
@@ -261,6 +267,7 @@ pub fn derive_host_error(intervention: &Intervention) -> Option<HostError> {
         message_class: MessageClass::of_status(Some(status)),
         derived: true,
         source_intervention: Some(intervention.id.clone()),
+        checks_pending: false,
     })
 }
 
@@ -434,6 +441,7 @@ mod tests {
             message_class: MessageClass::of_status(status),
             derived: false,
             source_intervention: None,
+            checks_pending: false,
         }
     }
 
@@ -628,6 +636,51 @@ mod tests {
             assert_eq!(firings[0].decision, "D87");
             assert_eq!(firings[0].firing_records, [errors[0].id.clone()]);
         }
+    }
+
+    #[test]
+    fn a_merge_refusal_caused_by_pending_checks_does_not_fire() {
+        let signals = host_error_signals().unwrap();
+        for status in [405, 422] {
+            let mut waiting = error(
+                "20261013-192210-pnd1",
+                JOB,
+                HostOperation::Merge,
+                Some(status),
+            );
+            waiting.checks_pending = true;
+            assert!(!signals[0].matches(&waiting), "{status}");
+            assert!(
+                evaluate(&signals, &[waiting.clone()], &[]).is_empty(),
+                "{status}"
+            );
+            // The same refusal with the checks settled still fires on the first job.
+            let mut settled = waiting.clone();
+            settled.checks_pending = false;
+            let firings = evaluate(&signals, &[settled.clone()], &[]);
+            assert_eq!(firings.len(), 1, "{status}");
+            assert_eq!(firings[0].decision, "D87");
+            assert_eq!(firings[0].firing_records, [settled.id.clone()]);
+        }
+    }
+
+    #[test]
+    fn a_waiting_refusal_beside_a_real_one_fires_on_the_real_one_only() {
+        let signals = host_error_signals().unwrap();
+        let mut waiting = error("20261013-192211-pnd2", JOB, HostOperation::Merge, Some(405));
+        waiting.checks_pending = true;
+        let real = error("20261013-192212-rea1", JOB, HostOperation::Merge, Some(405));
+        let firings = evaluate(&signals, &[waiting, real.clone()], &[]);
+        assert_eq!(firings.len(), 1);
+        assert_eq!(firings[0].firing_records, [real.id]);
+    }
+
+    #[test]
+    fn d87s_signal_name_is_unchanged_by_the_pending_exclusion() {
+        assert_eq!(
+            D87_SIGNAL.name,
+            "host-error: operation merge, status 405 or 422, phase landing"
+        );
     }
 
     #[test]

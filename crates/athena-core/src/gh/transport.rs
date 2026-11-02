@@ -330,7 +330,17 @@ impl HostErrorLog {
             message_class: MessageClass::of_status(status_code),
             derived: false,
             source_intervention: None,
+            checks_pending: false,
         });
+    }
+
+    /// Flags the latest refusal of this operation as caused by checks that were still pending, so the watcher
+    /// does not read it as a verdict. Does nothing when no refusal of the operation was logged.
+    pub fn mark_last_pending(&self, operation: HostOperation) {
+        let mut entries = self.entries.borrow_mut();
+        if let Some(entry) = entries.iter_mut().rev().find(|e| e.operation == operation) {
+            entry.checks_pending = true;
+        }
     }
 
     /// The refusals so far, oldest first.

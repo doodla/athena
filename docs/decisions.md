@@ -1914,6 +1914,11 @@ found, and every deferred finding visible in `athena status`. Each entry's prove
   with it: the merged-content check fetches the merged commit from `origin` (object only, no ref moves,
   `Git::ensure_commit`) before fingerprinting it, and when the job's pull request link exists the host is asked
   about the merge before the landed commit is required on the local branch (`gh::confirm_existing_merge`).
+- **Watcher signal (later note):** D87's hard signal ("host-error: operation merge, status 405 or 422, phase
+  landing", `watcher::D87_SIGNAL`) excludes a merge refusal that landing logged as caused by pending checks
+  (`checks_pending` on the `athena.host-error/1` record). The host refuses a merge by its repository rules
+  while a required check runs; that is a wait, not a verdict on the merge method. The signal's name is
+  unchanged, and a 405 or 422 with the checks settled still fires on the first job.
 - **Alternatives:** Keep squash and rely on the chain rule (rejected: it breaks ancestry, below); exempt the
   squash commit from the history check (rejected: weakens the check); move the work branch after a squash
   (rewrites history).

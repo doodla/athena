@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A merge refused with 405 while the required checks were still pending no longer fires D87's hard signal
+  ("merge commits not allowed"). Root cause: when the host refused the merge by its repository rules during a
+  running check, landing treated it as a wait, but the client had already logged it as a plain
+  `athena.host-error/1` record, and the watcher matched on operation, phase and status alone, so a wait read as
+  a verdict on the merge method. Now `athena.host-error/1` has an optional `checks_pending` field (absent when
+  false, so every old record parses and writes unchanged); `land_pr` marks the logged refusal through
+  `PrHost::note_pending_merge_refusal` when the checks read pending right after a rule-violation refusal, and
+  `HostErrorSignal::matches` skips a marked record. The signal name is unchanged, a 405 or 422 with the checks
+  settled still fires on the first job, and any other refusal is logged as before. Existing files under
+  `records/` are untouched, and the open D87 review is not cleared.
 - The drain now waits while any check run on the pull request head is queued or in progress, and treats a
   merge the host refuses with "Repository rule violations" while checks are pending as waiting to merge, not
   as a failed landing. Before, it asked the host to merge the rebase-before-landing pull request while its
