@@ -1,0 +1,155 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-172034-fx4m",
+  "n": 1,
+  "at": "2026-11-02T06:15:10.394872424Z",
+  "invocation_seq": 2,
+  "base_commit": "7c4d0c64ba7f702cae6a9f49b11987a749523200",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Balance CI test shards by recorded per-target timings",
+  "summary": "Change `xtask test-shard` to assign test units to shards greedily, longest first, using durations from a small checked-in timings file under xtask/. Units with no timing fall back to the current sorted index-modulo split. Add an xtask command that rewrites the timings file from a local run. The audience is CI maintainers, who want the slowest shard near the mean.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are in Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Unit tests for balance, fallback and partition; the full test suite and clippy must pass."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuse cargo metadata and cargo test; no new sharding tool."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the measured shard totals and the partition by running tests."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs the cargo commands."
+    },
+    {
+      "id": "small",
+      "how": "One focused change inside xtask."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and comments explain the timings file and how to refresh it."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read xtask/src/shard.rs (entry point `command` runs `cargo metadata`, then `plan_units` builds the sorted unit list, then `select` keeps units where sorted index % n == k, then runs `cargo test -p <pkg> <selector>` per unit or prints with --dry-run), xtask/src/main.rs (dispatch of `test-shard` and `walltime` subcommands plus the usage text), and xtask/tests/ci_shards.rs (an oracle built from cargo metadata, `check_cover`, and `shard_units` calling the built binary with --dry-run). The shard.rs unit tests are in-module because xtask is a binary crate, so the fixture-based balance and missing-target tests belong there, while the integration partition test stays unchanged. Resolution order to keep: plan_units first, then timing lookup by `Unit::line()` key, then greedy assignment, then fallback. The crates/ records validation (crates/athena-data/src/records.rs `check_record_file` and `AnyRecord`) only covers files under records/, so a timings file at xtask/ is outside it and no round-trip test is needed. The property is measured directly by summing fixture durations per shard from the real `select` output, not through a stand-in.",
+    "The timings file is xtask/shard-timings.txt (one `<package> <selector> <seconds>` line per unit, or equivalent JSON). The update command, `xtask shard-timings`, runs each unit with timing and rewrites the file; it is documented in USAGE and main.rs. Only the file name is open to change.",
+    "The unit key is the existing `Unit::line()`. Mixed assignment: units without timings are placed by the old index-modulo rule on the sorted list of untimed units, then added to the shard loads. The result must be deterministic, and ties break by unit order so `--dry-run` output stays stable.",
+    "Not a refusal-rule change, so no refused-readings percentage applies."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p xtask`. A shard.rs unit test uses a fixture timings map and calls the real selection for n=6. It asserts that the largest per-shard duration total is at most 1.25 times the mean, and that each unit appears in exactly one shard.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p xtask`. A shard.rs unit test includes a unit absent from the fixture timings and asserts that it is assigned to exactly one shard, with all units still covered.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p xtask --test ci_shards`. The existing ci_shards partition tests pass, including `shards_in_ci_yml_partition_every_workspace_test_target`, with the real checked-in timings file.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`. All pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "xtask/src/shard.rs sorts timed units by descending duration and places each on the currently least-loaded shard. The checked-in timings file is parsed with a clear error for a malformed line. A new xtask subcommand that regenerates the file is wired in xtask/src/main.rs and listed in the usage text.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry that describes timing-balanced sharding, the timings file and the update command.",
+      "kind": "content"
+    },
+    {
+      "text": "The checked-in timings file covers the current workspace test units, so the real shards are balanced rather than all falling back.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "xtask/src/shard.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "xtask/tests/ci_shards.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "create",
+      "p": 0.85
+    }
+  ],
+  "out_of_scope": [
+    "Changing the shard count or .github/workflows/ci.yml",
+    "Adding a sharding tool such as cargo-nextest",
+    "Splitting individual tests within a target",
+    "Changing athena.toml or defaults.toml"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.66,
+      "p_user_intervenes": 0.09,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.3
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1700.0,
+        "p90": 3900.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7201044386422977,
+      "p_verification_passes": 0.6768802228412256,
+      "p_user_intervenes": 0.09521410579345087,
+      "cost_usd": {
+        "p10": 0.5540958486904357,
+        "p50": 1.3028672,
+        "p90": 3.612397994787491
+      },
+      "wall_time_s": {
+        "p10": 542.5650861929345,
+        "p50": 1853.2926054029595,
+        "p90": 4008.720056263161
+      }
+    }
+  },
+  "departures": null
+}

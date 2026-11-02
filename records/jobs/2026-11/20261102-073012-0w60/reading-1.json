@@ -1,0 +1,167 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261102-073012-0w60",
+  "n": 1,
+  "at": "2026-11-02T07:31:17.534487102Z",
+  "invocation_seq": 2,
+  "base_commit": "9c002063a3cd39b198726cf600bf85a02551a358",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Balance xtask test-shard by recorded per-target timings",
+  "summary": "Retry of job 20261031-172034-fx4m (timed out at 3000s, no candidate, no changes kept). Change `xtask test-shard` to place units greedily longest first by durations in a checked-in timings file under xtask/, with the old sorted index-modulo split for untimed units, plus an xtask command that rewrites the file. Audience: CI maintainers who want the slowest shard near the mean. Keep it small to avoid another timeout.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All code and tests are Rust in xtask."
+    },
+    {
+      "id": "tested",
+      "how": "New unit tests; fmt, clippy -D warnings and cargo test are criteria."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo commands the verifier runs."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check balance and partition by running tests, not that files exist."
+    },
+    {
+      "id": "buy-first",
+      "how": "No sharding crate or tool is added; the existing cargo metadata approach is extended."
+    },
+    {
+      "id": "small",
+      "how": "One focused change inside xtask plus the changelog."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments explain the timings format and the fallback."
+    },
+    {
+      "id": "evidence",
+      "how": "Timings are measured or labeled as estimates."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read xtask/src/shard.rs, xtask/src/main.rs, xtask/tests/ci_shards.rs and crates/athena-data/src/records.rs. Entry point: main.rs dispatches `test-shard` to shard::command, which runs `cargo metadata`, calls plan_units (sorted, deduped Unit list), then select(units,k,n) (sorted index i, shard i % n), then dry-run prints or runs `cargo test -p <pkg> <selector>` per unit. Order for the change: plan_units first, then load timings (new), then timed units are placed greedily longest first on the least-loaded shard (ties broken by sorted order), then untimed units keep the index-modulo split over the sorted untimed list, then the shard k slice is returned. Every shard computes the same full assignment, so the partition holds. ci_shards.rs checks the partition through the built `xtask test-shard k n --dry-run` output against a metadata oracle; the real timings file is read by that path.",
+    "Code survey: the timings file is xtask/shard-timings.txt, not under crates/ and not under records/. check_record_file in crates/athena-data/src/records.rs accepts only canonical records/*.json files and a fixed list of job Markdown files, and returns UnknownFile otherwise. A file under xtask/ is not passed to it, so no AnyRecord variant, check_record_file path or round-trip test is added or needed.",
+    "Code survey: the balance property is measured directly in a shard.rs unit test. It calls the real selection function for n=6 over a fixture timings map, sums each shard's fixture durations, and compares the maximum with the mean. It also counts how often each unit appears across the shards. It does not use a stand-in for the selection.",
+    "The change adds no refusal rule to the Athena reading or records gate, so no refusal-rate criterion is needed. The `test-shard` error on a malformed timings line is a user-facing parse error.",
+    "Job 20261031-172034-fx4m is addressed by redoing its accepted reading from the base: its only recorded finding was the 3000s producer deadline, so there is no verifier finding to fix. The aim is to avoid a timeout by keeping the change small and the test fixtures simple.",
+    "The timings file format is one line per unit: `<package> <selector> <seconds>`. The seconds come from the run-41221582236 totals, or from a local run if the producer can make one. If a measured value is unavailable, a clearly labeled estimate is acceptable. The update command may time each unit with `cargo test`."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p xtask`. A shard.rs unit test calls the real selection with a fixture timings map for n=6 and asserts that the largest per-shard duration total is at most 1.25 times the mean, and that each fixture unit appears in exactly one shard.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p xtask`. A shard.rs unit test includes a unit absent from the fixture timings and asserts that it is assigned to exactly one shard, with every unit still covered.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p xtask --test ci_shards`. The existing partition tests pass, including `shards_in_ci_yml_partition_every_workspace_test_target`, using the real checked-in xtask/shard-timings.txt.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`. All pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p xtask`. A shard.rs unit test shows a malformed timings line (missing field or non-numeric seconds) returns an error that names the line.",
+      "kind": "behavior"
+    },
+    {
+      "text": "xtask/src/shard.rs sorts timed units by descending duration and places each on the currently least-loaded shard. Untimed units use the existing sorted index-modulo split. A new xtask subcommand that rewrites xtask/shard-timings.txt from a local run is wired in xtask/src/main.rs and listed in the usage text.",
+      "kind": "content"
+    },
+    {
+      "text": "xtask/shard-timings.txt exists and has a line for every current workspace test unit that `cargo run -p xtask -- test-shard 0 1 --dry-run` lists, so the real shards are balanced rather than all falling back.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing timing-balanced sharding, the timings file and the update command.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "xtask/src/shard.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "create",
+      "p": 0.95
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "xtask/tests/ci_shards.rs",
+      "action": "modify",
+      "p": 0.35
+    }
+  ],
+  "out_of_scope": [
+    "Changing the shard count or .github/workflows/ci.yml",
+    "Adding a sharding tool such as cargo-nextest",
+    "Splitting individual tests within a target",
+    "Changing athena.toml or defaults.toml",
+    "Any record or data file under crates/ or records/",
+    "Keeping work from job 20261031-172034-fx4m: it left no candidate, so nothing is kept or dropped"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7201044386422977,
+      "p_verification_passes": 0.675,
+      "p_user_intervenes": 0.0949748743718593,
+      "cost_usd": {
+        "p10": 0.5540958486904357,
+        "p50": 1.3028672,
+        "p90": 3.612397994787491
+      },
+      "wall_time_s": {
+        "p10": 542.863351208,
+        "p50": 1860.5583603309994,
+        "p90": 4025.733124295001
+      }
+    }
+  },
+  "departures": "The earlier attempt timed out at 3000s, so cost and time sit above the reference; the file also needs a unit list covering the whole workspace."
+}

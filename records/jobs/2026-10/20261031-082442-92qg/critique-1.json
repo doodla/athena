@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-082442-92qg",
+  "round": 1,
+  "at": "2026-11-02T05:04:54.30850388Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Person-set urgent items can be demoted, which contradicts the accepted reading, and the test for 'a person's record still wins' cannot fail.",
+      "evidence": "The accepted reading says: 'Items with a person's priority record are never demoted below their own record.' Open question 3 says the plan 'demotes the oldest-set one' when four person-set urgent items exceed a cap of 3. Demonstration 4(b) checks a person-set item at priority Normal among urgent ones. A Normal item is never in a capped tier, so it is never demoted with or without the rule, and the assertion passes either way. Fix: Follow the accepted reading. Person-set items count toward the cap but are never demoted below their own record level; non-person-set items are demoted first. Replace 4(b) with a test that does fail without the rule: four urgent items set by a person plus non-person-set urgent items, cap 3. Assert that none of the person-set ones appears in `Plan.demoted` and that all of them keep urgent.",
+      "location": "Decision 3, Open question 3, Criterion 4 demonstration (b)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Demoting a prerequisite whose urgent dependent stays urgent puts a lower tier ahead of a higher one, and `priority_violations` reports this as a contradiction.",
+      "evidence": "plan.rs:463-483: `effective_priorities` raises a prerequisite to its dependent's tier. The cap pass then ranks the prerequisite like any other item and may demote it to high while its dependent stays urgent. The dependency still schedules the prerequisite first. plan.rs:503-510: `priority_violations` flags any earlier item with a lower tier. drain.rs:2009 turns each flag into a 'plan order contradicts priority' note. Open question 5 calls this harmless; the check says otherwise. Fix: After the cap pass, re-raise prerequisites of kept items to a fixpoint, as `effective_priorities` already does. Alternatively, never demote an item whose tier came only from a kept dependent. Add a unit test: an urgent dependent is kept and its prerequisite is ranked past the cap. Assert the prerequisite stays urgent and `priority_violations` is empty.",
+      "location": "Step 2 (apply_caps) and Open question 5",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Nothing tests the production path that `athena plan` actually runs: reading the caps from athena.toml and the person-set times from priority records.",
+      "evidence": "Criterion 3 uses the pure `Plan::build_capped` and a fake Steps whose `priority_caps` returns made-up values. The default `Steps::priority_caps` returns 'no caps'. If `RealSteps` failed to override it, or `person_priority_times` were wrong, every listed test would still pass while the real `athena plan` capped nothing. Fix: Add a binary-level test in crates/athena-cli/tests/focus.rs using the Fixture. The plan already runs `athena plan --budget 0` there for criterion 4. Queue 5 requests with `Priority: urgent` and run `athena priority <newest> urgent` so the person-set item is not first in plan order. Run `athena plan` and assert exactly 2 'demoted' lines, neither naming the person-set item.",
+      "location": "Criterion 3 demonstration (b) and Step 8 (the RealSteps override)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The person-set item must be one that plan order alone would demote, or the 'kept among the 3' check passes without the preference.",
+      "evidence": "The plan's fails-without text mentions 'a test that sets the newest-aged item as person-set', but step 3 only says 'one person-set'. If the person-set item is the oldest, plain plan order keeps it anyway. Fix: Say in step 3 that the person-set item is the newest (last in plan order) of the 5.",
+      "location": "Criterion 3 demonstration (a)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "State that 'set by a person' counts only when the item's latest priority record names the tier being capped.",
+      "evidence": "`person_priority_times` maps each job to the `at` of its highest-n record, whatever level that record set. Suppose a person set an item to normal and a dependency raised it to urgent. Under the current wording it would rank as person-set in the urgent tier. Fix: Filter `person_set` to jobs whose latest record's level equals the tier being capped, and add one test for it.",
+      "location": "Decision 2 / Step 8 (`person_priority_times`)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read plan.rs, drain.rs (`prepare`), records.rs, store.rs and the test fixture. The plan is well grounded. Everything it names exists: `Plan::build_with`, `effective_priorities`, `priority_violations`, `Drain::prepare` calling `build_with` at drain.rs:2008, `Git::config_get`, `PriorityRecord.at` and the month-sharded path arms. `Plan` derives Default. `Records::load` matches non-job records at store.rs:334-347. The fixture sets `user.name`. Putting the caps after `effective_priorities` is the right place. Three problems need fixing. (1) The plan departs from the accepted reading on person-set items: it lets a person-set urgent item be demoted. Its criterion 4(b) test cannot fail, because it checks a normal item that no cap ever touches. (2) Demoting a dependency-raised prerequisite while its urgent dependent stays urgent makes the existing `priority_violations` check report a false contradiction. (3) The real wiring that `athena plan` uses, `RealSteps::priority_caps` reading athena.toml and the priority records, is never exercised. Only a fake Steps and the pure function are tested. Athena's own drain.rs scope finding stands; the plan explains why the file is needed."
+}

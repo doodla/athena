@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-082442-92qg",
+  "round": 2,
+  "at": "2026-11-02T05:08:06.636106863Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The cap counts prerequisites that are only raised by a dependent, and can keep them while demoting the dependent that raised them",
+      "evidence": "plan.rs:465 `effective_priorities` raises every prerequisite to its dependent's tier. In the plan, apply_caps takes the members of a tier from those raised tiers and fills the slots by (rung, age). Prerequisites are usually older than their dependents. Example: urgent D depends on normal P1, P2 and P3, all older, so all four count as urgent. With a cap of 3 and no person records, the fill keeps P1–P3 and demotes D. The urgent tier then holds three items that are urgent only because of D, which is no longer urgent. Real urgent requests are pushed out. The closure rule (Decision 3) only protects prerequisites of items that are kept, so it does not stop this. The plan rejected capping the input priorities because 'rewriting entry.priority would be undone when a dependent raises a prerequisite'. That undoing is the behavior you want: a prerequisite of a kept urgent item should be urgent. Fix: Inside build_capped, copy each planned entry's own priority (the request or person level, not the raised one) into a local vector. Apply the urgent cap and then the high cap to items whose own level is that tier, keeping person-set items first (newest `at` first), then the rest in plan order. Then run the existing raising logic on the capped vector. Record a Demotion only for items whose final effective tier is lower than their uncapped effective tier. Prerequisites of kept items get raised back automatically, so the closure rule and the level filter (Decision 4) are no longer needed. Have priority_violations use the same capped vector. Add a test where the prerequisites are older than an urgent dependent and the cap is reached: the dependent stays urgent and the prerequisites are not counted as separate urgent picks.",
+      "location": "Approach / Decisions 1 and 3; Steps 2 (apply_caps on dependency-raised tiers, fill ranked by (rung, age))",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The id's random suffix is used as an ordering counter",
+      "evidence": "id.rs:3-4 and 27-35: the four-character suffix carries 20 random bits from `generate`; it is not a sequence number. Ordering two focuses in one second needs set_focus to scan existing ids and mint bits above the largest. That breaks when the existing suffix is already at the maximum, and it gives the suffix a meaning no other record uses. PriorityRecord already solves this with an explicit `n` field (records.rs:527-528). Fix: Give the focus record an `n` field numbered from 1, as PriorityRecord does, and take the current focus as the record with the greatest (n, id). Or keep the id random and order by (at, n). The criterion 2 test then does not depend on how suffixes are minted.",
+      "location": "Decision 8 / Risks (same-second focus ordering via RecordId::from_parts(at, n))",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The end-to-end cap test relies on an untested assumption about how queued requests are made, when a direct seam exists",
+      "evidence": "The plan says it was not checked that `ask --later` text with bullets produces a complete plan entry without a model call. tests/drain.rs already writes records straight into a fixture repo (for example `AnyRecord::Priority(PriorityRecord {..})` at tests/drain.rs:4314 and 4660), which is a proven way to set up requests and priority records. Fix: In tests/focus.rs, set up the five urgent requests and the person priority record by writing records the way tests/drain.rs does, or reuse its helper. Then run the real `athena plan` binary. Keep `ask --later` only if the producer confirms that it yields complete entries.",
+      "location": "Demonstration 3(c) and 4(f); Open question on `athena ask --later` completeness",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The records allow-list question can be closed from the code",
+      "evidence": "records.rs:2935: check_record_file accepts a record at its canonical location (or an allowed Markdown file). It has no separate list of directories, so adding the AnyRecord::Focus arm with a canonical path is enough for this check. Fix: Remove the open question, or reduce it to checking how Records::load discovers directories in store.rs, which step 5 already covers.",
+      "location": "Step 4 / Open question on the records gate",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code. Everything it names exists where it says: `Plan::build_with` (plan.rs:532), `effective_priorities` (465), `priority_violations` (490), the only production caller in drain.rs `prepare` (2008), `trait Steps` (507), `RealSteps` (3090), `Git::config_get` (athena-git lib.rs:586), `RecordId::from_parts` (id.rs:35), `commit_records` (commits.rs), and `PriorityRecord` with its `n` and `at` fields. Athena's drain.rs finding is real, and the plan's reason for touching drain.rs holds up. Demonstrations 1, 2 and 5–8 cover their criteria, and each would fail without the behavior. The design has one soundness problem. The cap is counted on tiers after prerequisites have been raised by their dependents. Slots are then filled in (rung, age) order. So prerequisites that are urgent only because an urgent dependent needs them can take cap slots, while the dependent that made them urgent gets demoted. The urgent tier then holds work nobody asked to be urgent. The simpler fix is to cap the items' own priorities in a local copy and then run the existing raising pass. That also makes the plan's special prerequisite-closure rule and its level filter unnecessary. The rest are minor: the same-second ordering of focus records, and a fragile setup for the end-to-end test."
+}

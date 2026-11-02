@@ -1,0 +1,318 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-082442-92qg",
+  "round": 3,
+  "at": "2026-11-02T05:10:26.846806544Z",
+  "invocation_seq": 9,
+  "approach": "Add an `athena.focus/1` record (id, n, at, text, set_by) at records/focus/<month>/<id>.json. `Records.focus` loads it, and the record with the greatest `n` is the current focus. `Athena::set_focus` and `current_focus` back `athena focus [text]`, and `StatusView.focus` makes `athena status` print it. Add `[priority_caps]` (urgent = 3, high = 10) to the schema and to athena.toml. The cap is applied to each planned item's OWN priority (the request or person level), not the dependency-raised one, as the critic proposed. `Plan::build_capped(entries, history, &PriorityCaps)` works in four steps. (1) It builds the uncapped plan and uses its order as the plan order. (2) It runs the urgent cap and then the high cap over the own priorities. An item with a person priority record at the capped tier is kept and counts toward the cap; the other slots go to the rest in uncapped plan order; the excess drops one tier, and an item pushed out of urgent into high takes part in the high pass. (3) It rebuilds the plan from the capped own priorities, so the existing raising logic lifts the prerequisites of kept items by itself. (4) It records one `Demotion` for each item whose final effective tier is lower than its uncapped effective tier. `priority_violations` uses the same capped own priorities. `Drain::prepare` (shared by `athena plan` and `drain`) gets the caps from a new defaulted `Steps::priority_caps`, which `RealSteps` fills from `JobConfig::at` and the priority records. `display::plan` prints one `demoted` line per demotion. Planning writes nothing. Binary-level tests set up queued requests by writing records straight into the fixture, as tests/drain.rs does.",
+  "decisions": [
+    {
+      "choice": "Cap the own priority (entry.priority, or the person's record level), then rerun the existing raising logic on the capped vector. Record a Demotion only when an item's final effective tier is lower than its uncapped effective tier. Answers finding 2.",
+      "reason": "effective_priorities raises every prerequisite to its dependent's tier. Counting those raised prerequisites as separate picks lets older prerequisites push out the urgent dependent that raised them. Capping own levels counts only items someone asked to be urgent. A kept dependent raises its prerequisites back by itself, and a demoted dependent no longer raises them. So no closure rule or level filter is needed. Raised prerequisites are not counted against the cap; the docs and CHANGELOG say so.",
+      "rejected": [
+        {
+          "option": "Cap the dependency-raised tiers with a closure rule (previous Decisions 1, 3 and 4)",
+          "why": "The fill by (rung, age) keeps older prerequisites and demotes the urgent dependent that caused them to count."
+        },
+        {
+          "option": "Add a priority_set_at field to PlanEntry",
+          "why": "About 12 PlanEntry literals in drain.rs, tests/drain.rs and plan.rs would need edits. A side set in PriorityCaps avoids that."
+        }
+      ]
+    },
+    {
+      "choice": "The cap works through a private build_inner(entries, history, overrides: &BTreeMap<String, Priority>). build_with calls it with no overrides. Plan gains `demoted: Vec<Demotion>` (skipped in JSON when empty) and a `#[serde(skip)]` map of the capped own priorities. effective_priorities takes the own priorities as an argument. priority_violations reads them from the Plan.",
+      "reason": "The ordering and grouping code stays in one place. The existing wave logic needs no copy. priority_violations judges the order by the same tiers the plan used, so a demotion cannot show up as a contradiction. Entries are never mutated.",
+      "rejected": [
+        {
+          "option": "Lower entry.priority on cloned entries before build_with",
+          "why": "The Plan could not report the uncapped tiers, and priority_violations would need the clones."
+        }
+      ]
+    },
+    {
+      "choice": "Person-set means the job has a priority record. PriorityCaps.person_set is a BTreeSet<String> of job ids, built from the jobs' priorities. In a capped tier, the items in the set whose own level is that tier are kept even if they alone exceed the cap. The remaining slots go to the other items, in uncapped plan order, up to the cap.",
+      "reason": "The accepted reading says a person's priority record still wins for its item and the item is never demoted below it. That rule, not a ranking, decides who is kept. 'Most recent first' therefore needs no tiebreak, because every person-set item in the tier is kept. This is stated in the help text and CHANGELOG, and left as an open question for the owner.",
+      "rejected": [
+        {
+          "option": "Demote the oldest person-set items when they exceed the cap",
+          "why": "It contradicts the accepted reading, and the 'person record wins' test could not fail."
+        }
+      ]
+    },
+    {
+      "choice": "The focus record is `{id: RecordId, n: u32 (from 1), at, text, set_by}`. The current focus is the one with the greatest n; set_focus uses max(n)+1. The path is records/focus/<month>/<id>.json, the same shape as Intervention (id.month(), id). set_by comes from git user.name, and set_focus refuses an empty text or an empty identity. Answers finding 3.",
+      "reason": "PriorityRecord already orders itself with an explicit n. Using the random id suffix as a counter would give it a meaning no other record uses. The criterion 2 test then does not depend on how ids are minted or on the second.",
+      "rejected": [
+        {
+          "option": "Use RecordId::from_parts(at, n) and order by id",
+          "why": "The suffix is 20 random bits, not a sequence."
+        },
+        {
+          "option": "Read the USER environment variable",
+          "why": "It is not reliably set or recorded."
+        }
+      ]
+    },
+    {
+      "choice": "Pass caps and the person-set through a new defaulted trait method `Steps::priority_caps(&self) -> PriorityCaps` (default: no caps). RealSteps overrides it with `JobConfig::at(&self.athena.git, &self.athena.head()?)` for `config.priority_caps`, and `self.records()` for the person-set. Answers finding 1.",
+      "reason": "The only production caller is Drain::prepare (Plan::build_with at drain.rs:2008), shared by `athena plan` and `drain`. Config and records reach it only through Steps. A default keeps every fake Steps impl compiling. drain.rs is outside the listed deliverables but has no substitute. The summary will name it as a required extra file.",
+      "rejected": [
+        {
+          "option": "Make plan.rs read athena.toml",
+          "why": "plan.rs is pure."
+        },
+        {
+          "option": "Add a required Steps method",
+          "why": "It forces edits to the fake impls in tests/drain.rs and elsewhere."
+        },
+        {
+          "option": "Skip drain.rs and cap only inside `athena plan` display",
+          "why": "The drain would still work in the uncapped order, so the cap would not govern the work."
+        }
+      ]
+    },
+    {
+      "choice": "Name the section `[priority_caps]` with `urgent = 3` and `high = 10`, as a #[serde(default)] struct with deny_unknown_fields. Reset it in Config::reading_inputs.",
+      "reason": "Matches how [parallel] works: older configs still parse and readings' config digest does not change.",
+      "rejected": [
+        {
+          "option": "Put the fields under [parallel] or [budget]",
+          "why": "Unrelated, and [budget] feeds the digest."
+        }
+      ]
+    },
+    {
+      "choice": "Cascade the high pass: items demoted out of urgent count in the high tier, and the excess there drops to normal. One Demotion per item records its final from and to, so one line per item.",
+      "reason": "The reading says demoted items count toward the high cap. The request says one line per demoted item.",
+      "rejected": [
+        {
+          "option": "Demote each item at most one tier, letting high exceed 10",
+          "why": "It breaks the high cap."
+        }
+      ]
+    },
+    {
+      "choice": "Set up the binary-level test data by writing Request and Priority records directly into the Fixture repo (commit_records_to style, tests/drain.rs:4605), then run the real `athena plan` binary. Answers finding 4.",
+      "reason": "This is a proven setup, and it avoids relying on the unchecked assumption that `ask --later` text yields a complete entry. The test first asserts that all 5 ids appear in the plan order, so an incomplete entry fails loudly.",
+      "rejected": [
+        {
+          "option": "Queue with `athena ask --later`",
+          "why": "Whether it yields a complete entry without a model call was never checked."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal_corpus case is added, and `cargo test -p athena-core --test refusal_corpus` is not made a demonstration. Answers finding 5 as well: the open question about the records gate is dropped.",
+      "reason": "The cap changes tiers and refuses or matches no input; Priority::from_text and the request format are unchanged. check_record_file accepts a record at its canonical location (records.rs, near line 2935), so the new AnyRecord arm with a canonical path is enough. Records::load discovery is covered by step 5.",
+      "rejected": [
+        {
+          "option": "Grep for a records/ directory allow-list",
+          "why": "The code shows none."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Add PriorityCaps { urgent, high } (defaults 3 and 10, deny_unknown_fields) as `priority_caps` on Config. Reset it in reading_inputs. Add tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "Governance file, listed as a deliverable. Add a commented [priority_caps] section: urgent = 3, high = 10.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add the Focus record (athena.focus/1: id, n, at, text, set_by) with validate, plus AnyRecord::Focus with validate, canonical-path (records/focus/<month>/<id>.json) and schema-name arms. Extend the round-trip test and add validation and path tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Add Records.focus, fill it in Records::load, and add Records::current_focus() (greatest n). Add the helper that builds the set of job ids with a priority record. Unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add Athena::set_focus (validates, reads git user.name, numbers n, commits one Focus record with commit_records) and Athena::current_focus. Unit-test the empty-text and missing-identity errors.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "Add PriorityCaps, Demotion (with a line() renderer starting with 'demoted'), Plan.demoted, Plan::build_capped, a private build_inner and the cap pass. build_with delegates. effective_priorities takes the own priorities. priority_violations uses the capped ones. Update the module doc. Add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Not among the reading's deliverables, but the only production caller of Plan::build_with is Drain::prepare. Add the defaulted Steps::priority_caps, call Plan::build_capped in prepare, override it in RealSteps from JobConfig and the records, and add the Stub-Steps test (named to match `cargo test -p athena-cli demotes`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add StatusView.focus (text, set_by, at), filled in Athena::status from current_focus. Skipped in JSON when absent.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "In `status`, print a focus line when one is set. In `plan`, print one 'demoted' line per Plan.demoted entry after the order.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Add Command::Focus { text, json }. With text it sets and prints the focus. Without text it prints the current focus or says none is set. Update the help text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/focus.rs",
+      "action": "create",
+      "purpose": "Binary-level tests: focus write, print and status; a later focus replaces it; the cap through the real `athena plan` (default and urgent = 1 config) with records written into the fixture; the no-rewrite check.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased entry for athena focus, the status line, the priority caps and the demotion lines.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "config.rs: add PriorityCaps { urgent: u32, high: u32 } with serde defaults 3 and 10 and deny_unknown_fields. Add `#[serde(default)] pub priority_caps` on Config and the reading_inputs reset. Add the commented `[priority_caps]` section (urgent = 3, high = 10) to athena.toml. Add config tests: repo values, defaults when absent, digest unaffected.",
+    "plan.rs: add PriorityCaps { urgent, high, person_set: BTreeSet<String> } and Demotion { id, from, to } with line() (starts with `demoted`, names the id, from, to and the cap). Move the body of build_with into a private build_inner(entries, history, overrides). Change effective_priorities to take the own priorities. Add Plan.demoted and the capped-own map. Implement Plan::build_capped as: build_inner uncapped; take planned ids in order with their own priority; urgent pass then high pass (person-set items at that own level kept, fill the remaining slots in uncapped plan order, drop the rest one tier, so urgent excess joins the high pass); build_inner again with the overrides; record a Demotion for each planned id whose final effective tier is lower than its uncapped one. build_with calls build_inner with no overrides. priority_violations uses the capped map. Update the module doc.",
+    "plan.rs tests: the criterion 3(a) case with the person-set item newest; 12 high gives 2 to normal; 4 person-set urgent plus 2 others over cap 3; the dependent-with-older-prerequisites case and its variant; a Normal person record not kept in the urgent tier; raised prerequisites not counted; entries unchanged; build_capped with no caps equals build_with; a held item beside capped ones.",
+    "records.rs: add Focus with validate (non-empty trimmed text and set_by, n from 1) and AnyRecord::Focus (`athena.focus/1`) with validate, path and schema-name arms mirroring Intervention's path. Extend the AnyRecord round-trip test and add validation and path tests. (check_record_file accepts a record at its canonical path, so no directory list needs a change.)",
+    "store.rs: add Records.focus, fill it in the loader's match, and add current_focus() and the person-set helper (job ids with a priority record), with unit tests.",
+    "reading.rs: add Athena::set_focus and current_focus, using commit_records, git user.name, n = max + 1 and a plain-subject message. Unit-test the empty-text and missing-identity errors.",
+    "status.rs and display.rs: add StatusView.focus from current_focus and a `focus` line in display::status. In display::plan print the demotion lines after the order lines.",
+    "drain.rs: add the defaulted Steps::priority_caps (no caps). In prepare call Plan::build_capped(&entries, &history, &self.steps.priority_caps()). Override it in RealSteps with JobConfig::at(&self.athena.git, &self.athena.head()?) for the caps and self.records() for the person-set; on error return no caps. Add the Stub-Steps test named with `demotes`.",
+    "main.rs: add Command::Focus and its handler (open for write when setting, read-only when printing) and the help text. Create tests/focus.rs: focus write, print and status; a later focus replaces it; real `athena plan` with 5 urgent Request records written into the fixture and a PriorityRecord for the newest, asserting all 5 planned and exactly 2 `demoted` lines that do not name it; the same with `[priority_caps] urgent = 1` asserting 4; and head and records bytes unchanged by planning.",
+    "CHANGELOG.md: add the Unreleased entry (focus command, status line, priority caps, demotion lines, the person-set rule, raised prerequisites not counted). Then run fmt, clippy -D warnings and the full test suite, and fix what they report."
+  ],
+  "risks": [
+    {
+      "risk": "A Plan literal elsewhere breaks when Plan gains fields.",
+      "mitigation": "Plan derives Default. The producer fixes any literal with ..Default::default(). PlanEntry is unchanged."
+    },
+    {
+      "risk": "Adding [priority_caps] changes the reading config digest and invalidates stored readings.",
+      "mitigation": "Reset it in Config::reading_inputs like [parallel], and assert in the reading_inputs test that a changed cap leaves the text equal."
+    },
+    {
+      "risk": "The cap pass changes ordering or output for a queue under the caps, or the JSON of Plan changes.",
+      "mitigation": "With no caps, build_capped runs the same body as build_with, and a test compares the two. `demoted` is skipped in JSON when empty and the capped map is not serialized."
+    },
+    {
+      "risk": "The rebuilt plan differs from the uncapped one in membership (held or cyclic items), so effective tiers are compared on different sets.",
+      "mitigation": "Both builds use the same entries and history. Tiers are compared only for ids planned in both. A test covers a held item beside capped ones."
+    },
+    {
+      "risk": "priority_violations reports a false contradiction after a demotion.",
+      "mitigation": "It uses the same capped own priorities as the rebuilt plan. The criterion 3 and 4 tests assert an empty result."
+    },
+    {
+      "risk": "Two focus records written in the same second get an ambiguous order.",
+      "mitigation": "Order is by n, set to max(n)+1, and the criterion 2 test runs both commands back to back."
+    },
+    {
+      "risk": "Fixture request records are not complete plan entries, so the binary-level cap test sees an empty plan.",
+      "mitigation": "The test asserts that all 5 ids are in the printed plan first. The drain.rs Stub test and the plan.rs unit tests cover the logic regardless."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Binary-level test in crates/athena-cli/tests/focus.rs, using the review.rs-style helper (CARGO_BIN_EXE_athena, current_dir = fx.root(), ATHENA_STATE_DIR = fx.state.path(), ATHENA_NESTED removed) on a Fixture from tests/common. The test first asserts records/focus/ does not exist.",
+      "command": "cargo test -p athena-cli --test focus",
+      "observes": "`athena focus \"speed first\"` exits 0. Exactly one file appears under records/focus/<month>/ and parses as athena.focus/1 with n = 1, text \"speed first\" and a non-empty set_by. `athena focus` stdout contains \"speed first\", and so does `athena status`.",
+      "fails_without": "With no focus command, status field or record path, `athena focus \"speed first\"` exits non-zero as an unknown subcommand, no file exists under records/focus/, and the stdout assertions fail.",
+      "seam": "Production entry points: Command::Focus in main.rs, which calls Athena::set_focus and current_focus, and display::status. Seam: the real binary on the Fixture repo with the Fixture's git user.name. The Fixture and the helper pattern exist today. The focus code is added by steps 3 to 9."
+    },
+    {
+      "criterion": 2,
+      "method": "Second test in tests/focus.rs: run `athena focus \"speed first\"` and then `athena focus \"quality first\"` back to back. Then read `athena focus`, `athena status` and `athena status --json`, and list the files under records/focus/.",
+      "command": "cargo test -p athena-cli --test focus",
+      "observes": "All three outputs contain \"quality first\" and none contains \"speed first\". Two record files exist, with n = 1 and n = 2, so the first is replaced by order and not deleted. The result does not depend on the commands falling in different seconds, because n orders them.",
+      "fails_without": "If the current focus were the first, the oldest or an unordered pick, the output would still show \"speed first\" and the test would fail.",
+      "seam": "Same binary and Fixture seam as criterion 1. Records::load collects `focus` and current_focus() takes the greatest n (steps 3 to 5). The Fixture exists today."
+    },
+    {
+      "criterion": 3,
+      "method": "Three layers. (a) A plan.rs unit test on Plan::build_capped: 5 complete PlanEntry values at Urgent from the existing entry helper in the plan.rs tests, the person-set one being the NEWEST (last in plan order), so plan order alone would demote it. caps = {3, 10, person_set = {that id}}. (b) A drain.rs tests-module test using the existing Stub pattern, which overrides only Steps::priority_caps. It runs drain::plan, renders display::plan and counts the 'demoted' lines. (c) A tests/focus.rs test: write 5 Request records with `Priority: urgent` and a bullet into a Fixture, as tests/drain.rs does with commit_records_to. Add a PriorityRecord (urgent) for the newest one, run the real `athena plan --budget 0` and parse the output. The test first asserts all 5 ids are in the printed plan. A second case writes `[priority_caps]` with urgent = 1 into the fixture's athena.toml and expects 4 lines.",
+      "command": "cargo test -p athena-core plan:: && cargo test -p athena-cli demotes && cargo test -p athena-cli --test focus",
+      "observes": "(a) Exactly 3 ids are urgent in the effective tiers and 2 are in plan.demoted (Urgent to High). The person-set id is not in demoted, and priority_violations is empty. (b) The printed plan has exactly 2 lines containing 'demoted', one naming each demoted id. (c) Real `athena plan` prints exactly 2 'demoted' lines, neither naming the person-set request. With urgent = 1 it prints 4.",
+      "fails_without": "Without capping, plan.demoted is empty, all 5 are urgent and no demotion line prints, so (a), (b) and (c) fail. Without keeping person-set items, the newest item would be demoted by plan order and the 'person-set is kept' assertion fails. If RealSteps did not override priority_caps, or the person-set were built wrongly, (c) prints no demotion lines.",
+      "seam": "Production entry points: Plan::build_capped (added in step 2); drain::plan, which calls Drain::prepare (exists; calls build_with today, changed in step 8); and the `athena plan` binary (exists). Fakes: plain PlanEntry values, and a Stub Steps from the drain.rs tests module (exists) that overrides only the new Steps::priority_caps (added in step 8), returning numbers and the id set. The cap logic is in build_capped, not in the fake. (c) uses the Fixture, ATHENA_STATE_DIR and records written to the repo, with no fake. Step 9 adds it. Open point: the request text must give a complete entry, which needs a goal, a rung that infer_rung can derive, and a bullet. The producer fits the wording and the 5-ids assertion guards it."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit tests in plan.rs on Plan::build_capped and Plan::priority_violations, using the entry helper, plus a no-rewrite binary test. (a) 12 High entries with caps {3, 10}: exactly 2 are demoted High to Normal. (b) 4 person-set urgent plus 2 non-person-set urgent, urgent cap 3: none of the 4 appears in plan.demoted, all 4 stay urgent, the 2 others are demoted. (c) Finding 2's case: urgent dependent D, a person-set item, depends on three Normal prerequisites P1 to P3, all older than D, with cap 3 and no other urgent items. D stays urgent, P1 to P3 are raised to urgent through D, plan.demoted is empty, and priority_violations is empty. A variant with 3 other own-urgent non-person items older than D checks that D is kept and a non-person own-urgent item is demoted, not D's prerequisites. (d) An item set to Normal by a person is not protected in the urgent tier, since its own level is not urgent. (e) Raised prerequisites are not counted: cap 1, own-urgent X depending on a Normal prerequisite P, and own-urgent Y. X is kept, Y is demoted, P stays urgent. (f) The entries slice is unchanged (clone compare), and build_with output is identical to before. (g) In tests/focus.rs, set up the requests as in criterion 3(c), run the real `athena plan --budget 0`, and compare fx.head() and the bytes of every file under records/ before and after.",
+      "command": "cargo test -p athena-core plan:: && cargo test -p athena-cli --test focus",
+      "observes": "(a) the excess 2 go to normal and 10 remain high; (b) the 4 person-set items stay urgent even though they exceed the cap of 3; (c) D and its prerequisites stay urgent, demoted is empty, and no violation is reported; (d) the Normal-record item is not kept by the person-set rule; (e) as described; (f) entries equal before and after; (g) head and records bytes are identical after planning, so no request or priority record was written.",
+      "fails_without": "Without the high pass, 12 items stay high and demoted is empty. Without keeping person-set items, (b) demotes a person-set id. Without capping the own priority, (c) demotes the dependent and keeps the three prerequisites. Without the counting rule, (e) wrongly counts a raised prerequisite. If planning wrote anything, (g)'s head or bytes differ.",
+      "seam": "Plan::build_capped and Plan::priority_violations (step 2) with PlanEntry values from the existing helper in the plan.rs tests (exists). The real binary `athena plan` on the Fixture (Command::Plan exists in main.rs). The cap path is added by steps 2, 8 and 9."
+    },
+    {
+      "criterion": 5,
+      "method": "A config.rs unit test parses the repository athena.toml (the REPO_CONFIG constant in config.rs tests) with Config::parse and asserts config.priority_caps equals { urgent: 3, high: 10 }. It also parses a config without the section and asserts the same defaults, and asserts that reading_inputs ignores a changed cap. Then Grep `priority_caps` in athena.toml and config.rs.",
+      "command": "cargo test -p athena-data config::",
+      "observes": "The tests pass. Grep shows the `[priority_caps]` section with `urgent = 3` and `high = 10` in athena.toml, and the struct with defaults 3 and 10 in config.rs.",
+      "fails_without": "A missing schema field makes the strict parse of athena.toml fail on the unknown section. A wrong default fails the assertion.",
+      "seam": "Config::parse on REPO_CONFIG (exists). The struct is added in step 1."
+    },
+    {
+      "criterion": 6,
+      "method": "Unit tests in records.rs: extend the existing AnyRecord round-trip test with an AnyRecord::Focus value. Add validation tests (empty or whitespace text refused, empty set_by refused, n = 0 refused) and a path test (canonical_path starts with records/focus/<month>/ and ends with <id>.json). Then Grep the Focus arms.",
+      "command": "cargo test -p athena-data records::",
+      "observes": "Serialising and parsing the focus record gives an equal value with schema name athena.focus/1. validate() rejects the invalid forms with an error. Grep of records.rs shows Focus in the AnyRecord validate, canonical_path and schema-name matches.",
+      "fails_without": "Without the variant the round-trip test does not compile. Without validation, empty text is accepted and the assertion fails.",
+      "seam": "AnyRecord::validate, canonical_path, the schema-name match and the round-trip test (all exist in records.rs, which already has Intervention as a month-sharded sibling). The variant is added in step 4."
+    },
+    {
+      "criterion": 7,
+      "method": "Content check of the Unreleased section of CHANGELOG.md. Run the grep, then Read the entry.",
+      "command": "grep -n \"athena focus\" CHANGELOG.md",
+      "observes": "One new Unreleased entry names `athena focus`, the `athena status` focus line, the `[priority_caps]` caps (3 urgent, 10 high), the demotion lines in `athena plan`, and that a person's priority record is kept. It is written for an outside reader.",
+      "fails_without": "No entry means grep finds nothing new.",
+      "seam": "Content check only. CHANGELOG.md exists. The entry is added in step 10."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three checks Athena runs, on the whole workspace.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The existing drain.rs, plan.rs and reading.rs tests still pass because build_with and the Steps defaults keep the old behavior.",
+      "fails_without": "Any formatting drift, clippy warning (for example an unused field) or failing test fails the run.",
+      "seam": "The whole workspace; the fmt and clippy configuration exist."
+    }
+  ],
+  "open_questions": [
+    "The accepted reading says a person's priority record is never demoted, so items set by hand are kept even when they alone exceed a cap. The motivating case (13 urgent items set by hand) would then not shrink. If the owner meant the cap to bind person-set items too (oldest-set demoted first), the reading must be revised. The plan implements the reading as accepted.",
+    "drain.rs is outside the listed deliverables but has no substitute for the wiring. If the scope check refuses it, the caps cannot reach `athena plan`.",
+    "Will request records written into the fixture with a bullet and plain wording give complete plan entries, with a goal, a rung that infer_rung derives and acceptance? infer_rung was not read. The test asserts all 5 ids are planned before the cap assertions, and the producer fits the wording.",
+    "Raised prerequisites are not counted against a cap, so the effective urgent tier can hold more than 3 items when a kept urgent item depends on others. This follows the critic's fix; the docs and CHANGELOG will say it.",
+    "An urgent item pushed out of the high tier lands at normal, two tiers down, with one merged line. This follows the reading that demoted items count toward the high cap."
+  ],
+  "producer_section_sha256": "e311992a2247ef6dc0f1ba1b45da72877d2e942cd806ca5296075701d6ea7a50"
+}
