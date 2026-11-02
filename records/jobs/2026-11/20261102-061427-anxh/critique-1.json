@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261102-061427-anxh",
+  "round": 1,
+  "at": "2026-11-02T17:26:31.219112598Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The green-CI test frees disk space at the first CI read, so it would not catch a gate placed later in the checks stage.",
+      "evidence": "Free space goes back to plenty as soon as CI is first read. A wrong implementation that gates unconditionally after run_routed_with_record, or anywhere else in the checks stage after the CI read, would still pass this test. The criterion says the checks stage does not hold on a green CI run, so the test would miss exactly that kind of misplaced gate. Criterion 3's diff reading covers it only in part. Fix: Keep free space at 9 GB through the whole checks stage. For example, flip it when the verifier role is invoked: the producer script can be wrapped so that on Role::Verifier it writes plenty. That is too late for the verifier-stage gate, so the alternative is to assert that the job is held by the verifier-stage gate only after the 'ci         checks reused' line has printed. Either way, any checks-stage gate placed after the CI read would make the test fail.",
+      "location": "Demonstrations, Criterion 2 (green case): Runner wrapper that writes plenty to simulated_free on the first CI read",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The open question about the CI branch left pushed on a hold can be answered from the code: the verifier-stage hold already does this.",
+      "evidence": "Holding after push_ci_branch and early_pr is not new behaviour. The existing verifier-stage gate (verification.rs, test low_disk_after_the_checks_holds_the_job_before_the_verifier_runs) already holds after the push, and that resume path already exists and is tested. mod.rs 1419-1421 says the branch is deleted in finish_dispatched. Fix: Answer the question from the existing verifier-stage hold: a hold at the first local check leaves the same state as that hold. Drop 'should the hold delete the CI branch' as an open question, or note that it keeps the behaviour that already exists.",
+      "location": "Open questions 2-3 and Risks 1: CI branch left pushed on a hold",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "SnapExec would hold the job id twice.",
+      "evidence": "SnapExec already has `job: &'a str` (checks.rs:13). The plan adds `id: &'a JobId` next to it, so the struct would hold the same job id twice. Fix: Either keep one id field (store the &JobId and derive the &str), or wrap SnapExec in a small gating Exec decorator built in check_and_verify, which keeps the disk concern out of the executor.",
+      "location": "Steps 2, checks.rs SnapExec fields",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read check_and_verify (run/mod.rs 1394-1540), SnapExec (run/checks.rs), run_local, Fallback and run_routed_with_record (routing.rs 167-299), resolve (ci_result.rs), the dispatch and producer gates (mod.rs 782 and 1341), and the disk harness in drain.rs and run/tests.rs. The plan holds up against the code. The up-front gate is at mod.rs 1413 and free_producer_build is at 1463. exec() is reached only on the local paths: !reuse, BadSha, and Fallback::run. Fallback keeps the original error in `fallback.error` and hands it back on Blocked(LocalUnavailable), so a LowDisk returned from SnapExec::exec still downcasts in check_and_verify. check_and_verify runs while the producer's JobWorktree guard is still alive (it is called at mod.rs 1388), so the produce dir really is on disk at the old gate. That means the drain.rs criterion-1 test would fail under the old order and pass under the new one. The producer gate at 1341 runs before the producer script plants its build or writes simulated_free, so the new tests will not be held early. Putting the green-CI test in run/tests.rs is justified: ci_seam is pub(crate) and #[cfg(test)], and drain.rs has no way to reach gh. Athena already flagged that this file is outside the deliverables, and I do not repeat it. My remaining findings are minor: the green-CI test frees disk space at the first CI read, which hides a gate placed later in the checks stage; one open question can be answered from the code; and one SnapExec field is redundant. Nothing blocks the plan."
+}

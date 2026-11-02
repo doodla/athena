@@ -1,0 +1,336 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261102-063419-0beg",
+  "round": 1,
+  "at": "2026-11-02T18:27:13.657556547Z",
+  "invocation_seq": 2,
+  "approach": "Add one required `dependents` list to the planner's output (PlanOutput), carry it as a defaulted-empty list on the JobPlan record, and refuse at admission in `plan_findings` (Major finding, so the plan returns to the planner with no critic call) when the list is empty or an entry has neither a test nor an unaffected-reason. Each entry is flat: the changed item, the dependent (path or name), its kind (code, rule, host_setting), and a test or a reason. planner.md gains the requirement and critic.md gains its own \"what else does this break\" question, which checks the list against a repository search. plan_body renders the list only when it is non-empty, so old records keep the same producer-section bytes and SHA-256. The CI-reuse replay is a test in admission.rs. It builds the CI-reuse plan inputs (the change makes `runs_from_record` in checks.rs return a CheckRun with `exit_code: None, reused: true`). It runs a real search of the crates' sources for readers of `.reused` and requires the search to find verify.rs (the seen-commands rule in `judge`). It then runs the real `plan_findings` on a section that omits verify.rs and on one that names it. Admission checks shape only; the search is the critic's job (brief) and the test's.",
+  "decisions": [
+    {
+      "choice": "One flat list of entries `{changed, dependent, kind, test, unaffected_reason}` instead of a changed item holding a nested dependents list.",
+      "reason": "Each dependent needs its own test-or-reason, so a flat entry is the unit admission checks. The schema gets one new object (the existing test counts 6 plan objects, which becomes 7) where nesting would add two. The planner repeats `changed` across entries.",
+      "rejected": [
+        {
+          "option": "Nested: changed item with a list of dependents, each with test/reason",
+          "why": "Two more schema object levels, a bigger record, the same information."
+        },
+        {
+          "option": "A free-text dependents paragraph",
+          "why": "Admission could not tell which dependent lacks a test or reason; the rule would be prose only."
+        }
+      ]
+    },
+    {
+      "choice": "The check lives in `plan_findings` as Major findings: one for an empty list (names the missing section), one per entry with a blank test and blank reason (location `dependents, <dependent>`, summary names the dependent). Also blank `changed` or `dependent` text.",
+      "reason": "`plan_findings` is the model-free check; a Major finding already sends the plan back with no critic call (planning.rs line ~225). The rule is enforced by mechanism, not only by prose.",
+      "rejected": [
+        {
+          "option": "Reject at PlanOutput parse time",
+          "why": "Parse failure stops the job with 'no valid plan' instead of letting the planner revise."
+        },
+        {
+          "option": "A Minor finding",
+          "why": "Minor findings do not stop a plan."
+        }
+      ]
+    },
+    {
+      "choice": "`PlanOutput.dependents` is required (no serde default, and the hardened schema lists it as required). `JobPlan.dependents` is `#[serde(default, skip_serializing_if = \"Vec::is_empty\")]`, and `JobPlan::validate` does not demand it.",
+      "reason": "New planner output must carry it. Stored records without the field must parse and re-serialize byte for byte, as the existing seam round-trip test does. Admission judges only new plans, so old records are not re-refused.",
+      "rejected": [
+        {
+          "option": "Option<Vec<..>> on the record",
+          "why": "Two empty states; Vec with skip_serializing_if gives the same compatibility with less code."
+        },
+        {
+          "option": "A new record schema version (job-plan/2)",
+          "why": "The request says no new record file and no migration."
+        }
+      ]
+    },
+    {
+      "choice": "`plan_body` prints a `Dependents:` block only when the list is non-empty.",
+      "reason": "`render_plan_section` is hashed into `producer_section_sha256` so the producer prompt can be rebuilt. An unconditional block would change the bytes for every stored plan. Producer, critic and revision briefs all use plan_body, so each sees the list.",
+      "rejected": [
+        {
+          "option": "Always print '(none)'",
+          "why": "Changes the hash input of every existing plan."
+        }
+      ]
+    },
+    {
+      "choice": "The CI-reuse replay does its own repository search in the test (it walks `crates/*/src`, collects files with a non-comment line containing `.reused`, and asserts verify.rs is among them). It then runs the real `plan_findings` on two fixture sections. Only the 'named or not' comparison is test code.",
+      "reason": "The brief says admission checks shape only and the critic checks truth against a search. The test therefore pairs a real search (so the fixture cannot drift from the code) with real admission. No logic sits in a double, and no model runs.",
+      "rejected": [
+        {
+          "option": "Make admission search the repository",
+          "why": "plan_findings is pure and has no repository access; automatic dependency analysis is out of scope."
+        },
+        {
+          "option": "Add a production `unnamed_readers` function used only by the test",
+          "why": "Dead code in production. Open question 1 asks whether the owner wants it."
+        }
+      ]
+    },
+    {
+      "choice": "Update the three CLI scripted-plan tests and the fake planner so their plans carry a complete dependents section.",
+      "reason": "Every scripted or fake plan now needs the field to parse, and a complete section to avoid a mechanical Major finding. A `dependents_entry()` helper in `crates/athena-cli/tests/common/mod.rs` (already a deliverable) is shared by job_plan.rs, lifecycle.rs and introspection.rs.",
+      "rejected": [
+        {
+          "option": "Give PlanOutput.dependents a serde default",
+          "why": "The schema would still require it, and old scripted plans would pass parse but fail admission anyway. An explicit field is clearer."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "purpose": "Add `PlanDependentOutput` {changed, dependent, kind: DependentKindOutput, test: Option<String>, unaffected_reason: Option<String>} and a `dependents` field on PlanOutput. Update the sample plan, the object-count and extra-property tests, and add the schema test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/planner.md",
+      "action": "modify",
+      "purpose": "Add the dependents requirement (about 600 bytes; 477 tokens remain).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/critic.md",
+      "action": "modify",
+      "purpose": "Add the 'what else does this change break' question and the check of the list against a repository search (about 400 bytes; 483 tokens remain).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "plan_body prints a `Dependents:` block only when non-empty. Add the JobPlan literal field in the `plan()` fixture. Add prompt-content tests and brief-rendering tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `PlanDependent`, `DependentKind` (snake_case) and `JobPlan.dependents` (serde default, skipped when empty). Add the round-trip test and update the `sample_plan` literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Extend `plan_findings` and its doc list with the dependents rule. Add the fields to the two JobPlan literals in the tests (a complete section in `seam_findings`, so its 'is_empty' and 'len()==1' assertions still hold). Add the admission tests and the CI-reuse replay test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "`plan_record` maps `out.dependents` into the JobPlan record.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "`plan_with_action` gets a complete dependents section. Add the 'plan without dependents is revised before the critic' test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add `dependents: vec![]` to the `planned()` JobPlan literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Add the field to the `plan()` test literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add the field to the `plan()` test literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add the field to the `kept_plan` test literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "The deterministic fake planner output gets a complete dependents entry (new-file deliverable with an unaffected_reason).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "purpose": "Add the shared `dependents_entry()` JSON helper for scripted plans.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "`plan_of` uses `dependents_entry()` (not a listed deliverable; its scripted plans fail to parse without the field).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "`plan_with` uses `dependents_entry()` (same reason).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "purpose": "The inline scripted plan adds dependents (same reason).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Update the 'budget planner' and 'budget critic' lines to the computed values, as the budgets test demands.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "purpose": "Section 3: add the dependents bullet to the plan, the new rule in 'Athena's own checks', and the critic question.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "Mention the optional `dependents` list in the job-plan row (optional; keeps the record doc accurate).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry: root cause, the dependents section, the admission refusal, the critic question, the estimate for newly refused readings.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs (athena-data): add `DependentKind {Code, Rule, HostSetting}` (serde snake_case), `PlanDependent {changed, dependent, kind, test: Option<String>, unaffected_reason: Option<String>}` (deny_unknown_fields; the Options use serde default and skip when None), and `JobPlan.dependents: Vec<PlanDependent>` with `#[serde(default, skip_serializing_if = \"Vec::is_empty\")]`. Do not change `validate`. Update the `sample_plan` literal and add the round-trip test, `a_plan_without_dependents_still_parses_and_a_set_one_round_trips`.",
+    "outputs.rs (athena-context): add `DependentKindOutput` and `PlanDependentOutput` (JsonSchema, deny_unknown_fields, with field docs) and `PlanOutput.dependents: Vec<PlanDependentOutput>` after `risks`. Extend `sample_plan`, raise the object count 5→6 with a comment, add 'dependents' to the extra-property list, and add `the_plan_schema_requires_dependents_with_kind_test_and_reason`.",
+    "planning.rs: map `out.dependents` into `JobPlan.dependents` in `plan_record` (enum to enum; `resumed_from` stays None).",
+    "admission.rs: in `plan_findings`, after the files loop, add the dependents rules. An empty list gives one Major finding at location 'dependents' that names the missing section. Each entry with a blank `changed` or `dependent` gives a Major finding. Each entry with a blank test and a blank unaffected_reason gives a Major finding at 'dependents, <dependent>' that names the dependent. Extend the doc list above the function. Update the two test literals (a complete section in `seam_findings`), then add `a_plan_with_no_dependents_section_is_a_major_finding`, `a_dependent_with_neither_test_nor_reason_is_a_major_finding_naming_it`, `a_complete_dependents_section_adds_no_finding`, and `ci_reuse_replay_requires_dependents_to_name_the_seen_commands_rule`. The replay test walks `crates/*/src/**/*.rs` from `env!(\"CARGO_MANIFEST_DIR\")/../`, collects files with a non-comment `.reused` line, and asserts verify.rs is among them.",
+    "Add `dependents: vec![]` (or a complete section where `plan_findings` runs) to the JobPlan literals in run_pin_tests.rs, store.rs, status.rs, reading.rs and the `plan()` fixture of briefs.rs. Update `plan_with_action` in run/tests.rs with a complete section and add `a_plan_without_dependents_is_revised_before_the_critic` (scripted plans [plan lacking dependents, good_plan], roles checked for no Critic before the second planner call).",
+    "fake.rs: add a `dependents` entry to the deterministic fake plan JSON. common/mod.rs: add `pub fn dependents_entry() -> serde_json::Value` (a one-element array). Use it in job_plan.rs `plan_of`, lifecycle.rs `plan_with` and the introspection.rs inline plan.",
+    "briefs.rs: in `plan_body`, after Open questions (or before Demonstrations), print `Dependents:` and one line per entry (changed, dependent, kind, 'Test: ..' or 'Unaffected because: ..') only when the list is non-empty. Add the DEP-MARK dependents to the `plan()` fixture. Add `plan_body_lists_dependents_for_the_critic_and_the_revision`, `the_planner_prompt_requires_a_dependents_section` and `the_critic_prompt_asks_what_else_the_change_breaks_as_its_own_question`. Check that the existing exact-text tests (render_plan_section determinism) still pass.",
+    "planner.md: add a bullet 'dependents: for each behaviour, record, config key, check name or host setting the plan changes, list the code, rules (decisions, verdict rules, admission and gate checks) and host settings that read or rely on it, found by searching the repository and docs/system-facts.md; each with a test that shows it still holds or a reason it is unaffected. An empty list is refused.' critic.md: add a separate bullet 'What else does this change break? Search the repository (and docs/system-facts.md) for readers of each changed item, compare with the plan's dependents, and raise a major finding for any reader that is not listed or whose test or reason is false.' Keep both within the stated sizes.",
+    "Run `cargo test -p athena-cli --test budgets`, then set the 'budget planner' and 'budget critic' lines in docs/system-facts.md to the computed values.",
+    "Docs: job-planning.md section 3 (planner bullet list, Athena's own checks, critic paragraph) and the records.md job-plan row. CHANGELOG.md: an entry under Unreleased > Changed (or Added) with the root cause, the section, the admission refusal, the critic question, 'only new plans are judged', and the estimate of about 15% newly refused, labelled an estimate.",
+    "Run `cargo test -p athena-core dependents`, `cargo test dependents`, `cargo test -p athena-core --test refusal_corpus` and the budgets test. Then run the Athena checks (`cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`) only as the job's checks, not as criteria."
+  ],
+  "risks": [
+    {
+      "risk": "Several tests build JobPlan literals or scripted plan JSON. A missed one fails to compile or fails 'no valid plan'.",
+      "mitigation": "Update every literal site and scripted plan in the steps. The producer runs `cargo test` and `cargo clippy --all-targets` to find any missed one, since a missing struct field is a compile error."
+    },
+    {
+      "risk": "Changing plan_body alters the producer section hash of existing plans.",
+      "mitigation": "Render the block only when the list is non-empty. The briefs test asserts that a plan with no dependents renders the same text as before."
+    },
+    {
+      "risk": "The prompt additions overflow the budgets (477 and 483 tokens left, estimated as ⌈bytes/3⌉), or the system-facts lines go stale.",
+      "mitigation": "Keep additions to the sizes in the files table, then run the budgets test and set the system-facts lines to the computed values."
+    },
+    {
+      "risk": "The replay's file search is brittle if sources move or if `.reused` appears only in tests.",
+      "mitigation": "The replay test asserts that the search finds verify.rs. If the rule is renamed, the test fails loudly rather than passing without meaning. The search uses the plain `.reused` text and skips comment lines."
+    },
+    {
+      "risk": "Planners fill the section with boilerplate reasons.",
+      "mitigation": "Admission asks for a reason as an alternative to a test, so a truly unaffected dependent costs one line. The critic judges whether each reason is true."
+    },
+    {
+      "risk": "The existing schema test counts plan objects and fails when `dependents` is added.",
+      "mitigation": "Raising the object count in the schema test is part of step 2 and is explained in a comment."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in the admission.rs test module: `a_plan_with_no_dependents_section_is_a_major_finding`, `a_dependent_with_neither_test_nor_reason_is_a_major_finding_naming_it` (also a whitespace-only test and reason), and `a_complete_dependents_section_adds_no_finding` (test only, reason only, both). A run/tests.rs test, `a_plan_without_dependents_is_revised_before_the_critic`, shows the end-to-end refusal: the scripted planner's first plan lacks the section, and the recorded roles show no Critic call before the second plan. Also run `cargo test -p athena-core --test refusal_corpus` as a regression: the corpus covers reading checks only, so no case is added or changed.",
+      "command": "cargo test -p athena-core dependents",
+      "observes": "The empty-list plan yields exactly one Major finding with source Athena and a summary naming 'dependents'. The incomplete entry yields one Major finding whose summary or location names that dependent. The complete section adds no finding. The planned job revises with no critic call.",
+      "fails_without": "Without the check in plan_findings the empty and incomplete cases return no finding and the first two tests fail. The run/tests.rs test would see a Critic call on the first plan.",
+      "seam": "Production entry point `plan_findings(&JobPlan, &Reading, &Policy, &dyn Fn(&str)->bool)` in crates/athena-core/src/admission.rs, which exists. The fixture is a JobPlan literal in the admission tests, built like the existing `seam_findings` helper, with `dependents` varied and passed directly to the call. The end-to-end case uses `run_planned` with `Scenario`-style scripted plans in run/tests.rs, which exists (`bad_plan`, `good_plan`, `repo_with_planning`). Step 5 adds the dependents field to those fixtures."
+    },
+    {
+      "criterion": 2,
+      "method": "Test `ci_reuse_replay_requires_dependents_to_name_the_seen_commands_rule` in the admission.rs tests. Plan inputs: a JobPlan that modifies crates/athena-core/src/checks.rs (`runs_from_record`), with changed item 'CheckRun built from a CI result: exit_code None, reused true'. Step 1: search the crates' sources under CARGO_MANIFEST_DIR/../ for non-comment lines containing `.reused` and assert the hits include crates/athena-core/src/verify.rs (the seen-commands rule in `judge`). Step 2: a section naming only checks.rs and status readers leaves verify.rs unnamed, so the requirement is unmet. Step 3: a section naming verify.rs `judge` seen-commands with a test (`a_command_neither_run_nor_recorded_is_unseen_and_a_recorded_one_needs_the_same_text`) meets it and `plan_findings` adds no dependents finding. Step 4: the same entry with no test and no reason gets a Major finding naming verify.rs.",
+      "command": "cargo test -p athena-core ci_reuse_replay",
+      "observes": "The search finds verify.rs. The section without verify.rs is reported unmet, and the section with it is met and admitted. The incomplete verify.rs entry is refused.",
+      "fails_without": "If the section does not name verify.rs, step 2's assertion that the requirement is unmet fails. If the rule moved out of verify.rs, step 1 fails. If plan_findings ignored dependents, step 4 fails.",
+      "seam": "Production `plan_findings` in admission.rs (exists), driven with a JobPlan literal fixture (the file-search helper and the comparison are the test's own; the step 5 edits add the fixture). The search reads the real sources, so verify.rs `judge` is the genuine rule. No model, no double."
+    },
+    {
+      "criterion": 3,
+      "method": "athena-context: in outputs.rs, extend `sample_plan` with dependents, add dependents to the extra-property list, and raise the plan object count in `the_plan_and_critic_schemas_forbid_extra_properties_at_every_level` from 5 to 6. A new test, `the_plan_schema_requires_dependents_with_kind_test_and_reason`, asserts that schema['required'] contains 'dependents' and that the item has changed, dependent, kind, test and unaffected_reason, with kind enum [code, rule, host_setting]. athena-data: in records.rs a new test, `a_plan_without_dependents_still_parses_and_a_set_one_round_trips`, writes `sample_plan` with empty dependents, asserts the JSON lacks the key and re-serializes byte for byte, and passes `check_record_file`. It also round-trips a plan with dependents. The existing AnyRecord tests stay green.",
+      "command": "cargo test dependents",
+      "observes": "The generated schema lists dependents as required with the entry shape. An old-style record parses with an empty list and re-serializes identically. A record with dependents round-trips.",
+      "fails_without": "Without the PlanOutput field, the schema test fails. Without `serde(default)` on JobPlan, the old-record parse fails.",
+      "seam": "Production `plan_schema()` / `schema_of::<PlanOutput>()` (outputs.rs, exists) and `AnyRecord::parse` / `to_json` / `check_record_file` (records.rs, exists). The fixtures are JSON/struct literals in each crate's test module, and step 2 and step 3 add the field to them."
+    },
+    {
+      "criterion": 4,
+      "method": "Test `the_planner_prompt_requires_a_dependents_section` in briefs.rs (a content check on `include_str!(\"../prompts/planner.md\")`). It asserts the text contains 'dependents', 'docs/system-facts.md', 'host setting', 'verdict rules', 'admission and gate checks', and 'a test or a reason'. The producer writes a dependents bullet in planner.md that says what the request lists for each behaviour, record, config key, check name or host setting the plan changes.",
+      "command": "cargo test -p athena-context dependents",
+      "observes": "The bullet exists and names every required element.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Test `the_critic_prompt_asks_what_else_the_change_breaks_as_its_own_question` in briefs.rs. It asserts critic.md has a separate bullet that starts with 'What else does this change break' and contains 'dependents' and 'search the repository'. A second test, `plan_body_lists_dependents_for_the_critic_and_the_revision`, asserts `critic_brief` and the planner revision brief print the 'Dependents:' block with the entry text (a DEP-MARK in the `plan()` fixture) and that a plan with no dependents prints no 'Dependents:' line.",
+      "command": "cargo test -p athena-context dependents",
+      "observes": "critic.md carries the question and the list-versus-search instruction. The critic and revision briefs show the list.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "The existing budgets test, including `system_facts_budgets_match_computed`. After editing both prompts, the producer runs it and updates the 'budget planner' and 'budget critic' lines in docs/system-facts.md to the computed values, never the budget. docs/system-facts.md is therefore touched although it is not a listed deliverable (open question 2).",
+      "command": "cargo test -p athena-cli --test budgets",
+      "observes": "The planner set stays ≤ 1300 and the critic set ≤ 1300 tokens (⌈bytes/3⌉), and the system-facts lines equal the computed ones.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "The diff shows an entry under '## [Unreleased]' in CHANGELOG.md. It states the root cause (plans named changed files, and no step asked what reads the changed behaviour; four fixes broke a reader) and the dependents section. It states the admission refusal and the critic question. It says only new plans are judged. It also states the newly refused share as an estimate, about 15% of replayed readings per the request, labelled an estimate. docs/design/job-planning.md section 3 lists the dependents bullet and Athena's own checks gain the new rule, as the diff shows.",
+      "command": "git diff -- CHANGELOG.md docs/design/job-planning.md",
+      "observes": "Both files contain added lines for the new field, the admission rule and the critic question.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Admission only checks shape, so it cannot know that verify.rs ought to be named. Only the critic, by brief, and the replay test, by a real search, enforce completeness. Does the owner want a production `unnamed_readers(plan, search_hits)` function for a later mechanical search? This plan adds none.",
+    "The listed deliverables omit docs/system-facts.md, docs/records.md and the CLI tests job_plan.rs, lifecycle.rs and introspection.rs. The first is required by the budgets test. The CLI tests fail without the field. Admission will give a Minor 'outside the deliverables' finding for them. Should the reading list them?",
+    "An empty dependents list is treated as a missing section. A change that truly has no dependents must still list an entry with an unaffected_reason (for example a new file nothing reads). This is by design, but unconfirmed.",
+    "The input forms of the new refusal are the missing list, an entry with a blank test and a blank reason, a whitespace-only test or reason, blank `changed` or `dependent` text, and an entry with both. refusal_corpus.rs (`Case`, `corpus_cases_get_the_expected_outcome`, `corpus_covers_the_listed_input_forms`) exercises reading checks only. I found no case about plans, so the forms are mapped to the admission unit tests above and no corpus case is added. Please confirm that this is acceptable.",
+    "The 15% newly-refused figure in the request is an estimate. The code did not settle it: plan admission is not part of the reading replay in `athena.replay/1`."
+  ],
+  "producer_section_sha256": "e736f13b9c0db8242fb2ee59ea2bae6c6799ad2ba19cd729917d03e47c7b6256"
+}

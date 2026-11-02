@@ -15,17 +15,36 @@ use athena_git::Git;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-/// The paths the installed binary is built from: Athena's own code and the files that build and install it. A
+/// The paths the installed binary is built from: Athena's own code and the files that build and install it, and
+/// the two files the code compiles in from outside `crates/` (`athena.toml` and `docs/system-facts.md`). A
 /// change to one of them after the build commit leaves the installed binary stale.
-pub const BUILD_PATHS: [&str; 5] = ["crates/", "xtask/", "Cargo.toml", "Cargo.lock", "setup.sh"];
+///
+/// This list is declared by hand, so `crates/athena-core/tests/build_inputs.rs` checks it against the files the
+/// build really includes (every production `include_str!` and `include_bytes!` target, plus the manifests). It
+/// differs from the cache-key list in `xtask/src/main.rs` by `defaults.toml`, which that list hashes but no
+/// production code compiles in (D154).
+pub const BUILD_PATHS: [&str; 8] = [
+    "crates/",
+    "xtask/",
+    "Cargo.toml",
+    "Cargo.lock",
+    "setup.sh",
+    "athena.toml",
+    "rust-toolchain.toml",
+    "docs/system-facts.md",
+];
+
+/// Whether any of `paths` is named by `list`: equal to an entry, or under an entry that ends in `/`.
+pub fn list_touches(list: &[&str], paths: &[String]) -> bool {
+    paths.iter().any(|p| {
+        list.iter()
+            .any(|root| p == root || (root.ends_with('/') && p.starts_with(root)))
+    })
+}
 
 /// Whether any of `paths` is one the installed binary is built from.
 pub fn touches_build(paths: &[String]) -> bool {
-    paths.iter().any(|p| {
-        BUILD_PATHS
-            .iter()
-            .any(|root| p == root || (root.ends_with('/') && p.starts_with(root)))
-    })
+    list_touches(&BUILD_PATHS, paths)
 }
 
 /// The one line that says the binary built from `build_commit` is older than `head` for [`BUILD_PATHS`], or
@@ -51,7 +70,7 @@ pub fn stale_build_line(git: &Git, build_commit: &str, head: &str) -> Option<Str
     }
     let short = |c: &str| c[..c.len().min(12)].to_string();
     Some(format!(
-        "stale build: this athena was built from {}, and {changed} file(s) under crates/, xtask/, Cargo.toml, Cargo.lock or setup.sh changed by {}; run ./setup.sh",
+        "stale build: this athena was built from {}, and {changed} file(s) under crates/, xtask/, Cargo.toml, Cargo.lock, setup.sh, athena.toml, rust-toolchain.toml or docs/system-facts.md changed by {}; run ./setup.sh",
         short(build_commit),
         short(head)
     ))

@@ -9,6 +9,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- A test checks the lists that declare the binary's build inputs against the files the build really includes
+  (D154). Root cause: declared input lists were checked for structure but not against the real compiled-in inputs.
+  The `BUILD_PATHS` constant and the `athena-bin` cache key in `ci.yml` were hand-kept, and only their shape was
+  tested, so a prompt or `docs/system-facts.md` could be left out and only a late verdict would show it. The new
+  test `crates/athena-core/tests/build_inputs.rs` derives the compiled-in set from every production
+  `include_str!` and `include_bytes!` target under `crates/` and `xtask/`, plus the manifests, `rust-toolchain.toml`
+  and `setup.sh`, and fails, naming the missing path, unless `BUILD_PATHS` and every `athena-bin` `hashFiles` line
+  of the real `ci.yml` cover it. It reads `ci.yml` itself, not a copy, and it fails on a glob form it cannot read.
+  Negative fixtures include the key from before the fix (only `crates/**/*.rs` and `Cargo.toml`), which fails by
+  naming a prompt file. `athena_core::status::list_touches` is the one matcher shared by `touches_build` and the
+  check. `BUILD_PATHS` gains `athena.toml`, `rust-toolchain.toml` and `docs/system-facts.md`, which the build
+  compiles in or pins; a landing that changes only one of them now makes the installed binary stale. Prior jobs:
+  20261031-172040-kq9v found the cache key missing the prompts and `docs/system-facts.md`; its fix of `ci.yml` and
+  the `xtask/tests/policy.rs` key check are kept, and this change adds the check on `BUILD_PATHS` that its minor
+  finding asked for. 20261017-173508-0wtc (an ontology term contradicting its source) is met at the class level
+  only, by the same rule of checking a declared list against its source; the ontology is untouched here (D152
+  holds that check). 20261025-214509-y179 (a speed target set without a baseline) keeps its code changes; its
+  proposed measure-first stage is a pipeline change and is out of scope for this job. Limit: an include after an
+  early `#[cfg(test)]` line, or one built with `concat!`, is missed by the scan.
 - The reading check refuses a boundary word only in a deliverable path or a `content` acceptance criterion, the
   places a word can reach a tracked file (D153). Root cause: `check_boundary_and_repo_files` scanned every text
   field, but a reading is a record outside the policy scan and the writer already gets the word list and runs the

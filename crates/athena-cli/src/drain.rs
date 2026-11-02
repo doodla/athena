@@ -106,7 +106,7 @@
 //!   is finished (landed and rated) and no further job starts: [`Stop::Requested`]. Nothing is killed.
 //!
 //! - **Athena rebuilds itself after landing its own code.** A landing that changed `crates/`, `xtask/`,
-//!   `Cargo.toml`, `Cargo.lock` or `setup.sh` ([`touches_build`]) leaves the installed binary behind the
+//!   `Cargo.toml`, `Cargo.lock`, `setup.sh`, `athena.toml`, `rust-toolchain.toml` or `docs/system-facts.md` ([`touches_build`]) leaves the installed binary behind the
 //!   checkout, and the next config read or landing could fail on it. So before the next job starts, the loop
 //!   calls [`Steps::rebuild`] (the real one runs `setup.sh` in the checkout, which builds from the landed tree
 //!   and installs the binary). If that fails the run ends with [`Stop::RebuildFailed`] and
