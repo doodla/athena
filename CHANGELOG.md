@@ -9,6 +9,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- A producer's work is kept when it reaches its deadline, and `athena retry` resumes from it. At the deadline
+  Athena now commits the producer's changed files as a candidate in the repository (the same commit shape as any
+  candidate, not on a branch), records it in the job's `candidate.json` and outcome, and closes the job
+  `timed_out` with a reason that names the kept candidate (`the producer did not complete: ...; its edits are kept
+  as candidate <commit>`). The progress note lists the changed files and a "Still to do" list: the files the plan
+  and the reading's deliverables expect that have no change yet. A retry of that job starts its producer from the
+  kept candidate, and the producer brief's "Resume" section names the earlier job and candidate and quotes the
+  note. No admission rules run at the deadline, because the work is unfinished; the retry's own candidate is
+  admitted, checked and verified in full. The work tree is moved aside to a kept directory only when no commit can
+  be built, and a job that did that before this change still resumes from its directory. When the files the
+  agents see have changed since the timed out job's base, the retry starts from the base, and a pinned study
+  keeps nothing.
+  Root cause: the deadline path kept only a moved work directory and no record, so the work was not part of the
+  job's history and the closing did not name it (jobs lost 3000 s of work on 2026-10-31; D124, alternative c).
+  The reader of a retry now sees the files the timed out job changed, so its reading must list them as
+  deliverables or put them out of scope, as for a rejected job.
 - `xtask test-shard` now balances the CI test shards by recorded time instead of file count. The checked-in
   `xtask/shard-timings.txt` holds the seconds each test unit takes (`<package> <selector> <seconds>` per line);
   units are sorted longest first and each goes to the shard with the least total so far. A unit with no

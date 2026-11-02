@@ -96,13 +96,16 @@ impl StateDir {
         self.job_dir(job).join("work")
     }
 
-    /// Where the work tree of a job whose producer hit its deadline is kept. It lies outside the job's own
+    /// Where the work tree of a job whose producer hit its deadline is kept when no candidate commit could be
+    /// built from it, and where older timed out jobs kept it. A deadline normally keeps its edits as a
+    /// candidate commit instead, and this directory is then never made. It lies outside the job's own
     /// directory, which closing removes, so a retry can start from it.
     pub fn kept_work_dir(&self, job: &JobId) -> PathBuf {
         self.root.join("kept").join(job.as_str()).join("work")
     }
 
-    /// Removes the kept work of `job`, if any, and its now empty parent.
+    /// Removes the kept work tree of `job`, if any, and its now empty parent. A job that kept a candidate
+    /// commit has none, and the call does nothing.
     pub fn remove_kept_work(&self, job: &JobId) {
         let dir = self.root.join("kept").join(job.as_str());
         let _ = (self.remover)(&dir);

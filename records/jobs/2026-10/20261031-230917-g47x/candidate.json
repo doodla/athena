@@ -1,0 +1,172 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261031-230917-g47x",
+  "base_commit": "cb137d6d181aeb1449b6f8ed495a732601e75660",
+  "base_fingerprint": "sha256:87d5cfde5a767234fe36fbabcf4af15cb7bf6dd1a8740b0d276793c228c85880",
+  "previous_job": "20261102-073012-0w60",
+  "candidate_commit": "cc530d2b63a348516a5610d8bfa49242ad5565e0",
+  "candidate_tree": "27c64bf9d9628e6076077638717e999a1c7bbba8",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 285156
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 127785
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 166307
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 345987
+    },
+    {
+      "path": "crates/athena-core/src/run/candidate.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8166
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 77129
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 12377
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 119191
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31708
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 332550
+    }
+  ],
+  "fingerprint": "sha256:5667cc602e19fce24f7876896a7aa56d8269ce603724405107a691e33a3e0d32",
+  "violations": [],
+  "producer_report": {
+    "summary": "When a producer reaches its deadline, Athena now commits its changed files as a candidate and closes the job timed_out naming that candidate. A retry then starts its producer from the candidate. Before, a deadline only moved the work tree to a kept directory and wrote a note, so no candidate record or commit existed and the closing named nothing. The fix is in the deadline path: I moved the candidate-commit code out of `candidate_stage` into a shared `build_candidate`, and `keep_timed_out_work` calls it. No admission runs at the deadline, and no resume mark is written, so the retry still runs a producer. The outcome reason becomes `the producer did not complete: <detail>; its edits are kept as candidate <short commit>`. The candidate goes into candidate.json and the outcome, and the progress note names it and gains a \"Still to do\" list (planned files and deliverables with no change yet). `timeout_seed` now prefers the recorded commit and feeds it through the existing seed-commit path; the kept directory is only a fallback (no commit could be built, or an older job). The brief's Resume section names the earlier job and candidate and quotes the note. One side effect: a timed-out job now has a candidate record, so a retry's reader is shown its changed files and its reading must list them as deliverables or out of scope, as for a rejected job. The lifecycle tests' scripted reading was updated for that. The full suite, fmt, clippy `-D warnings` and the boundary-word scan all passed. I also added a D151 entry to docs/decisions.md (citing D124 alternative c) and a CHANGELOG entry.",
+    "files": [
+      "CHANGELOG.md",
+      "docs/decisions.md",
+      "crates/athena-core/src/run/candidate.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/producer.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "crates/athena-core/src/state.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-cli/tests/lifecycle.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test lifecycle -- deadline timed_out",
+        "result": "pass",
+        "note": "4 tests pass: the deadline test, both retry tests and the status test."
+      },
+      {
+        "command": "cargo test -p athena-core --lib -- a_deadline_keeps timeout_seed_is_none the_timeout_note",
+        "result": "pass",
+        "note": "3 new unit tests."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "Boundary-word scan; 12 tests pass."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran once. The command exited 0, which I took as the whole suite passing. The output was too large to read, so I did not count the results."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-cli --test lifecycle`: a test with a fake producer that edits files then times out shows the job closes timed_out and keeps a candidate (a commit, not only a work directory) whose diff holds those edits; the outcome reason or note names the kept candidate.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-cli --test lifecycle -- deadline timed_out`; a_producer_that_hits_its_deadline_keeps_its_work_and_closes_timed_out passes. It reads candidate.json at the closing head. The candidate commit's parent is the job's base. The commit holds src/partial.rs and README.md, which the base lacks or differs on. The changes list is exactly those two files. The reason, outcome and note contain the short commit. No kept directory exists. check_history has no violations."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-cli --test lifecycle`: a test retries that timed-out job and shows the next producer starts with the kept edits present and its brief names the earlier job id and the files already changed, plus what the plan still needs.",
+        "status": "met",
+        "evidence": "retrying_a_timed_out_job_starts_from_the_kept_work_with_the_note passes. The second producer sees src/partial.rs before acting. Its brief contains '## Resume', the first job id, 'kept as candidate <short commit>', src/partial.rs, README.md, and 'Still to do' with '> - CHANGELOG.md'. retrying_a_timed_out_job_whose_base_moved_starts_clean still passes."
+      },
+      {
+        "criterion": "Run `cargo test`: the whole suite passes, including the history check on the records of a timed-out job.",
+        "status": "met",
+        "evidence": "`cargo test --locked` exited 0. The deadline lifecycle test asserts athena.check_history() has no violations for the timed-out job."
+      },
+      {
+        "criterion": "Run `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`: both are clean.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`; both were clean."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry stating that a producer's work is kept when it reaches its deadline and that a retry resumes from it.",
+        "status": "met",
+        "evidence": "The first entry under [Unreleased] > Changed begins 'A producer's work is kept when it reaches its deadline, and `athena retry` resumes from it.' It gives the mechanism, the root cause and the reader side effect."
+      },
+      {
+        "criterion": "docs/decisions.md records the call (keep the candidate on deadline) as a new decision referencing D124 alternative c, with sources read.",
+        "status": "met",
+        "evidence": "D151 is added after D150. It cites D124 alternative (c) and gives case, root cause, decision, alternatives, tradeoff and reversal cost. The provenance lists the files read and what was measured and not measured."
+      }
+    ],
+    "open_issues": [
+      "The candidate commit is built before admission and no branch names it, so a repository garbage collection can remove it. The retry then falls back to the kept directory if there is one, otherwise it starts from the base. Whether an unadmitted commit may hold content admission would refuse (for example personal data) is not decided; the commit is local, and the retry's candidate is admitted in full.",
+      "Scoring a timed_out job that carries a candidate commit but no verification was not traced by hand. The history check and the full suite pass, so I expect it to work.",
+      "The retry reader's refusal rule now covers timed-out jobs (see learnings). Real retries of timed-out jobs may see more refused readings. I did not measure this, and replay cannot observe it.",
+      "docs/decisions.md D151 states the reader-side effect and the unmeasured refusal rate."
+    ],
+    "mistakes": [
+      "I first ran the retry lifecycle tests without checking the reader-side change; both failed because the scripted reading did not list src/partial.rs. I fixed it by giving deadline_script a reading that lists both files.",
+      "I left a small debug improvement in lifecycle.rs's `finished` helper, which now prints the reader error when a job is re-read. It is harmless but not needed for the change."
+    ],
+    "learnings": [
+      "A job that closes with a candidate record also shows up in the retry reader's 'prior result' section. check_prior_result_and_scope then refuses a reading that omits the earlier job's changed files. Giving timed-out jobs a candidate therefore extends that rule to their retries, which is why the lifecycle fixture's reading had to list src/partial.rs.",
+      "`SnapshotRepo::BaseThenTree` seeds a snapshot from any commit in the user's repository, so a candidate commit that no branch names can seed a retry with no new snapshot mode.",
+      "The lifecycle fake producer's report explains every planned file its edits leave out, and a change reading lists CHANGELOG.md as a deliverable. That makes CHANGELOG.md a stable 'still to do' file in tests.",
+      "The Bash tool cannot redirect output or use grep. Persisted tool-result files outside the working directory cannot be read."
+    ],
+    "desires": [
+      "Read access to the saved output of a long test run, to see per-test results.",
+      "A way to run a single named test filter across the workspace without naming each package."
+    ]
+  }
+}

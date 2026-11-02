@@ -5757,6 +5757,7 @@ mod tests {
                     findings: seed.findings.clone(),
                     must_address: seed.must_address.clone(),
                     progress_note: None,
+                    candidate: None,
                 });
             } else {
                 inputs.retry_findings = Some(RetryFindings {
