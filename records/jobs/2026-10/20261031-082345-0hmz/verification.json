@@ -1,0 +1,189 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261031-082345-0hmz",
+  "candidate_commit": "7f35c454b08ce279eb7ccbbdfdadc78e6a4a0674",
+  "verified_fingerprint": "sha256:14c2b454eec2c4a6f45b4c9cbc2e70c11f0d1fc1d4c4ac27fdf86b527f151d12",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41389349655 for 7f35c454b08ce279eb7ccbbdfdadc78e6a4a0674",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41389349655 for 7f35c454b08ce279eb7ccbbdfdadc78e6a4a0674",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41389349655 for 7f35c454b08ce279eb7ccbbdfdadc78e6a4a0674",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 4,
+  "criteria": [
+    {
+      "criterion": "A test in crates/athena-core/src/hestia.rs shows that plan_backfill over records with more than five repeated causes queues every request at Priority::High or lower (none urgent), and that root_cause_request produces a `Priority: high` request, not urgent. Run `cargo test -p athena-core hestia`.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "New test plan_backfill_over_more_than_five_causes_queues_every_request_at_high_or_lower asserts more than BACKFILL_HIGH worked causes, each priority >= High (Priority's Ord puts Urgent first, so this means high or lower), queued text starting `Priority: high` or `Priority: normal`, and exactly 5 at high. the_root_cause_request_is_high_and_refuses_a_cause_that_reads_as_acceptance asserts the text starts `Priority: high\\n` and does not contain 'urgent'. All 41 hestia tests passed in my run.",
+      "commands": [
+        "cargo test -p athena-core hestia"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A test shows a cause whose earlier request was closed with `athena close` (the manage.rs close path) gets no new request or requeue from the backfill or the per-job error review. A second case shows it is queued again, at high, once a new introspection of that cause is recorded after the close. Run `cargo test -p athena-core hestia`.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "The helper cause_whose_request_a_person_closed calls Athena::close (the manage.rs path) and checks the request ends Dropped. a_cause_a_person_closed_is_not_queued_again_until_it_recurs_after_the_close then shows the backfill queues 0 and requeues 0 (changed_nothing), the per-job error_review returns None for an introspection dated before the close, and an introspection dated after the close gets a new request at Priority::High. the_backfill_queues_a_cause_again_once_it_recurs_after_a_persons_close covers the same recurrence through the backfill. Both passed. Both would fail on base, where addressing_request skipped every closed request that had not landed.",
+      "commands": [
+        "cargo test -p athena-core hestia"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The backfill and the error review still queue a cause whose request was closed by Hestia itself (requeue Dropped) or was rejected or failed. A test covers at least one of these. Run `cargo test -p athena-core`.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "a_cause_whose_request_hestia_closed_to_queue_it_again_is_still_queued closes a request with Hestia's 're-queued as …' reason, asserts closed_by_person is false, and shows the backfill queues 1 new request. It passed in my targeted run. The whole suite passed in the recorded `cargo test --locked` CI run. Rejected and failed states are not Dropped, Declined or Abandoned, so closed_by_person returns false for them by construction.",
+      "commands": [
+        "cargo test -p athena-core a_cause_whose_request_hestia_closed_to_queue_it_again_is_still_queued",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "BACKFILL_URGENT and the Priority::Urgent uses in Hestia's request builders (root-cause, spec_request, throughput priority_for_minutes) are removed or capped at High. Grep shows no Priority::Urgent in non-test code of hestia.rs. `athena priority` and a person-written `Priority: urgent` line are unchanged: the plan.rs/store.rs parsing of urgent is untouched.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Grep of hestia.rs for 'Urgent': every match is inside `mod tests` (line 1998 onward). Before that line the only matches are doc comments in lowercase. BACKFILL_URGENT is renamed BACKFILL_HIGH, URGENT_MINUTES is removed, priority_for_minutes tops out at High, and spec_request and root_cause_request use High. The diff touches only CHANGELOG.md, hestia.rs, docs/design/hestia.md and docs/spec.toml, so plan.rs, store.rs and manage.rs are unchanged.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Doc comments in hestia.rs (module docs, plan_backfill, root_cause_request) and any docs mention of urgent for Hestia are updated to say high at most.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Updated in hestia.rs: the module docs (spec, error review and backfill paragraphs, plus a new paragraph on the cap and the person-close rule), and the doc comments on addressing_request, root_cause_request, is_speed, spec_request, spec_review, BACKFILL_HIGH, plan_backfill, HIGH_MINUTES, priority_for_minutes and error_review. The UI line now says 'queued at high priority'. Updated docs: docs/design/hestia.md (request and dedupe, throughput priority) and docs/spec.toml (header, OLY-GP-02, OLY-A-23). A grep of docs/ for 'urgent' finds no remaining claim that Hestia queues urgent.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "All three passed in Athena's recorded checks, reused from CI run 41389349655 for commit 7f35c454.",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "CHANGELOG.md has an entry that names the cap at high and the no-requeue after a person's close.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Under [Unreleased] → Changed there are two bullets. The first covers the cap at high for the backfill, root-cause, spec and throughput requests, with the 13-urgent/14-high context. The second covers the no-requeue after `athena close` until the cause recurs, and names the root cause (gdgv queued again as 7ym7).",
+      "commands": [],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "A cause a person closed still takes a rank slot in the backfill, so it can push a live cause from high down to normal.",
+      "evidence": "plan_backfill skips only dormant and landed causes before ranking. A cause whose cause.request is a person-closed request is still ranked and given High or Normal. backfill_step then returns Skip because can_requeue(Closed) is false. If such a cause ranks in the top 5, it uses one of the BACKFILL_HIGH slots, and a live cause that would have been high is queued at normal. The report line for the skipped cause also shows priority 'high'. Simpler fix: skip turned-down causes before ranking, as landed causes are skipped.",
+      "location": "crates/athena-core/src/hestia.rs plan_backfill / backfill_step",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "`priority.min(old.priority())` keeps any higher priority, not only one a person set. The comment and CHANGELOG say otherwise, and the backfill no longer demotes requests.",
+      "evidence": "The comment says 'A request a person already made urgent keeps that level'. In fact the backfill now never lowers any existing request: a Hestia-made high request that falls out of the top 5 stays high, and the earlier Hestia-set urgent requests stay urgent. That last part fits the out-of-scope rule against re-prioritising existing items. Still, the backfill used to demote requests and no longer does, the request did not ask for that, and the comment describes it as being about persons.",
+      "location": "crates/athena-core/src/hestia.rs:1105-1106; CHANGELOG.md",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "Who closed a request is inferred from the free-text close reason.",
+      "evidence": "closed_by_person treats a Dropped, Declined or Abandoned outcome as a person's close unless its reason, after 'closed: ', starts with 're-queued as '. A person whose --why starts with those words would count as Hestia. If the wording at line 1735 changes, every Hestia requeue becomes a 'person close' and its cause is suppressed. Both strings live in the same file, which limits the risk. A sturdier option is a dedicated marker, such as a trailer or a field on the outcome, or a shared constant used by both apply_step and closed_by_person (apply_step currently formats the string inline).",
+      "location": "crates/athena-core/src/hestia.rs REQUEUE_CLOSE_REASON / closed_by_person",
+      "source": "verifier"
+    },
+    {
+      "severity": "nit",
+      "summary": "A line in the docs is longer than the surrounding wrap width.",
+      "evidence": "The edited 'Priority: high (Hestia never queues urgent; …)' line runs past the ~115-column wrap used by its neighbours.",
+      "location": "docs/design/hestia.md:241",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "pass",
+  "final_verdict": "pass",
+  "reasons": [],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "The change does what was asked, and I recommend pass. Every request Hestia builds now tops out at high: the five top-ranked backfill causes, new root-cause requests, spec requests and throughput requests. The error review and the backfill no longer re-queue a cause after a person closes its request with `athena close`, until a new introspection of that cause is recorded after the close. A request Hestia closed itself to re-queue it still lets the cause be queued again. Urgent stays for people: `athena priority` and the urgent parsing in plan.rs and store.rs are untouched. In my run all 41 `cargo test -p athena-core hestia` tests passed, including the new ones, which would fail on the base code. A targeted run of the test for a request Hestia closed itself also passed. fmt, clippy and the full test suite passed in Athena's recorded CI run. Docs and CHANGELOG.md are updated. Every changed file is within the expected deliverables; manage.rs and drain.rs did not need changes. There are three minor findings. First, a cause a person closed still takes one of the five high slots in the backfill, so it can push a live cause down to normal. Second, the new `min()` stops the backfill lowering any request's priority, not only one a person made urgent, although the comment and CHANGELOG describe it as being about persons. Third, who closed a request is detected from a text prefix in the close reason, which is fragile."
+}
