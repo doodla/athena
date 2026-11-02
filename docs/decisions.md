@@ -4209,3 +4209,53 @@ should replace those estimates with its figures.
   reading`, `--lib run_pin_tests` and `--test refusal_corpus`, and `cargo test -p xtask --test policy`. Not
   measured: how many past readings the old rule refused for prose alone, and how often a writer copies a word
   from a `behavior` criterion.
+
+## D154 · Declared build-input lists are checked against the files the build really includes
+
+- **Case:** Three earlier jobs ended in a late verdict for one reason. Job 20261031-172040-kq9v keyed the
+  `athena-bin` cache in `ci.yml` on Rust sources and `Cargo.toml` only, so the prompts and `docs/system-facts.md`
+  that the binary compiles in were missing. Job 20261017-173508-0wtc seeded an ontology term from one source, and
+  job 20261025-214509-y179 set a speed target with no baseline. In each, a declared list (a cache key, a term, a
+  target) was checked for its shape, not against the source it summarizes. The three jobs are cited from their
+  introspection summaries; their records are not in this job's snapshot and were not read.
+- **Root cause:** Declared input lists were checked for structure but not against the real compiled-in inputs.
+  `xtask/tests/policy.rs` already compares the `ci.yml` key with a scan of the includes, but the other declared
+  list, `BUILD_PATHS` in `status.rs`, which decides when the installed binary is stale, had no such check and
+  was short: it omitted `athena.toml`, `docs/system-facts.md` and `rust-toolchain.toml`.
+- **Decision:** `crates/athena-core/tests/build_inputs.rs` derives the compiled-in set (the target of every
+  production `include_str!` and `include_bytes!` under `crates/` and `xtask/`, plus the manifests,
+  `rust-toolchain.toml` and `setup.sh`) and fails, naming each missing path, unless `BUILD_PATHS` and every
+  `athena-bin` `hashFiles` line of the real `ci.yml` cover it. The matching logic of `touches_build` moved to
+  `athena_core::status::list_touches(list, paths)`, which takes the list, so the check and the production rule
+  share one matcher and a test can hand in the old, shorter list and see it fail. `BUILD_PATHS` now holds eight
+  entries: it gains `athena.toml` (the built-in config, `athena-gate`), `rust-toolchain.toml` (it pins the build)
+  and `docs/system-facts.md`. `defaults.toml` is left out on purpose: the xtask `BUILD_INPUT_GLOBS` hashes it, but
+  production code only names it in comments and in test code, so nothing compiles it in; the two lists therefore
+  differ by exactly `defaults.toml`, and the xtask list is the larger one, built for hashing. The glob matcher
+  reads an exact path, `dir/**` and `dir/**/*.ext`; any other form fails and names the pattern. Negative fixtures:
+  a key without `docs/system-facts.md`; the key from before the fix of kq9v (fails by naming a prompt file); an
+  unreadable glob; a new file outside `crates/`; the old five-entry `BUILD_PATHS`. The check refuses repository
+  files, not readings, so no past reading is affected.
+- **Overlap:** The ci.yml half repeats `athena_bin_keys_cover_every_compiled_in_file` in `xtask/tests/policy.rs`
+  on purpose: the new test must read `ci.yml` itself, and a crates test cannot import from an xtask test. Both
+  assert the same floor of known targets, so a scan that drifts in one fails in the other. The pair is named in the
+  new test, in the `ci.yml` header comment and here. The new test adds the `BUILD_PATHS` check that the other
+  lacks.
+- **Alternatives:** (a) Add `defaults.toml` to `BUILD_PATHS` for parity: nothing shows it is a build input, and it
+  would report stale builds for no reason. (b) Exempt `athena.toml` and `docs/system-facts.md` in the test: a
+  hand-kept excuse that repeats the defect. (c) One shared scanner: xtask tests are outside this job, and the two
+  crates cannot share test code. (d) Parse with `syn` or `cargo`: a new dependency for a larger change. (e) Treat
+  an unknown glob as covering nothing: silent, and a valid new form would look like a missing path.
+- **Tradeoff:** The scan is a text scan. An include after an early `#[cfg(test)]` line, or one built with
+  `concat!`, is missed, and the matcher differs from GitHub's `hashFiles` outside the three forms it reads.
+  `crates/**` and `xtask/**` still cover whatever is under those directories. A landing that changes only
+  `athena.toml`, `rust-toolchain.toml` or `docs/system-facts.md` now reports a stale build and triggers a rebuild.
+  Jobs kq9v's other findings (the stamp on a non-CI build, the restored build commit, the dirty-tree rule) and the
+  measure-first stage proposed after y179 are not addressed; the first are local and minor, the second is a
+  pipeline change that needs its own job. The ontology content of 0wtc is untouched; only the shared principle is
+  applied.
+- **Reversal cost:** Low. Delete the test, and restore the five-entry `BUILD_PATHS` and the inline matcher.
+- **Provenance:** Read: `crates/athena-core/src/status.rs`, `xtask/tests/policy.rs`, `.github/workflows/ci.yml`,
+  `crates/athena-cli/tests/drain.rs` (the `touches_build` and stale-build tests). Measured: `cargo test -p
+  athena-core --test build_inputs`, and the drain and policy tests after the change. Not measured: how often a
+  landing touches only the three added files.
