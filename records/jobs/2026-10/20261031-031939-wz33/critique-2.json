@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-031939-wz33",
+  "round": 2,
+  "at": "2026-11-01T21:37:44.841937445Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The claim that production records already follow landing order is false for the records committed at close, so the planned CHANGELOG and design-note wording would overstate what ships.",
+      "evidence": "crates/athena-core/src/run/close.rs:204-244: land_or_block takes the repository lock and commits the closing files plus Score and Outcome records when the job closes. In the drain that is before PrLander::land / Athena::land_pr (drain.rs:2790) is reached, and the order is whichever job closes first. Design section 8 (async-drain.md:214-216) wants jobs not to commit records while running, and 'a records commit never refers to a job that has not landed'. With RealSteps on the default no-op, the real drain still commits most of a job's records before it lands. The plan's statement 'records order equals landing order' on the real path covers only the landing-intent and landing records written inside Steps::land. Fix: Correct Decision 2: say the close-time records are still committed before landing, in close order, and that this job does not move them. Word the CHANGELOG entry and the 'Note on build job 8' like build job 7's note (async-drain.md:320-322): the records step in the landing slot is built and tested through drain_concurrent; the real steps stay on the default and still commit at close; moving the close-time commit into the queue is later work. Alternatively, ask the user whether they want the real steps wired in this job.",
+      "location": "Decision 2; Files: CHANGELOG.md and docs/design/async-drain.md; Open question 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan ignores the existing landing queue and credits the `landing` mutex with the ordering, so two of its claims are wrong.",
+      "evidence": "drain.rs:1687 enters the queue when a job passes (`passed = Some((job, at, self.enter_queue()))`). drain.rs:1704-1706 waits on `await_head` before `self.land`, and the slot is kept until `attempts` returns (comment at 1648-1650). So a call made in `attempts` right after `land` returns Landed would still run before the next job can call `Drain::land`. The rejected alternative ('another worker could land between') would not break the order. The lock-placement test would not fail for that placement, because `a` would block on await_head, not the mutex, and log no `land a`. The reading's 'if the queue is absent' fallback does not apply: the queue is present. Fix: Name LandingQueue, LandingSlot and await_head as what keeps the order. Keep the call in Drain::land. Restate Decision 1's rejection and the 'fails without' text: the flag test catches a call made after the slot is released or a hook that is never called. It does not prove the call is inside the mutex.",
+      "location": "Decision 1 (rejected alternative), Decision 4, Demonstration for criterion 1 ('Fails without')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Wrong path cited for land_or_block.",
+      "evidence": "The function is at crates/athena-core/src/run/close.rs:204. There is no crates/athena-cli/src/run/close.rs. Fix: Cite crates/athena-core/src/run/close.rs in the doc comment and the design note.",
+      "location": "Approach and Decision 2: 'land_or_block, run/close.rs'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Open questions the planner could settle by reading the code.",
+      "evidence": "Committer (crates/athena-core/src/commits.rs:95-98) holds `&Git` and `&StateDir` and derives Copy. Fixture (tests/common/mod.rs:114-118) exposes `git` and the state TempDir, from which a StateDir is built at line 174. Whether a lone Priority record passes the gate can be checked by reading the gate. Fix: Read the gate's checks for a lone Priority record and whether Git and StateDir can be shared between threads (Sync), then state the choice instead of leaving fallbacks to the producer.",
+      "location": "Open questions 4 and 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The hook design is sound and the tests fit the code. A default-no-op Steps::commit_records is called in the Landed arm of Drain::land, while the job still holds its landing slot. It is tested through drain_concurrent with a stub that commits real records through Committer::commit_records. Committer, commit_records_to, Fixture and drain_concurrent all exist as the plan says, and the default body keeps existing stubs and test bodies untouched. Two problems need fixing. First, Decision 2 argues the real steps need nothing because records already follow landing order in production. That holds only for the landing-intent and landing records that land_pr writes. A job's candidate, verification, score and outcome records are committed at close (land_or_block in crates/athena-core/src/run/close.rs:204). That is before the landing and, with several jobs in flight, in close order. So the CHANGELOG entry and design note as planned would describe a behaviour the real drain does not have. Second, the plan reasons from the `landing` mutex and never names the existing LandingQueue/LandingSlot/await_head, which is what serialises landings by pass order. As a result, the rejected alternative and the lock-placement test's 'fails without' claim are partly wrong. Placing the call inside Drain::land is still correct."
+}

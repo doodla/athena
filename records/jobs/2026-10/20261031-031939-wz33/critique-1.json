@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-031939-wz33",
+  "round": 1,
+  "at": "2026-11-01T21:33:27.993001839Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The reason for keeping RealSteps on the no-op cites the wrong landing path",
+      "evidence": "The plan says a landed job's records travel in its landing commit (`land_or_block` builds it with `closing.files`), so nothing is left to commit. But the drain lands through `PrLander::land` → `athena.land_pr(..)`. In `land_pr` the comment reads 'The records sink is built here, on the production path ... a landing never goes ahead without somewhere to write its records (§5.2)', and it calls `GitLandingRecords::for_remote`. On the PR path the records are written by that sink, not by `land_or_block`. The plan did not read this path, so its decision that the real drain changes nothing is a guess where the code could be read. Fix: Read `land_pr` and `GitLandingRecords` and say where a PR-landed job's records are committed and when: inside `Steps::land` (already under the landing lock) or later. If they are written inside `land`, say so and show the ordering on that path. If something is committed after landing, wire `RealSteps::commit_records` to it. Either way, correct the reason in Decision 2, the doc comment and the async-drain.md note.",
+      "location": "Approach; Decision 2; crates/athena-core/src/run/close.rs:204; crates/athena-cli/src/drain.rs:2783-2798; crates/athena-core/src/gh/landing.rs:745-747",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Criterion 2 (append-only) is shown only against a test double that can only add files",
+      "evidence": "The stub's `commit_records` writes `records/<job>.json` and commits it in a throwaway repo. No production code writes a record in this plan: the real steps keep the default no-op (Decision 2). So the `A`-only diff and the unchanged blob test what the stub does, not anything in Athena. Design section 8 also says job 8 must 'confirm the append-only conflict rule' for shared month-shard files. Per-job fake files can never hit that case. Fix: Have the recording stub commit the job's real records through the existing commit path, for example `Athena::commit_records` on the tests' `Fixture`, like the `commit_records_to` helper at tests/drain.rs:4233, with real `AnyRecord`s such as an Outcome for the job. Then the diff and blob checks test the real committer and the real file layout, including any shared shard files. Otherwise mark plainly that append-only is not shown for production and narrow the claim.",
+      "location": "Demonstrations, Criterion 2; Step 6",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 'fails without' claim for lock placement depends on thread timing",
+      "evidence": "Run times are staggered with margins of at least 50 ms (Risks). If the hook ran outside the lock, the stagger would still usually give `land c, records c, land a, ...`. The plan itself says the failure would show only 'on some run'. Fix: Make the misplacement show every time. For example, the stub's `commit_records` for the first job blocks on a gate that the test releases only after a second job tries to land, and the test asserts that the second `land` entry comes after the first `records` entry. Or drop the claim and rely on the code review of the lock scope.",
+      "location": "Demonstrations, Criterion 1, 'Fails without the behavior'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The store.rs helper may not see the stub's files, and it exists only for tests",
+      "evidence": "The helper is to use `RecordSet::load` and `job_of`, which parse real records into `AnyRecord`. The stub writes ad-hoc `records/<job>.json` files, which this loader may refuse or skip. A public API added only for tests also cuts against the 'small' default. Fix: If the stub commits real records (see the major finding above), the helper works, and it can be kept with a unit test. Otherwise list files with `git diff --name-status` in the test and leave store.rs untouched.",
+      "location": "Step 5; Files: store.rs; crates/athena-core/src/store.rs:287,310",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan names two different places for the new tests",
+      "evidence": "The demonstration says 'a new test in the `parallel` module'. Step 6 says to append a new `records_order` module. Fix: Pick one place, preferably the new appended module, which keeps existing test bodies untouched.",
+      "location": "Demonstrations, Criterion 1 vs Step 6",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The hook site is right. `Drain::land` (drain.rs:1587) takes the `landing` mutex before it calls `Steps::land`, so a call in the `Landed` arm runs in landing order by construction. `Steps::rebase` (597) is a fair model for a hook with a default body. The problems are in the plan's reasons and its evidence. First, the plan keeps the real steps on a no-op because \"records travel in the landing commit (`land_or_block`)\". But `land_or_block` in run/close.rs is the local landing path. The drain actually lands through `PrLander` → `Athena::land_pr` (gh/landing.rs:688), which writes landing records through a `GitLandingRecords` sink. The plan never read that path, so its main decision rests on a guess where the code could have been read. Second, as planned the real drain does not change at all. All records writing happens in a test stub, so the append-only criterion is proved only against a double that by construction only adds files. The fix is to read the PR landing path and make the stub commit real records through the real commit path. Both are fixable, so the verdict is revise."
+}

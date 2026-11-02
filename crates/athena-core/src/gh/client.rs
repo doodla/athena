@@ -69,6 +69,10 @@ pub trait PrHost: Host {
     /// method the repository allows (see [`MergeMethods::choose`]). `text` is the message a squash carries.
     /// Returns the method the host was asked to use, which the landing record names (§5.3).
     fn merge(&self, number: u64, head: &str, text: &CommitText) -> Result<MergeMethod>;
+    /// Tells the host client that the merge refusal it just logged happened while required checks were still
+    /// pending, so the log marks it as a wait and not a verdict on the merge method. The default does
+    /// nothing, for a host that logs no refusals.
+    fn note_pending_merge_refusal(&self) {}
     /// The workflow runs of a commit: whether each is still going, how it ended, and which try it is on.
     fn ci_runs(&self, commit: &str) -> Result<Vec<CiRunState>>;
     /// The latest check run of a commit with the given job name (workflow runs cannot name a job); none when
@@ -451,6 +455,12 @@ impl PrHost for GhClient<'_> {
             &fields,
         )?;
         Ok(method)
+    }
+
+    fn note_pending_merge_refusal(&self) {
+        if let Some(log) = self.log {
+            log.mark_last_pending(HostOperation::Merge);
+        }
     }
 
     fn ci_runs(&self, commit: &str) -> Result<Vec<CiRunState>> {

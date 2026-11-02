@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-222517-3kgp",
+  "round": 3,
+  "at": "2026-11-01T22:41:57.245020984Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/main.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/main.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "With the Score deferred, an intervention made between close and landing is never scored: intervene writes no re-score, and the queue Score dated at close time leaves it out.",
+      "evidence": "manage.rs 368-375 writes a re-score only when `record.latest_score()` is Some. A deferred job has no Score in that window, so intervene adds just the Intervention. The gate (jobs.rs 271-285) refuses a re-score unless the same commit adds its intervention, so no later re-score can be written. expected_score (jobs.rs 117-123) counts only interventions that exist at the Score's `at`. A queue Score dated at close time therefore leaves the intervention out for good. The plan rejected `at` = landing time 'instead of leaving it for a re-score', but no re-score can come. The planned intervention-window test would pin this loss instead of catching it. Fix: Date the queue Score at landing time (now, under the repository lock). expected_score then counts the window's interventions, which matches a closing Score followed by a re-score (jobs.rs 117-123). Change the intervention-window test to assert that `user_intervenes` resolves true in the queue Score, and say so in the doc.",
+      "location": "Decision 4 (`at` = close time) and the Risks entry on `athena intervene --job`; crates/athena-core/src/manage.rs 366-375; crates/athena-gate/src/jobs.rs 271-285",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Moving only the Score does not meet section 8 or the reading. Every other closing record still commits at close, before the host landing, in the order jobs finish, yet criterion 6 would call build job 8 'built'.",
+      "evidence": "async-drain.md 214-216: jobs do not commit records while they run, 'records order equals the landing order, and a records commit never refers to a job that has not landed.' The reading asks for 'each landed job's records' to be committed from the landing queue, and the root-cause default says 'the real close-time records commit is moved, not just hooked.' Under the plan, the close commit (close.rs 257-264) still adds invocations, candidate, verification and Outcome Landed before the lander runs. Only one derived file moves. The plan's own analysis shows a full move needs gh/landing.rs (landing.rs 55-75, 708-718), which the brief puts out of scope, so the reading conflicts with its own out-of-scope list. The plan labels this a BLOCKER question for the user but still plans to describe job 8 as built. Fix: Get the user's answer to open question 1 before production starts, then write the plan for that answer. If gh/landing.rs (and a state-directory spool) is allowed, plan the full move. If not, restate criteria 1 and 6: the doc says the Score slice is built and the rest of section 8 (the other records in landing order) is not built, naming the cause. Do not call job 8 'built'.",
+      "location": "Approach, Decision 1 and open question 1; criterion 6 demonstration; docs/design/async-drain.md lines 214-216",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The publication limit is understated. On a squash-merge host, a job's queue Score appears inside the next job's squash commit, not after its own landing, and the last Score of a drain is never published.",
+      "evidence": "System facts: the host squash-merges and requires linear history. gh/records.rs 15-34: the athena/records sink writes only landing-intent, landing and cutover records, not job records. So a Score commit made on local main after a landing reaches the host only as part of the next pull request's commits (plan_rebase 573-591), which are folded into that pull request's squash commit. Fix: State in open question 3, the doc and the changelog that host history will not show the Score after its own landing, only folded into the next landing, and that a drain's last Score stays local until the next landing or sync.",
+      "location": "Decision 3 and open question 3 (publication)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The descendant check holds almost by construction, because the local landing commit is the close commit, which always comes before the lander call. It adds little evidence.",
+      "evidence": "close.rs 257-264 builds the Plan::Tree landing commit at close. RealSteps::land runs after go returns, so any later commit descends from it. The at-call check in the lander double (no Score yet for this job, Scores for every earlier one) is what actually shows the ordering. Fix: Make the at-call check and the Score order in `git log` the main proof. Either drop the descendant check or also assert that no other job's Score sits between this job's lander call and its Score commit.",
+      "location": "Criterion 1 demonstration: 'each Score commit is a descendant of its own landing commit on the first-parent chain'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is careful and its seams exist. land_or_block adds the Score at close (close.rs ~220-227). The gate rechecks each Score against expected_score (jobs.rs ~290-317). Rule::AppendOnly exists. RealSteps.lander, RecordingLander and real_steps_with exist, and the lander double gets an &Athena, so it can check records at head when called. land_pr does read verification and candidate at head (landing.rs 708-718). Athena's two out-of-deliverable file findings are weighed; the plan's reasons for run/mod.rs and main.rs are sound. Two major problems remain. First, dating the queue Score at close time loses any intervention made between close and landing: intervene writes no re-score when no Score exists (manage.rs 368-375), and the gate allows a re-score only in the commit that adds its intervention, so the plan's 'left for a re-score' premise is false. Dating the Score at landing time fixes it. Second, moving only the Score does not meet section 8 ('records order equals landing order, never refers to an unlanded job') or the reading's 'each landed job's records', yet criterion 6 would call job 8 built. The plan raises this as a BLOCKER question for the user; it must be answered and the criteria adjusted before production. Minor: publication on a squash-merge host is understated, and the descendant check in criterion 1 is weak."
+}

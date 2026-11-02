@@ -170,7 +170,9 @@ pub struct PrReport {
 /// the setting is on and the checks are green. Checks are green only when no check run on the head is still
 /// queued or in progress. A merge the host refuses with "Repository rule violations" while the checks are
 /// pending again is a wait: the report has `checks` pending, `merge_requested` set and a warning, and it is
-/// not an error. The same refusal with the checks settled stays an error.
+/// not an error, and the host-error entry the client logged for the refusal is marked as caused by pending
+/// checks ([`PrHost::note_pending_merge_refusal`]). The same refusal with the checks settled stays an error
+/// and its entry stays unmarked.
 pub fn land_pr(job: &LandPr) -> Result<PrReport> {
     // The commit an early push left on the branch at verification start, if any.
     let early = load_early(job.state, job.job)?;
@@ -249,11 +251,15 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
                 }
                 // The host refused the merge by its repository rules. While a check is still running that
                 // is a wait, not a failure: the merge is possible once every check has finished. Any other
-                // refusal, or one with the checks settled, is returned as it came.
+                // refusal, or one with the checks settled, is returned as it came. The waiting refusal is
+                // logged as caused by pending checks; the others are logged as before.
                 Err(refusal) if is_rule_violation(&refusal) => {
                     if job.host.check_report(&link.head)?.checks != Checks::Pending {
                         return Err(refusal);
                     }
+                    // The refusal the client logged was a wait: mark it so the watcher does not read it as
+                    // a verdict on the merge method.
+                    job.host.note_pending_merge_refusal();
                     let record = intent
                         .as_ref()
                         .map(|(_, _, id)| {

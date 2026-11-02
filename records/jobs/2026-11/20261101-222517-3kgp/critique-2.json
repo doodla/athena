@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-222517-3kgp",
+  "round": 2,
+  "at": "2026-11-01T22:36:57.818076897Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/main.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/main.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The deferred Score commit is made only on the local branch after the host merge, and the plan never says how it reaches the host's main or the athena/records branch.",
+      "evidence": "commit_records_in builds on self.head() and fast-forwards the current branch (commits.rs:255-270). With three jobs in flight, the local branch already holds the close-time landing commits for A, B and C, so A's Score commit lands on top of C's. land_pr pushes a job's landed commit (the one that introduced outcome-landed.json, landing.rs:52-80) and writes landing records to the remote records branch through a sink that is built inside land_pr (landing.rs:745-772). Nothing in the plan pushes the Score commit. It reaches the host only if a later job's landing commit descends from it, and then it is squashed into that job's PR. The last job's Score is not published by this drain. The plan's own risk note ('the local branch moves, so the Score commit builds on a moved head') does not answer this. Criterion 1 is then shown only in the local log, while the maintainer is meant to see real records after real landings. Fix: Name where the Score commit is published: the local branch, carried by the next landing; the records branch through the landing-records sink; or a push. Show in the criterion 1 test that the Score commit is reachable where the host or records branch would read it. If publishing needs gh/landing.rs, which is out of scope, say so and raise it as a blocker to the user rather than build a local-only commit.",
+      "location": "Approach / Steps 4-5 (commit_landed_records via Committer::commit_new_records); crates/athena-core/src/commits.rs:240-270; crates/athena-core/src/gh/landing.rs:702-772",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Moving only the Score narrows the accepted reading. Under decision 3 the move fixes no ordering fault, and the doc would carry the kind of 'later work' note that criterion 6 forbids.",
+      "evidence": "The reading says the real Steps 'defers the close-time records commit for a job that will land and commits those records after its landing'. Section 8 says 'a records commit never refers to a job that has not landed'. Under the plan, Outcome Landed, verification, candidate and invocations are still committed at close, before the host landing (close.rs:257-306), so that rule stays false. The plan's reason for picking the Score ('the one closing record whose value depends on the head') is undone by decision 3: expected_score keeps only interventions with i.at <= at (jobs.rs:124-125), so with at = close time the value is the same at close and after landing. The Score is moved because it is the only record that can move, not because moving it fixes anything. Criterion 6 asks for both parts 'as built' with no 'later work' note, but the plan's doc text names a limit and a gh/landing.rs follow-up. The plan raises this as an open question but builds anyway. Fix: Settle scope before building. Either ask that gh/landing.rs, which reads verification and candidate at head and uses outcome-landed.json to find the landed commit, be added to the deliverables so all closing records can move, or return the reading as not plannable within its out-of-scope list. If the Score-only slice is kept, drop the claim that its value depends on the head, and get the user to accept the change to criterion 6 explicitly.",
+      "location": "Decision 2 and Decision 3; Criterion 6 demonstration; docs/design/async-drain.md:214-221",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new append-only check in commits.rs duplicates the gate's existing Rule::AppendOnly instead of relying on it.",
+      "evidence": "Every Athena commit already runs through build_commit_in, which calls gate() (commits.rs:202). The gate adds a Rule::AppendOnly violation for any records path whose diff status is not 'A' (athena-gate/src/content.rs:44-61), and it already has tests (content.rs:276-289). The plan's own reason for testing the helper with raw plumbing ('the in-process gate refuses it first') shows that the rule is already enforced. The new code adds only the skip for identical bytes. Fix: Treat the gate's Rule::AppendOnly as the enforcement. Keep only the skip for identical bytes and the no-empty-commit behavior in the helper. Demonstrate criterion 3 through the production commit path: a conflicting write through Committer::commit_records is refused with AppendOnly and HEAD does not change. Keep the drain-level check that every queue commit shows only 'A' lines.",
+      "location": "Decision 4; Step 3; Criterion 3 demonstration (a)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The guard cannot tell a job landed on the host from one only closed locally, because Outcome Landed is written at close.",
+      "evidence": "land_or_block writes Outcome Landed in the close-time commit (close.rs:257-263), before Steps::land runs. So 'has an Outcome Landed at head' is true for every deferred job straight after close. Today only the call sites (the Landed arm and the Landed report in main.rs) keep the Score from being committed before the host landing. Fix: State that the call site is the guard, or make the function check the host landing state (for example the landing record or the link state) so that a stray call cannot commit before landing.",
+      "location": "Decision 3 (commit_landed_records guard 'no Outcome Landed at head')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan's files and functions exist: go/go_with_stages/go_job, Outputs and RunContext in run/mod.rs; land_or_block in close.rs; expected_score in athena-gate/src/jobs.rs:108; RealSteps::land at drain.rs:3307 and the landing lock at drain.rs:1588; RecordingLander at tests/drain.rs:1352; real_steps_with at tests/drain.rs:2573. The seams it names are real, and the tests for criteria 1, 2 and 4 would fail without the behavior. I have two major soundness problems. First, the deferred Score is committed with the local-branch committer (commit_records* fast-forwards the current branch; commits.rs:240-270) after the host merge has already happened. The plan never says how that commit reaches the host's history or the records branch. As I read it, the commit stays local until some later job's landing commit happens to carry it, which would fold it into that job's squash. It may never be published if it is the last job. Second, the Score-only slice leaves the main rule of design section 8 untrue: Outcome Landed and the other closing records are still committed before the landing. Under decision 3 the Score's value no longer depends on the head, so the move changes where a record is committed but fixes no ordering fault. The doc's 'limit and follow-up' wording conflicts with criterion 6. The plan should get the scope decision before building. A smaller point: the new append-only helper duplicates the gate's existing Rule::AppendOnly, which already refuses any records path whose diff status is not 'A' on every Athena commit (athena-gate/src/content.rs:44-61). Verdict: revise."
+}

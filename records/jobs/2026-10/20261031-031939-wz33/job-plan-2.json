@@ -1,0 +1,240 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-031939-wz33",
+  "round": 2,
+  "at": "2026-11-01T21:36:05.733725394Z",
+  "invocation_seq": 4,
+  "approach": "Add one default-no-op hook, `Steps::commit_records(job) -> Result<(), String>`, to drain.rs. `Drain::land` calls it right after `Steps::land` answers `Landed`, still under the `landing` mutex. Landings run one at a time, so each landed job's records commit follows its own landing, in landing order, and is never called for a job that did not land. A hook error becomes a `Report::notes` line; the landing still counts. The default does nothing, so `drain`, a bound of 1 and every existing stub behave as today. The real steps keep the default, for the reason found by reading the PR path: `go` commits a job's records (candidate, verification, score, landed outcome) to the local branch at close (`land_or_block`, run/close.rs). `PrLander::land` then calls `Athena::land_pr`, which writes the landing-intent and landing records to `athena/records` through `GitLandingRecords::for_remote` and `RecordsWriter::append_to_remote`. That runs inside `Steps::land`, so under the same landing lock and in landing order. Nothing is left to commit after the landing. Tests in a new `records_order` module use a recording `Steps` stub whose `commit_records` commits real per-job records through the real `Committer::commit_records` (the gated commit path used by `Athena::commit_records`) in a `Fixture` repo. Append-only is checked with `git diff --name-status` and blob ids against that real committer, plus the existing gate. store.rs is left untouched because the tests need no new helper.",
+  "decisions": [
+    {
+      "choice": "The hook lives on `Steps` with a default no-op, and `Drain::land` calls it in the `Landed` arm, inside the landing lock.",
+      "reason": "The `landing` mutex in `Drain::land` already makes landings one at a time. A call inside it cannot interleave with another job's landing, so records order equals landing order by construction, and `NotLanded`, `Waiting` and budget arms never reach it. Matches design section 8: records are committed right after the landing in the same slot.",
+      "rejected": [
+        {
+          "option": "Commit in `attempts` after `land` returns, outside the lock",
+          "why": "Another worker could land between a job's landing and its records, which breaks the order."
+        },
+        {
+          "option": "Add a records field to `Landing::Landed`",
+          "why": "It changes a public enum used by every existing stub and test, forcing edits to existing test bodies and breaking criterion 3."
+        },
+        {
+          "option": "A separate records queue or writer thread",
+          "why": "Adds a second serial resource when the landing slot already serialises; more code for no gain."
+        }
+      ]
+    },
+    {
+      "choice": "`RealSteps` keeps the default no-op. Its reason, now from reading the PR path: `go` commits the job's records to the local branch at close; `Athena::land_pr` (called by `PrLander::land`) writes the landing-intent and landing records to `athena/records` through `GitLandingRecords` and `RecordsWriter::append_to_remote`, inside `Steps::land`, under the landing lock and in landing order. The doc comment on the hook and the async-drain.md note say exactly this.",
+      "reason": "Round-1 finding 1. `land_pr` builds the records sink on the production path (landing.rs:745-747) and writes before returning, so no records are pending after `Steps::land` returns. A real hook would have nothing to commit. `RecordsWriter` also refuses deletes, renames and a path that exists with different bytes (records_branch.rs ~485-530), so append-only holds on that path by mechanism. The landing records are new files named by a generated id, so no shared month-shard file is touched on this path.",
+      "rejected": [
+        {
+          "option": "Wire `RealSteps::commit_records` to `Athena::commit_records`",
+          "why": "There are no uncommitted per-job record files after landing; it would invent a deferral and touch the run path and landing.rs, which are out of scope."
+        },
+        {
+          "option": "Keep the old reason (records travel in the landing commit)",
+          "why": "It named the wrong path; on the PR path the history records come from the `GitLandingRecords` sink."
+        }
+      ]
+    },
+    {
+      "choice": "Tests commit real records through the real committer: the stub holds an owned `Git` and `StateDir` (both from the `Fixture`'s paths) and calls `Committer { git, state }.commit_records(&[NewFile::record(&AnyRecord::Priority(..))], subject)` for the job's id. A name such as `a` is mapped to a fixed valid `JobId`. The record is a per-job `athena.priority/1` record, a file type tests/drain.rs already builds.",
+      "reason": "Round-1 finding 2. The diff and blob checks then test the real gated commit path and real canonical paths, not a hand-written JSON file. The stub's hook only calls the committer; the ordering decision stays in `Drain::land`.",
+      "rejected": [
+        {
+          "option": "Hand-written `records/<job>.json` plus `git commit` in the stub",
+          "why": "Tests only what the double does."
+        },
+        {
+          "option": "Hold `Athena` in the stub",
+          "why": "The agent driver in `Athena` is not shared between threads and `drain_concurrent` needs `Steps + Sync`; `Committer` is the shareable part."
+        }
+      ]
+    },
+    {
+      "choice": "Lock placement is proved deterministically: the hook of the first-landing job `c` waits (bounded 5 s) until a flag set at the end of `a`'s run is true, then sleeps another 100 ms, so `a` is certainly waiting to land. The test asserts the log has `records c` before `land a`.",
+      "reason": "Round-1 finding 3. If the call sat outside the lock, `land a` would be logged during that wait on every run, so the assertion fails every time, not on some runs. It is inside the lock, so `a` blocks on the mutex until `records c` is done.",
+      "rejected": [
+        {
+          "option": "Rely on staggered sleeps alone",
+          "why": "A misplaced call would only fail on some runs."
+        },
+        {
+          "option": "Gate the first hook on seeing the second `land` entry",
+          "why": "With the call correctly inside the lock the second `land` cannot start, so the test would hang."
+        }
+      ]
+    },
+    {
+      "choice": "store.rs is not changed. The tests read the result with `Records::load(&git, \"HEAD\")` (jobs with a priority record) and `git diff --name-status`.",
+      "reason": "Round-1 finding 4: a public helper added only for tests cuts against the 'small' default and the brief allows store.rs changes only if the ordering needs them.",
+      "rejected": [
+        {
+          "option": "Add `record_paths_of` to store.rs",
+          "why": "No test needs it once existing loaders and git diff are used."
+        }
+      ]
+    },
+    {
+      "choice": "One home for the new tests: a `records_order` module appended at the end of tests/drain.rs.",
+      "reason": "Round-1 finding 5. Appended code leaves existing test bodies untouched.",
+      "rejected": [
+        {
+          "option": "Add to the existing `parallel` module",
+          "why": "It edits an existing module body region and splits the tests."
+        }
+      ]
+    },
+    {
+      "choice": "Only landed jobs go through the hook; a commit error is a note, not a failed landing.",
+      "reason": "Criterion 2 requires no record for a job that did not land. A landed job cannot be un-landed, and `NotLanded` would make the drain retry and land it twice.",
+      "rejected": [
+        {
+          "option": "Also route failed jobs' records through the hook (design section 8, bullet 3)",
+          "why": "Conflicts with criterion 2 as worded; left as an open question."
+        },
+        {
+          "option": "Return `NotLanded` on a records failure",
+          "why": "Would land the same job twice on retry."
+        }
+      ]
+    },
+    {
+      "choice": "The max_in_flight = 1 pin runs through `drain_concurrent` with bound 1 and through `drain`, plus a bound-2 run of a dependent pair with an existing default `Steps` stub. No `max_in_flight` parameter is added.",
+      "reason": "The fourth argument of `drain_concurrent` is `[parallel] max_concurrency`; `max_in_flight` is read only by the disk guard in `go`. Raising it is build job 10.",
+      "rejected": [
+        {
+          "option": "Add a `max_in_flight` parameter to `drain_concurrent`",
+          "why": "Build job 10, out of scope."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Steps::commit_records` (default `Ok`), call it in the `Landing::Landed` arm of `Drain::land` under the landing lock, record a failure as a note and a `drain` line, add a module-doc bullet and doc comments naming the real-path reason. No existing test is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Append a `records_order` module: recording stub with real `Committer` commits, tests for criteria 1, 2, 3 and 6. No existing test body is edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add the Unreleased entry for records committed after each landing, with no change at max_in_flight = 1.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "purpose": "Add a 'Note on build job 8' to section 8: what is built (hook, landed-only, landing order), that the real steps keep the default because `go` and `land_pr` already commit a job's records (the latter inside `Steps::land`), and what is not built (failed-job routing, month-shard conflict reading).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `Drain::land` (drain.rs ~1587), the `Steps` trait defaults (`rebase`, `rerun_cap`, ~500-610), the `parallel::Shared` stub (tests/drain.rs ~5379) and the `Rebasing` stub (~5695); copy their style.",
+    "In drain.rs add `fn commit_records(&self, _job: &str) -> Result<(), String> { Ok(()) }` to `Steps`, with a doc comment: asked once per landed job, under the landing lock, right after `land` answered `Landed`; never for a job that did not land; the default commits nothing; the real steps keep it because `go` commits a job's records at close and `land_pr` writes the landing records inside `Steps::land`, under the same lock.",
+    "In `Drain::land`, in the `Landing::Landed` arm after the state update and `wake.notify_all()`, call `self.steps.commit_records(job)`. On `Err(why)` push a note naming the job and reason with `self.note` and print a `drain      {job} records not committed: ..` line. Return `LandStep::Landed` either way. No other arm changes.",
+    "Add a module-doc bullet 'Records are committed right after each landing' and extend the max_in_flight 1 sentence near line 46.",
+    "Append `mod records_order` to tests/drain.rs: a recording `Steps + Sync` stub (plan, items, staggered run times, barrier, `failing`, `a_done` flag, log `Mutex`, owned `Git` and `StateDir` for a `Fixture` repo, a name-to-`JobId` map) whose `commit_records` logs `records X` and calls `Committer { git, state }.commit_records` with a real per-job record; then the tests `records_commit_after_each_landing`, `append_only_with_interleaved_jobs`, `records_follow_landing_with_one_job_at_a_time` and `a_default_steps_sees_no_records_call_at_bound_two`. Print the sequences in the assert messages and with `println!`.",
+    "Add the CHANGELOG.md entry under Unreleased (read the headings first), then the 'Note on build job 8' in section 8 of docs/design/async-drain.md.",
+    "Leave store.rs untouched and say so in the final report.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-cli --test drain`, then `cargo test --locked`, and check `git diff` shows no existing test body changed."
+  ],
+  "risks": [
+    {
+      "risk": "The hook runs under the landing lock, so a slow `commit_records` delays the next landing.",
+      "mitigation": "Intended: it serialises records with landings. The doc comment says the hook must be quick; the test stub's commit is a local git commit."
+    },
+    {
+      "risk": "Threads plus a real git repo make the test flaky.",
+      "mitigation": "The commit only runs inside the landing lock, so calls are serial, and `Committer::commit_records` takes the repository lock itself. Run times are staggered by at least 50 ms, and the lock-placement check uses a flag, not timing."
+    },
+    {
+      "risk": "An existing test body is edited by accident.",
+      "mitigation": "New code goes in a module appended to tests/drain.rs; the verifier checks `git diff` shows added lines only."
+    },
+    {
+      "risk": "A new `Steps` method breaks the stubs in drain.rs unit tests and tests/drain.rs.",
+      "mitigation": "The method has a default body, so no existing `Steps` impl changes."
+    },
+    {
+      "risk": "The gate refuses the test's record, or `StateDir`/`Git` is not `Sync`.",
+      "mitigation": "The producer tries `AnyRecord::Request` as a fallback, and the test reports the gate's message on failure."
+    },
+    {
+      "risk": "The hook is a no-op in production, so a reader may think records ordering is untested end to end.",
+      "mitigation": "The note and doc comment cite the code paths that guarantee order, and the open question flags it for the maintainer."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test in the appended `records_order` module drives `drain::drain_concurrent` with bound 3 over independent jobs a, b, c. All three runs are in flight (barrier, as in `Shared`). Run times are staggered by at least 50 ms so they pass in the order c, a, b. The stub logs `land X` and `records X`; its `commit_records` makes a real gated commit via `Committer::commit_records`. The hook of `c` waits for `a`'s run to end plus 100 ms, so `a` is waiting to land. It asserts the log is exactly `land c, records c, land a, records a, land b, records b`; that `git log` subjects in the fixture repo run in the same order; and that no `records X` precedes `land X`. The assert messages print both sequences.",
+      "command": "cargo test -p athena-cli --test drain records_order::records_commit_after_each_landing",
+      "observes": "Each landed job's records commit directly follows its own landing, and the records commit sequence equals the landing sequence (c, a, b), not the start order (a, b, c).",
+      "fails_without": "Without the `commit_records` call in `Drain::land`, no `records X` entry is logged and the exact-sequence assertion fails. If the call sat outside the landing lock, `land a` would be logged while the hook of `c` is held, on every run, and the `records c` before `land a` assertion would fail.",
+      "seam": "Production entry point: `drain::drain_concurrent(&steps, limits(9.0), &Quiet, 3)` (exists, drain.rs:2482). Guards: independent jobs with disjoint paths, budget large enough, the stub answers `Landing::Landed`. Fixture: a `Steps + Sync` recording stub in `records_order` (added by plan step 5), holding a `Git` and `StateDir` for a `Fixture` repo and a `Committer` built from them (both exist; `Fixture` in tests/common/mod.rs). It is injected as the `&dyn Steps` argument. `Steps::commit_records` does not exist today; step 2 adds it."
+    },
+    {
+      "criterion": 2,
+      "method": "New test in `records_order`. The `Fixture` repo first gets an earlier record (a priority record for an old job) committed with `commit_records_to`; the test notes HEAD, the file's blob id and its bytes. The three-job drain of criterion 1 runs with bound 3, plus a fourth job `d` in `failing` whose run is rejected, so it never lands. The test runs `git diff --name-status <base>..HEAD` through `fx.git` and asserts every line starts with `A` and there are exactly three. It asserts the earlier file's blob id and bytes are unchanged and that commits since base number exactly 3. It loads `Records::load(&fx.git, \"HEAD\")` and asserts that a, b and c have their priority record and `d` has none.",
+      "command": "cargo test -p athena-cli --test drain records_order::append_only_with_interleaved_jobs",
+      "observes": "The diff holds only added record files, earlier files are byte-identical, exactly the three landed jobs gained records, and the rejected job gained none, all through the real committer and canonical paths.",
+      "fails_without": "If the hook ran for every finished job, the rejected job `d` would gain a record and the commit count and the `Records::load` assertion would fail. If a records commit rewrote an earlier file, the diff would show `M` and the assertion would fail.",
+      "seam": "Production entry point: `drain::drain_concurrent` (exists). Guards: `d` is in the stub's `failing` list, so its run ends `Rejected` and `Drain::land` is not reached for it. Fixture: the same recording stub and `Fixture` repo; the existing `commit_records_to` helper (tests/drain.rs:4233, exists) makes the earlier record; `Records::load` (store.rs, exists). Injected as `&dyn Steps`. The stub is added by step 5. The gate's own refusal of rewritten records is the production mechanism the test also depends on."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the whole `tests/drain.rs` and the drain.rs unit tests, and show with `git diff -- crates/athena-cli/tests/drain.rs crates/athena-cli/src/drain.rs` that existing test bodies have no removed or changed lines (added lines only). New tests in `records_order`: (a) `records_follow_landing_with_one_job_at_a_time` runs the recording stub through `drain::drain_concurrent(.., 1)` and through `drain::drain` over a, b, c and asserts the log is `run a, land a, records a, run b, land b, records b, run c, land c, records c` and peak concurrency is 1; (b) `a_default_steps_sees_no_records_call_at_bound_two` runs `drain_concurrent(.., 2)` over a dependent pair with the existing `parallel::Shared`-style default stub (copied in the module, no `commit_records` override) and asserts the log is the old sequence with no records entry.",
+      "command": "cargo test -p athena-cli --test drain",
+      "observes": "Existing tests pass untouched. At bound 1 each landing's records commit follows it, one job at a time. A stub without the override sees nothing new, which is today's behaviour.",
+      "fails_without": "If the default hook changed behaviour for a stub that does not override it, an existing test in tests/drain.rs or the unit tests in drain.rs would fail. If a landing and its records commit were reordered at bound 1, the pin test would fail.",
+      "seam": "Production entry points: `drain::drain` and `drain::drain_concurrent(.., 1)` and `(.., 2)` (exist). The bound is the fourth argument, `[parallel] max_concurrency` today; `max_in_flight` is not a drain parameter. Fixture: the recording stub (step 5) and a default-hook stub in the module, injected as `&dyn Steps`. `Steps::commit_records` default is added by step 2."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three checks Athena runs on the result, across the workspace.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "A formatting slip, a clippy lint in the new code (unused import, needless clone) or any failing test makes one command exit non-zero.",
+      "seam": "Whole-workspace cargo commands (exist). No fixture."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff. The producer finds the `Unreleased` section by reading the headings near the top of CHANGELOG.md (headings at lines 8, 10, 197, 425, 597, 686 were seen by grep only) and adds the entry in the right subsection there.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "Added lines only, under Unreleased, stating that records are now committed from the landing queue right after each landing, in landing order, only for landed jobs and append-only, and that nothing changes at max_in_flight = 1.",
+      "fails_without": "Without the entry the diff is empty and the check fails.",
+      "seam": "No code seam; content check of a file that exists."
+    },
+    {
+      "criterion": 6,
+      "method": "The `records_order` tests keep one log vector holding both `land X` and `records X`. They build the expected list from the landing order c, a, b, which differs from the start order a, b, c, compare whole sequences, and print the start, landing and records sequences in the assert message and with `println!`. The verifier runs with `--nocapture` and reads the printed lines for three jobs.",
+      "command": "cargo test -p athena-cli --test drain records_order -- --nocapture",
+      "observes": "The landing sequence and the records commit sequence appear side by side for three jobs, match, and differ from the start order.",
+      "fails_without": "A test that only checks `commit_records` is called, or a count of 3, would not compare the order and would pass for a wrong order.",
+      "seam": "Same as criterion 1: `drain::drain_concurrent` with the recording stub (added by step 5)."
+    }
+  ],
+  "open_questions": [
+    "Design section 8 says failed or closed jobs also commit through the queue; criterion 2 says no record for a job that did not land. The plan follows the criterion and leaves failed-job routing to a later job.",
+    "The hook is unused by `RealSteps` (see Decision 2): the production ordering is the landing lock around `Steps::land`, which includes the `GitLandingRecords` writes. The hook and its tests fix that contract for later wiring. Say if you want the real steps to commit something extra after landing.",
+    "The design's 'month shard' append-only conflict reading cannot be shown with per-job record files or landing records (each is a new path). The plan does not claim it; the note in async-drain.md says it is not confirmed. Which record types are month-sharded was not settled by the code I read.",
+    "Whether the gate accepts a lone `athena.priority/1` record for a made-up job via `Committer::commit_records` was not read. The producer checks; if refused, it uses another record type already committed through `Committer` in tests/drain.rs (`AnyRecord::Request`, ~line 3276).",
+    "Whether `Git` is `Sync` (the stub holds one for `drain_concurrent`'s `Steps + Sync` bound) was not checked; the producer falls back to a `Mutex<Git>` if not.",
+    "`drain_concurrent`'s fourth argument is `[parallel] max_concurrency`; `max_in_flight` is not a drain parameter, so the pin test uses bounds 1 and 2.",
+    "Which `### Added` or `### Changed` heading sits under `[Unreleased]` in CHANGELOG.md was not read; the producer checks before inserting."
+  ],
+  "producer_section_sha256": "803bc7e33b05419c4067968e85fcea34ad85130ff7d0ec06e48a5808c1ee1fe2"
+}

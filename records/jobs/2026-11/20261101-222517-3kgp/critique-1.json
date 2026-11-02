@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-222517-3kgp",
+  "round": 1,
+  "at": "2026-11-01T22:30:55.316429643Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The plan defers the Score based on the config, but only the drain commits it. Jobs closed by `athena go` and landed by `athena land` at max_in_flight > 1 never get a Score.",
+      "evidence": "close.rs would drop the Score whenever the config's max_in_flight is above 1, whoever runs go. The only commit point is RealSteps::land (drain.rs:3307). `athena land` calls athena.land_pr directly at main.rs:1109 and never goes through RealSteps. Existing tests already call athena.go under pipelined(2) (tests/drain.rs:6307-6378). Those jobs would be Landed with no Score and no later step to add it. The plan's 'next call commits it' fix only works inside a drain. Fix: Let the caller that knows a landing queue follows make the choice. RealSteps passes an explicit 'defer the score' option into go, and plain `athena go` never defers. Alternatively, call commit_landed_records from the `athena land` path too. Add a test showing a job closed and landed outside the drain still has its Score.",
+      "location": "Plan Decision 2 / Files: close.rs land_or_block; crates/athena-cli/src/main.rs:1109",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The conflict demonstration cannot reach the refusal: commit_landed_records skips when any Score exists, and the gate refuses a planted hand-written score.",
+      "evidence": "Step 3 says commit_landed_records is a 'no-op when a Score exists'. A planted score.json that differs therefore yields Ok(None), not 'an error naming the path'. Planting it through Committer::commit_records also passes through the in-process gate, which refuses any score that differs from expected_score (athena-gate/src/jobs.rs:301-317). The behavior-evidence default also asks the test to first show the rewrite succeeds without the protection; the plan does not. Fix: Test the append-only helper directly on a real repository. Plant an existing record path with different bytes using raw git plumbing in the fixture, not the gated committer. Show that a commit without the check would carry an M entry. Then show the helper refuses, HEAD is unchanged, and `git diff --name-status` shows only A. Keep (b) and (c). If commit_landed_records itself must refuse, have it compare the existing Score with the recomputed one instead of skipping blindly.",
+      "location": "Demonstrations: Criterion 3 (a)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Only the Score moves. Most of the job's records still commit at close, in close order, which narrows the accepted reading and the design without saying so.",
+      "evidence": "The reading says the real Steps 'defers the close-time records commit for a job that will land and commits those records after its landing'. Design §8 says each job 'does not commit' its records until the queue commits them after the landing. The plan keeps verification, candidate, invocations and the Landed outcome in land_or_block's close-time commit (close.rs:257-306). The cause is real: land_pr reads the verification and candidate from head (gh/landing.rs:708-718), and that file is out of scope. But the plan presents this as a design choice. It does not name it as an out-of-scope root cause. Criterion 6 then risks the doc claiming §8 is built when it is not. Fix: Say in the approach that only the Score is deferred, and name the cause in gh/landing.rs. Propose the follow-up fix there, as the root-cause default asks. Have async-drain.md §8 state exactly what is built: the Score after landing; the other records still at close, and why. Do not mark the whole of §8 as built.",
+      "location": "Approach / Decision 1; docs/design/async-drain.md §8 lines 214-216",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Scoring at landing time instead of at close changes which interventions count in the closing score.",
+      "evidence": "expected_score keeps only interventions with i.at <= at (jobs.rs:124-125). With `at` set at landing, an intervention made between close and landing is folded into the closing score instead of being handled by a re-score. During that window `athena intervene --job` finds no closing score to re-score. Fix: State and test what happens to an intervention made in the window, or record the close time and pass it as `at`. Mention the change in the doc.",
+      "location": "Decision 3 (recompute the Score at queue time)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Existing tests that use pipelined(2) will now take the deferral path, so criterion 7 depends on them still passing.",
+      "evidence": "tests/drain.rs:6307-6400 run go and the drain under pipelined(2) with RealSteps and RecordingLander. After the change those jobs have no Score at close, and the drain test gets an extra records commit. Fix: In step 1, list the pipelined tests and check which of their assertions (Score, commit counts, records state) change. Adjust the design, not the test bodies.",
+      "location": "Step 1 / Risks",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "It is unproven that the scripted fake agent can run three jobs at once through drain_concurrent with RealSteps.",
+      "evidence": "The plan itself notes that no existing test drives RealSteps through drain_concurrent with real jobs. Criteria 1, 2 and 9 depend on it. Fix: Make it the first thing the producer checks, before any production change, and keep the plan's 'report rather than stub' fallback.",
+      "location": "Open questions 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the plan against drain.rs (Steps::land, Drain::land with its landing lock, RealSteps::land), close.rs (land_or_block), commits.rs (commit_records_in), athena-gate/src/jobs.rs (expected_score and the score rule), gh/landing.rs, main.rs, the existing pipelined tests in tests/drain.rs, and async-drain.md §8 and §12. The named code exists. The call site is a sound place for the commit: Drain::land holds the landing lock, so a commit made in RealSteps::land follows landing order. Three problems stop me accepting. (1) The plan decides whether to defer in close.rs from the max_in_flight setting, but only the drain's RealSteps::land commits the deferred Score. `athena land` (main.rs:1109) calls athena.land_pr directly, and existing tests call athena.go with pipelined(2). Both would leave a Landed job with no Score, and nothing would ever commit it. (2) The criterion 3 demonstration cannot work as written. commit_landed_records skips whenever a Score already exists, so a planted score that differs produces a no-op, not an error. Planting a hand-written score through the gated Committer is refused by the gate's score rule anyway. (3) The plan narrows the accepted reading without saying so. Only the Score moves. Verification, candidate and the Landed outcome stay in the close-time commit, so most records still commit in close order. The plan should say this openly, name the root cause in gh/landing.rs, and have the doc describe exactly what was built. Revise."
+}

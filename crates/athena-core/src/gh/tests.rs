@@ -2357,6 +2357,10 @@ struct Refusing {
     merged: Cell<bool>,
     merge_calls: Cell<u32>,
     other_calls: Cell<u32>,
+    /// The host's text for a refused merge.
+    refusal_text: &'static str,
+    /// Whether an optional check run is still going once a merge has been asked for.
+    pending_after_merge: bool,
 }
 impl Refusing {
     fn new(failures: &[Option<u16>], always: Option<Option<u16>>) -> Self {
@@ -2366,6 +2370,18 @@ impl Refusing {
             merged: Cell::new(false),
             merge_calls: Cell::new(0),
             other_calls: Cell::new(0),
+            refusal_text: "refused",
+            pending_after_merge: false,
+        }
+    }
+
+    /// A host that refuses the merge with `text`, whatever the status, and, when `pending` is set, shows an
+    /// unfinished optional check run after the first merge request.
+    fn refusing_with(status: u16, text: &'static str, pending: bool) -> Self {
+        Refusing {
+            refusal_text: text,
+            pending_after_merge: pending,
+            ..Refusing::new(&[], Some(Some(status)))
         }
     }
 }
@@ -2385,7 +2401,15 @@ impl Runner for Refusing {
                     r#"{"merged": false}"#.to_string()
                 }
             } else if path.contains("check-runs") {
-                required_green_reply()
+                if self.pending_after_merge && self.merge_calls.get() > 0 {
+                    json!({"check_runs": [
+                        {"id": 1, "name": EARLY_RUN_JOB, "status": "completed", "conclusion": "success"},
+                        optional_run("in_progress"),
+                    ]})
+                    .to_string()
+                } else {
+                    required_green_reply()
+                }
             } else {
                 r#"{"state": "success", "statuses": []}"#.to_string()
             });
@@ -2399,7 +2423,7 @@ impl Runner for Refusing {
             Some(status_code) => Err(GhFailure {
                 call: "api".into(),
                 status_code,
-                text: "refused".into(),
+                text: self.refusal_text.into(),
             }
             .into()),
             None => {
@@ -2472,6 +2496,65 @@ fn a_refusal_that_is_not_transient_is_recorded_once_and_not_retried() {
         assert_eq!(errors[0].operation, HostOperation::Merge);
         assert_eq!(errors[0].message_class, MessageClass::of_status(status));
     }
+}
+
+const RULE_TEXT: &str = "Repository rule violations found";
+
+#[test]
+fn a_405_for_rule_violations_while_checks_are_pending_is_logged_as_caused_by_pending_checks() {
+    for status in [405, 422] {
+        let runner = Refusing::refusing_with(status, RULE_TEXT, true);
+        let rig = Rig::new();
+        let (result, errors) = land_through(&runner, &rig);
+        let report = result.expect("a refusal while checks are pending is a wait");
+        assert_eq!(report.checks, Some(Checks::Pending), "{status}");
+        assert!(report.merge_requested, "{status}");
+        assert_eq!(errors.len(), 1, "{status}");
+        assert_eq!(errors[0].status_code, Some(status));
+        assert_eq!(errors[0].operation, HostOperation::Merge);
+        assert!(errors[0].checks_pending, "{status}");
+    }
+}
+
+#[test]
+fn a_405_for_rule_violations_with_the_checks_settled_is_logged_as_before() {
+    for status in [405, 422] {
+        let runner = Refusing::refusing_with(status, RULE_TEXT, false);
+        let rig = Rig::new();
+        let (result, errors) = land_through(&runner, &rig);
+        assert!(result.is_err(), "{status}");
+        assert_eq!(errors.len(), 1, "{status}");
+        assert_eq!(errors[0].status_code, Some(status));
+        assert_eq!(
+            errors[0].message_class,
+            MessageClass::of_status(Some(status))
+        );
+        assert!(!errors[0].checks_pending, "{status}");
+    }
+}
+
+#[test]
+fn another_405_while_checks_are_pending_is_an_error_and_not_marked() {
+    let runner = Refusing::refusing_with(405, "Pull request is not mergeable", true);
+    let rig = Rig::new();
+    let (result, errors) = land_through(&runner, &rig);
+    assert!(result.is_err());
+    assert_eq!(errors.len(), 1);
+    assert!(!errors[0].checks_pending);
+}
+
+#[test]
+fn marking_a_refusal_as_pending_flags_only_the_latest_entry_of_that_operation() {
+    let log = HostErrorLog::new(JobId::parse("bootstrap").unwrap(), WorkPhase::Landing);
+    log.mark_last_pending(HostOperation::Merge);
+    assert!(log.entries().is_empty(), "no entry, nothing to mark");
+    log.record(HostOperation::Merge, Some(405));
+    log.record(HostOperation::ReadChecks, Some(500));
+    log.record(HostOperation::Merge, Some(422));
+    log.record(HostOperation::ReadChecks, Some(500));
+    log.mark_last_pending(HostOperation::Merge);
+    let flags: Vec<bool> = log.entries().iter().map(|e| e.checks_pending).collect();
+    assert_eq!(flags, [false, false, true, false]);
 }
 
 #[test]
