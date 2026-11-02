@@ -2062,6 +2062,140 @@ mod produce_and_verify_order_tests {
         }
     }
 
+    /// The base script, except that the producer edits the README and then hits its deadline.
+    fn timing_out() -> athena_agent::fake::Script {
+        let inner = base_script();
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            if spec.role == Role::Producer {
+                turn.outcome = InvocationOutcome::TimedOut;
+                turn.structured = None;
+                turn.detail = Some("deadline of 1800s reached".into());
+            }
+            turn
+        })
+    }
+
+    #[test]
+    fn a_deadline_keeps_a_candidate_and_timeout_seed_prefers_it_to_the_kept_directory() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            timing_out(),
+        );
+        let (first, done) = finished_job(&athena);
+        assert_eq!(done.state, OutcomeState::TimedOut, "{}", done.reason);
+        // The reason still reads as work that ran out of time, not as an environment stop.
+        assert!(done.reason.starts_with("the producer did not complete: "));
+        assert!(!crate::disk::is_environment_reason(&done.reason));
+        let head = athena.head().unwrap();
+        let mut records = Records::load(&athena.git, &head).unwrap();
+        let request = format!("try again on {first}");
+        let job = &records.jobs[first.as_str()];
+        let commit = job
+            .candidate
+            .as_ref()
+            .and_then(|c| c.candidate_commit.clone())
+            .expect("the deadline kept a candidate commit");
+        assert!(done.reason.contains(short(&commit)), "{}", done.reason);
+        // Nothing was moved aside: the commit is the keep, and the retry starts from it.
+        assert!(!athena.state.kept_work_dir(&first).exists());
+        let seed = athena
+            .timeout_seed(&records, &request, &head)
+            .unwrap()
+            .expect("a retry resumes from the kept candidate");
+        assert_eq!(seed.commit.as_deref(), Some(commit.as_str()));
+        assert!(seed.dir.is_none());
+        assert!(seed.note.contains("README.md") && seed.note.contains(short(&commit)));
+
+        // A job that kept a work tree instead (an older job) still resumes, from the directory.
+        records.jobs.get_mut(first.as_str()).unwrap().candidate = None;
+        assert!(
+            athena
+                .timeout_seed(&records, &request, &head)
+                .unwrap()
+                .is_none(),
+            "with no commit and no directory there is nothing to resume from"
+        );
+        let dir = athena.state.kept_work_dir(&first);
+        std::fs::create_dir_all(&dir).unwrap();
+        let seed = athena
+            .timeout_seed(&records, &request, &head)
+            .unwrap()
+            .expect("the kept directory is the fallback");
+        assert_eq!((seed.commit, seed.dir), (None, Some(dir)));
+    }
+
+    #[test]
+    fn timeout_seed_is_none_for_a_job_that_did_not_time_out() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let (first, done) = finished_job(&athena);
+        assert_ne!(done.state, OutcomeState::TimedOut);
+        let head = athena.head().unwrap();
+        let records = Records::load(&athena.git, &head).unwrap();
+        assert!(
+            athena
+                .timeout_seed(&records, &format!("try again on {first}"), &head)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_timeout_note_names_the_candidate_the_changed_files_and_what_is_still_to_do() {
+        let job = JobId::parse("20261010-120000-abcd").unwrap();
+        let commit = "0123456789abcdef0123456789abcdef01234567".to_string();
+        let changes = vec![
+            ('M', "README.md".to_string()),
+            ('A', "src/new.rs".to_string()),
+        ];
+        let todo = vec!["CHANGELOG.md".to_string()];
+        let note = timeout_note(
+            &job,
+            "deadline of 1800s reached",
+            &changes,
+            &todo,
+            &TimedOutKeep::Candidate(commit),
+        );
+        for needle in [
+            "The producer of job 20261010-120000-abcd stopped: deadline of 1800s reached.",
+            "Changed files (2), against the base commit:",
+            "- M README.md\n- A src/new.rs\n",
+            "kept as candidate 0123456789ab;",
+            "Still to do:",
+            "- CHANGELOG.md\n",
+        ] {
+            assert!(note.contains(needle), "{needle:?}:\n{note}");
+        }
+        // No planned file left over, no edit made, and no commit built are each worded as such.
+        let done = timeout_note(&job, "deadline", &changes, &[], &TimedOutKeep::Directory);
+        assert!(
+            done.contains("no planned file is left without a change"),
+            "{done}"
+        );
+        assert!(done.contains("The edits were kept;"), "{done}");
+        let nothing = timeout_note(
+            &job,
+            "deadline",
+            &[],
+            &todo,
+            &TimedOutKeep::Nothing("no file had been changed".into()),
+        );
+        assert!(nothing.contains("No file had been changed."), "{nothing}");
+        assert!(
+            nothing.contains(
+                "Nothing was kept (no file had been changed); a retry starts from the base"
+            ),
+            "{nothing}"
+        );
+    }
+
     /// A UI that dies, as a process does, when the checks start.
     struct DiesAtChecks;
 

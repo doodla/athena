@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 fn finished(result: GoResult) -> athena_core::run::Finished {
     match result {
         GoResult::Finished(f) => *f,
-        GoResult::Reread(_) => panic!("expected the job to finish"),
+        GoResult::Reread(p) => panic!("expected the job to finish {:?}", p.reader_error),
     }
 }
 
@@ -2194,7 +2194,17 @@ fn deadline_script(
     seen: Seen,
     kill_with: athena_data::records::InvocationOutcome,
 ) -> athena_agent::fake::Script {
-    let base = Scenario::default().script();
+    // The reading lists both files the first producer edits, so that a retry's reading, which must account for
+    // the earlier job's files, is accepted.
+    let mut scenario = Scenario::default();
+    scenario.reading = reading(
+        &[("README.md", "modify"), ("src/partial.rs", "create")],
+        &[
+            ("content", "README.md ends with a greeting line"),
+            ("behavior", "the tests still pass"),
+        ],
+    );
+    let base = scenario.script();
     let runs = Arc::new(Mutex::new(0u32));
     Box::new(move |spec| {
         let mut turn = base(spec);
@@ -2264,17 +2274,69 @@ fn a_producer_that_hits_its_deadline_keeps_its_work_and_closes_timed_out() {
         note.contains("src/partial.rs") && note.contains("README.md"),
         "{note}"
     );
-    let kept = fx
-        .state
-        .path()
-        .join("repo/kept")
-        .join(proposal.job.as_str())
-        .join("work");
+    // The edits are kept as a candidate commit on the job's base, recorded in candidate.json.
+    let candidate = match record_at(&fx, &head, &format!("{dir}/candidate.json")) {
+        Some(AnyRecord::Candidate2(c)) => *c,
+        other => panic!("a timed out job records its candidate, got {other:?}"),
+    };
+    let commit = candidate
+        .candidate_commit
+        .clone()
+        .expect("the deadline kept a candidate commit");
     assert_eq!(
-        std::fs::read_to_string(kept.join("src/partial.rs")).unwrap(),
-        "// half done\n"
+        fx.git.rev_parse(&format!("{commit}^")).unwrap(),
+        Some(candidate.base_commit.clone()),
+        "the candidate is a commit on the job's base"
     );
-    assert!(kept.join("README.md").exists());
+    let at = |rev: &str, path: &str| {
+        fx.git
+            .show_file(rev, path)
+            .unwrap()
+            .map(|bytes| String::from_utf8(bytes).unwrap())
+    };
+    assert_eq!(
+        at(&commit, "src/partial.rs").as_deref(),
+        Some("// half done\n")
+    );
+    assert_eq!(
+        at(&commit, "README.md").as_deref(),
+        Some("# Demo\n\nHello\n")
+    );
+    assert_eq!(at(&candidate.base_commit, "src/partial.rs"), None);
+    assert_ne!(
+        at(&candidate.base_commit, "README.md"),
+        at(&commit, "README.md")
+    );
+    let mut changed: Vec<&str> = candidate.changes.iter().map(|c| c.path.as_str()).collect();
+    changed.sort();
+    assert_eq!(changed, ["README.md", "src/partial.rs"]);
+    // The outcome, the reason and the note name the kept candidate.
+    let short = &commit[..12];
+    assert!(
+        f.reason.contains(&format!("kept as candidate {short}")),
+        "{}",
+        f.reason
+    );
+    match record_at(&fx, &head, &format!("{dir}/outcome.json")) {
+        Some(AnyRecord::Outcome(outcome)) => {
+            assert_eq!(outcome.candidate_commit.as_deref(), Some(commit.as_str()));
+            assert!(outcome.reason.contains(short), "{}", outcome.reason);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    assert!(note.contains(short), "{note}");
+    assert!(
+        note.contains("Still to do") && note.contains("- CHANGELOG.md"),
+        "the note lists the planned file with no change yet: {note}"
+    );
+    assert!(
+        !fx.state
+            .path()
+            .join("repo/kept")
+            .join(proposal.job.as_str())
+            .exists(),
+        "the commit is the keep: no work tree is moved aside"
+    );
     assert!(
         athena.check_history().unwrap().violations.is_empty(),
         "the records of a timed out job pass the history check"
@@ -2296,6 +2358,12 @@ fn retrying_a_timed_out_job_starts_from_the_kept_work_with_the_note() {
             .unwrap(),
     );
     assert_eq!(f.state, OutcomeState::TimedOut);
+    let short = f
+        .reason
+        .split("kept as candidate ")
+        .nth(1)
+        .expect("the reason names the kept candidate")
+        .to_string();
 
     let (second, _) = athena.retry(first.job.as_str(), &Lines::default()).unwrap();
     assert_ne!(second.job, first.job);
@@ -2313,9 +2381,18 @@ fn retrying_a_timed_out_job_starts_from_the_kept_work_with_the_note() {
             "the earlier edit is in the new working directory"
         );
         assert!(brief.contains("## Resume"), "{brief}");
+        assert!(brief.contains(first.job.as_str()), "{brief}");
+        assert!(
+            brief.contains(&format!("kept as candidate {short}")),
+            "{brief}"
+        );
         assert!(
             brief.contains("src/partial.rs") && brief.contains("README.md"),
             "{brief}"
+        );
+        assert!(
+            brief.contains("Still to do") && brief.contains("> - CHANGELOG.md"),
+            "the brief says what the plan still needs: {brief}"
         );
     }
     assert!(
@@ -2324,7 +2401,7 @@ fn retrying_a_timed_out_job_starts_from_the_kept_work_with_the_note() {
             .join("repo/kept")
             .join(first.job.as_str())
             .exists(),
-        "the kept work is removed once the retry closes"
+        "no work tree was moved aside, and none is left after the retry closes"
     );
 }
 
