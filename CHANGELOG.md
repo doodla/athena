@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The reading check refuses a boundary word only in a deliverable path or a `content` acceptance criterion, the
+  places a word can reach a tracked file (D153). Root cause: `check_boundary_and_repo_files` scanned every text
+  field, but a reading is a record outside the policy scan and the writer already gets the word list and runs the
+  scan on its files (D73), so prose alone was refused and the reader was sent round again (six refusals of one
+  request on 2026-10-31 and two of another on 2026-10-30, as stated by the request). The title, summary,
+  assumptions, out-of-scope list, defaults, reasons, question, departures and `behavior` criteria are no longer
+  scanned, so no reading is newly refused. Alternatives rejected: scanning every criterion, removing the check,
+  and exempting single requests. Open gap, named in D153: the title, summary and criterion texts reach landing
+  commit messages and the pull request title, which no scan covers; a follow-up could clean them at those sinks.
 - The ontology test compares each term in `docs/ontology.toml` with the sources that govern it (D152). Root cause:
   content was checked for structure, not against sources (job 20261017-173508-0wtc seeded it, and job
   20261025-214509-y179 asked for the check), and the check added in job 20261027-054251-33v7 had an unbounded
