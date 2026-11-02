@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Slowest-test-binary speedup not done: the ten slowest test binaries could not be listed. The job needed the
+  "finished in" lines from the six shard logs of the newest green CI run on main, and the job's tooling cannot
+  reach GitHub (`gh` is not available to it), so no run id or per-binary time was read. No code changed, and
+  no time is guessed here. `xtask/shard-timings.txt` holds estimates only, so it is not a substitute. Rerun the
+  job with access to the CI logs.
+
 - The reading check refuses a boundary word only in a deliverable path or a `content` acceptance criterion, the
   places a word can reach a tracked file (D153). Root cause: `check_boundary_and_repo_files` scanned every text
   field, but a reading is a record outside the policy scan and the writer already gets the word list and runs the
