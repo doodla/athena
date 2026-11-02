@@ -520,9 +520,18 @@ fn every_test_named_in_the_enforcement_map_exists() {
 // CI reuses an earlier pass (docs/decisions.md D121): the `gate` job looks it up, `fmt`, `clippy` and `test`
 // skip on a hit, and the `pass` job writes the marker only after all three succeeded.
 
+/// The text of ci.yml.
+fn ci_yml() -> String {
+    std::fs::read_to_string(root().join(".github/workflows/ci.yml")).unwrap()
+}
+
 /// The text of the job `<id>:` in ci.yml, from its key line up to the next two-space-indent key.
 fn job_text(id: &str) -> String {
-    let text = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).unwrap();
+    job_text_in(&ci_yml(), id)
+}
+
+/// `job_text` over a given workflow text, so a test can run a check on an altered copy of ci.yml.
+fn job_text_in(text: &str, id: &str) -> String {
     let start = text
         .find(&format!("\n  {id}:\n"))
         .unwrap_or_else(|| panic!("no job {id}"))
@@ -544,9 +553,13 @@ fn job_text(id: &str) -> String {
 
 /// The steps of the job `<id>`, each as its text (name line included, comment lines left out).
 fn job_steps(id: &str) -> Vec<String> {
-    let text = job_text(id);
+    job_steps_in(&ci_yml(), id)
+}
+
+/// `job_steps` over a given workflow text.
+fn job_steps_in(text: &str, id: &str) -> Vec<String> {
     let mut steps: Vec<String> = Vec::new();
-    for line in text.lines().skip(1) {
+    for line in job_text_in(text, id).lines().skip(1) {
         if line.starts_with("      - ") {
             steps.push(String::new());
         }
@@ -624,6 +637,390 @@ fn the_checks_job_looks_up_its_earlier_pass_before_setup_and_skips_on_a_hit() {
             "{id}"
         );
     }
+}
+
+/// Every job that runs the setup step; each must restore the gitleaks and athena binary caches before it.
+const SETUP_JOBS: [&str; 6] = ["fmt", "clippy", "test", "history", "attribution", "pr-head"];
+
+/// What is wrong with a job's steps: the setup step runs without a restore step for each tool cache (gitleaks
+/// and the athena binary, `actions/cache/restore`, keyed with `hashFiles`) before it.
+fn tool_cache_problems(steps: &[String]) -> Vec<String> {
+    let Some(setup) = steps
+        .iter()
+        .position(|s| s.contains("name: Set up (pinned toolchain, gitleaks, athena)"))
+    else {
+        return vec!["no setup step".to_string()];
+    };
+    let mut problems = Vec::new();
+    for (cache, path) in [
+        ("gitleaks", "tools/gitleaks"),
+        ("athena binary", "athena/bin"),
+    ] {
+        let restore = steps.iter().position(|s| {
+            s.contains("actions/cache/restore@") && s.contains(path) && s.contains("hashFiles(")
+        });
+        match restore {
+            None => problems.push(format!("no restore step for the {cache} cache")),
+            Some(i) if i > setup => problems.push(format!(
+                "the {cache} cache is restored after the setup step"
+            )),
+            Some(_) => {}
+        }
+    }
+    problems
+}
+
+/// Checks every job in `SETUP_JOBS` of the workflow text `yml` with `tool_cache_problems`.
+fn check_restore_before_setup(yml: &str) -> Result<(), String> {
+    let problems: Vec<String> = SETUP_JOBS
+        .iter()
+        .flat_map(|id| {
+            tool_cache_problems(&job_steps_in(yml, id))
+                .into_iter()
+                .map(move |p| format!("{id}: {p}"))
+        })
+        .collect();
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("; "))
+    }
+}
+
+#[test]
+fn every_job_restores_the_tool_caches_before_it_runs_the_setup_step() {
+    assert_eq!(check_restore_before_setup(&ci_yml()), Ok(()));
+    // The three check jobs also save both caches, on the default branch only and not after an exact hit.
+    for id in CHECK_JOBS {
+        let steps = job_steps(id);
+        for (name, hit) in [
+            ("Save the gitleaks cache", "cache-gitleaks"),
+            ("Save the athena binary cache", "cache-athena"),
+        ] {
+            let save = &steps[step_index(&steps, name)];
+            assert!(save.contains("actions/cache/save@"), "{id}: {name}");
+            assert!(save.contains(DEFAULT_BRANCH_ONLY), "{id}: {name}");
+            assert!(
+                save.contains("github.event_name != 'pull_request'"),
+                "{id}: {name}"
+            );
+            assert!(
+                save.contains(&format!("steps.{hit}.outputs.cache-hit != 'true'")),
+                "{id}: {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_tool_cache_check_fails_when_a_restore_is_missing_or_after_setup() {
+    let yml = ci_yml();
+    for job in SETUP_JOBS {
+        for name in [
+            "Restore the gitleaks cache",
+            "Restore the athena binary cache",
+        ] {
+            // Removing a restore step from the job is caught, and names the job.
+            let (without, step) = take_step(&yml, job, name);
+            let err = check_restore_before_setup(&without).unwrap_err();
+            assert!(err.contains(&format!("{job}: no restore step")), "{err}");
+            // Moving it after the setup step is caught too.
+            let moved = put_step_after(&without, job, "Set up", &step);
+            let err = check_restore_before_setup(&moved).unwrap_err();
+            assert!(
+                err.contains(&format!("{job}: ")) && err.contains("restored after the setup step"),
+                "{err}"
+            );
+        }
+    }
+    // A restore without a hashed key does not count.
+    let unkeyed = yml.replace("hashFiles(", "noHash(");
+    assert!(check_restore_before_setup(&unkeyed).is_err());
+    // A job with no setup step is reported too.
+    assert!(!tool_cache_problems(&[]).is_empty());
+}
+
+/// The byte range of the step of job `job` whose name starts with `name_part`: from its `- name:` line to just
+/// before the next step, comment line or job.
+fn step_span(yml: &str, job: &str, name_part: &str) -> std::ops::Range<usize> {
+    let job_start = yml
+        .find(&format!("\n  {job}:\n"))
+        .unwrap_or_else(|| panic!("no job {job}"));
+    let marker = format!("\n      - name: {name_part}");
+    let start = job_start
+        + 1
+        + yml[job_start..]
+            .find(&marker)
+            .unwrap_or_else(|| panic!("no step {name_part} in {job}"));
+    // The step ends at the first later line that is not indented under its `- name:` line.
+    let mut end = yml.len();
+    let mut pos = start;
+    for (i, line) in yml[start..].split_inclusive('\n').enumerate() {
+        if i > 0 && !line.starts_with("        ") {
+            end = pos;
+            break;
+        }
+        pos += line.len();
+    }
+    start..end
+}
+
+/// `yml` without the named step of `job`, and the step's text.
+fn take_step(yml: &str, job: &str, name_part: &str) -> (String, String) {
+    let span = step_span(yml, job, name_part);
+    let step = yml[span.clone()].to_string();
+    (format!("{}{}", &yml[..span.start], &yml[span.end..]), step)
+}
+
+/// `yml` with `step` inserted right after the step of `job` named `after_part`.
+fn put_step_after(yml: &str, job: &str, after_part: &str, step: &str) -> String {
+    let at = step_span(yml, job, after_part).end;
+    format!("{}{}{}", &yml[..at], step, &yml[at..])
+}
+
+// --------------------------------------------------------------------------------------------------------
+// The athena binary cache key covers every file the binary is built from. `xtask build-inputs` prints the one
+// list (`BUILD_INPUT_GLOBS` in xtask/src/main.rs) that `inputs_digest` hashes; the `athena-bin` key in ci.yml
+// must hash exactly that list, and the list must cover every file found independently below.
+
+/// The globs `xtask build-inputs` prints.
+fn build_input_globs() -> Vec<String> {
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("build-inputs")
+        .output()
+        .expect("run xtask build-inputs");
+    assert!(out.status.success(), "xtask build-inputs failed");
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// `dir/**` names every file under `dir`; any other glob names one file.
+fn covers(glob: &str, path: &str) -> bool {
+    match glob.strip_suffix("/**") {
+        Some(dir) => path.starts_with(&format!("{dir}/")),
+        None => glob == path,
+    }
+}
+
+/// `a/b/../c` as `a/c`, for a path relative to the repository root.
+fn normalize(path: &Path) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            std::path::Component::Normal(p) => parts.push(p.to_string_lossy().into_owned()),
+            _ => {}
+        }
+    }
+    parts.join("/")
+}
+
+fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// Every file the athena binary is built from, found independently of the xtask list: the targets of the
+/// `include_str!` and `include_bytes!` literals in production code under `crates/` and `xtask/` (a file under
+/// `src/`, not `tests.rs` or `*_tests.rs`, and before its first `#[cfg(test)]` line), plus the manifests and
+/// `setup.sh`. Test-only includes (the README, the changelog, design documents) never reach the binary, so they
+/// are not counted.
+///
+/// The limit: an include after an early `#[cfg(test)]` item, or a path built with `concat!`, would be missed;
+/// the xtask list and the exact-match check on the key still cover the directories around them.
+fn compiled_in_files() -> BTreeSet<String> {
+    let include = Regex::new(r#"include_(?:str|bytes)!\(\s*"([^"]+)"\s*\)"#).unwrap();
+    let root = root();
+    let mut files = Vec::new();
+    for top in ["crates", "xtask"] {
+        rust_files(&root.join(top), &mut files);
+    }
+    let mut found = BTreeSet::new();
+    for file in files {
+        let rel = file.strip_prefix(&root).unwrap();
+        let name = rel.file_name().unwrap().to_string_lossy();
+        let production = rel.components().any(|c| c.as_os_str() == "src")
+            && name != "tests.rs"
+            && !name.ends_with("_tests.rs");
+        if !production {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        let production_text = text.split("#[cfg(test)]").next().unwrap();
+        for cap in include.captures_iter(production_text) {
+            let target = rel.parent().unwrap().join(&cap[1]);
+            found.insert(normalize(&target));
+        }
+    }
+    for manifest in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "setup.sh",
+    ] {
+        found.insert(manifest.to_string());
+    }
+    for entry in std::fs::read_dir(root.join("crates")).unwrap() {
+        let manifest = entry.unwrap().path().join("Cargo.toml");
+        if manifest.is_file() {
+            found.insert(normalize(manifest.strip_prefix(&root).unwrap()));
+        }
+    }
+    found.insert("xtask/Cargo.toml".to_string());
+    found
+}
+
+/// The globs inside the `hashFiles(...)` of one `key:` line.
+fn hash_files_globs(line: &str) -> Vec<String> {
+    let args = Regex::new(r"hashFiles\(([^)]*)\)").unwrap();
+    let glob = Regex::new(r"'([^']*)'").unwrap();
+    args.captures_iter(line)
+        .flat_map(|c| {
+            glob.captures_iter(&c[1])
+                .map(|g| g[1].to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// What is wrong with the `athena-bin` cache keys in the workflow text `yml`: each (restore and save) must hash
+/// exactly `listed` and so cover every path in `required`. Err names each problem; Ok needs at least one key.
+fn check_athena_bin_keys(
+    yml: &str,
+    listed: &[String],
+    required: &BTreeSet<String>,
+) -> Result<(), String> {
+    let keys: Vec<(usize, &str)> = yml
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.trim_start().starts_with("key: athena-bin-"))
+        .collect();
+    if keys.is_empty() {
+        return Err("ci.yml has no athena-bin cache key".to_string());
+    }
+    let mut problems = Vec::new();
+    let want: BTreeSet<&String> = listed.iter().collect();
+    for (n, line) in keys {
+        let globs = hash_files_globs(line);
+        let have: BTreeSet<&String> = globs.iter().collect();
+        if have != want {
+            problems.push(format!(
+                "line {}: the key hashes {globs:?}, not the xtask list {listed:?}",
+                n + 1
+            ));
+        }
+        for path in required {
+            if !globs.iter().any(|g| covers(g, path)) {
+                problems.push(format!("line {}: the key does not cover {path}", n + 1));
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("; "))
+    }
+}
+
+#[test]
+fn athena_bin_keys_cover_every_compiled_in_file() {
+    let listed = build_input_globs();
+    assert_eq!(listed.len(), 9, "{listed:?}");
+    let required = compiled_in_files();
+    // The scan must find the files that went missing in the rejected attempt, or it checks nothing.
+    for path in [
+        "crates/athena-context/prompts/producer.md",
+        "crates/athena-cap-change/prompts/verifier.md",
+        "crates/athena-cap-study/prompts/producer.md",
+        "docs/system-facts.md",
+        "athena.toml",
+        "crates/athena-core/Cargo.toml",
+        "xtask/Cargo.toml",
+        "setup.sh",
+    ] {
+        assert!(
+            required.contains(path),
+            "the scan misses {path}: {required:?}"
+        );
+    }
+    for path in &required {
+        assert!(
+            root().join(path).exists(),
+            "{path} is named by an include but does not exist"
+        );
+    }
+    let yml = ci_yml();
+    assert_eq!(check_athena_bin_keys(&yml, &listed, &required), Ok(()));
+    // Six restore steps (one per job that sets up) and three save steps.
+    let keys = yml
+        .lines()
+        .filter(|l| l.trim_start().starts_with("key: athena-bin-"))
+        .count();
+    assert_eq!(keys, SETUP_JOBS.len() + CHECK_JOBS.len());
+}
+
+#[test]
+fn a_stale_or_incomplete_ci_yml_is_flagged() {
+    let listed = build_input_globs();
+    let required = compiled_in_files();
+    let yml = ci_yml();
+    // One key without docs/system-facts.md.
+    let no_facts = yml.replacen(", 'docs/system-facts.md'", "", 1);
+    assert_ne!(no_facts, yml);
+    let err = check_athena_bin_keys(&no_facts, &listed, &required).unwrap_err();
+    assert!(err.contains("docs/system-facts.md"), "{err}");
+    // One key without another glob.
+    let no_crates = yml.replacen("'crates/**', ", "", 1);
+    assert_ne!(no_crates, yml);
+    assert!(check_athena_bin_keys(&no_crates, &listed, &required).is_err());
+    // A key that spells the old, narrower list.
+    let narrow = yml.replacen("'crates/**'", "'crates/**/*.rs'", 1);
+    assert!(check_athena_bin_keys(&narrow, &listed, &required).is_err());
+    // A compiled-in file that no glob covers (a new prompt outside crates/, or a second doc) is reported, while
+    // one under crates/ is covered by `crates/**`.
+    let mut outside = required.clone();
+    outside.insert("docs/new-compiled-in.md".to_string());
+    let err = check_athena_bin_keys(&yml, &listed, &outside).unwrap_err();
+    assert!(err.contains("docs/new-compiled-in.md"), "{err}");
+    let mut inside = required.clone();
+    inside.insert("crates/x/prompts/new.md".to_string());
+    assert_eq!(check_athena_bin_keys(&yml, &listed, &inside), Ok(()));
+    // No athena-bin key at all.
+    assert!(check_athena_bin_keys("jobs:\n", &listed, &required).is_err());
+    // A restore step removed, or placed after the setup step.
+    let (without, step) = take_step(&yml, "fmt", "Restore the athena binary cache");
+    assert!(check_restore_before_setup(&without).is_err());
+    let after = put_step_after(&without, "fmt", "Set up", &step);
+    assert!(check_restore_before_setup(&after).is_err());
+    assert_eq!(check_restore_before_setup(&yml), Ok(()));
+}
+
+#[test]
+fn every_action_is_pinned_by_a_full_commit_sha() {
+    let pinned = Regex::new(r"^\s*(?:- )?uses: \S+@[0-9a-f]{40}(?:\s+#.*)?$").unwrap();
+    let mut seen = 0;
+    for line in ci_yml().lines().filter(|l| l.contains("uses:")) {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        seen += 1;
+        assert!(
+            pinned.is_match(line),
+            "not pinned by a 40-character SHA: {line}"
+        );
+    }
+    assert!(seen > 20, "{seen} uses: lines");
 }
 
 #[test]

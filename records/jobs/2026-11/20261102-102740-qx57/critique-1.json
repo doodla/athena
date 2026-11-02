@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261102-102740-qx57",
+  "round": 1,
+  "at": "2026-11-02T10:34:49.254935308Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "BUILD_PATHS in status.rs is a second list that also leaves out compiled-in files, and the plan does not name it.",
+      "evidence": "BUILD_PATHS = crates/, xtask/, Cargo.toml, Cargo.lock, setup.sh. stale_build and drain.rs rebuild_due use it, and it leaves out athena.toml, defaults.toml, docs/system-facts.md and rust-toolchain.toml. briefs.rs:1230 compiles in docs/system-facts.md, and athena-gate lib.rs:33 compiles in athena.toml. Fix: Name it as the same root cause outside scope, and propose a follow-up: derive BUILD_PATHS from the same input set, or add a policy test that checks it covers the scanned set.",
+      "location": "Plan, Risks (crates/athena-core/src/status.rs:20)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Save steps recompute hashFiles over crates/** after the job runs, so a file a job writes there makes the save key differ from the restore key.",
+      "evidence": "The existing saves recompute keys over Cargo.lock and rust-toolchain.toml only, which no job changes. With crates/** and xtask/**, any file a test or check leaves there changes the save key, and the saved entry is never hit. The stamp still prevents a stale binary, so this costs cache hits, not correctness. Fix: Use steps.cache-athena-bin.outputs.cache-primary-key as the save key, or save only from fmt. Adjust the policy check to match.",
+      "location": "Plan, Step 8 (athena-bin save keys)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Treating every include after the first #[cfg(test)] line as test-only is a coarse heuristic.",
+      "evidence": "A `#[cfg(test)] mod tests;` near the top of a file would hide every production include after it. On today's files the rule gives the right set: briefs.rs:1230 is before 1933 and gate lib.rs:33 is before 387. Fix: Count an include as test-only only inside tests files or inside the brace span of a `#[cfg(test)] mod … {` block. Or say why rustc's dep-info (target/*/athena.d) was not used.",
+      "location": "Plan, Decision 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan rejects saving from every job because of a race, but saves from four parallel jobs.",
+      "evidence": "fmt, clippy, test shard 0 and history all save the same key, which is the race the existing shared caches already accept. Fix: Reword the rationale to say the race is accepted, or save each new cache from one job.",
+      "location": "Plan, Decision 6",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The criterion 4 test uses a synthetic tree, not a copy of the real one.",
+      "evidence": "The criterion says 'a temp copy of the tree'. The policy test separately shows the real files fall under the globs, so the criterion is still shown. Fix: Optionally copy the real prompt and docs/system-facts.md into the temp tree.",
+      "location": "Plan, Demonstration for criterion 4 (a)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read xtask/src/main.rs, the include_str! sites under crates/, the #[cfg(test)] positions in the files that include them, crates/athena-data/src/paths.rs, crates/athena-core/src/status.rs, the structure of .github/workflows/ci.yml, and the CARGO_BIN_EXE_xtask use in xtask/tests. The plan fits the reading. The names it relies on exist: build_and_adopt (main.rs:357), install_gitleaks with its early return, job_text and job_steps in policy.rs, and CARGO_BIN_EXE_xtask in four xtask tests. athena_home defaults to ~/.local/share/athena, and ci.yml has every 'Set up' step the plan names. One const in main.rs is read by the digest and, through a `build-inputs` subcommand, by the policy test, which removes the two-lists drift behind the rejected job. Each demonstration has a real seam: the pure check functions on the real and mutated ci.yml, and inputs_digest, can_skip_build and rebuild_stamped with only the cargo build injected. Each would fail without the behavior. The stamp design (delete before build, write after success) closes the stale-stamp finding. There are no blocker or major findings. The minor findings: BUILD_PATHS in status.rs is a second, narrower list with the same gap and should be named as an out-of-scope root cause; save keys that recompute hashFiles over crates/** after the job runs can stop the cache from ever hitting; the #[cfg(test)] heuristic could be tighter. The plan fits one producer run."
+}

@@ -9,6 +9,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- CI caches what its setup step installs, so a warm runner restores instead of reinstalling. Two new
+  `actions/cache` entries are restored before `./setup.sh --ci` in every job that runs it: gitleaks, keyed on
+  runner OS, architecture and `hashFiles('athena.toml')` (the pin lives there); and the athena binary, keyed on
+  runner OS, architecture and `hashFiles` of nine globs: `crates/**`, `xtask/**`, `rust-toolchain.toml`,
+  `Cargo.toml`, `Cargo.lock`, `athena.toml`, `defaults.toml`, `setup.sh` and `docs/system-facts.md`. That is every
+  file the binary is compiled from, including the prompts and `docs/system-facts.md`; other documents
+  (`CHANGELOG.md`, `README.md`, the rest of `docs/`) are not in the key. There is no restore-key fallback. The
+  list lives once, in `BUILD_INPUT_GLOBS` in `xtask/src/main.rs` (print it with `cargo run -p xtask --
+  build-inputs`); the key, the build skip's digest and the policy test all read it. fmt, clippy and test shard 0
+  save the entries, on the default branch only and not after an exact hit; history, attribution and pr-head
+  restore only. `setup --ci` skips the gitleaks install when the cached copy reports the pinned version, and skips
+  the athena build when `--ci` is given, a binary is adopted and a stamp beside it equals the digest of the same
+  inputs; each skip is printed. Every other setup removes the stamp, builds, and writes it only after the build
+  succeeds, so a plain setup never leaves a stale stamp. The skip runs before the dirty-tree refusal, which a CI
+  checkout does not need; a local setup never skips. Xtask policy tests fail if an `athena-bin` key differs from
+  the list or misses a file found through `include_str!` and `include_bytes!`, or if a job runs the setup step
+  without both restore steps before it. A pull request that changes `crates/` or `xtask/` still rebuilds, because
+  only the default branch saves. KNOWN EFFECT: a restored binary reports the source commit of the run that built
+  it; the jobs that use it only run read-only checks. The speed-up on GitHub Actions is not measured here; the
+  throughput review measures it.
 - A producer's work is kept when it reaches its deadline, and `athena retry` resumes from it. At the deadline
   Athena now commits the producer's changed files as a candidate in the repository (the same commit shape as any
   candidate, not on a branch), records it in the job's `candidate.json` and outcome, and closes the job

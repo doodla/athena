@@ -1,0 +1,166 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-172040-kq9v",
+  "n": 1,
+  "at": "2026-11-02T09:36:53.027729985Z",
+  "invocation_seq": 2,
+  "base_commit": "7bd7e81c55d036852fd55d46ce97cf5dc856b9ed",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Cache gitleaks and the athena binary across CI runs",
+  "summary": "Goal: cut the 65 to 105 s the 'Set up' step spends in each fmt, clippy and test-shard job, for the CI maintainers and the later throughput review. Add actions/cache restore and default-branch-only save steps for gitleaks and the athena binary, make `setup.sh --ci` skip a matching cached install, and add an xtask policy test that enforces the restore-before-setup order.",
+  "class_of_work": "build",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The skip logic and the policy test are Rust in xtask; setup.sh stays a thin shell shim."
+    },
+    {
+      "id": "tested",
+      "how": "The skip decision and the ci.yml policy are covered by tests, and fmt, clippy -D warnings and cargo test must pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "The restore-before-setup rule is enforced by an xtask policy test, not by prose."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that the skip happens and that the policy test fails on a bad ci.yml, not only that steps exist."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the CI caching path."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test, clippy and fmt --check, and reads ci.yml."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is that a warm runner restores instead of reinstalling, checked through the ci.yml keys and the skip tests. The real time saved is left to the throughput review."
+    },
+    {
+      "id": "strangers",
+      "how": "ci.yml comments and the CHANGELOG entry explain the keys for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read .github/workflows/ci.yml, setup.sh and xtask/src/main.rs (install_gitleaks, build_and_adopt). setup.sh ends with `exec cargo run ... -p xtask -- setup \"$@\"`. xtask setup runs prerequisites, `cargo fetch`, install_gitleaks, a sccache step that is skipped under --ci, then build_and_adopt, which builds the athena-cli package (crates/athena-cli) in release mode and copies it to the athena home bin/athena. It also symlinks ~/.local/bin/athena. No crates/ record or data file is added, so check_record_file and AnyRecord are not touched.",
+    "The install logic lives in xtask/src/main.rs, not in setup.sh. So the skip behaviour for 'setup.sh --ci skips an install whose cached copy is present and matches' is probably implemented there, and xtask/src/main.rs is listed as a likely deliverable. setup.sh may need only a small change or none, and the request's file list is not exhaustive.",
+    "install_gitleaks already returns early when the pinned version is present and `gitleaks version` matches. The restored cache therefore only needs to put the binary at paths::tool_path. build_and_adopt always runs cargo build and embeds ATHENA_BUILD_COMMIT, so the new --ci skip must be keyed on the inputs of the binary (Cargo.lock, rust-toolchain.toml, athena.toml, and the sources under crates/ and xtask/). It must also still link ~/.local/bin/athena, which the history, attribution and pr-head jobs run.",
+    "Cache keys: gitleaks keyed on hashFiles('athena.toml') plus runner OS and architecture, because the pin lives there. The athena binary is keyed on hashFiles of rust-toolchain.toml, Cargo.lock, Cargo.toml, crates/**/*.rs and xtask/**/*.rs, with no restore-keys fallback, so a stale binary is never used.",
+    "Restore steps go before the 'Set up' step in every job that runs it: fmt, clippy, the test shards, history, attribution and pr-head. Save steps keep the existing guard (not a pull request and the default branch). Test shards save from shard 0 only, as the existing caches do. All actions stay pinned to the existing actions/cache SHA. The real speed-up is not measurable here, so the throughput review measures it later.",
+    "The policy test follows the existing job_text/job_steps/step_index helpers in xtask/tests/policy.rs. CHANGELOG.md gets one entry. athena.toml, defaults.toml and setup.sh's pins are not edited."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Grep of .github/workflows/ci.yml: in each of the fmt, clippy and test jobs, an actions/cache/restore step for gitleaks and one for the athena binary come before the step named 'Set up (pinned toolchain, gitleaks, athena)'. Each key uses hashFiles over the files that decide the install. Every `uses:` line is still pinned by a 40-character SHA.",
+      "kind": "content"
+    },
+    {
+      "text": "ci.yml has matching actions/cache/save steps for those two caches in the same jobs. Each carries the existing condition: not a pull request, ref equal to the default branch, and no exact cache hit. Neither cache is saved from any other event.",
+      "kind": "content"
+    },
+    {
+      "text": "The history, attribution and pr-head jobs that also run the setup step get the same restore step before it, or the diff states in a comment why they do not.",
+      "kind": "content"
+    },
+    {
+      "text": "With a cached gitleaks and athena binary present and matching, `./setup.sh --ci` skips both installs and prints that it skipped them. Without them it installs as before. Run `cargo test -p xtask`, which must include a test that exercises the skip and no-skip decisions.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The new test in xtask/tests/policy.rs reads ci.yml and passes on the changed file. A test that feeds it a ci.yml variant with the restore step removed or placed after the setup step makes it fail. Run `cargo test -p xtask --test policy`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test` all pass, including xtask/tests/ci_shards.rs and the existing policy tests.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry describing the gitleaks and athena binary caches and their keys, and stating that the speed-up is not measured here.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "xtask/tests/policy.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "setup.sh",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "xtask/tests/ci_shards.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Measuring the real time saved on GitHub Actions; the later throughput review does that.",
+    "Changing the toolchain, registry or target caches, the gate and pass logic, or the shard layout.",
+    "Changing athena.toml, defaults.toml, tool pins or action SHAs."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7203603603603603,
+      "p_verification_passes": 0.6679920477137177,
+      "p_user_intervenes": 0.09355432780847145,
+      "cost_usd": {
+        "p10": 0.4254379026407229,
+        "p50": 1.0902689310317983,
+        "p90": 3.2322078084904957
+      },
+      "wall_time_s": {
+        "p10": 396.34292578022394,
+        "p50": 1661.2160761328141,
+        "p90": 3954.433678478374
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass chance than the reference. Eight jobs need edits, the skip logic sits in xtask rather than setup.sh, and a stale-binary risk comes from the commit-embedded build.",
+  "urgent_reason": "Cuts duplicated installs: nine jobs per run repeat the same 65 to 105 s setup step."
+}
