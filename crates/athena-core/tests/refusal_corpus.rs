@@ -67,7 +67,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 16] = [
+const INPUT_FORMS: [&str; 17] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -84,6 +84,7 @@ const INPUT_FORMS: [&str; 16] = [
     "producer-report-evidence",
     "code-survey",
     "design-existing-code",
+    "boundary-word",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -567,6 +568,68 @@ fn reading_check_cases() -> Vec<Case> {
         "Read the GitHub/env-var settings of owner/repo and update docs/design/roadmap.md.".into();
     out.push(c);
 
+    out.extend(boundary_word_cases());
+    out
+}
+
+/// A boundary word, built from pieces so this file passes the boundary scan it exercises.
+fn banned_word() -> String {
+    ["oper", "ator"].concat()
+}
+
+/// Where a boundary word is refused: a deliverable path, or an acceptance criterion of kind `content`.
+/// Where it is not: prose in the record, such as the summary or an assumption.
+fn boundary_word_cases() -> Vec<Case> {
+    const SOURCE: &str = "request of job 20261031-215030-b0nv citing refusals on 2026-10-31 and 2026-10-30; rebuilt from the request";
+    let word = banned_word();
+    let request = "Stop refusing a reading over a boundary word in its prose.";
+    let mut out = Vec::new();
+    let mut c = case(
+        "boundary-word-in-the-summary",
+        SOURCE,
+        &["boundary-word"],
+        request,
+        0,
+        Expected::Accept,
+    );
+    c.reading.summary = format!("Ask the {word} to read the guide.");
+    out.push(c);
+    let mut c = case(
+        "boundary-word-in-an-assumption",
+        SOURCE,
+        &["boundary-word"],
+        request,
+        0,
+        Expected::Accept,
+    );
+    c.reading.assumptions = vec![format!("The {word} reads the guide.")];
+    out.push(c);
+    let mut c = case(
+        "boundary-word-in-a-deliverable-path",
+        SOURCE,
+        &["boundary-word"],
+        request,
+        0,
+        Expected::Refuse("check_boundary_and_repo_files"),
+    );
+    c.reading.deliverables = vec![deliverable(
+        &format!("docs/{word}.md"),
+        DeliverableAction::Create,
+    )];
+    out.push(c);
+    let mut c = case(
+        "boundary-word-in-a-content-criterion",
+        SOURCE,
+        &["boundary-word"],
+        request,
+        0,
+        Expected::Refuse("check_boundary_and_repo_files"),
+    );
+    c.reading.acceptance_criteria.push(Criterion {
+        text: format!("docs/guide.md says: ask the {word} to read it"),
+        kind: CriterionKind::Content,
+    });
+    out.push(c);
     out
 }
 

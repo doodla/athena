@@ -1,4 +1,25 @@
 //! `ask` and `correct`: the reader's reading, with forecasts, committed before any work (design §3.2–3.3).
+//!
+//! # Where a reading is checked for boundary words
+//!
+//! [`check_boundary_and_repo_files`] runs the boundary scan on two places only: every deliverable path, and
+//! every acceptance criterion of kind `content` (text that says what a file must hold). It does not scan the
+//! title, summary, assumptions, out-of-scope list, defaults applied, the decline, hard and urgent reasons,
+//! the question, the departures or `behavior` criteria.
+//!
+//! Why: the risk the check guards against is a word reaching a tracked file. A reading is a record, records
+//! are outside the boundary scan the policy test runs, and the writer already gets the word list and runs
+//! that scan on its own files (D73). A word in prose therefore cannot fail a file check, and refusing it only
+//! sent the reader round again (D153 cites the refusals). A deliverable path becomes a file name and a
+//! `content` criterion tells the writer what to write, so a word there can reach a file and is still refused.
+//!
+//! Limits, stated so no one assumes more cover than there is: criterion kind is an imperfect signal (a
+//! `content` criterion that only describes a document is still scanned; a `behavior` criterion that quotes
+//! output is not, and the writer's scan and the policy scan at verification catch a word that reaches a
+//! tracked file). The title, summary and criterion texts also reach landing commit messages and the pull
+//! request title, and no scan covers those; D153 records that gap and the proposed follow-up.
+//!
+//! The scan of a user's own request text is a different check and is unchanged.
 
 use crate::admission::{governance_change_is_listed, is_governance};
 use crate::capability::{JobConfig, ToolGrant};
@@ -2704,38 +2725,25 @@ fn names_path_token(item: &str, token: &str) -> bool {
     })
 }
 
-/// The free-text fields of a reading, each with the label a refusal names it by. The deliverable paths are
-/// not here: [`check_boundary_and_repo_files`] scans them as paths.
-fn reading_text_fields(reading: &Reading) -> Vec<(String, &str)> {
-    let mut fields: Vec<(String, &str)> = vec![
-        ("title".into(), reading.title.as_str()),
-        ("summary".into(), reading.summary.as_str()),
-    ];
-    let optional = [
-        ("decline_reason", &reading.decline_reason),
-        ("question", &reading.question),
-        ("departures", &reading.departures),
-        ("hard_reason", &reading.hard_reason),
-        ("urgent_reason", &reading.urgent_reason),
-    ];
-    for (label, value) in optional {
-        if let Some(text) = value {
-            fields.push((label.into(), text.as_str()));
-        }
-    }
-    for (i, text) in reading.assumptions.iter().enumerate() {
-        fields.push((format!("assumptions[{i}]"), text.as_str()));
-    }
-    for (i, text) in reading.out_of_scope.iter().enumerate() {
-        fields.push((format!("out_of_scope[{i}]"), text.as_str()));
-    }
-    for (i, criterion) in reading.acceptance_criteria.iter().enumerate() {
-        fields.push((format!("acceptance_criteria[{i}]"), criterion.text.as_str()));
-    }
-    for (i, default) in reading.defaults_applied.iter().enumerate() {
-        fields.push((format!("defaults_applied[{i}]"), default.how.as_str()));
-    }
-    fields
+/// The fields of a reading whose text can tell the writer what to put into a tracked file: the acceptance
+/// criteria of kind `content`, each with the label a refusal names it by. The deliverable paths are not here:
+/// [`check_boundary_and_repo_files`] scans them as paths.
+///
+/// A `content` criterion describes what a file must say, so a boundary word in it can be copied into a file.
+/// A `behavior` criterion names a command to run or a result to observe. The title, summary, assumptions,
+/// out-of-scope list, defaults and the reasons and question are prose in a record, and records are outside the
+/// policy scan, so they are not listed. Criterion kind is an imperfect signal in two ways: a `content`
+/// criterion that describes a document without quoting text is still scanned, and a `behavior` criterion that
+/// quotes output is not (the writer's own scan and the policy scan at verification then catch a word that
+/// reaches a tracked file).
+fn file_bound_text_fields(reading: &Reading) -> Vec<(String, &str)> {
+    reading
+        .acceptance_criteria
+        .iter()
+        .enumerate()
+        .filter(|(_, criterion)| criterion.kind == CriterionKind::Content)
+        .map(|(i, criterion)| (format!("acceptance_criteria[{i}]"), criterion.text.as_str()))
+        .collect()
 }
 
 /// Whether `path` is a file in `files`, or a directory with at least one file under it.
@@ -2750,8 +2758,8 @@ fn path_exists_in(files: &BTreeSet<String>, path: &str) -> bool {
         .is_some_and(|f| f.starts_with(&prefix))
 }
 
-/// Refuses a reading whose text holds a word the boundary scan rejects, or whose deliverables disagree with
-/// the files at the base commit.
+/// Refuses a reading whose deliverable paths or `content` acceptance criteria hold a word the boundary scan
+/// rejects, or whose deliverables disagree with the files at the base commit.
 ///
 /// Root cause: a reading was checked only for the previous result and change scope, the evidence each
 /// criterion rests on, the code survey and the governance files. Nothing compared its text with the boundary
@@ -2761,7 +2769,16 @@ fn path_exists_in(files: &BTreeSet<String>, path: &str) -> bool {
 /// calls no model; it runs last in [`check_reading_acceptance`], so a refusal reaches the reader as its one
 /// correction, as the other refusals do.
 ///
-/// Every free-text field and every deliverable path goes through `athena_context::briefs::boundary_scan`.
+/// Only the places a word can reach a tracked file go through `athena_context::briefs::boundary_scan`: every
+/// deliverable path, and every acceptance criterion of kind `content` (text that says what a file must hold;
+/// see [`file_bound_text_fields`]). Not scanned: the title, summary, assumptions, out-of-scope list, defaults
+/// applied, the decline, hard and urgent reasons, the question, the departures and `behavior` criteria. A
+/// reading is a record, records are outside the boundary scan the policy test runs, and the writer already
+/// gets the word list and runs that scan on its own files (D73), so a word in prose cannot fail a file check
+/// and refusing it only sent the reader round again (D153). The title, summary and criterion texts also
+/// reach landing commit messages and the pull request title, which no scan covers; that gap is recorded in
+/// D153, not closed here.
+///
 /// `repo_files` is the set of file paths at the base commit. When it is `Some`
 /// and the reading is a change with no open question, a `modify` or `delete` of a path that is neither a file
 /// nor a directory holding files is refused, and so is a `create` of a path that is already a file. A
@@ -2773,7 +2790,7 @@ pub fn check_boundary_and_repo_files(
     repo_files: Option<&BTreeSet<String>>,
 ) -> Result<()> {
     let mut problems: Vec<String> = Vec::new();
-    for (label, text) in reading_text_fields(reading) {
+    for (label, text) in file_bound_text_fields(reading) {
         for hit in athena_context::briefs::boundary_scan(text) {
             problems.push(format!("{label}: the banned word {:?}", hit.term));
         }
@@ -2827,14 +2844,17 @@ pub fn check_boundary_and_repo_files(
     let word_problems = problems.len() - path_problems;
     let repair = match (word_problems > 0, path_problems > 0) {
         (true, true) => {
-            "reword the text without the banned words, and make each deliverable's action match the files"
+            "reword the deliverable path or content acceptance criterion without the banned words, and \
+             make each deliverable's action match the files"
         }
-        (true, false) => "reword the text without the banned words",
+        (true, false) => {
+            "reword the deliverable path or content acceptance criterion without the banned words"
+        }
         _ => "make each deliverable's action match the files at the base commit",
     };
     bail!(
-        "the reading was refused because its text or deliverables fail a check Athena runs on every \
-         reading: {}; {repair}",
+        "the reading was refused because its deliverable paths, content acceptance criteria or \
+         deliverables fail a check Athena runs on every reading: {}; {repair}",
         problems.join("; ")
     )
 }
@@ -3006,8 +3026,8 @@ pub fn check_reading_references(
 /// retried or followed-up job ([`check_prior_result_and_scope`]), then the evidence each criterion rests on
 /// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
 /// rests on ([`check_code_survey`]), then the governance files the outcome needs
-/// ([`check_governance_coverage`]), then the reading's text against the boundary words and its deliverables
-/// against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
+/// ([`check_governance_coverage`]), then the deliverable paths and `content` criteria against the boundary
+/// words and the deliverables against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
 /// there is no repository to compare with), then the repo paths its text relies on against the same files
 /// ([`check_reading_references`]). It applies to a first attempt as well as a retry. It runs
 /// [`refusing_check`] and drops the name of the check that refused.
@@ -6988,27 +7008,14 @@ mod tests {
     }
 
     #[test]
-    fn a_reading_whose_summary_holds_a_boundary_word_is_refused_and_the_word_is_named() {
+    fn a_boundary_word_in_prose_fields_is_accepted() {
         let word = banned_word();
         let mut reading = governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
         reading.summary = format!("Ask the {word} to approve it.");
-        let error = check_reading_acceptance(&reading, "add a greeting", None, &[], None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(&word), "{error}");
-        assert!(error.contains("summary"), "{error}");
-        // The same on the replay path and with a file set: the words do not depend on the repository.
-        assert!(matches!(
-            check_reading_text(&reading, "add a greeting"),
-            ReadingCheck::Refuse(_)
-        ));
+        reading.assumptions = vec![format!("The {word} reads the logo.")];
+        check_reading_acceptance(&reading, "add a greeting", None, &[], None).unwrap();
+        // The same with a file set, and on the replay path: the words do not depend on the repository.
         let files = files_at_head();
-        let error = check_reading_acceptance(&reading, "add a greeting", None, &[], Some(&files))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(&word), "{error}");
-        // Without the word the same reading is accepted.
-        reading.summary = "Ask the owner to approve it.".into();
         check_reading_acceptance(&reading, "add a greeting", None, &[], Some(&files)).unwrap();
         assert!(matches!(
             check_reading_text(&reading, "add a greeting"),
@@ -7017,55 +7024,91 @@ mod tests {
     }
 
     #[test]
-    fn a_boundary_word_in_any_text_field_or_path_is_refused_with_the_field_named() {
+    fn a_boundary_word_in_a_path_or_content_criterion_is_still_refused() {
+        let word = banned_word();
+        let fragment = banned_fragment();
+        for term in [&word, &fragment] {
+            // A deliverable path is scanned, and the error names the path and the word.
+            let path = format!("docs/{term}.md");
+            let reading = reading_with_deliverable(&path, DeliverableAction::Create);
+            let error = check_reading_acceptance(&reading, "add a greeting", None, &[], None)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&path) && error.contains(term.as_str()),
+                "{error}"
+            );
+            assert!(
+                error.contains("deliverable path or content acceptance criterion"),
+                "{error}"
+            );
+            // A content criterion is text to write into a file: scanned, and named by its label.
+            let mut reading = governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
+            reading.acceptance_criteria[0].text = format!("README.md says: the {term} decides.");
+            assert_eq!(reading.acceptance_criteria[0].kind, CriterionKind::Content);
+            let error = check_reading_acceptance(&reading, "add a greeting", None, &[], None)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("acceptance_criteria[0]"), "{error}");
+            assert!(error.contains(term.as_str()), "{error}");
+            assert!(
+                error.contains("deliverable path or content acceptance criterion"),
+                "{error}"
+            );
+            // The replay path refuses it too.
+            assert!(matches!(
+                check_reading_text(&reading, "add a greeting"),
+                ReadingCheck::Refuse(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn boundary_words_outside_paths_and_content_criteria_are_not_scanned() {
         let word = banned_word();
         let fragment = banned_fragment();
         type Edit = fn(&mut Reading, String);
-        let edits: [(&str, Edit); 9] = [
+        let edits: [(&str, Edit); 8] = [
             ("title", |r, t| r.title = t),
-            ("summary", |r, t| r.summary = t),
-            ("decline_reason", |r, t| r.decline_reason = Some(t)),
-            ("question", |r, t| r.question = Some(t)),
-            ("departures", |r, t| r.departures = Some(t)),
-            ("assumptions[0]", |r, t| r.assumptions = vec![t]),
             ("out_of_scope[0]", |r, t| r.out_of_scope = vec![t]),
-            ("acceptance_criteria[0]", |r, t| {
-                r.acceptance_criteria[0].text = t
-            }),
             ("defaults_applied[0]", |r, t| {
                 r.defaults_applied = vec![DefaultApplied {
                     id: "tested".into(),
                     how: t,
                 }]
             }),
+            ("departures", |r, t| r.departures = Some(t)),
+            ("hard_reason", |r, t| r.hard_reason = Some(t)),
+            ("urgent_reason", |r, t| r.urgent_reason = Some(t)),
+            ("behavior criterion", |r, t| {
+                r.acceptance_criteria[0].text = t;
+                r.acceptance_criteria[0].kind = CriterionKind::Behavior;
+            }),
+            ("assumptions[0]", |r, t| r.assumptions = vec![t]),
         ];
         for (field, edit) in edits {
             for text in [format!("The {word} decides."), format!("See {fragment}/x.")] {
                 let mut reading =
                     governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
-                edit(&mut reading, text.clone());
-                let error = check_reading_acceptance(&reading, "add a greeting", None, &[], None)
-                    .unwrap_err()
-                    .to_string();
-                assert!(error.contains(field), "{field}: {error}");
-                let term = if text.contains(&word) {
-                    &word
-                } else {
-                    &fragment
-                };
-                assert!(error.contains(term.as_str()), "{field}: {error}");
+                edit(&mut reading, text);
+                if let Err(error) =
+                    check_reading_acceptance(&reading, "add a greeting", None, &[], None)
+                {
+                    panic!("{field} was refused: {error}");
+                }
             }
         }
-        // A deliverable path is scanned too, and the error names it.
-        let path = format!("docs/{word}.md");
-        let reading = reading_with_deliverable(&path, DeliverableAction::Create);
-        let error = check_reading_acceptance(&reading, "add a greeting", None, &[], None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(&path) && error.contains(&word), "{error}");
-        // Words that only contain a banned word are not hits.
+        // A question and a decline name no change, so each is its own reading.
+        let mut asking = governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
+        asking.question = Some(format!("Which {word} do you mean?"));
+        check_reading_acceptance(&asking, "add a greeting", None, &[], None).unwrap();
+        let mut declined = governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
+        declined.capability = None;
+        declined.decline_reason = Some(format!("The {word} owns it."));
+        check_reading_acceptance(&declined, "add a greeting", None, &[], None).unwrap();
+        // Words that only contain a banned word are not hits in a scanned field either.
         let mut clean = governed_reading(&["README.md"], &["the greeting prints"], &["x"]);
-        clean.summary = "Cooperators accrue the opcode.".into();
+        clean.acceptance_criteria[0].text = "README.md says: cooperators accrue the opcode.".into();
         check_reading_acceptance(&clean, "add a greeting", None, &[], None).unwrap();
     }
 
@@ -7160,7 +7203,7 @@ mod tests {
         let files = files_at_head();
         let word = banned_word();
         let mut reading = reading_with_deliverable("docs/missing.md", DeliverableAction::Modify);
-        reading.summary = format!("The {word} decides.");
+        reading.acceptance_criteria[0].text = format!("README.md says: the {word} decides.");
         let error = check_reading_acceptance(&reading, "add a greeting", None, &[], Some(&files))
             .unwrap_err()
             .to_string();

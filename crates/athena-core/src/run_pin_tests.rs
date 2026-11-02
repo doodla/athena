@@ -1727,7 +1727,10 @@ fn a_reading_with_a_boundary_word_is_not_accepted_and_the_word_reaches_the_calle
         CountingPinner::new(FAKE_SHA),
         Arc::default(),
         reader_edits(
-            move |_, reading| reading["summary"] = json!(format!("Ask the {said} to read it.")),
+            move |_, reading| {
+                reading["acceptance_criteria"][0]["text"] =
+                    json!(format!("README.md says: ask the {said} to read it."))
+            },
             briefs.clone(),
         ),
     );
@@ -1736,7 +1739,7 @@ fn a_reading_with_a_boundary_word_is_not_accepted_and_the_word_reaches_the_calle
     let error = proposal.reader_error.expect("the refusal is reported");
     assert!(error.contains("was refused"), "{error}");
     assert!(error.contains(&word), "{error}");
-    assert!(error.contains("summary"), "{error}");
+    assert!(error.contains("acceptance_criteria"), "{error}");
     // The reader was read once more with the refusal, which names the word, and then stopped.
     let briefs = briefs.lock().unwrap();
     assert_eq!(briefs.len(), 2);
@@ -1755,6 +1758,28 @@ fn a_reading_with_a_boundary_word_is_not_accepted_and_the_word_reaches_the_calle
         "{paths:?}"
     );
     assert!(!paths.iter().any(|p| p.contains("reading")), "{paths:?}");
+}
+
+#[test]
+fn a_reading_with_a_boundary_word_in_its_summary_is_accepted() {
+    let word = ["oper", "ator"].concat();
+    let (dir, _git) = repo(&config(true));
+    let state = tempfile::tempdir().unwrap();
+    let briefs: Arc<Mutex<Vec<String>>> = Arc::default();
+    let athena = athena_with(
+        &dir,
+        &state,
+        CountingPinner::new(FAKE_SHA),
+        Arc::default(),
+        reader_edits(
+            move |_, reading| reading["summary"] = json!(format!("Ask the {word} to read it.")),
+            briefs.clone(),
+        ),
+    );
+    let proposal = athena.ask("study the demo", &Quiet).unwrap();
+    assert!(proposal.reading.is_some(), "{:?}", proposal.reader_error);
+    assert_eq!(proposal.reader_error, None);
+    assert_eq!(briefs.lock().unwrap().len(), 1);
 }
 
 #[test]
