@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-184832-4gah",
+  "round": 1,
+  "at": "2026-11-02T02:44:46.691869765Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The \"exactly one printed line\" check counts only Ui lines. The drain report prints the same pause reason again as a `refused` line and a `note` line.",
+      "evidence": "After the first `prepare`, `drain_with` runs `for refusal in &plan.refused { d.note(format!(\"item {} is not worked: {}\", ...)) }`, and `Report.refused` comes from `first_plan`. `display::drain` then prints `refused     {id} · {title}: {reason}` for each refusal and `note        {note}` for each note. Holding the paused item in `plan.refused` therefore gives the `plan <id> passed over:` Ui line plus two report lines with the full pause text. The demonstration asserts on recording-Ui lines only, so it passes while the user sees the reason three times. The request asks for one line. Fix: Choose and state one rendering. For example, skip the `not worked` note for pause holds (or for every held refusal with empty `missing`), or have the report list them once under a distinct label. Then extend the criterion-1 test to also render `display::drain(&report)` and assert that the pause text appears exactly once across the Ui lines and the rendered report.",
+      "location": "Plan Decision 2 / Demonstration for criterion 1; crates/athena-cli/src/drain.rs:2586-2591, crates/athena-cli/src/display.rs:715-720",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "For items held in `prepare`, the passed-over line is printed by `sweep` at the end of the run, not when the item is passed over.",
+      "evidence": "`sweep` is called once, after the wave loop (drain.rs:2642). The request says to \"pass over it before reading it, print one line ... and go on to the next item\". With this plan, the line for a paused item comes after all other work has run. Fix: Either call `pass_over` for each paused id when `prepare` first holds it in a drain (it dedupes through `passed_over`), or state that the end-of-run line is intended and make the test assert the line's position relative to `run b`.",
+      "location": "Plan Approach / Decision 2 (sweep prints the line); crates/athena-cli/src/drain.rs:2642",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A dependent of a held paused item may be planned and run as if its dependency were done.",
+      "evidence": "The plan itself notes that `Plan::build_with` treats a dependency on an id missing from the entries as done. Dropping the paused item from `entries` therefore frees its dependents. Forced refusals already behave this way, so this is pre-existing, but the change adds a new and common way to reach it. Fix: Hold dependents of a paused item too (a `held` refusal saying it waits on <id>, whose line is paused). If not, name this as a known follow-up in the change description instead of leaving it as an open question.",
+      "location": "Open question 3; Plan::build_with in crates/athena-core/src/plan.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The stale-pause test may be stale only because the line has no finished attempts, which is a weaker case than a pause that stopped holding under the current rule.",
+      "evidence": "`line_pause` returns None when `line_state(...).overall()` is not Pause. A fixture job with no attempts never reaches Pause, so the test shows that file existence is not enough, but not the recomputation case that scope_guard.rs:1427 covers. Fix: If `Scenario` can script two rejections of different criteria (flag, not pause), use that, as in `a_stored_pause_that_no_longer_holds_is_not_returned_and_does_not_block_a_retry`. Otherwise say in the test comment which case it covers.",
+      "location": "Demonstration for criterion 6",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the fix where the fault starts. I read drain.rs and scope_guard.rs to check its claims. `Drain::prepare` and `Drain::attempts` never check the pause; the pause is only found when reading.rs:1034 or run/mod.rs:704 refuses the item, and `failures += 1` then counts that refusal toward `ATTEMPTS` (drain.rs:1718). Adding a defaulted `Steps::paused` seam is sound, and so is backing it with `Athena::line_pause` and `pause_refusal` (both exist with the shapes the plan uses). Holding the item through `Refusal::held` lets `display::plan` print its existing `held` line (display.rs:592). The second guard in `attempts` with a new `ItemEnd::Paused` also works. Queued items are request jobs, so `line_pause(records, id)` finds them. One major gap: the \"exactly one printed line\" demonstration only counts lines sent to the recording Ui. But the drain also turns every `plan.refused` entry into a report note (\"item X is not worked: <reason>\", drain.rs:2586-2591), and `display::drain` prints `refused` and `note` lines from the report (display.rs:715-720). So a real drain would show the pause reason about three times, and the test would still pass. The other findings are minor: the line is printed at the end of the run, not when the item is passed over; and dependents of a held item may still be planned."
+}

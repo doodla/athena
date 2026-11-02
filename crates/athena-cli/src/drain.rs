@@ -23,6 +23,13 @@
 //!   ready (needs accepting), held for disk or budget, skipped, over the budget, over the job limit, or not
 //!   reached because the run ended first (with the path it shares with the last group when that is why it
 //!   waited).
+//! - **A paused line is passed over, not failed.** [`Steps::paused`] says which queued items are on a line the
+//!   scope guard has paused. `Drain::prepare` asks once for the whole queue, before it reads anything: such an
+//!   item is not read, is held back with whatever depends on it (so `athena plan` lists it as `held`), and its
+//!   one passed-over line, which names the line and how to lift the pause, is printed as soon as the plan is
+//!   made. [`Drain::attempts`] asks again before each attempt ([`ItemEnd::Paused`]), for a line the item's own
+//!   failed attempt has just paused. Neither is a failed attempt, so neither counts toward the repeated-failure
+//!   stop.
 //! - **Concurrency.** A group is worked by up to `max_concurrency` workers; the next group starts only when
 //!   the group before it is done, so an item that depends on another starts after it has finished. Landing
 //!   and rating go one at a time (a lock), and every model call's cap is held against the budget while it is
@@ -608,6 +615,13 @@ pub trait Steps {
     fn rerun_cap(&self) -> f64 {
         0.0
     }
+    /// Which of `jobs` are on a line the scope guard has paused, each with the reason to show: the line, how
+    /// to lift the pause and the pause file. Only a pause that still holds counts. The drain asks before it
+    /// reads or runs an item, so an item on a paused line is passed over and never fails. The default has no
+    /// paused line, as for steps that have no scope guard.
+    fn paused(&self, _jobs: &[String]) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// What rebasing a verified job's branch onto the latest main did, as far as the re-check rule needs it.
@@ -1085,6 +1099,9 @@ struct State {
     tried: BTreeSet<String>,
     /// Items that have a "passed over" line, so none gets two.
     passed_over: BTreeSet<String>,
+    /// Items the last plan held back because their line is paused (or they wait on one that is), with the
+    /// reason. Replaced by each plan: a lifted pause frees the item.
+    pause_held: BTreeMap<String, String>,
     /// What each new plan of this run needs to remember from the ones before.
     carry: Carry,
     /// Workers whose run passed and whose job is not landed yet, in the order the runs passed.
@@ -1219,6 +1236,9 @@ enum ItemEnd {
     /// The job passed and its pull request is open, waiting on checks that have not finished. It is not
     /// retried and is not a failure: the next item runs, and the job merges on a later `athena land --pr`.
     Waiting,
+    /// The item's line is paused by the scope guard, with the reason. It is passed over before it is read or
+    /// run: not a failed attempt, so it does not count toward the repeated-failure stop.
+    Paused(String),
 }
 
 /// What one call of [`Drain::land`] came to.
@@ -1657,6 +1677,16 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 if self.steps.stop_requested() {
                     return ItemEnd::Stop;
                 }
+                // A line the scope guard paused (possibly by this item's own last attempt) refuses a read
+                // or run with the pause text. That is not a failure of the item: pass it over unread.
+                if let Some((_, reason)) = self
+                    .steps
+                    .paused(std::slice::from_ref(&item.job))
+                    .into_iter()
+                    .next()
+                {
+                    return ItemEnd::Paused(reason);
+                }
                 let from = if retry {
                     ReadOf::Retry(last_job.as_str())
                 } else {
@@ -1869,12 +1899,21 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             }
         }
         let mut forced: Vec<Refusal> = carry.forced.clone();
+        // Items on a line the scope guard has paused: asked once for the whole queue, before any read. Such an
+        // item is not read to fill its plan, and is held back below.
+        let paused: BTreeMap<String, String> = {
+            let ids: Vec<String> = view.items.iter().map(|i| i.job.clone()).collect();
+            self.steps.paused(&ids).into_iter().collect()
+        };
         for idx in 0..view.items.len() {
             // An interrupted job was read before it ran; its retry reads the request again.
             if view.items[idx].read || view.items[idx].interrupted {
                 continue;
             }
             let id = view.items[idx].job.clone();
+            if paused.contains_key(&id) {
+                continue;
+            }
             // Read by an earlier plan of this run: not read or paid for again.
             if carry.prepared.contains_key(&id) {
                 continue;
@@ -1936,10 +1975,34 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             }
             self.remember_reading(&id, view.items[idx].read, &view.plan[pos], refusal.as_ref());
         }
+        // A paused item is held back, and so is everything that depends on it, as `Plan::build_with` holds the
+        // dependents of an item it holds: a dependency on an id outside the entries would count as met.
+        let mut held: BTreeMap<String, String> = paused
+            .into_iter()
+            .filter(|(id, _)| !forced.iter().any(|f| &f.id == id))
+            .collect();
+        loop {
+            let more: Vec<(String, String)> = view
+                .plan
+                .iter()
+                .filter(|e| !held.contains_key(&e.id) && !forced.iter().any(|f| f.id == e.id))
+                .filter_map(|e| {
+                    let on = e.depends_on.iter().find(|d| held.contains_key(*d))?;
+                    Some((
+                        e.id.clone(),
+                        format!("depends on {on}, which is held back: its line is paused"),
+                    ))
+                })
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            held.extend(more);
+        }
         let entries: Vec<PlanEntry> = view
             .plan
             .iter()
-            .filter(|e| !forced.iter().any(|f| f.id == e.id))
+            .filter(|e| !forced.iter().any(|f| f.id == e.id) && !held.contains_key(&e.id))
             .cloned()
             .collect();
         let mut plan = Plan::build_with(&entries, &self.steps.job_history());
@@ -1947,7 +2010,32 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             self.note_once(format!("plan order contradicts priority: {contradiction}"));
         }
         plan.refused.extend(forced);
+        // In queue order, so the list does not depend on the map.
+        for (id, title) in view.items.iter().map(|i| (&i.job, &i.title)) {
+            if let Some(reason) = held.get(id) {
+                let title = view
+                    .plan
+                    .iter()
+                    .find(|e| &e.id == id)
+                    .map_or(title.as_str(), |e| e.title.as_str());
+                plan.refused.push(Refusal::held(id, title, reason));
+            }
+        }
+        self.st().pause_held = held;
         plan
+    }
+
+    /// One "passed over" line for each item the last plan held for a paused line, unless this run has worked it.
+    /// It names the line and how to lift the pause, and is printed as soon as the plan is made, before any other
+    /// item runs.
+    fn pass_over_paused(&self) {
+        let (held, tried) = {
+            let st = self.st();
+            (st.pause_held.clone(), st.tried.clone())
+        };
+        for (id, reason) in held.iter().filter(|(id, _)| !tried.contains(*id)) {
+            self.pass_over(id, reason);
+        }
     }
 
     /// Records that the planning pass read `id`, so a later plan of the run neither reads nor pays for it again.
@@ -2130,6 +2218,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 pump_gone: false,
                 tried: BTreeSet::new(),
                 passed_over: BTreeSet::new(),
+                pause_held: BTreeMap::new(),
                 carry: Carry::default(),
                 queue: LandingQueue::default(),
                 rebases: RebaseTally::default(),
@@ -2219,6 +2308,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 ),
             ),
             ItemEnd::Waiting => self.pass_over(&item.job, &self.last_landing(&item.job)),
+            ItemEnd::Paused(reason) => self.pass_over(&item.job, &reason),
             ItemEnd::Skipped => self.pass_over(
                 &item.job,
                 &format!(
@@ -2508,7 +2598,12 @@ fn batches_for(
 ) -> Vec<Vec<Item>> {
     let mut batches: Vec<Vec<Item>> = items
         .iter()
-        .filter(|i| !tried.contains(&i.job) && !entries.iter().any(|e| e.id == i.job))
+        .filter(|i| {
+            !tried.contains(&i.job)
+                && !entries.iter().any(|e| e.id == i.job)
+                // An item the plan held back (a paused line) is not worked, entry or not.
+                && !plan.refused.iter().any(|r| r.id == i.job)
+        })
         .cloned()
         .map(|i| vec![i])
         .collect();
@@ -2583,7 +2678,14 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     // is incomplete, or that wait on each other in a loop, are not worked.
     let reserve = d.caps.read + d.caps.run;
     let plan = d.prepare(&mut view, reserve);
-    for refusal in &plan.refused {
+    // Items on a paused line get their one "passed over" line now, so nothing else prints their reason.
+    d.pass_over_paused();
+    let first_paused: BTreeSet<String> = d.st().pause_held.keys().cloned().collect();
+    for refusal in plan
+        .refused
+        .iter()
+        .filter(|r| !first_paused.contains(&r.id))
+    {
         d.note(format!(
             "item {} is not worked: {}",
             refusal.id, refusal.reason
@@ -2630,6 +2732,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
                 next.waiting = std::mem::take(&mut view.waiting);
                 view = next;
                 plan = d.prepare(&mut view, reserve);
+                d.pass_over_paused();
             }
             Err(error) => {
                 d.note(format!(
@@ -2703,7 +2806,11 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
             .collect(),
         waiting: view.waiting,
         plan_groups: plan.groups,
-        refused: plan.refused,
+        refused: plan
+            .refused
+            .into_iter()
+            .filter(|r| !first_paused.contains(&r.id))
+            .collect(),
         notes: st.notes.clone(),
         jobs: st.jobs.clone(),
         rebuild_output: st.rebuild_output.clone(),
@@ -3087,6 +3194,21 @@ impl<'a> RealSteps<'a> {
 }
 
 impl Steps for RealSteps<'_> {
+    /// Asks [`Athena::line_pause`], which recomputes the line's level from the records, so a stored pause that
+    /// no longer holds is not reported. Records that cannot be loaded report nothing paused: the read then
+    /// refuses a paused line with the pause text, as it did before.
+    fn paused(&self, jobs: &[String]) -> Vec<(String, String)> {
+        let Ok(records) = self.records() else {
+            return Vec::new();
+        };
+        jobs.iter()
+            .filter_map(|job| {
+                let mark = self.athena.line_pause(&records, job)?;
+                Some((job.clone(), self.athena.pause_refusal(&mark)))
+            })
+            .collect()
+    }
+
     fn review_passes(&self) -> Vec<String> {
         self.athena.review_passes(self.ui)
     }

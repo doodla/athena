@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena drain` now passes over a queued item whose line the scope guard has paused, before it reads the item,
+  and goes on to the next item. It prints one line, `plan  <item> passed over: ...`, that names the line and
+  says how to lift the pause and where the pause file is. The item is not a failed attempt, so it no longer
+  counts toward the repeated-failure stop; three drains had stopped on such items before any other work, each
+  item ending "no outcome, not attempted, line ... is paused" twice. A line paused by an item's own first failed
+  attempt is passed over before the retry in the same way. Items that depend on a passed-over item are held back
+  with it. `athena plan` lists these items as `held` with the same reason, and does not read them. Root cause:
+  the drain read an item before asking whether its line was paused, so the refusal came back as a failed
+  attempt. The check uses `Athena::line_pause`, so a stored pause that the records no longer reach holds
+  nothing. A real repeated failure of any other item still stops the drain.
 - A merge the host refused while a required check was still pending (405 or 422, "Repository rule violations")
   no longer fires D87's signal. The false positive: such a refusal is a wait, but it was logged as a host error
   like any merge refusal, and the signal matched on operation, phase and status alone, so D87 went under review
