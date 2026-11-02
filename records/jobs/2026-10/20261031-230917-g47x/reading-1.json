@@ -1,0 +1,166 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261031-230917-g47x",
+  "n": 1,
+  "at": "2026-11-02T08:19:21.125605369Z",
+  "invocation_seq": 1,
+  "base_commit": "0b48040d879c1e9b64afda04e7f0535394e1e864",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Keep a timed-out producer's edits as a candidate a retry resumes",
+  "summary": "When the producer reaches its deadline, its edits are kept, the job closes timed_out naming what was kept, and `athena retry` starts the next producer from them with a brief naming the earlier attempt. The goal is that long jobs stop losing work at the 3000s deadline; the audience is the owner running retries. The code already keeps a work tree and progress note, so the change closes the remaining gaps against the request.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests for keep and resume, plus fmt, clippy -D warnings and the suite."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the timeout and retry tests and check the candidate's edits and the brief text."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is in the deadline path, not per job."
+    },
+    {
+      "id": "strangers",
+      "how": "Decision and changelog written for outside readers."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the deadline and retry path."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-core/src/run/producer.rs (producer_loop calls keep_timed_out_work when the invocation outcome is TimedOut), crates/athena-core/src/run/mod.rs (keep_timed_out_work, timeout_seed, TimeoutSeed, the environment-stop resume mark in write_resume_mark/retry), crates/athena-core/src/state.rs (kept_work_dir), crates/athena-cli/tests/lifecycle.rs (deadline_script and the existing timed-out tests), crates/athena-data/src/records.rs (progress-note.md is in the JOB_MARKDOWN allow-list; no new record file is added, so check_record_file/AnyRecord/round-trip are unaffected).",
+    "Existing state: at the base, a deadline already moves the work tree to a kept directory, writes progress-note.md, closes TimedOut, and a retry seeds the producer's workdir from it with a '## Resume' brief section. It does not commit the edits as a candidate as an environment stop does, and the closing names the kept directory only in the note.",
+    "Reading: make the timed-out outcome keep a committed candidate (the same candidate and resume-mark mechanism an environment stop uses), name that candidate in the outcome reason and note, and make the retry's producer brief name the earlier job and what the plan still needs. If the producer finds the behavior fully present, it extends tests and docs and says so.",
+    "Pinned studies keep nothing today and stay that way unless the candidate mechanism supports them.",
+    "The request names no refusal rule, so no refusal-rate criterion applies."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-cli --test lifecycle`: a test with a fake producer that edits files then times out shows the job closes timed_out and keeps a candidate (a commit, not only a work directory) whose diff holds those edits; the outcome reason or note names the kept candidate.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli --test lifecycle`: a test retries that timed-out job and shows the next producer starts with the kept edits present and its brief names the earlier job id and the files already changed, plus what the plan still needs.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: the whole suite passes, including the history check on the records of a timed-out job.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`: both are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has an entry stating that a producer's work is kept when it reaches its deadline and that a retry resumes from it.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md records the call (keep the candidate on deadline) as a new decision referencing D124 alternative c, with sources read.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Changing producer_timeout_s in athena.toml",
+    "Making the producer finish faster or splitting long jobs",
+    "Retries of GitHub-result or check-slowdown jobs beyond the generic mechanism",
+    "Keeping work for pinned study checkouts"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2100.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7201044386422977,
+      "p_verification_passes": 0.6759002770083102,
+      "p_user_intervenes": 0.09473684210526315,
+      "cost_usd": {
+        "p10": 0.552942401586698,
+        "p50": 1.3009884454034477,
+        "p90": 3.6113826046883934
+      },
+      "wall_time_s": {
+        "p10": 543.0885001951771,
+        "p50": 1863.4532502177437,
+        "p90": 4023.8392233790946
+      }
+    }
+  },
+  "departures": "The deadline-keep mechanism already exists in part, so the work is partly a gap-closing change and the cost range is wider; the path touches the run pipeline, which raises verifier risk.",
+  "urgent_reason": "Retries of timed-out jobs restart from zero and waste whole 3000s attempts; keeping the work cuts redo-work retries.",
+  "hard_reason": "It changes the run pipeline: how a job closes at the producer deadline and how a retry is seeded.",
+  "producer_effort": "high"
+}

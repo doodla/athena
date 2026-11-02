@@ -4056,3 +4056,54 @@ should replace those estimates with its figures.
   `gh/transport.rs` (`HostErrorLog`), `crates/athena-data/src/records.rs` (`HostError`). Measured:
   `cargo test -p athena-core watcher`, `cargo test -p athena-core gh`, `cargo test -p athena-data`,
   `cargo test -p athena-cli decisions`.
+
+## D151 · A producer that reaches its deadline keeps its work as a candidate, and a retry resumes from it
+
+- **Case:** On 2026-10-31 three long jobs lost everything when the producer reached the 3000 s deadline: the
+  check-slowdown fix twice and the GitHub-result job once (as stated in the request; the job records were not read
+  here). D124 raised the deadline and named, as alternative (c), keeping a producer's work when it times out,
+  "queued, not built here". Before this change a deadline moved the work tree to a directory outside the
+  job's own directory and wrote a progress note; no commit was made, the job had no candidate record, and the closing
+  did not name what was kept, so the work was invisible to the job's history and lost with the state directory.
+- **Root cause:** The deadline path kept a directory, not a candidate. Every other stop that has work (an
+  environment stop, a refused change, a rejection) records a candidate commit; only this one did not, so nothing
+  in the records said what was kept and a retry's brief could not name it.
+- **Decision:** (1) At the deadline the snapshot's change list is committed as a candidate by the same code
+  that builds every candidate (`Athena::build_candidate`), recorded in `candidate.json` and the outcome, and named
+  by its short commit in the outcome reason and the progress note. The job still closes `timed_out`, and the reason
+  still starts `the producer did not complete: `, so it is not read as an environment stop. (2) No admission
+  runs at the deadline: the work is unfinished and the retry's own candidate is admitted in full. (3) The note
+  gains a "Still to do" list, the plan's files and the reading's deliverables with no change yet. (4) A retry of a
+  timed out job seeds its producer from the candidate commit, through the path a retry of a rejected candidate
+  uses, and its brief's "Resume" section names the earlier job and candidate and quotes the note. (5) The kept
+  directory remains only as the fallback when no commit can be built, and for jobs that kept one before this
+  change. (6) No resume mark is written, and `timed_out` is not made a resumable stop. This follows D124, alternative
+  (c), and leaves `producer_timeout_s` at 3000.
+- **Alternatives:** (a) Keep only the directory and add a line to the note: that is the old behavior, and leaves
+  no commit and no record. (b) Reuse the environment-stop resume mark: a resumed job skips the producer and goes to
+  the checks and the verifier, which would judge a half-done candidate and reject it. (c) Run admission at the
+  deadline and keep nothing on a violation: this loses the work the change exists to save, for a rule the retry
+  can satisfy. (d) Delete the directory mechanism: older timed out jobs would no longer resume, and it touches
+  the snapshot code for no gain. (e) Quote the earlier plan in the retry brief: a larger brief; the note carries
+  only the files the plan still needs.
+- **Tradeoff:** The candidate commit is an object in the repository that no branch names, so a garbage collection
+  can remove it; the retry then falls back to the directory if there is one, and otherwise starts from the base.
+  The commit holds only the change list against the base, so a file the producer made that the change list
+  leaves out is not carried. The commit is built before admission, so it can hold content that admission would
+  refuse; it is local and unreferenced, and the retry's candidate is admitted in full. The reader of a retry now
+  sees the timed out job's changed files and must account for them in its reading, as for a rejected job; this
+  makes some readings of retries of timed out jobs refused that were accepted before, and the refusal rate was
+  not measured.
+- **Reversal cost:** Low. Build no candidate in `keep_timed_out_work` and seed from the directory only; the
+  records of jobs already closed stay valid, since `candidate.json` is a record every candidate has.
+  Proposed signal, not measured: reverse it if retries from a kept candidate are rejected for the kept edits more
+  often than retries from the base.
+- **Provenance:** Stated: the request of 2026-10-31 (the three lost jobs, the behavior wanted). Read:
+  `crates/athena-core/src/run/mod.rs` (`keep_timed_out_work`, `timeout_seed`, `dispatch`),
+  `run/producer.rs` (`producer_loop`, `producer_snapshot`), `run/candidate.rs`, `run/close.rs`,
+  `crates/athena-core/src/state.rs`, `crates/athena-core/src/reading.rs` (the prior-result check),
+  `crates/athena-core/src/scope_guard.rs` and `disk.rs` (how a timed out reason is classified),
+  `crates/athena-context/src/briefs.rs`, `crates/athena-git/src/snapshot.rs`,
+  `crates/athena-cli/tests/lifecycle.rs`, and the D124 entry. Measured: `cargo test -p athena-cli --test
+  lifecycle` and the unit tests in `crates/athena-core/src/run/tests.rs`. Not measured: how often a deadline
+  produces a change list that a retry can finish, or the effect on cost per job.

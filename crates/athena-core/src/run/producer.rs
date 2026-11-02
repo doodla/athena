@@ -85,13 +85,15 @@ impl Athena {
         if work.exists() {
             crate::pin::remove_tree(&work)?;
         }
-        let repo = match (&ctx.seed_commit, &ctx.resume) {
+        // The kept candidate of a timed out job is `seed_commit` too; its kept directory is the fallback.
+        let repo = match (
+            &ctx.seed_commit,
+            ctx.resume.as_ref().and_then(|r| r.dir.as_ref()),
+        ) {
             (Some(tree_commit), _) => SnapshotRepo::BaseThenTree {
                 tree_commit: tree_commit.clone(),
             },
-            (None, Some(resume)) => SnapshotRepo::BaseThenDir {
-                dir: resume.dir.clone(),
-            },
+            (None, Some(dir)) => SnapshotRepo::BaseThenDir { dir: dir.clone() },
             (None, None) => SnapshotRepo::Base,
         };
         let snapshot = Snapshot::create(&self.git, &p, &p, &work, repo)?;
@@ -196,7 +198,7 @@ impl Athena {
             closing.new_invocations.push(record.clone());
             if output.outcome == InvocationOutcome::TimedOut {
                 let reason = record.detail.clone().unwrap_or_default();
-                self.keep_timed_out_work(ctx, &snapshot, &reason, closing)?;
+                self.keep_timed_out_work(ctx, &snapshot, accepted, &reason, closing)?;
                 return Ok(Flow::Stop);
             }
             if output.outcome != InvocationOutcome::Success {

@@ -1,0 +1,223 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-230917-g47x",
+  "round": 1,
+  "at": "2026-11-02T08:22:08.406409426Z",
+  "invocation_seq": 2,
+  "approach": "The base already moves a timed-out work tree to a kept directory, writes progress-note.md, closes TimedOut and seeds a retry from the directory with a \"## Resume\" brief section. What is missing against the request: (1) no commit, so no candidate record and the closing does not name what was kept; (2) the note and brief say which files changed but not what the plan still needs. Fix in the deadline path. Extract the \"change list -> candidate commit + Candidate record\" half of candidate_stage (candidate.rs) into a helper, and call it from keep_timed_out_work (no admission: the work is unfinished and the retry's own candidate is admitted in full). Record the candidate in closing.candidate (written as candidate.json), name its short commit in the outcome reason and the note, and add a \"Still to do\" list to the note: planned files and reading deliverables (planned_paths) not among the changed paths. A retry (timeout_seed) now seeds from the recorded candidate commit through the existing seed_commit / BaseThenTree path when the commit is still in the repository; it falls back to the kept directory only for older timed-out jobs or when the commit could not be built. When the commit is built the work tree is no longer moved to a kept directory. Pinned studies keep nothing, as now. No resume mark is written for a timed-out job: the environment-stop resume skips the producer, which is wrong for work cut off mid-way. The retry brief's Resume section names the earlier job and its kept candidate and quotes the note (changed files, still-to-do).",
+  "decisions": [
+    {
+      "choice": "Commit the edits as a candidate at the deadline, built by one helper shared with candidate_stage; record it in closing.candidate and name its short commit in the outcome reason and progress note.",
+      "reason": "This is the request's 'commit as a kept candidate'. Sharing the helper keeps the commit shape (base tree plus change list, 'Candidate for job <id>') identical to the normal and environment-stop candidates, so the history check and scoring treat it as they treat other candidates (an idle-producer or admission-refused candidate already closes with a candidate and no verification).",
+      "rejected": [
+        {
+          "option": "Keep only the work directory and add a sentence to the note",
+          "why": "That is the base behavior; it leaves no commit, and a state-directory wipe loses the work."
+        },
+        {
+          "option": "Copy the candidate-building code into keep_timed_out_work",
+          "why": "Two copies of the commit-building logic would drift; the root fault is one deadline path, so one helper is smaller."
+        }
+      ]
+    },
+    {
+      "choice": "Retry seeds the producer from the recorded candidate commit (existing BaseThenTree seed_commit path), falling back to the kept directory only when no commit exists.",
+      "reason": "The request says the next producer starts from that candidate. Reusing seed_commit adds no new snapshot mode. The fallback keeps older timed-out jobs (and a failed commit build) resumable, and close.rs already removes the kept directory after the retry closes.",
+      "rejected": [
+        {
+          "option": "Delete the kept-directory mechanism and SnapshotRepo::BaseThenDir",
+          "why": "Touches athena-git and close.rs outside the deliverables and breaks retry of already-kept jobs."
+        },
+        {
+          "option": "Always keep both the directory and the commit",
+          "why": "Redundant disk use and two sources of truth for what a retry starts from."
+        }
+      ]
+    },
+    {
+      "choice": "Write no ResumeMark and do not extend resumable_stop to timed_out.",
+      "reason": "resume_candidate skips planner and producer and goes to checks and the verifier. A producer cut off at its deadline has not finished, so its retry must run a producer on the kept edits.",
+      "rejected": [
+        {
+          "option": "Reuse the environment-stop resume mark exactly",
+          "why": "It would send unfinished work to the verifier and reject it."
+        }
+      ]
+    },
+    {
+      "choice": "No admission at the deadline.",
+      "reason": "Admission judges a finished candidate; the retry's new candidate is admitted in full. Running it here could discard half-done work for a rule the retry would fix.",
+      "rejected": [
+        {
+          "option": "Run admission and keep nothing on a violation",
+          "why": "Loses the work this job exists to save."
+        }
+      ]
+    },
+    {
+      "choice": "The 'what the plan still needs' text is computed at the deadline from planned_paths(closing.plans.last(), accepted) minus changed paths and written into the note; briefs.rs only words the Resume section to name the candidate and point at that list.",
+      "reason": "A retry plans again from the base, so the earlier plan's files are not otherwise visible; the earlier job's own records are the source and the note is already the carrier into the brief.",
+      "rejected": [
+        {
+          "option": "Quote the whole earlier plan in the brief",
+          "why": "Larger brief; planning_resume_seed deliberately covers only the planning-cap case."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/candidate.rs",
+      "action": "modify",
+      "purpose": "Extract the change-list-to-candidate-commit half of candidate_stage into a helper (returns the Candidate record, the Changed list for admission, the commit and tree); candidate_stage calls it and keeps its idle-producer and admission logic unchanged. Not in the brief's deliverable list; needed to share the code.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "keep_timed_out_work builds the candidate via the helper, sets closing.candidate, names the short commit in the outcome reason and note, adds the still-to-do list, and moves the work tree to the kept directory only if no commit could be built (pinned studies still keep nothing). A pure note builder gets unit tests. timeout_seed reads the job's candidate record and returns the commit (or the directory as fallback); TimeoutSeed gains an optional commit; dispatch passes it as seed_commit and in the RetrySeed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "producer_loop passes accepted and the planned paths to keep_timed_out_work; producer_snapshot already prefers seed_commit, so only the seed source changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Resume section names the earlier job and its kept candidate commit, says the working directory holds its edits, and points at the quoted note's changed-files and still-to-do lists; update the existing test a_resume_brief_carries_the_progress_note and add the candidate field to RetrySeed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "purpose": "Update the doc comments of kept_work_dir and remove_kept_work to say the directory is now the fallback when no candidate commit could be built or for older timed-out jobs; no behavior change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Unit tests: the note builder (changed files, candidate commit, still-to-do list, no-edit case, commit-failed wording) and timeout_seed (commit preferred, directory fallback, none on a moved base or a non-timed-out job).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Rework the two timed-out tests as in the demonstrations: candidate commit with the edits, named in reason and note; retry starts with the edits and a brief naming the earlier job, candidate, changed files and still-to-do; no kept directory when the commit exists. Base-moved test stays.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry: a producer's work is kept as a candidate at its deadline and a retry resumes from it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "New decision after D150 referencing D124 alternative (c), with alternatives, tradeoff, reversal cost and sources read.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read candidate.rs, the keep_timed_out_work and timeout_seed code in run/mod.rs, and briefs.rs retry_section again before editing, to keep names consistent.",
+    "In candidate.rs, extract a helper (for example build_candidate_commit(&self, ctx, snapshot, report) -> Result<Option<BuiltCandidate>>) holding S4: the change list, base fingerprint and previous job, the temp-index commit, and the Candidate record with its ChangeEntry list; return None when the change list is empty. candidate_stage calls it and keeps the idle-producer branch and the admission code. Keep the closing.happened.changed_paths assignment where it is.",
+    "In run/mod.rs, change keep_timed_out_work to take the accepted reading and the planned paths: build the candidate with the helper (skipped for a pinned study); on success set closing.candidate (producer_report None), do not move the work tree, and add the short commit to the reason: 'the producer did not complete: <reason>; its edits are kept as candidate <short commit>'; on an empty change list or a build error fall back to the directory move as today (empty change list keeps nothing). Add a pure function that builds the note text from (job, reason, changed files, still-to-do paths, kept outcome) and put 'Still to do' (planned_paths minus changed paths, or 'every planned file has a change') in it. Redact the note as now.",
+    "In run/mod.rs, change timeout_seed to read job.candidate: use its candidate_commit when it exists in the repository (rev_parse) and there are no violations; else fall back to the kept directory; return None otherwise. Keep the base-moved check. Add commit: Option<String> to TimeoutSeed; in dispatch set seed_commit from the tree seed or the timeout seed's commit, and pass the candidate commit in RetrySeed. Keep close.rs's remove_kept_work call unchanged.",
+    "In producer.rs, pass accepted and planned to keep_timed_out_work at the TimedOut branch. In briefs.rs, add a candidate field to RetrySeed and reword the Resume section to say job <id> reached its deadline, its edits are kept as candidate <commit> and already in the working directory, and that the quoted note lists the changed files and what is still to do; update the briefs.rs test and the other RetrySeed constructors (briefs.rs line ~2196, reading.rs line ~5759, mod.rs line ~829).",
+    "Update lifecycle.rs tests as in the demonstrations; add unit tests in run/tests.rs for the note builder and timeout_seed (commit preferred, directory fallback, none on a non-timed-out job, reason not an environment stop).",
+    "Update the doc comments in state.rs for kept_work_dir and remove_kept_work.",
+    "Add the CHANGELOG.md entry under [Unreleased] and the new decision in docs/decisions.md after D150 (title, case from the three 2026-10-31 timeouts as stated in the request, decision, alternatives including D124 (c), tradeoff, reversal cost, provenance with files read and what was not measured).",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test -p athena-cli --test lifecycle, cargo test -p athena-cli --test budgets and cargo test --locked."
+  ],
+  "risks": [
+    {
+      "risk": "Refactoring candidate_stage could change the normal candidate path.",
+      "mitigation": "The helper holds only the existing S4 code moved unchanged; candidate_stage keeps its idle-producer and admission branches. The whole suite (cargo test --locked) exercises the normal path."
+    },
+    {
+      "risk": "A retry seeded from the commit differs from one seeded from the directory (the commit holds only the change list against the base; ignored or untracked files the producer made are not in it).",
+      "mitigation": "Those files are not part of the change list any candidate carries, so they never reach a verifier; the Snapshot change list is what the retry's candidate is built from. The directory fallback remains for jobs that have no commit."
+    },
+    {
+      "risk": "The retry's seed-tree check (files agents see at head equal the base's, except records/) rejects a moved base, so work is not reused.",
+      "mitigation": "Kept as is: starting clean on a moved base is the existing, tested behavior (retrying_a_timed_out_job_whose_base_moved_starts_clean)."
+    },
+    {
+      "risk": "The longer outcome reason is shown to users and read by StopCause::of / scope-guard code.",
+      "mitigation": "The reason still starts with 'the producer did not complete: ' and carries no 'environment:' prefix, so StopCause::of still says Work; a unit test pins this."
+    },
+    {
+      "risk": "The brief grows and the producer's always-loaded token budget test (budgets.rs) could fail.",
+      "mitigation": "The Resume section is in the per-job brief, outside the budgeted always-loaded sets; keep the new text short and run cargo test -p athena-cli --test budgets."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Rework the existing lifecycle test a_producer_that_hits_its_deadline_keeps_its_work_and_closes_timed_out. The fake producer edits src/partial.rs and README.md and then returns outcome TimedOut. After go, assert state TimedOut. Read candidate.json at the closing head via record_at, require candidate_commit is Some, and read the file contents from that commit (git show_file) to see the edits. Assert the commit's parent is the job's base commit, and that the short commit is in the outcome reason and in the note.",
+      "command": "cargo test -p athena-cli --test lifecycle a_producer_that_hits_its_deadline",
+      "observes": "The job closes timed_out with a committed candidate holding both edits; the reason and note name it; check_history has no violations.",
+      "fails_without": "At the base no candidate record is written for a timed-out job: the test's assertions that candidate.json has a candidate_commit whose diff against the base holds src/partial.rs and README.md, and that the outcome reason and progress-note.md contain the short commit, fail.",
+      "seam": "Entry point Athena::go via the existing lifecycle Fixture (fx.athena(script)); the fake producer is the existing deadline_script (athena_agent::fake::Script) injected into the Athena fake driver; the git repository is real. Exists (read in crates/athena-cli/tests/lifecycle.rs lines 2193-2282); the candidate assertions are new test code in step 6."
+    },
+    {
+      "criterion": 2,
+      "method": "Rework retrying_a_timed_out_job_starts_from_the_kept_work_with_the_note. The first producer times out after editing the two files. athena.retry then go on the new job. The second fake producer records (workdir has src/partial.rs, user prompt). Assert the file is present, the prompt contains '## Resume', the first job's id, the kept candidate's short commit, both changed files, and a still-to-do line naming a planned file the first run left unchanged (CHANGELOG.md, which D89 adds to every change reading's deliverables; the test first asserts that deliverable is on the accepted reading). Also assert the kept directory does not exist after the first job closes (the commit is the keep). Keep retrying_a_timed_out_job_whose_base_moved_starts_clean unchanged: it must still start clean. Add a case where the commit is deleted and the kept directory remains is not needed; the fallback is covered by a core unit test in run/tests.rs.",
+      "command": "cargo test -p athena-cli --test lifecycle retrying_a_timed_out_job",
+      "observes": "The retry's producer sees the earlier edits in its working directory and a brief that names the earlier job, the candidate, the changed files and what is still to do.",
+      "fails_without": "If the retry did not seed from the kept candidate, seen[0].0 (src/partial.rs present before the producer acts) would be false. If the brief lacked the earlier job id, the candidate commit or the still-to-do list, the brief assertions would fail; at base the brief has no 'still to do' section.",
+      "seam": "Entry points Athena::retry and Athena::go through the lifecycle Fixture; the fake producer is deadline_script with its Seen recorder (existing, lifecycle.rs lines 2189-2221). The new assertions are test code in step 6; the brief wording comes from briefs.rs (step 4)."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the whole suite. It includes athena.check_history() on the timed-out job (existing assertion in the lifecycle test) and the unit tests added in run/tests.rs for the note text and the seed fallback.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass, including the history check on a job that closed timed_out with a candidate.",
+      "fails_without": "Without the fix to state.rs/producer.rs callers, a mismatch between the new candidate record and the history check, or the existing kept-work tests, would fail the suite; the history check assertion in the lifecycle test covers the timed-out job's records.",
+      "seam": "athena.check_history() on the lifecycle Fixture (exists, lifecycle.rs line 2279); unit tests call the pure note builder and timeout_seed in crates/athena-core/src/run/tests.rs (the builder is added in step 3)."
+    },
+    {
+      "criterion": 4,
+      "method": "Run fmt and clippy with -D warnings. The verifier runs `cargo clippy --all-targets --locked -- -D warnings` as a second command.",
+      "command": "cargo fmt --all --check",
+      "observes": "Both exit 0 with no diagnostics.",
+      "fails_without": "Unformatted code or any clippy warning (for example an unused kept_work_dir import, or a needless clone in the new helper) fails the command.",
+      "seam": "None needed: a lint check, not a behavior."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff and check the Unreleased section for an entry that says a producer's work is kept as a candidate when it reaches its deadline, the job closes timed_out naming it, and `athena retry` resumes from it with a brief naming the earlier job, the changed files and what is still to do.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The entry is present under [Unreleased] and written for an outside reader.",
+      "fails_without": "Without the entry the diff of CHANGELOG.md is empty.",
+      "seam": "None needed: a content check."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff for a new decision after D150 (title: the producer's work is kept as a candidate at its deadline) citing D124 alternative (c), the decision, alternatives (no resume mark, directory-only keep, delete directory mechanism), tradeoff, reversal cost, and provenance listing files read (run/mod.rs, run/producer.rs, run/candidate.rs, state.rs, briefs.rs, lifecycle.rs, reading.rs, disk.rs) and what was not measured.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "The decision is present, numbered after D150, and references D124 (c).",
+      "fails_without": "Without the record the diff of decisions.md is empty.",
+      "seam": "None needed: a content check."
+    }
+  ],
+  "open_questions": [
+    "The fixture's reading deliverables were not read: the plan assumes CHANGELOG.md (added by D89) is a deliverable the fake producer leaves unchanged. If it is not, the producer should have the test's first producer edit only one of the listed deliverables.",
+    "Scoring: closing a TimedOut job with a candidate that has a commit but no verification was not traced through scoring::score. The idle-producer and admission-refused paths already close with such candidates, so it is expected to work; the whole-suite run and the history-check assertion are the check.",
+    "The candidate commit is an unreferenced object in the user's repository, so git gc could remove it. The environment-stop candidate has the same exposure; if the commit is gone the retry falls back to the kept directory when there is one, otherwise starts from the base.",
+    "Whether git objects of an unadmitted candidate may hold content admission would refuse (for example personal data). The commit is local and unreferenced, and the retry's candidate is admitted in full; confirm that is acceptable."
+  ],
+  "producer_section_sha256": "8493587527de7d32a3ed517f29e0077f3de7bd30e86df41d75c16824d006feda"
+}

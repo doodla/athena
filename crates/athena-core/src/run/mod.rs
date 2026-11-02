@@ -597,9 +597,10 @@ impl Athena {
     }
 
     /// The kept work of a timed out job that a retry resumes from: the request must be "try again on <job>"
-    /// for a job that closed `timed_out`; its kept work tree and progress note must still exist; and the
-    /// files agents see at `head` must be those the job's base had (only `records/` differs), so that
-    /// resuming cannot undo later work. Otherwise `None`: the retry starts from the base.
+    /// for a job that closed `timed_out`; its progress note must exist, and so must its kept candidate commit
+    /// (or, for a job that kept a work tree instead, that directory); and the files agents see at `head` must
+    /// be those the job's base had (only `records/` differs), so that resuming cannot undo later work. The
+    /// commit is preferred over the directory. Otherwise `None`: the retry starts from the base.
     fn timeout_seed(
         &self,
         records: &Records,
@@ -615,14 +616,27 @@ impl Athena {
         if job.state() != JobState::Closed(OutcomeState::TimedOut) {
             return Ok(None);
         }
-        let dir = self.state.kept_work_dir(&id);
         let (Some(note), Some(base)) = (
             job.briefs.get("progress-note"),
             job.job.as_ref().and_then(|j| j.base_commit.clone()),
         ) else {
             return Ok(None);
         };
-        if !dir.is_dir() || self.git.rev_parse(&base)?.is_none() {
+        if self.git.rev_parse(&base)?.is_none() {
+            return Ok(None);
+        }
+        let mut commit = job
+            .candidate
+            .as_ref()
+            .filter(|c| c.violations.is_empty())
+            .and_then(|c| c.candidate_commit.clone());
+        if let Some(c) = &commit
+            && self.git.rev_parse(c)?.is_none()
+        {
+            commit = None;
+        }
+        let dir = Some(self.state.kept_work_dir(&id)).filter(|d| d.is_dir());
+        if commit.is_none() && dir.is_none() {
             return Ok(None);
         }
         let changed = self.git.diff_tree(&base, head)?;
@@ -632,60 +646,79 @@ impl Athena {
         Ok(Some(TimeoutSeed {
             job: id,
             note: note.clone(),
+            commit,
             dir,
         }))
     }
 
-    /// Ends a producer that hit its deadline. The work tree moves out of the job's directory, which closing
-    /// removes, and the progress note listing the changed files goes into the closing. A study's pinned
-    /// checkout is mounted inside the work tree, so a pinned job keeps nothing.
+    /// Ends a producer that hit its deadline, keeping what it did. The snapshot's change list becomes a
+    /// candidate commit in the user's repository (the same commit shape as any candidate, built by
+    /// [`Athena::build_candidate`]), recorded in the closing and named in the outcome reason and the progress
+    /// note. No admission runs: the work is unfinished, and the retry's own candidate is admitted in full.
+    /// Only when no commit can be built (an error) does the work tree move to the kept directory, outside the
+    /// job's directory, which closing removes. A study's pinned checkout is mounted inside the work tree, so a
+    /// pinned job keeps nothing. The note also lists the planned files with no change yet.
     fn keep_timed_out_work(
         &self,
         ctx: &RunContext<'_>,
         snapshot: &Snapshot,
+        accepted: &AcceptedReading,
         reason: &str,
         closing: &mut Closing,
     ) -> Result<()> {
         let id = ctx.id().clone();
-        let changes = snapshot.change_list().unwrap_or_default();
-        let kept_dir = self.state.kept_work_dir(&id);
+        let changes: Vec<(char, String)> = snapshot
+            .change_list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.status, c.path))
+            .collect();
+        let mut candidate_paths = BTreeSet::new();
         let kept = if ctx.pin_dir.is_some() {
-            Err("a pinned study keeps no work tree".to_string())
+            TimedOutKeep::Nothing("a pinned study keeps no work tree".to_string())
         } else {
-            std::fs::create_dir_all(kept_dir.parent().expect("has a parent"))
-                .and_then(|_| std::fs::rename(snapshot.dir(), &kept_dir))
-                .map_err(|e| e.to_string())
-        };
-        let mut texts = vec![format!(
-            "# Progress note\n\nThe producer of job {id} stopped: {reason}.\n\n"
-        )];
-        let mut listing = if changes.is_empty() {
-            "No file had been changed.\n".to_string()
-        } else {
-            let mut s = format!(
-                "Changed files ({}), against the base commit:\n\n",
-                changes.len()
-            );
-            for c in &changes {
-                s.push_str(&format!("- {} {}\n", c.status, c.path));
+            match self.build_candidate(ctx, snapshot, None) {
+                Ok(built) => match built.candidate.candidate_commit.clone() {
+                    Some(commit) => {
+                        candidate_paths = built.paths;
+                        closing.candidate = Some(built.candidate);
+                        TimedOutKeep::Candidate(commit)
+                    }
+                    None => TimedOutKeep::Nothing("no file had been changed".to_string()),
+                },
+                Err(e) => {
+                    let kept_dir = self.state.kept_work_dir(&id);
+                    match std::fs::create_dir_all(kept_dir.parent().expect("has a parent"))
+                        .and_then(|_| std::fs::rename(snapshot.dir(), &kept_dir))
+                    {
+                        Ok(()) => TimedOutKeep::Directory,
+                        Err(io) => TimedOutKeep::Nothing(format!(
+                            "no candidate could be built ({e:#}) and the work tree could not be moved ({io})"
+                        )),
+                    }
+                }
             }
-            s
         };
-        match &kept {
-            Ok(()) => listing.push_str(
-                "\nThe edits were kept; `athena retry` starts the next producer from them.\n",
-            ),
-            Err(why) => listing.push_str(&format!(
-                "\nThe edits could not be kept ({why}); a retry starts from the base.\n"
-            )),
-        }
-        texts[0].push_str(&listing);
+        let changed: BTreeSet<&str> = changes.iter().map(|(_, p)| p.as_str()).collect();
+        let still_to_do: Vec<String> = planned_paths(closing.plans.last(), accepted)
+            .into_iter()
+            .filter(|p| !changed.contains(p.as_str()))
+            .collect();
+        let mut texts = vec![timeout_note(&id, reason, &changes, &still_to_do, &kept)];
         ctx.redactor.redact_all(&mut texts)?;
         closing.files.push(NewFile::text(
             format!("{}/progress-note.md", id.dir()),
             texts.remove(0),
         ));
-        closing.happened = self.failure(ctx, &format!("the producer did not complete: {reason}"));
+        let mut full = format!("the producer did not complete: {reason}");
+        if let TimedOutKeep::Candidate(commit) = &kept {
+            full.push_str(&format!(
+                "; its edits are kept as candidate {}",
+                short(commit)
+            ));
+        }
+        closing.happened = self.failure(ctx, &full);
+        closing.happened.changed_paths = candidate_paths;
         closing.happened.state = Some(OutcomeState::TimedOut);
         Ok(())
     }
@@ -827,6 +860,7 @@ impl Athena {
                     findings: s.findings.clone(),
                     must_address: s.must_address.clone(),
                     progress_note: None,
+                    candidate: None,
                 }),
                 (None, Some(r)) => Some(RetrySeed {
                     job: r.job.as_str().to_string(),
@@ -834,6 +868,7 @@ impl Athena {
                     findings: Vec::new(),
                     must_address: Vec::new(),
                     progress_note: Some(r.note.clone()),
+                    candidate: r.commit.as_deref().map(|c| short(c).to_string()),
                 }),
                 (None, None) => None,
             },
@@ -915,7 +950,10 @@ impl Athena {
             ui,
             stages,
             pin_dir: pinned.map(|(_, dir)| dir),
-            seed_commit: retry_seed.map(|s| s.candidate_commit),
+            seed_commit: match &retry_seed {
+                Some(s) => Some(s.candidate_commit.clone()),
+                None => resume.as_ref().and_then(|r| r.commit.clone()),
+            },
             resume,
         };
         // Job planning (docs/design/job-planning.md): one accepted round, before the producer. The round
@@ -980,17 +1018,84 @@ struct RunContext<'a> {
     stages: &'a dyn StageSink,
     /// The pinned tree's checkout, mounted read-only into both agents' working directories.
     pin_dir: Option<PathBuf>,
-    /// The rejected candidate commit the producer's working directory is seeded from, for a tree-seeded retry.
+    /// The candidate commit the producer's working directory is seeded from: a rejected candidate for a
+    /// tree-seeded retry, or the candidate a timed out job kept for a resumed retry.
     seed_commit: Option<String>,
-    /// The timed out job whose kept work tree seeds the producer's working directory, for a resumed retry.
+    /// The timed out job whose kept work seeds the producer's working directory, for a resumed retry.
     resume: Option<TimeoutSeed>,
 }
 
-/// The kept work of a timed out job and the progress note it left.
+/// The kept work of a timed out job and the progress note it left. A retry starts from `commit`, the
+/// candidate the deadline kept; `dir` is the fallback for a job that kept its work tree instead (an older
+/// job, or one whose candidate could not be built).
 struct TimeoutSeed {
     job: JobId,
     note: String,
-    dir: PathBuf,
+    commit: Option<String>,
+    dir: Option<PathBuf>,
+}
+
+/// What a producer's deadline kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TimedOutKeep {
+    /// The edits, as this candidate commit.
+    Candidate(String),
+    /// The edits, as the moved work tree: no candidate commit could be built.
+    Directory,
+    /// Nothing, for this reason.
+    Nothing(String),
+}
+
+/// The progress note of a producer that hit its deadline: what stopped it, the files it had changed against
+/// the base (status letter and path), what was kept, and the planned files with no change yet. A retry's
+/// producer brief quotes it, so it is the one account of "what was done and what the plan still needs".
+fn timeout_note(
+    job: &JobId,
+    reason: &str,
+    changes: &[(char, String)],
+    still_to_do: &[String],
+    kept: &TimedOutKeep,
+) -> String {
+    let mut text = format!("# Progress note\n\nThe producer of job {job} stopped: {reason}.\n\n");
+    if changes.is_empty() {
+        text.push_str("No file had been changed.\n");
+    } else {
+        text.push_str(&format!(
+            "Changed files ({}), against the base commit:\n\n",
+            changes.len()
+        ));
+        for (status, path) in changes {
+            text.push_str(&format!("- {status} {path}\n"));
+        }
+    }
+    text.push('\n');
+    match kept {
+        TimedOutKeep::Candidate(commit) => text.push_str(&format!(
+            "The edits are kept as candidate {}; `athena retry` starts the next producer from them.\n",
+            short(commit)
+        )),
+        TimedOutKeep::Directory => text.push_str(
+            "The edits were kept; `athena retry` starts the next producer from them.\n",
+        ),
+        TimedOutKeep::Nothing(why) => text.push_str(&format!(
+            "Nothing was kept ({why}); a retry starts from the base.\n"
+        )),
+    }
+    if still_to_do.is_empty() {
+        text.push_str(
+            "\nStill to do: no planned file is left without a change; finish the edits in progress, \
+             run the checks and report.\n",
+        );
+    } else {
+        text.push_str(
+            "\nStill to do: the plan and the reading's deliverables expect changes to these files, which \
+             have none yet:\n\n",
+        );
+        for path in still_to_do {
+            text.push_str(&format!("- {path}\n"));
+        }
+    }
+    text
 }
 
 impl RunContext<'_> {

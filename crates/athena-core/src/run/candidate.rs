@@ -9,23 +9,28 @@ pub(super) struct Admitted {
     pub(super) fingerprint: String,
 }
 
+/// A candidate built from a snapshot's change list, before admission.
+pub(super) struct BuiltCandidate {
+    /// The record, with no fingerprint or violations yet. It has no commit when the change list is empty.
+    pub(super) candidate: Candidate,
+    /// The change list as admission reads it.
+    pub(super) changed: Vec<Changed>,
+    /// The paths the change list names.
+    pub(super) paths: BTreeSet<String>,
+}
+
 impl Athena {
-    /// Stages S4 and S5: build the candidate from the snapshot's change list, then run admission on it.
-    /// `Flow::Stop` means the job ended here (an idle producer, or a refused change) and `closing` says how.
-    pub(super) fn candidate_stage(
+    /// Stage S4: the candidate commit for the snapshot's change list, applied to the base's full tree in the
+    /// user's repository and not on any branch. The producer stage uses it for a finished producer, and the
+    /// deadline path for one that was cut off, so both commits have the same shape.
+    pub(super) fn build_candidate(
         &self,
         ctx: &RunContext<'_>,
-        closing: &mut Closing,
-        report: Option<ProducerReport>,
-        report_gaps: &[String],
-        report_kept_in: &str,
         snapshot: &Snapshot,
-    ) -> Result<Flow<Admitted>> {
+        report: Option<ProducerReport>,
+    ) -> Result<BuiltCandidate> {
         let id = ctx.id().clone();
-        let jc = ctx.jc;
         let p = ctx.prediction.clone();
-
-        // The candidate: the snapshot's change list, applied to the base's full tree in the user's repository.
         let changes = snapshot.change_list()?;
         // The chain links (athena.candidate/2): the base's own fingerprint, under its own rules, and the
         // latest job landed in the base's history.
@@ -43,23 +48,14 @@ impl Athena {
             violations: Vec::new(),
             producer_report: report,
         };
+        let mut built = BuiltCandidate {
+            candidate: candidate.clone(),
+            changed: Vec::new(),
+            paths: BTreeSet::new(),
+        };
         // The change list is against the base, so it is empty only when the candidate does nothing at all.
-        // A retry seeded from a kept candidate already differs from the base: if its producer adds nothing
-        // (the kept candidate did the work and only evidence was missing), the seeded candidate is the
-        // candidate and goes on to admission, checks and the verifier. Only a run with no change against the
-        // base fails as an idle producer.
         if changes.is_empty() {
-            closing.candidate = Some(candidate);
-            let reason = if report_gaps.is_empty() {
-                "the producer made no change".to_string()
-            } else {
-                format!(
-                    "the producer made no change, and its report still had problems when sent back: {}; the report is kept in {report_kept_in}",
-                    report_gaps.join("; ")
-                )
-            };
-            closing.happened = self.failure(ctx, &reason);
-            return Ok(Flow::Stop);
+            return Ok(built);
         }
         let new_blobs: Vec<String> = changes
             .iter()
@@ -68,7 +64,6 @@ impl Athena {
             .collect();
         let sizes = snapshot.git().blob_sizes(&new_blobs)?;
         let mut edits = Vec::new();
-        let mut changed = Vec::new();
         for change in &changes {
             let size = sizes.get(&change.new_oid).copied().unwrap_or(0);
             if change.status == 'D' {
@@ -92,17 +87,14 @@ impl Athena {
                 mode: (change.status != 'D').then(|| change.new_mode.clone()),
                 bytes: (change.status != 'D').then_some(size),
             });
-            changed.push(Changed {
+            built.changed.push(Changed {
                 path: change.path.clone(),
                 status: change_status(change.status),
                 mode: change.new_mode.clone(),
                 size,
             });
         }
-        closing.happened.changed_paths = changes
-            .iter()
-            .map(|c| c.path.clone())
-            .collect::<BTreeSet<_>>();
+        built.paths = changes.iter().map(|c| c.path.clone()).collect();
         let index = TempIndex::from_tree(&self.git, &p)?;
         index.apply(&edits)?;
         let tree = index.write_tree()?;
@@ -114,8 +106,49 @@ impl Athena {
             ),
             false,
         )?;
-        candidate.candidate_commit = Some(c.clone());
-        candidate.candidate_tree = Some(tree.clone());
+        candidate.candidate_commit = Some(c);
+        candidate.candidate_tree = Some(tree);
+        built.candidate = candidate;
+        Ok(built)
+    }
+
+    /// Stages S4 and S5: build the candidate from the snapshot's change list, then run admission on it.
+    /// `Flow::Stop` means the job ended here (an idle producer, or a refused change) and `closing` says how.
+    pub(super) fn candidate_stage(
+        &self,
+        ctx: &RunContext<'_>,
+        closing: &mut Closing,
+        report: Option<ProducerReport>,
+        report_gaps: &[String],
+        report_kept_in: &str,
+        snapshot: &Snapshot,
+    ) -> Result<Flow<Admitted>> {
+        let jc = ctx.jc;
+        let p = ctx.prediction.clone();
+
+        let BuiltCandidate {
+            mut candidate,
+            changed,
+            paths,
+        } = self.build_candidate(ctx, snapshot, report)?;
+        // A retry seeded from a kept candidate already differs from the base: if its producer adds nothing
+        // (the kept candidate did the work and only evidence was missing), the seeded candidate is the
+        // candidate and goes on to admission, checks and the verifier. Only a run with no change against the
+        // base fails as an idle producer.
+        let Some(c) = candidate.candidate_commit.clone() else {
+            closing.candidate = Some(candidate);
+            let reason = if report_gaps.is_empty() {
+                "the producer made no change".to_string()
+            } else {
+                format!(
+                    "the producer made no change, and its report still had problems when sent back: {}; the report is kept in {report_kept_in}",
+                    report_gaps.join("; ")
+                )
+            };
+            closing.happened = self.failure(ctx, &reason);
+            return Ok(Flow::Stop);
+        };
+        closing.happened.changed_paths = paths;
 
         // Admission: the core's rules, then the capability's.
         let mut violations: Vec<PolicyViolation> = admit(&AdmissionInput {
