@@ -313,7 +313,8 @@ impl HostErrorLog {
 
     /// Notes one refused call. The client does this for every refusal; it is public so a test of the landing
     /// trigger can stand in for the client.
-    pub fn record(&self, operation: HostOperation, status_code: Option<u16>) {
+    /// Returns the id of the new entry, so the caller can mark that entry later.
+    pub fn record(&self, operation: HostOperation, status_code: Option<u16>) -> RecordId {
         let mut entries = self.entries.borrow_mut();
         let now = crate::now();
         let mut id = RecordId::generate(now);
@@ -321,7 +322,7 @@ impl HostErrorLog {
             id = RecordId::generate(now);
         }
         entries.push(HostError {
-            id,
+            id: id.clone(),
             at: now,
             status_code,
             operation,
@@ -330,7 +331,17 @@ impl HostErrorLog {
             message_class: MessageClass::of_status(status_code),
             derived: false,
             source_intervention: None,
+            checks_pending: false,
         });
+        id
+    }
+
+    /// Marks the entry with this id as a refusal made while required checks were pending. Only that entry
+    /// changes.
+    pub fn mark_checks_pending(&self, id: &RecordId) {
+        if let Some(entry) = self.entries.borrow_mut().iter_mut().find(|e| &e.id == id) {
+            entry.checks_pending = true;
+        }
     }
 
     /// The refusals so far, oldest first.

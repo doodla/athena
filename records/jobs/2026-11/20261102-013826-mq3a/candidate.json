@@ -1,0 +1,164 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261102-013826-mq3a",
+  "base_commit": "7784767ba6772647e633064acc15552b0e5ca79e",
+  "base_fingerprint": "sha256:9a43cc1ce9a3c07de08c9489bcd914f93c0818add1682548b6b409ad8b7a65e2",
+  "previous_job": "20261031-031934-8vyd",
+  "candidate_commit": "20109a2e2cdbc70ce4eb32522eddc7473dfa4d28",
+  "candidate_tree": "fc038140e6b91e1f668a033d61a6e3e460fc46ef",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 280437
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 37920
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 51949
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 138899
+    },
+    {
+      "path": "crates/athena-core/src/gh/transport.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 13507
+    },
+    {
+      "path": "crates/athena-core/src/watcher.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 30844
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 178591
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 327580
+    }
+  ],
+  "fingerprint": "sha256:f7b97419a8006ce7956c0d8f4a7f963ad3035b1a94d11ab3819994536912b9dc",
+  "violations": [],
+  "producer_report": {
+    "summary": "Merge refusals made while required checks were pending no longer fire D87's signal. An unmarked 405 or 422 still fires on the first job.\n\n**What changed**\n- **Record:** `HostError` in records.rs has a new optional `checks_pending` field. It is written only when true, so old records read and write back byte for byte.\n- **Matcher:** `HostErrorSignal::matches` skips records with `checks_pending` set. The `D87_SIGNAL` doc comment says so, and its name string is unchanged.\n- **The mark:** `HostErrorLog::record` now returns the new entry's id, and a new `mark_checks_pending(&RecordId)` sets the flag on that one entry. `GhClient::merge` keeps the id of its own refused PUT. If the refusal says \"Repository rule violations\" and a read of the checks then says pending, it marks that id. Entries logged later are never touched. A failed check read leaves the entry unmarked, so D87 still fires.\n- **`api_text` split:** the retry loop moved into a private `call` that also returns the id of the last refusal it logged. `api_text` keeps its signature. `is_rule_violation` in landing.rs is now `pub(super)` and `land_pr`'s doc comment mentions the mark.\n- **Decision note:** D150 is appended after D149 in docs/decisions.md. It cites D87 (\"follows D87\") and says pending-check merge refusals no longer fire its signal. D87 is untouched; the diff is 30 added lines and no deletions.\n- **Changelog:** CHANGELOG.md has a new Fixed bullet. Nothing under records/ changed.\n\n**Tests added**\n- Two watcher tests: marked 405 and 422 do not fire, and a mixed set cites only the unmarked id.\n- Five landing tests in gh/tests.rs, through a real `GhClient` with a new scripted `PendingMerge` runner:\n  - The pending 405 or 422 entry is marked while a later check-read entry exists and is unmarked.\n  - Only the retried call's final 422 is marked.\n  - A settled-check refusal is unmarked.\n  - A refusal without the rule-violation text is unmarked.\n  - A failed check read leaves the entry unmarked.\n- One records.rs test for the old-format record.",
+    "files": [
+      "CHANGELOG.md",
+      "docs/decisions.md",
+      "crates/athena-core/src/watcher.rs",
+      "crates/athena-core/src/gh/client.rs",
+      "crates/athena-core/src/gh/landing.rs",
+      "crates/athena-core/src/gh/transport.rs",
+      "crates/athena-core/src/gh/tests.rs",
+      "crates/athena-data/src/records.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core watcher",
+        "result": "pass",
+        "note": "27 passed, including the two new marked/unmarked D87 tests"
+      },
+      {
+        "command": "cargo test -p athena-core gh::",
+        "result": "pass",
+        "note": "108 passed, including 5 new landing tests; rerun after the clippy fix"
+      },
+      {
+        "command": "cargo test -p athena-data",
+        "result": "pass",
+        "note": "143 passed, including the old-format host-error test"
+      },
+      {
+        "command": "cargo test -p athena-cli decisions",
+        "result": "pass",
+        "note": "5 passed, including the append-only guard with D150 appended"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "12 passed (boundary words scan)"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "after cargo fmt --all"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "first run failed on collapsible_if in client.rs; fixed and rerun clean"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core watcher`: a test shows a merge 405 host error marked as caused by pending checks does not make `evaluate` fire D87, and an unmarked 405 or 422 still fires D87 on the first job.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core watcher`: 27 passed. a_merge_refusal_marked_as_made_while_checks_were_pending_does_not_fire_d87 checks that a marked 405 and 422 give no firing and that the same record unmarked fires D87 once. a_marked_and_an_unmarked_refusal_together_fire_citing_only_the_unmarked_one covers a mixed set."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core gh`: a landing test shows a merge refusal while checks are pending is logged with the pending mark on that same merge call's entry even when other entries are logged after it, and a refusal with checks settled is logged unmarked as before.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core gh::`: 108 passed. a_rule_refusal_while_checks_are_pending_is_marked_on_its_own_merge_entry runs land_pr through GhClient with a HostErrorLog and asserts the Merge 405/422 entry is marked, a later ReadChecks 500 entry exists, and exactly one entry is marked. only_the_pending_refusal_is_marked_when_an_earlier_merge_call_was_retried marks only the 422, not the earlier 500. a_rule_refusal_with_the_checks_settled_is_logged_unmarked, a_refusal_that_is_not_a_rule_violation_is_unmarked_even_while_checks_are_pending and a_failed_read_of_the_checks_leaves_the_refusal_unmarked cover the unmarked cases."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-data`: a test through check_record_file/AnyRecord shows an old-format athena.host-error/1 record (as in records/host-errors/2026-11/20261101-174051-3t6g.json) still validates and serialises unchanged.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-data`: 143 passed. an_old_format_host_error_still_validates_and_writes_back_unchanged passes a literal record with no checks_pending through check_record_file at that path, asserts checks_pending is false and to_json() equals the input, that the field is written only when true, and that a stray field is still refused."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-cli decisions`: the append-only guard test passes, so docs/decisions.md only gained text after its previous end.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-cli decisions`: 5 passed, including the_decision_log_is_well_formed_and_only_appended_to, with D150 appended."
+      },
+      {
+        "criterion": "`git diff` of docs/decisions.md shows only added lines at the end of the file: a new entry that cites D87 and says pending-check merge refusals no longer fire its signal. No D87 line is changed.",
+        "status": "met",
+        "evidence": "`git diff --stat -- docs/decisions.md` reports 30 insertions and 0 deletions. The only edit is the D150 entry appended after D149's Provenance bullet; D87 is untouched. D150 names D87 and states that pending-check merge refusals no longer fire D87's signal."
+      },
+      {
+        "criterion": "Grep of crates/athena-core/src/watcher.rs shows the D87_SIGNAL doc comment says pending-check refusals are excluded, and the name string \"host-error: operation merge, status 405 or 422, phase landing\" is unchanged.",
+        "status": "met",
+        "evidence": "The doc comment above D87_SIGNAL now says a refusal logged while required checks were pending is excluded. The `name:` line is untouched in my edits. The HostErrorSignal::matches doc comment and condition (`!error.checks_pending`) were also updated."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry naming the pending-check 405 false positive and stating that existing records/ are untouched; no file under records/ is in the diff.",
+        "status": "met",
+        "evidence": "A new Fixed bullet under Unreleased names the pending-check refusal false positive, its root cause and the fix, and says existing `records/` are untouched. `git status --short` lists only CHANGELOG.md, docs/decisions.md, the five gh/watcher Rust files and records.rs; nothing under records/."
+      }
+    ],
+    "open_issues": [
+      "HostError keeps deny_unknown_fields, so an older Athena build cannot read a record that carries checks_pending. The field is written only when true; D150 and the changelog note this.",
+      "The client's pending probe and land_pr's own check read are two reads. If a check finishes between them, the refusal is marked but land_pr returns it as an error. This cannot fire D87 wrongly; D150 notes it.",
+      "I did not run the full `cargo test --locked`; it is left to Athena's checks."
+    ],
+    "mistakes": [
+      "The first clippy run failed on a collapsible `if` in GhClient::merge. I fixed it and clippy now passes."
+    ],
+    "learnings": [
+      "The work snapshot is the base commit, so the previous candidate's code fix was not present and was reimplemented as the plan describes.",
+      "check_record_file returns Result<Option<AnyRecord>, RecordError>.",
+      "Clippy in this repo denies collapsible_if, so nested `if let` plus `if` must be written as a let chain."
+    ],
+    "desires": [
+      "records/host-errors/2026-11/20261101-174051-3t6g.json was not in the snapshot, so the old-record test uses a literal in the layout to_json writes, not the real file's bytes."
+    ]
+  }
+}

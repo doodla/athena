@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261102-013826-mq3a",
+  "round": 1,
+  "at": "2026-11-02T01:43:20.607922939Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The client repeats land_pr's decision (rule-violation refusal plus Pending checks) with a second check read, so two places decide the same thing.",
+      "evidence": "landing.rs:253-256 already calls `is_rule_violation` and `job.host.check_report(&link.head)` after a refused merge. Step 6 runs the same predicate and another `check_report(head)` inside `GhClient::merge` before returning the error, so each pending refusal costs two extra ReadChecks GETs. The plan's own open question notes that the two reads can disagree. If land_pr's wait rule changes later, the client's mark will silently stop matching it. Fix: Keep the design, since the rejected alternatives were weighed fairly, but add a comment at both sites saying the predicate is shared on purpose (the shared `is_rule_violation` already helps). Also add one test assertion that pins the extra probe: the number of ReadChecks calls after a pending refusal. That makes a future divergence visible. If a no-op default method on PrHost can carry the call's id without changing every fake, prefer letting land_pr's single read drive the mark.",
+      "location": "Plan step 6 / Decision 1 (GhClient::merge probes check_report itself)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The byte-for-byte check uses a hand-written literal, not the real old record, so it proves the round trip only for the producer's guess at the format.",
+      "evidence": "The plan's open question says records/ is absent and the literal is copied from the `to_json` output of the `host_error()` helper at records.rs:3276. A literal produced by the current serializer will round-trip by construction, even if the real 20261101-174051-3t6g.json differs (for example in field order, whitespace or optional fields). Fix: Say that the literal must reproduce the real file's layout as described in the reading (no `derived`, no `checks_pending`). Ask the verifier to compare the literal against records/host-errors/2026-11/20261101-174051-3t6g.json where records/ is available, or to run check_record_file on that file directly.",
+      "location": "Demonstration for criterion 3 (inline old-format literal)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The approach names `HostSignal::matches`, but the type is `HostErrorSignal`.",
+      "evidence": "watcher.rs:60 declares `pub struct HostErrorSignal`, and `matches` is at watcher.rs:149. The Files section uses the right name. Fix: Use `HostErrorSignal::matches` throughout.",
+      "location": "Plan Approach, point (2)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. It keeps the earlier code fix: an optional serde-default `checks_pending` field on HostError, and the D87 matcher skipping records that have it set. It ties the pending mark to the merge call itself by keeping the RecordId that `HostErrorLog::record` returns for that call, not by marking the last logged entry. It appends D150 to docs/decisions.md and leaves D87 alone. It keeps the repository-wide fmt, clippy and test runs out of the acceptance criteria. I read the code to check the plan's claims, and they hold. `api_text` (client.rs:303) logs each refused attempt inside its retry loop. `merge` (client.rs:433) makes one PUT through `api`. `is_rule_violation` is private at landing.rs:327. `land_pr` probes `check_report` after a rule-violation refusal (landing.rs:253-256). `HostErrorLog::record` currently returns `()` (transport.rs:316). HostError is built by struct literal in exactly four places: transport.rs:323, watcher.rs:254 and :427, and records.rs:3277. D149 is the last entry, so D150 is the next free number. The guard pins the first 230046 bytes (decisions.rs:177). The `Refusing` runner and `land_through` helper exist (tests.rs:2354, 2414), and the `Refusing` runner's refusal text is \"refused\", so the new probe never runs in the existing retry tests. Each demonstration names a real seam and would fail without the behavior: cases (a)–(d) catch both an always-mark and a never-mark implementation, and case (a) also catches marking the last entry. The findings below are minor. The client's probe repeats the decision `land_pr` already makes. The old-record fixture is hand-written rather than the real file's bytes. There is one naming slip."
+}
