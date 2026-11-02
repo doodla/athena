@@ -4107,3 +4107,30 @@ should replace those estimates with its figures.
   `crates/athena-cli/tests/lifecycle.rs`, and the D124 entry. Measured: `cargo test -p athena-cli --test
   lifecycle` and the unit tests in `crates/athena-core/src/run/tests.rs`. Not measured: how often a deadline
   produces a change list that a retry can finish, or the effect on cost per job.
+
+## D152 · The ontology test checks each term against the governing sources it summarizes
+
+- **Case:** Job 20261017-173508-0wtc seeded `docs/ontology.toml`. Its Hermes entry was first written from one
+  source, the studied agent, while BRIEF.md also names Hermes as the Orchestration god. The structure test passed;
+  the contradiction was found only at the final verdict. Job 20261025-214509-y179 failed in the same class: its
+  checks covered activity, not whether the claimed outcome was right.
+- **Root cause:** Term content was checked for structure (fields present, sources exist, relations resolve), not
+  against the sources it summarizes. A term with several senses could be defined from one source and pass.
+- **Decision:** `crates/athena-cli/tests/ontology.rs` now scans BRIEF.md and the term's own file sources. Every
+  line that names the term (whole word or phrase, ignoring case) must match a marker of a listed `senses` entry,
+  whose label the definition must state, or an `excused` entry with a reason, anchored by a marker and/or a source
+  file. An unaccounted line fails the test and names its file and line. The rule is generic over all terms; the
+  optional fields are described in the header of `docs/ontology.toml`. Decision-id sources are not scanned. Unit
+  tests on a scratch source reproduce the Hermes case (tool listed, role found in the source: flagged; both
+  listed: passes).
+- **Alternatives:** (a) A rule only in prose in the ontology header or a prompt: it is the check that was missing,
+  and prose is not enforced. (b) A measure-first stage for speed-target jobs, the prevention proposed by the
+  second introspection: it addresses a different failure (a speed goal missed), is out of scope here and needs its
+  own job. (c) A check in the verifier's prompt: it depends on the verifier reading every source.
+- **Tradeoff:** Blanket per-source excuses, used where a source names a term many times in one sense, are a weak
+  record: a new second sense in such a source is not noticed. The reason text and review are the guard. Matching
+  is by substring markers, so a line can be matched by an unrelated marker.
+- **Reversal cost:** Low. Remove `sense_problems` and its call in `problems`; the fields are optional and ignored.
+- **Provenance:** Stated: the request for job 20261027-054251-33v7 and the two introspections it cites. Read:
+  `crates/athena-cli/tests/ontology.rs`, `docs/ontology.toml`, D109. Measured: `cargo test -p athena-cli --test
+  ontology`. Not measured: how often a future term needs more than a blanket excuse.

@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The ontology test now checks each term's content against the governing sources it summarizes, not only the
+  file's structure. For every term, each line of BRIEF.md and of the term's own source files that names it must
+  belong to a listed `senses` entry or carry an `excused` entry with a reason, so a term with several meanings
+  (Hermes, the studied agent and the Orchestration god) can no longer be defined from one source. Cause: jobs
+  20261017-173508-0wtc and 20261025-214509-y179 passed checks of structure or activity while the content was
+  wrong or unmeasured. See D152.
 - CI caches what its setup step installs, so a warm runner restores instead of reinstalling. Two new
   `actions/cache` entries are restored before `./setup.sh --ci` in every job that runs it: gitleaks, keyed on
   runner OS, architecture and `hashFiles('athena.toml')` (the pin lives there); and the athena binary, keyed on
