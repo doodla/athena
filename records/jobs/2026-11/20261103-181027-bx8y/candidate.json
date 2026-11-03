@@ -1,0 +1,123 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261103-181027-bx8y",
+  "base_commit": "ee4b71c6cadcb8d2fd286fe6fbcce9a5b84f6a78",
+  "base_fingerprint": "sha256:6753b27e884fa9be63aa1be8788efef9ace4c0f3bfe6272cd2ffb1b01bf2eab3",
+  "previous_job": "20261102-171907-ab85",
+  "candidate_commit": "caa3cedfc7277669d73691ee11697a6795f55040",
+  "candidate_tree": "cae602f6d78a888c1ba8d9a680ace96f67068bb9",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 302551
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 227889
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 290193
+    }
+  ],
+  "fingerprint": "sha256:1919e248d38d8044c84378fe6566d43244532eeb7a4f5e9627f22b1766bc1c6f",
+  "violations": [],
+  "producer_report": {
+    "summary": "A batch no longer stops as a repeated failure when the item's second failure paused its line. Root cause: Drain::attempts asked the scope guard whether the line was paused only at the top of each attempt, so the failure that caused the pause was never checked. attempts returned ItemEnd::Failed, and finish turned that into Stop::RepeatedFailure. Fix, in drain.rs: a helper `paused_reason` (the old inline lookup, now used at both places), and one re-check where the loop gives up. A paused line returns ItemEnd::Paused, so the item is passed over with one `plan <id> passed over: <pause reason>` line and the next queued item runs. Dependents of that item are held back by the existing per-wave re-plan. Unpaused items still end as Failed and stop the batch. I updated the module docs, the Stop::RepeatedFailure doc comment and Stop::meaning(). No cause classification, key masking, ATTEMPTS change, unread-rule change or scope-guard change. Tests: a Stub field `pause_on_retry` and two new tests (independent next item runs and lands; dependent item c is held back with one line). Two existing real-steps tests had to change (see mistakes). CHANGELOG.md has a Fixed entry.",
+    "files": [
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test drain drain_passes_over_an_item_whose_second_failure",
+        "result": "pass",
+        "note": "both new tests"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain (first run)",
+        "result": "fail",
+        "note": "2 failures, both old-behavior expectations in real-steps tests: drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_reading_it and in_flight_row_goes_when_an_item_fails_twice. Fixed."
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain -- in_flight_row_goes_when_an_item_fails_twice drain_real_steps repeated_failure",
+        "result": "pass",
+        "note": "6 tests pass, including the two unpaused repeated-failure tests, unedited"
+      },
+      {
+        "command": "cargo test --locked --workspace --exclude xtask --no-fail-fast",
+        "result": "pass",
+        "note": "exited 0 (output was too large to read; the exit code shows success). xtask policy was run separately."
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "run before the last test edits; cargo fmt --all was run after them"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-cli/tests/drain.rs: item a fails twice, the scope guard then reports its line paused, and drain::drain runs the next queued item. It asserts the next item is read, run and landed, report.stop is not Stop::RepeatedFailure, and report.failed_item is None. Check with `cargo test -p athena-cli --test drain`.",
+        "status": "met",
+        "evidence": "drain_passes_over_an_item_whose_second_failure_pauses_its_line_and_runs_the_next_item asserts the log [read a, run a, reread a, run a-retry, read b, run b, land b, rate], stop QueueEmpty (and not RepeatedFailure), failed_item None, landed 1. It passes, and the whole drain test file passes."
+      },
+      {
+        "criterion": "The existing repeated-failure tests for an unpaused item (the_same_item_failing_twice_is_a_repeated_failure_naming_the_item and the not-landed variant) still pass unchanged: Stop::RepeatedFailure naming the item. Check with `cargo test -p athena-cli --test drain`.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-cli --test drain -- ... repeated_failure`. the_same_item_failing_twice_is_a_repeated_failure_naming_the_item and a_job_that_does_not_land_twice_still_ends_as_repeated_failure_when_the_config_is_readable pass; neither is edited."
+      },
+      {
+        "criterion": "`cargo test` passes, `cargo clippy --all-targets` is clean and `cargo fmt --check` passes.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran clippy with -D warnings (clean), `cargo fmt --all` and the workspace tests (exit 0)."
+      },
+      {
+        "criterion": "The diff to crates/athena-cli/src/drain.rs is small and has no failure-cause classification or key masking. The module docs and the Stop::RepeatedFailure description say that a failure of an item whose line is paused does not stop the batch. Verifiable with `git diff`.",
+        "status": "met",
+        "evidence": "git diff --stat: drain.rs has about 37 changed lines. They are the paused_reason helper, one re-check before the give-up, and text in the module docs bullet, the Stop::RepeatedFailure doc comment and meaning()."
+      },
+      {
+        "criterion": "The paused item's second failure is recorded in the run output (a passed-over line with the pause reason) and not silently dropped. The new test asserts that line.",
+        "status": "met",
+        "evidence": "The first new test asserts ui.lift_lines(\"a\") has exactly one line, starting `plan       a passed over: line a is paused` and containing `To lift it: narrow the request`, printed after 2 runs, and not repeated by display::drain. The second test asserts c's single passed-over line."
+      },
+      {
+        "criterion": "No change to athena.toml, defaults.toml, workflows, the scope guard itself, ATTEMPTS, or the reader's skip-after-two-unread rule.",
+        "status": "met",
+        "evidence": "git diff --stat lists only CHANGELOG.md, crates/athena-cli/src/drain.rs and crates/athena-cli/tests/drain.rs. The drain.rs diff does not touch ATTEMPTS or the `unread >= 2` branch."
+      }
+    ],
+    "open_issues": [
+      "I did not read the output of the final workspace test run because it was too large. I relied on its zero exit code, and drain tests and the xtask policy test were run separately with their output read.",
+      "display.rs was not changed (see unchanged_planned_files)."
+    ],
+    "mistakes": [
+      "The plan said existing tests would not be edited. The first full drain test run showed two real-steps tests that expected the old behavior, and I had to edit them. I changed the `rejected_twice` helper to return the report and no longer assert failed_item itself. drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_reading_it now asserts failed_item None and a stop that is not RepeatedFailure. drain_real_steps_do_not_hold_an_item_for_a_stored_pause_that_no_longer_holds asserts failed_item is the job. in_flight_row_goes_when_an_item_fails_twice now uses a different criterion for the second rejection so the item still fails, as the test intends. The two named repeated-failure tests are not edited."
+    ],
+    "learnings": [
+      "Two real-steps tests relied on the old behavior. A pause happens when one criterion is rejected twice. The real scope guard pauses a line on exactly the scenario this job changes, so `rejected_twice(rejecting_verdict(), rejecting_verdict())` and in_flight_row_goes_when_an_item_fails_twice now see a passed-over item, not a failed one.",
+      "Two rejections of different criteria only flag the line. They do not pause it, so such an item still fails and stops the batch.",
+      "The Stub's `paused` is asked with the item id, so a pause that begins mid-item must be keyed by the item id, not the retry job id."
+    ],
+    "desires": [
+      "Bash allows only cargo, git, ls and similar commands, and Read and Grep cannot open cargo's saved large-output files. I could not search a long test log for failures and relied on the exit code."
+    ]
+  }
+}

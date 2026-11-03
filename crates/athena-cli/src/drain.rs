@@ -27,9 +27,10 @@
 //!   scope guard has paused. `Drain::prepare` asks once for the whole queue, before it reads anything: such an
 //!   item is not read, is held back with whatever depends on it (so `athena plan` lists it as `held`), and its
 //!   one passed-over line, which names the line and how to lift the pause, is printed as soon as the plan is
-//!   made. [`Drain::attempts`] asks again before each attempt ([`ItemEnd::Paused`]), for a line the item's own
-//!   failed attempt has just paused. Neither is a failed attempt, so neither counts toward the repeated-failure
-//!   stop.
+//!   made. [`Drain::attempts`] asks again before each attempt ([`ItemEnd::Paused`]), and once more after the
+//!   last failed attempt, for a line the item's own failed attempt has just paused. Neither is a failed
+//!   attempt, so neither counts toward the repeated-failure stop: an item whose second failure paused its line
+//!   is passed over with the pause reason, and the batch goes on to the next queued item.
 //! - **Concurrency.** A group is worked by up to `max_concurrency` workers; the next group starts only when
 //!   the group before it is done, so an item that depends on another starts after it has finished. Landing
 //!   and rating go one at a time (a lock), and every model call's cap is held against the budget while it is
@@ -940,7 +941,8 @@ pub enum Stop {
     /// The next call's cap did not fit what was left of the budget.
     BudgetSpent,
     /// One item failed twice. An item whose reader gave no reading twice is not this: it is skipped, with its
-    /// reason, and the next item runs.
+    /// reason, and the next item runs. Nor is an item whose line the scope guard has paused, even when its
+    /// second failure is what paused it: it is passed over, with the pause reason, and the batch goes on.
     RepeatedFailure,
     /// Nothing is queued (or everything queued was worked). This is not success.
     QueueEmpty,
@@ -998,7 +1000,9 @@ impl Stop {
             Stop::BudgetSpent => {
                 "spend plus the next model call's cap would exceed the budget; the rest stays queued"
             }
-            Stop::RepeatedFailure => "the same item failed twice; the item is named",
+            Stop::RepeatedFailure => {
+                "the same item failed twice; the item is named (an item whose line is paused is passed over and does not stop the batch)"
+            }
             Stop::QueueEmpty => "nothing was left to work; this is not success",
             Stop::JobLimit => "the job limit was reached",
             Stop::Requested => {
@@ -1742,12 +1746,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 }
                 // A line the scope guard paused (possibly by this item's own last attempt) refuses a read
                 // or run with the pause text. That is not a failure of the item: pass it over unread.
-                if let Some((_, reason)) = self
-                    .steps
-                    .paused(std::slice::from_ref(&item.job))
-                    .into_iter()
-                    .next()
-                {
+                if let Some(reason) = self.paused_reason(item) {
                     return ItemEnd::Paused(reason);
                 }
                 let from = if retry {
@@ -1810,9 +1809,23 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             }
             failures += 1;
             if failures >= ATTEMPTS {
-                return ItemEnd::Failed;
+                // The last failure may itself have paused the line. That is the scope guard's doing, not a
+                // repeated failure of the item: pass it over and let the batch go on.
+                return match self.paused_reason(item) {
+                    Some(reason) => ItemEnd::Paused(reason),
+                    None => ItemEnd::Failed,
+                };
             }
         }
+    }
+
+    /// The reason the scope guard has paused the line of `item`, if it has.
+    fn paused_reason(&self, item: &Item) -> Option<String> {
+        self.steps
+            .paused(std::slice::from_ref(&item.job))
+            .into_iter()
+            .next()
+            .map(|(_, reason)| reason)
     }
 
     /// The stale-reading re-check, made when the job of a reading made ahead starts. A landing since the

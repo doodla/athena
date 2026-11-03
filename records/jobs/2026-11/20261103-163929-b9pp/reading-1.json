@@ -1,0 +1,170 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261103-163929-b9pp",
+  "n": 1,
+  "at": "2026-11-03T16:39:54.98648793Z",
+  "invocation_seq": 1,
+  "base_commit": "728c408ea6c61ba164738b8eb5b208c1ab190375",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Pause an item that fails twice; stop drain only on shared causes",
+  "summary": "Retry of job 20261103-162416-m9th (no candidate kept, nothing to carry over): in crates/athena-cli/src/drain.rs, `Drain::finish` stops the batch on any item's double failure. Change so one item's double failure pauses that item and the drain continues; stop with Stop::RepeatedFailure only on positive evidence of a shared cause (StopCause::of environment match, or typed host error). Audience: operator running `athena drain` with budget left.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes in Rust."
+    },
+    {
+      "id": "tested",
+      "how": "cargo test, clippy, fmt checks required."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run drain::drain with the Stub and real error texts."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Checks that the drain continues past a lone failing item and stops on shared cause."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fixes the unconditional stop rule in Drain::finish."
+    },
+    {
+      "id": "mechanism",
+      "how": "Rule enforced in code and tests."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/drain.rs (Drain::finish at ~2348 sets Stop::RepeatedFailure unconditionally for ItemEnd::Failed at ~2379; pass_over ~1368; landing_from_report ~3038; RealSteps ~3322; Stop docs ~944-1001; module header ~103), crates/athena-cli/tests/drain.rs (27 RepeatedFailure uses, drain::drain with Stub), display.rs, tests/job_plan.rs and steward.rs (one use each). The property is measured directly by running drain::drain with the Stub and inspecting the report and stub log. No record or data files are added, so no records validation change.",
+    "Job 20261103-162416-m9th failed in planning in round 3 on one major finding: every run/read Err was classed as shared. Addressed here: a no-outcome Err is per item by default; it is shared only with positive evidence (StopCause::of(reason).is_environment(), or a typed host error by downcast as BudgetShort already is). Err sites to enumerate before classifying, from the code: go_with_stages in athena-core run/mod.rs (~340 declined, 348 running, 356 interrupted, 360 already closed), run/pin.rs ~150 readings cap, run/close.rs ~412 and ~348; all are item-specific. The landing error is classified by where it arises (landing_from_report Ok vs Err).",
+    "The earlier job's candidate changed no files, so there is no work to keep or drop; the retry starts from base.",
+    "Demonstrations use real error texts from those sites and production constants (e.g. athena_core::disk::USAGE_LIMIT, LOW_DISK, ENVIRONMENT_PREFIX), not invented text.",
+    "The previous prevention (enumerate producers, repair round) is a planning-process matter, out of this change; this job only does the drain fix with the producer list done up front."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "New test in crates/athena-cli/tests/drain.rs: item a fails twice, and the drain then runs queued item b (stub log shows b after a's retry); report.stop is not Stop::RepeatedFailure and a is paused with its failure named. Run `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "New test: two different items each fail twice with the item-specific real texts (`job X is already closed (rejected)`, `job X has N readings, the most a job may have`, declined, running, interrupted); both are paused and the drain finishes the rest of the queue without Stop::RepeatedFailure. Run `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "New test: two different items fail twice with the same shared cause built from a production constant (athena_core::disk::USAGE_LIMIT or LOW_DISK, or an expired login text); the drain stops with Stop::RepeatedFailure naming an item and starts no further queued item. Run `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "New test: a landing error is classified by where it arises (landing_from_report Ok vs Err), checked with the real landing_from_report. Run `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Unit test in drain.rs tests shows ids wrapped in backticks or parentheses are masked by the failure key, so such texts match. Run `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In crates/athena-cli/src/drain.rs, `Drain::finish` no longer sets Stop::RepeatedFailure unconditionally for ItemEnd::Failed; a lone failure goes through pass_over with a reason naming the item and its failures, and only evidence of a shared cause stops the batch.",
+      "kind": "content"
+    },
+    {
+      "text": "Existing drain tests asserting the old single-item stop are updated; `cargo test` passes for the workspace, `cargo clippy --all-targets` is clean, `cargo fmt --check` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Doc comments in drain.rs (module header ~103, Stop::RepeatedFailure ~944 and ~1001) and text in display.rs describe the new rule; CHANGELOG.md has an entry; the display still names the failed item and its rejection.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/steward.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "docs",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Changing the scope guard itself or how it pauses lines",
+    "Changing the ATTEMPTS count or the reader's skip-after-two-unread rule",
+    "Changes to athena.toml, defaults.toml, or workflows",
+    "Changing environment stops such as rebuild failure, budget, job limit, or reinstall",
+    "Changing athena-core error types or planning-stage process"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.718961038961039,
+      "p_verification_passes": 0.6763925729442971,
+      "p_user_intervenes": 0.0919431279620853,
+      "cost_usd": {
+        "p10": 0.5582334999999999,
+        "p50": 1.3349033000000003,
+        "p90": 3.6205314
+      },
+      "wall_time_s": {
+        "p10": 535.0761846248224,
+        "p50": 1927.7798879900006,
+        "p90": 4185.660723018431
+      }
+    }
+  },
+  "departures": "Higher cost and lower pass chance than reference: core drain flow, prior attempt failed planning three rounds, many tests encode the old rule.",
+  "urgent_reason": "Cuts wasted time: a single item's repeated failure stops a batch with budget and jobs left.",
+  "hard_reason": "Changes the drain's stop rule, which decides whether a batch is held or continues, in the core run pipeline.",
+  "producer_effort": "high"
+}

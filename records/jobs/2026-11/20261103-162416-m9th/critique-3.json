@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-162416-m9th",
+  "round": 3,
+  "at": "2026-11-03T16:38:51.955750933Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Every run or read Err is classed as a shared cause, but many Err texts are verdicts on the item's own job. After masking they match across items and would stop the batch falsely.",
+      "evidence": "crates/athena-core/src/run/mod.rs:340 `bail!(\"job {id} was declined: ...\")`, :348 `job {id} is running`, :356 `job {id} was interrupted ...`, :360 `job {id} is already closed ({state})`; run/pin.rs:150 `job {id} has {n} readings, the most a job may have`; run/close.rs:412 `job {id}'s verification does not hold for its candidate any more`. All of these come back through `go_with_stages` as Err, so RealSteps::run at drain.rs 3562 turns them into `outcome: None`. `failure_key` masks the id and the digits, so two items that are both 'already closed (rejected)' or both at the readings cap get equal keys. The plan's mitigation ('The Err arms carry host and Athena errors, as their code shows') is not what the code shows. Fix: Treat a no-outcome Err as per item by default. Mark it shared only when there is positive evidence of a shared cause: `StopCause::of(reason).is_environment()`, a typed host error found by downcast (as `BudgetShort` already is at 3564), or an explicit list of Athena or host error types. Otherwise mark the job-state bails as per item, for example with a typed `JobStateError` in athena-core, or by checking `JobState` in the drain. Add a control case to criterion 3: two items whose runs both end in the Err text 'job <id> is already closed (rejected)', and the batch continues.",
+      "location": "Plan Decision 1 / Step 2 (`run_failure`: shared when `outcome.is_none()`), Decision 3 / Step 4 (read Err arm), Risks bullet 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The shared no-outcome case is scripted with invented text that no production path produces, so it does not exercise how real Err texts are classified.",
+      "evidence": "Stub.runs returns `(None, \"host unavailable\")`. If Err classification moves to positive evidence (finding above), this case should use a real environment or host error form, as case 2 already does with `athena_core::disk::USAGE_LIMIT`. Fix: Script case 1 with a reason built from production constants, for example `ENVIRONMENT_PREFIX` or `LOW_DISK`, or with a typed host error. Keep a per-item Err text such as 'job X is already closed' as a control.",
+      "location": "Demonstration for criterion 2, stopping case 1 (`(None, 'host unavailable')`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Tokens that wrap a job id in backticks or parentheses depend on trimming to be masked. This works, but should be stated in a unit test.",
+      "evidence": "close.rs:348 'run `athena go {id}` again' produces the token '{id}`' with a trailing backtick. Fix: Add a unit case in `tests::failure` for an id wrapped in backticks and one in parentheses.",
+      "location": "Decision 4 (`failure_key` trims edge punctuation)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the fix in the right place: `Drain::finish`'s unconditional `set_stop(Stop::RepeatedFailure)` at drain.rs 2379 is where the fault starts. Splitting a landing error by where it arises (`landing_from_report` Ok vs Err at 3052/3056) and reusing `StopCause::of` (disk.rs 388-415) are both sound. The demonstrations name real seams (`drain::drain` with `Stub`, plus the production `landing_from_report`), and each would fail under the old rule. One part of the classification is a guess the code contradicts. The plan treats every `Err` from `RealSteps::run` (3562) and from a read (3510) as a shared host or Athena cause. Its risk section says those Err arms \"carry host and Athena errors, as their code shows\". They do not. `go_with_stages` bails with errors about the item's own job state ('job X was declined', 'is already closed', 'is running', 'was interrupted', at run/mod.rs 340-360), and pin.rs 150 bails with 'job X has N readings, the most a job may have'. Once names and digits are masked, two unrelated items hitting the same one of these sentences get identical keys and stop the batch. That is the same false-shared fault the request is about. A shared cause needs evidence that it is shared, not just \"no outcome\". I checked the code with Read and Grep only and ran nothing."
+}

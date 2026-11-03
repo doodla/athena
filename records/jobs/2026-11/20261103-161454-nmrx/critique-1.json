@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-161454-nmrx",
+  "round": 1,
+  "at": "2026-11-03T16:22:46.429616765Z",
+  "invocation_seq": 4,
+  "agent_verdict": "reject",
+  "final_verdict": "reject",
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "The detector needs a candidate record that the real early head never contains, so the CI failure the request is about remains.",
+      "evidence": "candidate.rs:98-108 builds the tree from base `p` plus only the producer's changes and commits it as `Candidate for job {id} ... Not on any branch`. Line 109 then sets `candidate.candidate_commit = Some(c)`, so the record is written after the commit, outside it. run/mod.rs:1415-1425 pushes this same `c` as the early head (`self.early_pr(&id, &c, ...)`). gh/early.rs:52 even notes that the pull-request-head and history jobs 'always fail there'. The plan's detector requires the commit to add exactly one candidate.json or candidate2.json, which never happens for `c`. Fix: Have the reading redone with a correct definition of a pending head: for example, the head is a job's candidate commit (single parent, governed work only, no records), identified by something CI can actually read. Then plan detection from that source and rewrite criteria 1 and 2 to build the real shape.",
+      "location": "Plan step 2 (`pending_candidate`) and Decision 1; crates/athena-core/src/run/candidate.rs:98-110",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan asks the user something the code already answers.",
+      "evidence": "The question 'Is the real early-push head one commit holding governed work together with the job's candidate.json?' is answered by run/candidate.rs:101-109 and run/mod.rs:1425. Reading those two places would have shown that the whole design rests on a shape that does not exist. This is guessing where the code could be read. Fix: Read run/candidate.rs and run/mod.rs, base the detector on the actual early-head shape, and drop the question.",
+      "location": "Open questions, item 2",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The test fixtures build a fictional head, so the tests would pass while real CI still fails.",
+      "evidence": "`candidate_head` commits a.txt plus `fixtures::candidate`. `pending_head` restores the landing tree and removes only verification.json and outcome.json, which leaves candidate.json in the tree. Neither matches the head that open_early_pr pushes (candidate.rs:101). A demonstration that passes on a shape the system never produces does not show the requested behavior. Fix: Build the fixture head the way run/candidate.rs builds it: base plus the producer's changes, no records. Then show that this head is reported as pending only when it is a known candidate, and that an arbitrary governed change still fails.",
+      "location": "Demonstrations for criteria 1 and 2 (`candidate_head` helper, `pending_head` helper)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Matching on the message text to demote a gate violation is fragile, and it works around the gate rather than fixing it there.",
+      "evidence": "The demotion matches the prefix 'this commit is on the head but not on main, and' from history.rs:158 to move a violation into a note after check_history has returned. The plan concedes this in Decision 1, where it calls an `Uncovered` variant in the gate the cleaner root-cause site. Fix: After the reading is redone, prefer deciding pending status at the source (the gate's pre-merge rule, or a hook in check_after_cutover), with the gate files listed as deliverables, rather than matching on display text.",
+      "location": "Plan step 4 / Decision 3 (prefix match on the history violation text)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The reading defines a candidate-shaped head as \"governed work plus the job's candidate record\", but the real early head has no candidate record in it. open_early_pr pushes the candidate commit `c`, built in crates/athena-core/src/run/candidate.rs:98-110 and run/mod.rs:480-494. That commit is the base tree plus the producer's changes only, and the candidate record is filled in afterwards with `candidate_commit = Some(c)`, so the record cannot sit inside the commit it names. So the head the first CI run sees is \"a governed change with no job records\". The reading's assumptions say that shape is \"still judged as before\", which means the reading keeps failing the exact head the request is about. Criteria 1 and 2 test a shape the early-PR flow never produces.",
+  "summary": "The plan is internally careful. It applies the rule only to the head or to a stacked landing of the same job, judges the landing in full, adds negative cases, and checks its dependents well. The prefix it matches exists at crates/athena-gate/src/history.rs:158, and check_pr_head exists at pr_check.rs:47. But it builds on a head shape that the code shows never happens. Read in the snapshot: the early pull-request head is the candidate commit from run/candidate.rs:101, which is base plus the producer's work with no records/ entries. The candidate record points at that commit by sha (candidate.rs:109). It cannot be inside it, and gh/records.rs does not push it anywhere. So `pending_candidate`, which requires the commit to add candidate.json or candidate2.json, never matches a real early head. The first CI run would still fail with exit 2, and the request's root cause would stay unfixed. The plan saw this risk but left it as an open question to the user, although the answer is readable in the code. Fixing this means redefining what makes a head \"pending\". It has to be identified without a record in the tree, perhaps by matching the head sha to a known candidate commit, and the plan must name where CI can see that information. That changes the accepted reading's definition and criteria 1 and 2, so the reading needs to be redone before planning. Per the role's rules, that makes the verdict reject rather than revise."
+}
