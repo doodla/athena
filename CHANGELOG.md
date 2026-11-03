@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Decision briefs: `cargo run -p xtask -- site` now writes a decisions page with one self-contained,
+  one-screen HTML brief per waiting item (decision, options with cost and risk, one chart, Athena's
+  recommendation, a record link for every claim). The renderer refuses a brief with no recommendation or
+  more than 120 words of prose. The owner's style rules are stored in `docs/conventions/owner-style.md`;
+  see `docs/design/owner-decision-briefs.md`. Rating and rewrite by the audience role and status links
+  are follow-ups.
+
 ### Changed
 
 - A reused red CI run now gives the verifier the names of the failing tests and the end of the failing job's
