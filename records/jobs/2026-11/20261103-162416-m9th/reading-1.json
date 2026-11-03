@@ -1,0 +1,165 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261103-162416-m9th",
+  "n": 1,
+  "at": "2026-11-03T16:26:04.293743548Z",
+  "invocation_seq": 1,
+  "base_commit": "61c1a088f55cfc3cfc35913ee1b8fa30a8f762bd",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Pause an item that fails twice; stop the batch only on shared causes",
+  "summary": "In the drain, an item failing twice currently sets Stop::RepeatedFailure and ends the batch. Change it so one item's double failure passes that item over (paused, noted, failure visible) and the batch continues, while two different items failing for the same cause still stop the batch with RepeatedFailure. Audience: the operator running `athena drain` with budget left.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests plus cargo test and clippy criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the drain with stub items and check the next item runs or the batch stops."
+    },
+    {
+      "id": "root-cause",
+      "how": "Changes the stop rule in finish, not the one item that surfaced."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the batch continuing past a lone failure, and stopping on a shared cause."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and changelog updated for an outside reader."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced in drain code and tests."
+    },
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/drain.rs. `Drain::attempts` (~line 1725) loops: checks stop_requested, then the scope-guard pause (returns ItemEnd::Paused), then run_job; a failed attempt (rejected job or NotLanded) increments `failures`, and at ATTEMPTS returns ItemEnd::Failed. `Drain::finish` (~2379) maps ItemEnd::Failed to set_stop(Stop::RepeatedFailure, Some(job)), which ends every worker via take_until_done. ItemEnd::Paused/Skipped already use pass_over and let the run continue; that is the model for the new behaviour. Stop::RepeatedFailure is declared ~line 944 with text near 983/1001, and rendered in crates/athena-cli/src/display.rs ~619.",
+    "Code survey: existing tests in crates/athena-cli/tests/drain.rs that assert Stop::RepeatedFailure for a single failing item (~lines 939, 1060, 1083, 1272, 4293, 6435, 6864, 7194) and the `Before::RepeatedFailure` seeding (~6628) encode the old rule and must be updated to the new rule; display tests assert 'repeated failure: item a failed twice'. No new record or data file is added, so records validation (check_record_file, AnyRecord) is untouched.",
+    "Shared cause is judged by comparing a normalized failure reason (the rejection/not-landed text, with job and item names stripped) between two different items; the same reason on a second distinct item means shared and stops the batch with Stop::RepeatedFailure naming the later item. Different reasons, or the same item, only pause that item. Item failures from the environment/build (rebuild failure, unreadable config, disk hold) keep their existing stops.",
+    "A paused-by-failure item is recorded in report jobs/notes with its reason so the failure stays visible, and is not retried again in the same run.",
+    "This adds no new refusal rule that rejects more readings; it loosens a stop, so no refusal-rate criterion applies.",
+    "Governance files (athena.toml, defaults.toml, workflows) are not changed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/tests/drain.rs has item `a` fail twice and then asserts the drain runs the next queued item `b` (stub log shows b read/run after a's retry), and report.stop is not Stop::RepeatedFailure. Run `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test has two different items fail twice with the same failure reason and asserts the drain stops with Stop::RepeatedFailure, naming an item, and does not start a further queued item. Run `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test has two different items fail with different reasons and asserts the batch continues past both (not a shared cause). Run `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In crates/athena-cli/src/drain.rs `Drain::finish` no longer sets Stop::RepeatedFailure unconditionally for ItemEnd::Failed; a lone item failure goes through pass_over with a reason that names the item and its failures, and the stop only occurs when the failure reason matches a different earlier failed item.",
+      "kind": "content"
+    },
+    {
+      "text": "Existing drain tests that asserted the old single-item stop are updated to the new rule, and `cargo test` passes across the workspace, `cargo clippy --all-targets` is clean, and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The doc comments in drain.rs (module header ~line 103, Stop::RepeatedFailure docs ~942 and its description ~1001) and the text in display.rs describe the new rule: a repeated failure of one item pauses that item; only a shared cause stops the batch. CHANGELOG.md has an entry.",
+      "kind": "content"
+    },
+    {
+      "text": "Running the drain display test for a paused-by-failure item (`cargo test -p athena-cli`) shows the output still names the failed item and its rejection, so the failure is not hidden when the batch continues.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.96
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "docs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing the scope guard itself or how it pauses lines",
+    "Changing the ATTEMPTS count or the reader's skip-after-two-unread rule",
+    "Changes to athena.toml, defaults.toml, or workflows",
+    "Changing environment stops such as rebuild failure, budget, job limit, or reinstall"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.9,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2200.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.718961038961039,
+      "p_verification_passes": 0.6763925729442971,
+      "p_user_intervenes": 0.09216152019002374,
+      "cost_usd": {
+        "p10": 0.5578277252771497,
+        "p50": 1.3299452424662004,
+        "p90": 3.6318539912717314
+      },
+      "wall_time_s": {
+        "p10": 534.278384555124,
+        "p50": 1930.4523788498045,
+        "p90": 4187.736928905571
+      }
+    }
+  },
+  "departures": "The drain.rs file is very large and many existing tests assert the old stop, so cost, time and verification risk are higher than the reference.",
+  "urgent_reason": "It cuts wasted time: batches stopped by one item's repeated failure leave budget and queued jobs unused and force manual restarts.",
+  "hard_reason": "It changes the drain's stop rule (when a batch refuses to continue) and the run pipeline's failure handling, where mistakes are costly and hard to see.",
+  "producer_effort": "high"
+}
