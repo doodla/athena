@@ -172,7 +172,7 @@ fn cites(value: &Value, what: &str, known: &BTreeSet<String>) -> Result<String> 
 }
 
 /// Athena's own repository, linked from the next-steps section.
-const ATHENA_URL: &str = "https://github.com/doodla/athena";
+pub(crate) const ATHENA_URL: &str = "https://github.com/doodla/athena";
 
 /// The web address of a GitHub repository given its clone URL (`https://github.com/<owner>/<name>[.git]`),
 /// or `None` when the repository is not on GitHub.
@@ -190,7 +190,7 @@ fn github_base(repo: &str) -> Option<String> {
 
 /// A link to a file and lines of the pinned commit on GitHub. Characters that would end the path early are
 /// percent-encoded. A start line of 0 means the claim names no line, so no anchor is added.
-fn source_url(base: &str, sha: &str, path: &str, start: u64, end: u64) -> String {
+pub(crate) fn source_url(base: &str, sha: &str, path: &str, start: u64, end: u64) -> String {
     let path: String = path
         .chars()
         .map(|c| match c {
@@ -265,7 +265,8 @@ pub fn render(study: &Study) -> Result<String> {
          Each statement below ends with the id of the claim that supports it; the claims, with links to \
          their sources, are listed at the end.</p>\
          <p class=\"pin\">Pinned {sys} commit: <code>{sha}</code> in {repo_link}</p>\
-         <p class=\"lede\">Next step: <a href=\"#next-steps\">install Athena or read {sys} itself</a>.</p></header>",
+         <p class=\"lede\">Next step: <a href=\"#next-steps\">install Athena or read {sys} itself</a>.</p>\
+         <p class=\"lede\">Also on this site: <a href=\"decisions.html\">proposals waiting for the owner</a>.</p></header>",
         sys = escape(system),
         athena = escape(str_of(about, "athena", "intro.json about")?),
         study_text = escape(str_of(about, "study", "intro.json about")?),
@@ -624,17 +625,22 @@ fn array_of_value<'a>(value: &'a Value, file: &str) -> Result<&'a Vec<Value>> {
         .ok_or_else(|| anyhow!("{file} is not a list"))
 }
 
-/// Builds the site: reads the study under `root` and writes `index.html` into `out`.
+/// Builds the site: reads the study under `root` and writes `index.html` into `out`, and beside it
+/// `decisions.html`, the owner's briefs on the open Steward proposals. Both pages are built before either is
+/// written, so a failure leaves no partial site.
 pub fn build(root: &Path, out: &Path) -> Result<()> {
     let html = render(&load(&root.join(STUDY_DIR))?)?;
+    let decisions = crate::decisions::page(root)?;
     std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
-    let index = out.join("index.html");
-    std::fs::write(&index, html).with_context(|| format!("cannot write {}", index.display()))?;
-    println!("wrote {}", index.display());
+    for (name, page) in [("index.html", html), (crate::decisions::PAGE, decisions)] {
+        let path = out.join(name);
+        std::fs::write(&path, page).with_context(|| format!("cannot write {}", path.display()))?;
+        println!("wrote {}", path.display());
+    }
     Ok(())
 }
 
-const CSS: &str = "\
+pub(crate) const CSS: &str = "\
 :root{color-scheme:light dark;--bg:#fff;--fg:#1b1f24;--muted:#59636e;--card:#f6f8fa;--line:#d0d7de;--accent:#0b5cad}\
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#9198a1;--card:#161b22;--line:#30363d;--accent:#58a6ff}}\
 *{box-sizing:border-box}\
@@ -1234,5 +1240,31 @@ mod tests {
                 .unwrap()
                 .starts_with("<!doctype html>")
         );
+    }
+
+    #[test]
+    fn the_index_links_to_the_decisions_page_and_build_writes_it_beside_the_index() {
+        let dir = study_dir("[mechanism] A thing happens.", "c1");
+        let html = render(&load(dir.path()).unwrap()).unwrap();
+        assert!(html.contains(&format!("<a href=\"{}\">", crate::decisions::PAGE)));
+        let root = tempfile::tempdir().unwrap();
+        let study = root.path().join(STUDY_DIR);
+        std::fs::create_dir_all(&study).unwrap();
+        for name in [
+            "pin.json",
+            "claims.json",
+            "model.json",
+            "rationales.json",
+            "findings.json",
+            "intro.json",
+        ] {
+            std::fs::copy(dir.path().join(name), study.join(name)).unwrap();
+        }
+        let out = root.path().join("site");
+        build(root.path(), &out).unwrap();
+        assert!(out.join("index.html").is_file());
+        let page = std::fs::read_to_string(out.join(crate::decisions::PAGE)).unwrap();
+        assert!(page.contains("Proposals waiting for the owner"));
+        assert!(page.contains("The records branch is not in this checkout"));
     }
 }
