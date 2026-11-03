@@ -624,15 +624,362 @@ fn array_of_value<'a>(value: &'a Value, file: &str) -> Result<&'a Vec<Value>> {
         .ok_or_else(|| anyhow!("{file} is not a list"))
 }
 
-/// Builds the site: reads the study under `root` and writes `index.html` into `out`.
+/// Builds the site: reads the study under `root` and writes `index.html` into `out`, then the decision
+/// briefs under `out/decisions/`. The index links to the decisions page.
 pub fn build(root: &Path, out: &Path) -> Result<()> {
-    let html = render(&load(&root.join(STUDY_DIR))?)?;
+    let html = with_decisions_link(render(&load(&root.join(STUDY_DIR))?)?);
     std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
     let index = out.join("index.html");
     std::fs::write(&index, html).with_context(|| format!("cannot write {}", index.display()))?;
     println!("wrote {}", index.display());
+    build_decisions(root, out)
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Decision briefs: one self-contained page per item that waits for the owner.
+
+/// Where waiting items are read from, relative to the repository root: one `<id>.json` brief per item.
+/// A missing directory means nothing is waiting. Design: `docs/design/owner-decision-briefs.md`.
+pub const DECISIONS_SRC: &str = "records/decisions-waiting";
+/// The most words of prose a brief may carry (decision, options, costs, risks, recommendation).
+pub const MAX_BRIEF_WORDS: usize = 120;
+
+/// One choice the owner can make.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BriefOption {
+    pub name: String,
+    pub cost: String,
+    pub risk: String,
+    /// 1 (low) to 3 (high); drawn as the bar length in the diagram.
+    pub risk_level: u8,
+    /// Link to the record this option's cost and risk come from.
+    pub source: String,
+}
+
+/// Athena's recommendation: one of the option names, why, and the record it rests on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BriefRecommendation {
+    pub choice: String,
+    pub reason: String,
+    pub source: String,
+}
+
+/// A decision brief. `recommendation` is optional only so that a missing one can be refused with a clear message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Brief {
+    pub id: String,
+    pub title: String,
+    pub decision: String,
+    pub decision_source: String,
+    pub options: Vec<BriefOption>,
+    pub recommendation: Option<BriefRecommendation>,
+}
+
+/// A Steward proposal that waits for the owner, as the fields the brief needs. Only tests construct it
+/// until a later change writes the waiting files from the Steward's proposals.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitingProposal {
+    pub key: String,
+    pub title: String,
+    /// Link to the record that raised the proposal.
+    pub source: String,
+    /// Link to the evidence the proposal rests on.
+    pub evidence: String,
+}
+
+impl Brief {
+    /// The brief for a waiting Steward proposal: approve it or leave it open.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn from_proposal(p: &WaitingProposal) -> Brief {
+        Brief {
+            id: p.key.clone(),
+            title: p.title.clone(),
+            decision: format!("Steward proposes: {}. Approve it?", p.title),
+            decision_source: p.source.clone(),
+            options: vec![
+                BriefOption {
+                    name: "Approve".into(),
+                    cost: "One queued job changes the rung.".into(),
+                    risk: "The change touches a rung above Steward's limit.".into(),
+                    risk_level: 2,
+                    source: p.evidence.clone(),
+                },
+                BriefOption {
+                    name: "Leave open".into(),
+                    cost: "Nothing changes now.".into(),
+                    risk: "The finding stays and may be raised again.".into(),
+                    risk_level: 1,
+                    source: p.source.clone(),
+                },
+            ],
+            recommendation: Some(BriefRecommendation {
+                choice: "Approve".into(),
+                reason: "The evidence supports the finding.".into(),
+                source: p.evidence.clone(),
+            }),
+        }
+    }
+
+    /// Reads a brief from JSON. A missing or empty `recommendation` is kept as `None` and refused by `check`.
+    pub fn from_json(value: &Value) -> Result<Brief> {
+        let what = "a brief";
+        let text = |v: &Value, k: &str, w: &str| str_of(v, k, w).map(str::to_string);
+        let mut options = Vec::new();
+        for o in array_of(value, "options", what)? {
+            options.push(BriefOption {
+                name: text(o, "name", "an option")?,
+                cost: text(o, "cost", "an option")?,
+                risk: text(o, "risk", "an option")?,
+                risk_level: o
+                    .get("risk_level")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u8::try_from(n).ok())
+                    .ok_or_else(|| anyhow!("an option has no number `risk_level`"))?,
+                source: text(o, "source", "an option")?,
+            });
+        }
+        let recommendation = match value.get("recommendation").filter(|r| r.is_object()) {
+            Some(r) => Some(BriefRecommendation {
+                choice: text(r, "choice", "the recommendation")?,
+                reason: text(r, "reason", "the recommendation")?,
+                source: text(r, "source", "the recommendation")?,
+            }),
+            None => None,
+        };
+        Ok(Brief {
+            id: text(value, "id", what)?,
+            title: text(value, "title", what)?,
+            decision: text(value, "decision", what)?,
+            decision_source: text(value, "decision_source", what)?,
+            options,
+            recommendation,
+        })
+    }
+
+    /// The prose the owner reads: everything except titles, ids and links.
+    fn prose(&self) -> Vec<&str> {
+        let mut parts = vec![self.decision.as_str()];
+        for o in &self.options {
+            parts.extend([o.name.as_str(), o.cost.as_str(), o.risk.as_str()]);
+        }
+        if let Some(r) = &self.recommendation {
+            parts.extend([r.choice.as_str(), r.reason.as_str()]);
+        }
+        parts
+    }
+
+    /// Words of prose in the brief.
+    pub fn word_count(&self) -> usize {
+        self.prose()
+            .iter()
+            .map(|p| p.split_whitespace().count())
+            .sum()
+    }
+
+    /// Refuses a brief that lacks a required part or has too much prose.
+    pub fn check(&self) -> Result<()> {
+        let id = &self.id;
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            bail!("brief id `{id}` must be lowercase letters, digits and dashes");
+        }
+        if self.decision.trim().is_empty() {
+            bail!("brief `{id}` is missing the decision");
+        }
+        if self.options.len() < 2 {
+            bail!(
+                "brief `{id}` needs at least two options, has {}",
+                self.options.len()
+            );
+        }
+        for o in &self.options {
+            if o.name.trim().is_empty() || o.cost.trim().is_empty() || o.risk.trim().is_empty() {
+                bail!("brief `{id}` has an option missing its name, cost or risk");
+            }
+            if !(1..=3).contains(&o.risk_level) {
+                bail!(
+                    "brief `{id}` option `{}` has risk_level outside 1 to 3",
+                    o.name
+                );
+            }
+            if o.source.trim().is_empty() {
+                bail!("brief `{id}` option `{}` has no source record link", o.name);
+            }
+        }
+        if self.decision_source.trim().is_empty() {
+            bail!("brief `{id}` decision has no source record link");
+        }
+        let Some(rec) = &self.recommendation else {
+            bail!("brief `{id}` is missing the recommendation");
+        };
+        if rec.choice.trim().is_empty() || rec.reason.trim().is_empty() {
+            bail!("brief `{id}` is missing the recommendation");
+        }
+        if !self.options.iter().any(|o| o.name == rec.choice) {
+            bail!(
+                "brief `{id}` recommends `{}`, which is not one of its options",
+                rec.choice
+            );
+        }
+        if rec.source.trim().is_empty() {
+            bail!("brief `{id}` recommendation has no source record link");
+        }
+        let words = self.word_count();
+        if words > MAX_BRIEF_WORDS {
+            bail!("brief `{id}` has {words} words of prose; the limit is {MAX_BRIEF_WORDS}");
+        }
+        Ok(())
+    }
+}
+
+fn record_link(source: &str) -> String {
+    format!(
+        "<a class=\"rec\" href=\"{0}\">record: <code>{0}</code></a>",
+        escape(source)
+    )
+}
+
+/// Renders one brief as a self-contained page (inline style and SVG, no external references).
+/// Refuses it first if `check` fails.
+pub fn render_brief(brief: &Brief) -> Result<String> {
+    brief.check()?;
+    let rec = brief
+        .recommendation
+        .as_ref()
+        .ok_or_else(|| anyhow!("brief `{}` is missing the recommendation", brief.id))?;
+    let mut body = format!(
+        "<h1>{}</h1><section class=\"decide\"><h2>Decision</h2><p>{}</p>{}</section><h2>Options</h2><div class=\"cards\">",
+        escape(&brief.title),
+        escape(&brief.decision),
+        record_link(&brief.decision_source)
+    );
+    for o in &brief.options {
+        let _ = write!(
+            body,
+            "<div class=\"card\"><h3>{}</h3><p><b>Cost:</b> {}</p><p><b>Risk:</b> {}</p>{}</div>",
+            escape(&o.name),
+            escape(&o.cost),
+            escape(&o.risk),
+            record_link(&o.source)
+        );
+    }
+    let height = 30 + brief.options.len() * 34;
+    let _ = write!(
+        body,
+        "</div><h2>Risk by option</h2><svg class=\"chart\" role=\"img\" aria-label=\"Risk of each option, 1 low to 3 high\" \
+         viewBox=\"0 0 420 {height}\" width=\"100%\">"
+    );
+    for (i, o) in brief.options.iter().enumerate() {
+        let y = 12 + i * 34;
+        let _ = write!(
+            body,
+            "<text x=\"0\" y=\"{ty}\" fill=\"currentColor\" font-size=\"13\">{}</text>\
+             <rect x=\"130\" y=\"{y}\" width=\"{w}\" height=\"20\" rx=\"3\" fill=\"{fill}\"/>",
+            escape(&o.name),
+            ty = y + 15,
+            w = u32::from(o.risk_level) * 90,
+            fill = ["#2da44e", "#d4a72c", "#cf222e"][usize::from(o.risk_level) - 1],
+        );
+    }
+    body.push_str("</svg>");
+    let _ = write!(
+        body,
+        "<section class=\"recommend\"><h2>Athena recommends: {}</h2><p>{}</p>{}</section>\
+         <p class=\"pin\"><a href=\"index.html\">All decisions</a></p>",
+        escape(&rec.choice),
+        escape(&rec.reason),
+        record_link(&rec.source)
+    );
+    Ok(page(&brief.title, &body))
+}
+
+fn page(title: &str, body: &str) -> String {
+    format!(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <title>{}</title><style>{CSS}{BRIEF_CSS}</style></head><body><main>{body}</main></body></html>\n",
+        escape(title)
+    )
+}
+
+/// Renders the decisions page: one line per waiting brief, each linking to its page.
+pub fn render_decisions_index(briefs: &[Brief]) -> String {
+    let mut body = String::from("<h1>Decisions waiting for you</h1>");
+    if briefs.is_empty() {
+        body.push_str("<p>Nothing is waiting.</p>");
+    } else {
+        body.push_str("<ul>");
+        for b in briefs {
+            let _ = write!(
+                body,
+                "<li><a href=\"{}.html\">{}</a></li>",
+                escape(&b.id),
+                escape(&b.title)
+            );
+        }
+        body.push_str("</ul>");
+    }
+    body.push_str("<p class=\"pin\"><a href=\"../index.html\">Back to the explainer</a></p>");
+    page("Decisions waiting for you", &body)
+}
+
+/// Adds a link to the decisions page at the end of the index page.
+fn with_decisions_link(html: String) -> String {
+    let link =
+        "<p class=\"lede\"><a href=\"decisions/index.html\">Decisions waiting for you</a></p>";
+    match html.rfind("</main>") {
+        Some(at) => format!("{}{link}{}", &html[..at], &html[at..]),
+        None => html,
+    }
+}
+
+/// Loads every waiting brief under `root`, in file-name order.
+fn load_briefs(root: &Path) -> Result<Vec<Brief>> {
+    let dir = root.join(DECISIONS_SRC);
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .with_context(|| format!("cannot read {}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .collect();
+    files.sort();
+    let mut briefs = Vec::new();
+    for f in files {
+        let text =
+            std::fs::read_to_string(&f).with_context(|| format!("cannot read {}", f.display()))?;
+        let value: Value =
+            serde_json::from_str(&text).with_context(|| format!("{} is not JSON", f.display()))?;
+        briefs.push(Brief::from_json(&value).with_context(|| f.display().to_string())?);
+    }
+    Ok(briefs)
+}
+
+/// Writes `out/decisions/index.html` and one page per brief. Any refused brief fails the build.
+fn build_decisions(root: &Path, out: &Path) -> Result<()> {
+    let briefs = load_briefs(root)?;
+    let dir = out.join("decisions");
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    for b in &briefs {
+        let path = dir.join(format!("{}.html", b.id));
+        std::fs::write(&path, render_brief(b)?)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+    }
+    let index = dir.join("index.html");
+    std::fs::write(&index, render_decisions_index(&briefs))
+        .with_context(|| format!("cannot write {}", index.display()))?;
+    println!("wrote {} ({} briefs)", index.display(), briefs.len());
     Ok(())
 }
+
+const BRIEF_CSS: &str = "\
+.decide,.recommend{background:var(--card);border:1px solid var(--line);border-radius:.5rem;padding:.2rem 1rem;margin:1rem 0}\
+.recommend{border-color:var(--accent)}.chart{max-width:34rem}.rec{font-size:.8rem;color:var(--muted)}";
 
 const CSS: &str = "\
 :root{color-scheme:light dark;--bg:#fff;--fg:#1b1f24;--muted:#59636e;--card:#f6f8fa;--line:#d0d7de;--accent:#0b5cad}\
@@ -1234,5 +1581,106 @@ mod tests {
                 .unwrap()
                 .starts_with("<!doctype html>")
         );
+    }
+
+    fn proposal() -> WaitingProposal {
+        WaitingProposal {
+            key: "steward-raise-limit".into(),
+            title: "Raise the retry limit".into(),
+            source: "records/steward/p1.json".into(),
+            evidence: "records/jobs/j7.json".into(),
+        }
+    }
+
+    #[test]
+    fn waiting_steward_proposal_brief_has_every_part() {
+        let html = render_brief(&Brief::from_proposal(&proposal())).unwrap();
+        assert!(html.contains("<h2>Decision</h2>") && html.contains("Raise the retry limit"));
+        assert_eq!(html.matches("class=\"card\"").count(), 2);
+        assert_eq!(html.matches("<b>Cost:</b>").count(), 2);
+        assert_eq!(html.matches("<b>Risk:</b>").count(), 2);
+        assert!(html.contains("Athena recommends: Approve"));
+        assert_eq!(html.matches("<svg").count(), 1);
+        assert!(html.contains("href=\"records/steward/p1.json\""));
+        assert!(html.contains("href=\"records/jobs/j7.json\""));
+        // Self-contained: no script, no external stylesheet or other reference.
+        for banned in ["<script", "<link", "src=", "http://", "https://", "@import"] {
+            assert!(!html.contains(banned), "{banned}");
+        }
+    }
+
+    #[test]
+    fn brief_without_recommendation_is_refused() {
+        let mut b = Brief::from_proposal(&proposal());
+        b.recommendation = None;
+        let err = render_brief(&b).unwrap_err().to_string();
+        assert!(err.contains("missing the recommendation"), "{err}");
+        let json = serde_json::json!({
+            "id": "x", "title": "t", "decision": "d", "decision_source": "r",
+            "options": [], "recommendation": null
+        });
+        assert!(Brief::from_json(&json).unwrap().recommendation.is_none());
+    }
+
+    #[test]
+    fn brief_over_the_word_limit_is_refused_with_the_count() {
+        let mut b = Brief::from_proposal(&proposal());
+        let base = b.word_count();
+        assert!(base <= MAX_BRIEF_WORDS);
+        b.options[0].cost = vec!["word"; 130].join(" ");
+        let words = b.word_count();
+        let err = render_brief(&b).unwrap_err().to_string();
+        assert!(err.contains(&format!("{words} words")), "{err}");
+        assert!(err.contains("limit is 120"), "{err}");
+    }
+
+    #[test]
+    fn recommendation_must_name_an_option() {
+        let mut b = Brief::from_proposal(&proposal());
+        b.recommendation.as_mut().unwrap().choice = "Other".into();
+        assert!(render_brief(&b).is_err());
+    }
+
+    #[test]
+    fn build_writes_decisions_page_linked_from_the_index() {
+        let root = tempfile::tempdir().unwrap();
+        let study = root.path().join(STUDY_DIR);
+        std::fs::create_dir_all(&study).unwrap();
+        let src = study_dir("[mechanism] A thing happens.", "c1");
+        for name in [
+            "pin.json",
+            "claims.json",
+            "model.json",
+            "rationales.json",
+            "findings.json",
+            "intro.json",
+        ] {
+            std::fs::copy(src.path().join(name), study.join(name)).unwrap();
+        }
+        let out = root.path().join("site");
+        build(root.path(), &out).unwrap();
+        let empty = std::fs::read_to_string(out.join("decisions/index.html")).unwrap();
+        assert!(empty.contains("Nothing is waiting"));
+        assert!(
+            std::fs::read_to_string(out.join("index.html"))
+                .unwrap()
+                .contains("href=\"decisions/index.html\"")
+        );
+
+        let waiting = root.path().join(DECISIONS_SRC);
+        std::fs::create_dir_all(&waiting).unwrap();
+        let b = Brief::from_proposal(&proposal());
+        let json = serde_json::json!({
+            "id": b.id, "title": b.title, "decision": b.decision, "decision_source": b.decision_source,
+            "options": b.options.iter().map(|o| serde_json::json!({
+                "name": o.name, "cost": o.cost, "risk": o.risk, "risk_level": o.risk_level, "source": o.source
+            })).collect::<Vec<_>>(),
+            "recommendation": {"choice": "Approve", "reason": "Evidence.", "source": "records/jobs/j7.json"}
+        });
+        std::fs::write(waiting.join("a.json"), json.to_string()).unwrap();
+        build(root.path(), &out).unwrap();
+        let page = std::fs::read_to_string(out.join("decisions/index.html")).unwrap();
+        assert!(page.contains("href=\"steward-raise-limit.html\""));
+        assert!(out.join("decisions/steward-raise-limit.html").is_file());
     }
 }
