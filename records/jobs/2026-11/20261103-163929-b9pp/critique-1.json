@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-163929-b9pp",
+  "round": 1,
+  "at": "2026-11-03T16:45:18.01609746Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The `docs` deliverable is dropped on a false premise, and the help text operators read would describe the old rule.",
+      "evidence": "Grep finds a `docs/` directory: docs/decisions.md lines 2217-2218 and 2232 say the run ends in `repeated failure` when one item fails twice, docs/spec.toml 1351 says 'a repeated failure stops the drain', and docs/design/async-drain.md 179 also mentions an item failing twice. The plan says 'The `docs` deliverable has no directory in the snapshot' yet cites those same files. main.rs 254 (`repeated failure  the same item failed twice; it is named`) is the `athena drain --help` text that the stated audience, an operator running `athena drain`, reads. After the change it would be wrong. `docs (modify)` is a listed deliverable, and criterion 8 asks that the docs describe the new rule. Fix: Add these edits to the plan: main.rs 254 (help stop list), README.md 126, docs/spec.toml 1351, docs/decisions.md (a new entry recording the rule change, or an amendment to the 2217-2232 text), and docs/design/async-drain.md 179 if it states the old stop. None of these is athena.toml, defaults.toml or a workflow, so none is out of scope. Add a check that greps these files for the old wording ('same item failed twice', 'one item fails twice') and finds none.",
+      "location": "Plan decision 7 and the open question; crates/athena-cli/src/main.rs:254, README.md:126, docs/spec.toml:1351, docs/decisions.md:2217-2232",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "With the default Stub, b is also rejected, so the test's own assertions (`land b`, `landed == 1`) would fail.",
+      "evidence": "tests/drain.rs 230-235: when `outcomes` is empty, every run is `OutcomeState::Rejected`. The plan says 'with the default Stub ... a gets the default Rejected outcome both times; b lands', which is not possible without scripting outcomes. Fix: Script `outcomes: RefCell::new(vec![Rejected, Rejected, Landed])`, or use `unlandable`/`Stub.runs`, so that a fails twice and b passes.",
+      "location": "Demonstrations, criterion 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "For a run that ends with no outcome, the second attempt is not a retry, so the log has no `a-retry`.",
+      "evidence": "drain.rs 1564-1573: `retry` is true only for Rejected, Failed or TimedOut, so a `None` outcome gives `retry: false`, and attempts (1789-1791) reads `ReadOf::Queued(\"a\")` again. Stub.read (tests/drain.rs 185) logs `read a` and returns job `a`, not `a-retry`. The scripted pop order still works, but any log assertion that names `a-retry` would fail. Fix: In the criterion 2 log assertions, expect `read a, run a, read a, run a, read b, ...`, or assert only on `read c`/`run c`/`land c` and on the notes.",
+      "location": "Demonstrations, criterion 2; plan step 8",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Treating every `GhFailure` with no HTTP status as a host-wide cause is a broad guess. The code already has a typed reading for this case.",
+      "evidence": "transport.rs 30-35: any non-zero exit of `gh` without an `HTTP NNN` in stderr becomes `status_code: None`. transport.rs 87-106: `GhFailure::transient_reason`/`transient_text` already decide when a status-less failure is about the network (timeout, connection reset). The plan's own Risks section admits that None may be specific to one item. Fix: Treat status None as shared only when `transient_reason()` is Some (key `host: github <reason>`), or leave it as it is and add a unit case that documents the choice. As it stands this is defensible, since every gh call goes through `gh api` (client.rs 506), but reusing the existing classifier is tighter.",
+      "location": "Decision 2 / host_cause: status None treated as shared",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Each item calls land twice, so `Stub.landings` must hold four entries.",
+      "evidence": "attempts (drain.rs 1797-1813): after `NotLanded`, `passed` stays Some, so the second attempt calls `land` again without a rerun. Fix: Script four landings (a, a, b, b) and state this in the test.",
+      "location": "Demonstrations, criterion 3, cases 5-6",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The core design is sound, and I checked it against the code. Today `Drain::finish` (drain.rs 2379) stops the drain unconditionally on any item's double failure. The plan changes that: one item's double failure now pauses the item and the drain goes on. The drain stops only when there is positive evidence of a shared cause. That evidence comes from `StopCause::of` (disk.rs 388-415) or from a typed `GhFailure` found by downcast in the Err arm of `landing_from_report` (drain.rs 3056). The check and the insert into the shared-key list happen under one lock. This answers the earlier job's finding that every Err was treated as shared. The names the plan relies on all exist and are public: `GhFailure`'s fields, `PrReport`, the `USAGE_LIMIT`, `LOW_DISK`, `PRODUCER_AUTH` and `ENVIRONMENT_PREFIX` constants, and the `Landing` matches, which occur only in drain.rs. One major problem remains. The plan drops the listed `docs` deliverable and leaves user-facing text stale, on the false claim that the snapshot has no docs directory. `docs/` exists, and `athena drain --help` (main.rs 254) would keep telling operators that one item failing twice stops the drain. Two demonstrations also have smaller defects. Criterion 1's test, as written, would not let b land, and criterion 2 describes the wrong retry order in the stub log."
+}

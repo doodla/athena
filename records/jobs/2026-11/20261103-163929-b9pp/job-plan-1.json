@@ -1,0 +1,344 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261103-163929-b9pp",
+  "round": 1,
+  "at": "2026-11-03T16:43:51.600468532Z",
+  "invocation_seq": 2,
+  "approach": "In crates/athena-cli/src/drain.rs, an item's second failure ends as `ItemEnd::Failed(Failure)` with `Failure { reason, shared: Option<String> }`. `shared` is Some only on positive evidence of a cause that is not a verdict on the item. Evidence is (a) `athena_core::disk::StopCause::of(reason).is_environment()` on a run that ended `Failed` or with no outcome, or on a read that ended in an Err with no job, or (b) a typed host error: a `GhFailure` (athena_core::gh, found by `downcast_ref`, which sees through anyhow context) with no HTTP status or a status of 401, 403, 429 or 5xx, found in the Err arm of `landing_from_report`. A run or read Err with no such evidence is per item. That covers every job-state bail (declined, running, interrupted, already closed, the readings cap, \"verification does not hold\"). `Drain::finish` passes a lone failure over with a note, like Paused and Skipped. It stops with `Stop::RepeatedFailure` only when an earlier different item holds the same shared key, with check and insert in one lock section. Keys: the StopCause kind for named environment causes, the masked text for OtherEnvironment, and `host: github <status>` for typed landing errors. Run and Read structs are unchanged. The classification is done by pure functions (`run_failure`, `host_cause`, `failure_key`) that are unit tested, and the drain tests drive them through `drain::drain` with scripted doubles.",
+  "decisions": [
+    {
+      "choice": "A no-outcome run or read Err is per item by default. It is shared only when `StopCause::of(text).is_environment()` holds for it. A `Failed` outcome is shared on the same test. Rejected, TimedOut and Failed with a Work reason are never shared. Run, Read and `RealSteps::run` get no new field and no new classification.",
+      "reason": "Answers finding 1. The Err sites are item-specific: run/mod.rs 340 declined, 348 running, 356 interrupted, 360 already closed; run/pin.rs 150 readings cap; run/close.rs 412 verification does not hold. `RealSteps::run` (drain.rs 3562) turns them all into `outcome: None`, so masked equal texts across items would stop the batch falsely. The typed host errors the Err arm already knows, `BudgetShort` and `LowDisk` (3564, 3575), set `held`, so they are never a Failed item. The only positive evidence left in a run or read Err is text that the shared classifier (disk.rs 388-415, also used by run/mod.rs and scope_guard.rs) reads as environment. The producer's usage-limit and expired-login stops arrive as `Failed` outcomes with those reasons, and the same test catches them.",
+      "rejected": [
+        {
+          "option": "Treat every no-outcome Err as shared (kept plan round 3)",
+          "why": "Critic finding 1: job-state bails would stop the batch after two items each."
+        },
+        {
+          "option": "Add a typed JobStateError in athena-core to mark per-item bails",
+          "why": "Out of scope (athena-core error types), and unnecessary once per item is the default."
+        },
+        {
+          "option": "Add a `Run.shared` field set by RealSteps::run from a GhFailure downcast",
+          "why": "A GhFailure from `go_with_stages` is not shown to reach the drain. It would break the explicit `Run {..}` constructor at tests/drain.rs 1224 for no demonstrated gain. A missed shared cause only pauses more items, each with a note, and the budget and job limit bound the run."
+        }
+      ]
+    },
+    {
+      "choice": "Add `Landing::HostError { why: String, key: String }`, returned only from the Err arm of `landing_from_report` (drain.rs 3056) when a new pure `host_cause(&anyhow::Error) -> Option<String>` finds a `GhFailure` with status None, 401, 403, 429 or 500..=599. It returns the key `host: github <status or no status>`. Any other Err (including GhFailure 404, 405, 422 and non-gh errors) stays `NotLanded(text)`, as does the Ok arm (3052). `Drain::land` handles HostError like NotLanded, writing `landing = \"not landed: <why>\"` and returning `LandStep::NotLanded { host_cause: Some(key) }`. NotLanded(why) and the after-rebase recheck give None. `RealSteps::land` (3607, `other => other`) passes the variant through. `landing_from_report` becomes `pub`.",
+      "reason": "Same principle as decision 1, applied to the landing: where the error arises plus a typed fact decides, never text equality. A gh failure with no status or an auth, rate-limit or server status is about the host, shared by every item; a 404 or a refused merge is about one pull request. Red CI (Ok arm) is a verdict on the item. The key comes from the typed status, not from text, so the repository path with a pull-request number cannot defeat matching. Making the function `pub` lets criteria 3 and 4 use production landing values.",
+      "rejected": [
+        {
+          "option": "Treat every landing Err as shared (kept plan round 3)",
+          "why": "Not shown to be shared: a gh 404 for one pull request is per item, and the same over-stop problem as finding 1."
+        },
+        {
+          "option": "Compare masked landing text",
+          "why": "Two red-CI items give equal masked text and would stop the batch."
+        },
+        {
+          "option": "Bool flag on `Landing::NotLanded`",
+          "why": "Changes the tuple variant at every constructor (drain.rs 5188, tests/drain.rs 246); a new variant leaves them valid."
+        }
+      ]
+    },
+    {
+      "choice": "Keys. For LowDisk, CheckTimeout, ProducerAuth and UsageLimit the key is the StopCause Debug text. For OtherEnvironment it is `failure_key(reason, names)`. Helper `failure_key(text, names) -> Option<String>`: lower-case, split on whitespace, trim edge punctuation (backtick, parentheses, quotes, comma, colon, full stop, semicolon) and a trailing `'s`, mask whole tokens equal to a name (item or retry job), job-id-shaped tokens and all-digit tokens, join with single spaces. An empty result is None and never matches. `State.failures: Vec<(String, String)>` holds shared keys only.",
+      "reason": "Answers finding 3 and keeps whole-token masking, so item `a` cannot corrupt words. The wrapped-id forms are real: close.rs 348 writes run `athena go {id}` again, which gives the token `{id}` with a trailing backtick. Masking works only because edge punctuation is trimmed, so a unit test states it for backticks and parentheses.",
+      "rejected": [
+        {
+          "option": "Substring replacement of names",
+          "why": "Item `a` would corrupt ordinary words."
+        },
+        {
+          "option": "A regex dependency",
+          "why": "Not needed for token masking."
+        }
+      ]
+    },
+    {
+      "choice": "Check and insert into `State.failures` in one `self.st()` section in `Drain::finish`. After the lock is dropped, a match calls `set_stop(Stop::RepeatedFailure, Some(item.job))` with a note naming both items. No match notes `item X failed twice and is paused for this run: <reason>` and calls `pass_over`. The failed item stays in `report.queued` and is not tried again this run.",
+      "reason": "Two concurrent workers (`drain_concurrent`) cannot both miss each other. It matches how Paused and Skipped behave and adds no Report field, so the JSON and the display prefix `repeated failure: item X failed twice` are unchanged. No Steps method is called with the lock held.",
+      "rejected": [
+        {
+          "option": "Persist a pause record",
+          "why": "Touches the scope guard, out of scope."
+        },
+        {
+          "option": "New `shared_with` Report field",
+          "why": "Changes the serialized report for detail a note carries."
+        }
+      ]
+    },
+    {
+      "choice": "Read failures: at the 1504 return in `run_job`, `shared` is set only when `read.job.is_none()`, `read.error` is Some, `!read.held`, and `StopCause::of(error).is_environment()`. A reader's own report (job Some) and a no-capability reading are per item.",
+      "reason": "Consistent with decision 1. The read Err arm (3510) carries any athena.go error, which includes item-specific ones.",
+      "rejected": [
+        {
+          "option": "Any read error is shared",
+          "why": "Finding 1 applies equally."
+        }
+      ]
+    },
+    {
+      "choice": "Test seam: add to `Stub` (tests/drain.rs 40-296) `runs: RefCell<Vec<(Option<OutcomeState>, String)>>`, popped first in `run` (197), and `landings: RefCell<Vec<Landing>>`, popped first in `land` (243). Both are consumed in order, and the serial drain makes the order a, a-retry, b, b-retry. Add to `Shared` (about 6200) an `errors` list for the Before::RepeatedFailure rows. The doubles only hand back scripted `Run` and `Landing` values. Texts come from production constants and the real format strings of the athena-core bails. Landing values for criteria 3 and 4 are built by the production `landing_from_report`, with `athena_core::gh::GhFailure { call, status_code, text }` as the typed error.",
+      "reason": "Answers finding 2: the shared cases stand on production constants (USAGE_LIMIT, LOW_DISK, PRODUCER_AUTH, ENVIRONMENT_PREFIX) and typed GhFailure, not invented text. The per-item cases stand on the real bail texts as controls. Classification stays in production code.",
+      "rejected": [
+        {
+          "option": "Invented 'host unavailable' text as the shared cause",
+          "why": "No production path produces it (finding 2)."
+        },
+        {
+          "option": "Keep the default 'ended rejected' as the shared cause",
+          "why": "It is a verdict and must not be shared."
+        }
+      ]
+    },
+    {
+      "choice": "Leave main.rs help (254), README.md 126, docs/design/async-drain.md 179, docs/decisions.md and docs/spec.toml unedited. The `docs` deliverable has no directory in the snapshot. job_plan.rs and steward.rs are edited only if the full run breaks them.",
+      "reason": "job_plan.rs 211 is an assert_ne! on a held item, which the change cannot turn into a stop. steward.rs 233 is `WorkItemKind::RepeatedFailure`, a different type, so it is unaffected. The rule is documented in drain.rs and display.rs docs, the CHANGELOG and the tests.",
+      "rejected": [
+        {
+          "option": "Create a docs file",
+          "why": "The brief gives no path and the snapshot has no docs directory."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Failure`, `failure_key`, `run_failure` and `host_cause`. Add the `Landing::HostError` variant and make `landing_from_report` pub. Change `LandStep::NotLanded` to carry `host_cause`, and `RunStep::Failed` and `ItemEnd::Failed` to carry `Failure`. Add `State.failures`. Change the `finish` Failed arm. Update the doc comments and add the `tests::failure` unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Stub.runs`, `Stub.landings` and `Shared.errors`. Add the tests for criteria 1, 2, 3 and 8. Rewrite the old-rule tests and reseed Before::RepeatedFailure.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Reword the repeated-failure line (about 619), keeping the prefix 'repeated failure: item X failed twice' and adding the shared-cause wording.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased/Changed entry naming the root cause (`finish` stopped the batch for one item's double failure) and the new rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "A listed deliverable. Edit only if the full test run shows a break; line 211 is an `assert_ne!` that should hold.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/steward.rs",
+      "action": "modify",
+      "purpose": "A listed deliverable. Its one use (line 233) is `WorkItemKind::RepeatedFailure`, a different type, so edit only if the full test run shows a break.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `Drain::run_job` (1414-1576), `attempts` (1725-1816), `land` (1654-1708), `recheck_after_rebase` (about 1610-1652), `finish` (2348-2422), the `State` construction (about 2305), `landing_from_report` (3038-3058) and its unit test (4607-4638), and `RealSteps::run` and `RealSteps::land` (3530-3613). Confirm `RealSteps::land` passes new variants through (3607).",
+    "In drain.rs add a private `Failure { reason, shared }` (Default derive) and three pure functions. `failure_key(text, names) -> Option<String>` lower-cases, splits on whitespace, trims edge punctuation and a trailing `'s`, masks name tokens, job-id-shaped tokens and all-digit tokens, joins with single spaces, and gives None when empty. `run_failure(outcome, reason, names) -> Failure` sets `shared` only when outcome is `Failed` or None and `StopCause::of(reason).is_environment()`; the key is the StopCause Debug text for LowDisk, CheckTimeout, ProducerAuth and UsageLimit and `failure_key(reason)` for OtherEnvironment. `host_cause(&anyhow::Error) -> Option<String>` downcasts to `athena_core::gh::GhFailure` and returns `host: github <status|no status>` for status None, 401, 403, 429 or 500..=599, else None. Only `reason` goes through `one_line` (or 'no reason given').",
+    "Add `Landing::HostError { why, key }` with a doc comment. Make `landing_from_report` `pub`. Its Err arm returns HostError when `host_cause` is Some and `NotLanded(format!(\"{error:#}\"))` otherwise. The Ok arms are unchanged. Change `LandStep::NotLanded` to `NotLanded { host_cause: Option<String> }`. In `Drain::land` handle HostError like NotLanded and set `host_cause: Some(key)`. The `NotLanded(why)` and recheck paths give None.",
+    "Change `RunStep::Failed` to carry `failure: Failure` and `ItemEnd::Failed` to `ItemEnd::Failed(Failure)`. At the 1504 return in `run_job`, set `shared` only when `read.job.is_none()`, `read.error` is Some, `!read.held` and `StopCause::of(error).is_environment()`, with the same key rule. In the `other` arm (1561-1574) use `run_failure(other, &run.reason, names)`, where names are `item.job` and `job`. The `held` and `needs_accepting` arms are untouched. Do not change `Run`, `Read` or `RealSteps::run`.",
+    "In `attempts` keep `let mut last = Failure::default()`. On `RunStep::Failed { failure, .. }` set `last = failure`. On `LandStep::NotLanded { host_cause }` build `last` from the landing text on `st.jobs[at].landing` with 'not landed: ' stripped, and set `shared = host_cause` when Some. At `failures >= ATTEMPTS` return `ItemEnd::Failed(last)`. Leave ATTEMPTS and the unread rule alone.",
+    "Add `failures: Vec<(String, String)>` to `State`. Replace the `ItemEnd::Failed` arm of `finish`: in one `self.st()` section, when `failure.shared` is Some(key), look for an entry for a different item with the same key, then push (item, key). When matched, after the lock is dropped call `set_stop(Stop::RepeatedFailure, Some(item.job.clone()))` and note 'item X failed twice for the same cause as item Y: reason; the run stops'. Otherwise note 'item X failed twice and is paused for this run: reason' and call `pass_over`. Call no Steps method with the lock held.",
+    "Update the doc comments in drain.rs (module header about 103, `Stop::RepeatedFailure` about 942, `meaning()` about 1001, `Report::failed_item` about 1051, `State.stop` about 1120, the `Landing` variants) and display.rs about 619, keeping the prefix 'repeated failure: item X failed twice'. Add the CHANGELOG Unreleased/Changed entry. Add the `tests::failure` unit tests: `failure_key` masking including backticked and parenthesised ids and the `'s` form, whole-token matching and None for an empty key; `run_failure` for Rejected, TimedOut, Work-reason Failed and each per-item bail text (all `shared: None`), USAGE_LIMIT with different detail text (equal keys), LOW_DISK, PRODUCER_AUTH and ENVIRONMENT_PREFIX; `host_cause` for each status and a context-wrapped error; and the updated `landing_from_report` test.",
+    "In tests/drain.rs add `Stub.runs` (popped first in `run`) and `Stub.landings` (popped first in `land`), both consumed in order, and `Shared.errors` for the reinstall rows. Add the tests for criteria 1, 2 (each per-item text plus the Work-reason control), 3 (cases 1-6 plus the three landing controls) and 8. Build landing values with `landing_from_report`, `athena_core::gh::GhFailure` and `athena_core::disk::{USAGE_LIMIT, LOW_DISK, PRODUCER_AUTH, ENVIRONMENT_PREFIX}`. Assert on stable substrings.",
+    "Rewrite the old-rule tests (about 939, 1047-1092, 1260-1282, 4293, 6420-6442 and 7194) and reseed `Before::RepeatedFailure` (about 6628, used at about 6506, 6797 and 6850-6866) so two items fail with the same USAGE_LIMIT cause. Keep the asserted row counts.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix every break, including any in job_plan.rs or steward.rs. Do not edit athena.toml, defaults.toml, workflows, main.rs, README.md or docs/."
+  ],
+  "risks": [
+    {
+      "risk": "A true shared cause is missed, so the batch pauses items one at a time. Examples: a gh outage during a run, a Failed run with a non-environment text, or an OtherEnvironment text with per-item data that masking does not remove.",
+      "mitigation": "Named environment causes (429, 401, low disk, check timeout) are keyed by StopCause kind, not by text. Landing host errors are keyed by the typed status. Only OtherEnvironment text is masked. A miss pauses more items, each with a visible note, and the budget and job limit bound the run."
+    },
+    {
+      "risk": "Two unrelated verdicts with the same fixed sentence (critic reject, planning cap, 'checks failed after rebase') are taken as a shared cause.",
+      "mitigation": "Only Failed or no-outcome results with an environment StopCause, and `Landing::HostError`, can be shared. Rejected, TimedOut, a Work-reason Failed, a pull-request-state NotLanded and the after-rebase recheck never are. Criteria 2 and 3 run the controls through the drain."
+    },
+    {
+      "risk": "A gh failure with status None, 401 or 403 may be specific to one item (for example a pull request the token cannot read), so two such items would stop the batch.",
+      "mitigation": "A stop is the conservative outcome and a note names both items. 401 and 403 and an absent status are almost always about the token or network, shared by the whole repository. 404, 405 and 422 are per item. The criterion 4 unit test pins the split."
+    },
+    {
+      "risk": "Tests could pass by relying on the stub's own text rather than on production classification.",
+      "mitigation": "The doubles return scripted `Run` and `Landing` values only. Shared causes use production constants and typed `GhFailure`, landings are built by the production `landing_from_report`, and the per-item controls use the real bail formats."
+    },
+    {
+      "risk": "The Before::RepeatedFailure seeding runs two workers with timing waits, and a second failing item changes the order.",
+      "mitigation": "Reseed with `errors` for bad and bad2 and wait for the entry `end bad2-retry`. The loop already waits for the entry and then 150 ms for the stop to be stored. Keep the asserted row counts and run the whole file."
+    },
+    {
+      "risk": "A failed item stays in `report.queued`, so the next `athena drain` retries it and a permanently failing item repeats across runs.",
+      "mitigation": "This matches Paused and Skipped items. The note says 'paused for this run'. A persistent pause would touch the scope guard, which is out of scope."
+    },
+    {
+      "risk": "The new `Landing` variant and the `LandStep` and `RunStep::Failed` changes break matches elsewhere.",
+      "mitigation": "The compiler finds each one. The only matches on `Landing` and `LandStep` are in drain.rs, and the test doubles construct only `Landing::Landed` and `NotLanded`, which stay valid."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "ItemEnd::Failed handling (stop vs pass over)",
+      "dependent": "crates/athena-cli/src/drain.rs `Drain::finish` ItemEnd::Failed arm (about 2379)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain: the criteria 1-3 tests and the rewritten old-rule tests.",
+      "reason": null
+    },
+    {
+      "name": "attempt loop and the Failure it returns",
+      "dependent": "`Drain::attempts` (1725-1816), the only producer of ItemEnd::Failed, reached via `Drain::work` from `drain::drain` (serial) and `drain_concurrent` ([parallel] max_concurrency workers)",
+      "kind": "code",
+      "test": "Concurrent test at tests/drain.rs 6420-6442 (rewritten), the Shared-stub reinstall rows (about 6503-6560, 6792-6868), and the serial tests for criteria 1-3. ATTEMPTS and the reader's skip-after-two-unread rule are unchanged. The check and insert into `State.failures` share one lock section.",
+      "reason": null
+    },
+    {
+      "name": "RunStep::Failed gains a `failure` field",
+      "dependent": "`RunStep::Failed` constructions in `run_job` (1504 and 1564) and its consumer in `attempts` (1781)",
+      "kind": "code",
+      "test": "Unit tests `tests::failure` and the criteria 1-3 drain tests drive both constructions; the compiler finds any missed one.",
+      "reason": null
+    },
+    {
+      "name": "New `Landing::HostError` variant and `LandStep::NotLanded { host_cause }`",
+      "dependent": "`Drain::land` (1654-1708), `attempts` (1799-1809), the `landing_from_report` unit test (4587-4638), `RealSteps::land` (3591-3608), the doubles in tests/drain.rs (246, 1232, 1715, 2644, 4687, 5595, 6278, 7063), tests/job_plan.rs 128, tests/focus.rs 134",
+      "kind": "code",
+      "test": "cargo test -p athena-cli landing",
+      "reason": "The doubles only construct `Landing::Landed` or `NotLanded` and never match on `Landing`, so the new variant breaks none of them. `RealSteps::land` passes it through (`other => other`). The in-crate matches are all in drain.rs and are updated. The updated `landing_from_report` unit test covers the Err and Ok forms."
+    },
+    {
+      "name": "Reuse of the environment classifier and the typed gh error",
+      "dependent": "`athena_core::disk::StopCause::of` and `is_environment` (disk.rs 388-434), read by run/mod.rs 598 and scope_guard.rs 547; `athena_core::gh::GhFailure` (transport.rs 45), exported at gh/mod.rs 65-68",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --lib failure",
+      "reason": "Read only. Nothing in athena-core changes, so the existing disk.rs tests (1208-1381) and gh tests (gh/tests.rs 2811, 3315) are unaffected. The drain asks the same question as the scope guard, so they cannot disagree about what is environment."
+    },
+    {
+      "name": "Report::failed_item and Stop::RepeatedFailure",
+      "dependent": "Report assembly in drain.rs (2864-2879: `st.stop`, `failed_item`, the note 'did not pass twice ... the run ends for the reinstall below') and `assert_reinstall` in tests/drain.rs (about 6655)",
+      "kind": "code",
+      "test": "`every_landing_path_ends_in_reinstall_for_any_unreadable_config`, with the Before::RepeatedFailure row reseeded so that a RepeatedFailure is really stored first. `failed_item` is now the later of the two items, and the reinstall rewrite reads it unchanged.",
+      "reason": null
+    },
+    {
+      "name": "Display of the repeated-failure stop",
+      "dependent": "crates/athena-cli/src/display.rs `drain` (about 619-622) and the tests asserting `repeated failure: item a failed twice` (tests/drain.rs 1066, 1088)",
+      "kind": "code",
+      "test": "Rewritten tests at 1047-1092 and the criterion 3 test. The new text keeps the prefix `repeated failure: item X failed twice`, so substring assertions hold.",
+      "reason": null
+    },
+    {
+      "name": "Stops other than repeated failure",
+      "dependent": "tests/job_plan.rs 211; tests/drain.rs 1110, 1187, 1252, 2365-3122, 4399, 6529, 7623; tests/steward.rs 233",
+      "kind": "code",
+      "test": null,
+      "reason": "Scenarios that never reach ItemEnd::Failed (held, skipped, waiting, needs accepting, unreadable config) return other ItemEnd variants before the Failed arm, and loosening a stop cannot turn a non-stop into a stop. steward.rs 233 is `WorkItemKind::RepeatedFailure`, a different type, so it is unaffected. job_plan.rs 211 is `assert_ne!` and holds."
+    },
+    {
+      "name": "Stop::RepeatedFailure label and meaning text",
+      "dependent": "drain.rs `Stop::ALL` (967), the meaning test (about 4191), display.rs 622 (prints `stop.meaning()`)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --lib",
+      "reason": "No variant is added or renamed; only the wording of `meaning()` changes, and the meaning test checks non-empty text and the words 'not success' and 'reinstall'."
+    },
+    {
+      "name": "Documented rule: the same item failing twice stops the drain",
+      "dependent": "crates/athena-cli/src/main.rs `athena drain --help` stop list (254), README.md 126, docs/design/async-drain.md 179, docs/decisions.md 2217-2232, docs/spec.toml 1351",
+      "kind": "rule",
+      "test": null,
+      "reason": "None is a deliverable, so none is edited. A search found no test that compares main.rs 254 with `Stop::meaning()`, so the wording gap breaks no check. The stale lines are named in an open question."
+    },
+    {
+      "name": "Config keys and CI check names",
+      "dependent": "athena.toml, defaults.toml, .github/workflows (fmt, clippy and test checks)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No key, check name or workflow is added, renamed or edited. No record or data file is added, so records validation is untouched. No refusal or matching rule over reading text is added: the cause test is on where the failure arose, a typed error, or an existing classifier, so no refusal_corpus case applies."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Serial `drain::drain(&stub, limits(9.0), &Quiet)` over a and b with the default Stub. a gets the default Rejected outcome both times; b lands. Assert on the stub log, `report.stop`, `failed_item`, `queued`, `landed` and the notes.",
+      "command": "cargo test -p athena-cli --test drain a_lone_items_double_failure_pauses_it_and_the_next_item_runs",
+      "observes": "The log runs `run a`, `run a-retry`, then `read b`, `run b`, `land b`. `report.stop` is not `Stop::RepeatedFailure`, `failed_item` is None and `landed == 1`. a is in `report.queued` and its job lines name `rejected` and `ended rejected`. A note contains `item a failed twice and is paused`.",
+      "fails_without": "With the old unconditional `set_stop(Stop::RepeatedFailure, ..)` in `finish`, the log ends at `run a-retry`, `read b` is absent and the stop is RepeatedFailure.",
+      "seam": "Entry point `drain::drain`, which reaches `Drain::attempts` and `Drain::finish`. The fake is the existing `Stub` injected as `&dyn Steps`, scripted by its existing `outcomes` field. The seam exists today and needs no change."
+    },
+    {
+      "criterion": 2,
+      "method": "For each real per-item text, one serial drain of a, b, c through `drain::drain` with `Stub.runs` scripted as (None, text) for a, a-retry, b, b-retry, then c landing by default. Texts use the real format strings: `job {id} is already closed (rejected)` (run/mod.rs 360), `job {id} has 12 readings, the most a job may have; close it and ask again` (pin.rs 150), `job {id} was declined: ...` (340), `job {id} is running` (348), `job {id} was interrupted: its process died before it closed. ...` (356), and `job {id}'s verification does not hold for its candidate any more; ask again` (close.rs 412). Each text uses the job's own name, so a and b texts are equal after masking. Extra control: both items end (Some(Failed), 'the producer did not complete: crashed') (a Work reason).",
+      "command": "cargo test -p athena-cli --test drain two_items_failing_with_per_item_texts_are_both_paused_and_the_batch_continues",
+      "observes": "In every case the log has `read c`, `run c` and `land c`. `report.stop` is not `Stop::RepeatedFailure`, `failed_item` is None and `landed == 1`. a and b are in `report.queued`. Notes say `item a failed twice and is paused` and `item b failed twice and is paused`, each with its reason.",
+      "fails_without": "Classing every no-outcome Err as shared (the kept plan) stops the run after b, so `read c` is missing and the stop is RepeatedFailure. The old rule stops at a.",
+      "seam": "Entry point `drain::drain`. The fake is `Stub` injected as `&dyn Steps`. Step 8 adds `Stub.runs`, which returns scripted `Run` values only. The classification is in production `run_job` and `run_failure`."
+    },
+    {
+      "criterion": 3,
+      "method": "Serial `drain::drain` over a, b, c with `Stub.runs` scripted as (Some(Failed), reason) for a, a-retry, b, b-retry. Cases: (1) reasons `format!(\"{}: success: API Error: 429 {{detail 1}}\", athena_core::disk::USAGE_LIMIT)` and a different detail text for b; (2) `athena_core::disk::LOW_DISK` text, with a different tail for each item; (3) `athena_core::disk::PRODUCER_AUTH` text; (4) `ENVIRONMENT_PREFIX` plus other text with a job name inside, which exercises masking; (5) landing: a and b each run to Landed and `Stub.landings` hands back `landing_from_report(Err(GhFailure { call: \"repos/o/r/pulls/7/merge\" or \"/8/merge\", status_code: Some(503), text }.into()))`; (6) the same with `status_code: None`. Controls that must continue: landings from `landing_from_report(Err(anyhow!(\"pull request 7 not found\")))`, from a GhFailure with status Some(404), and from `Ok(PrReport { state Open, checks Some(Red), pr_number 7 / 8 })`.",
+      "command": "cargo test -p athena-cli --test drain two_items_failing_for_the_same_shared_cause_stop_the_batch",
+      "observes": "In cases 1-6: `report.stop == Stop::RepeatedFailure` and `failed_item == Some(\"b\")`. A note names a and b. The log has no `read c`, and `display::drain(&report)` contains `repeated failure: item b failed twice`. In the controls: the stop is not RepeatedFailure and the log has `read c`.",
+      "fails_without": "Without the shared-cause comparison, a lone failure always passes over, so cases 1-6 run c and end with the queue empty. Under the old rule they stop at a, so `failed_item == Some(\"b\")` fails. Without the origin split, the controls stop.",
+      "seam": "Entry point `drain::drain` with `Stub`. Step 8 adds `Stub.runs` and `Stub.landings`. They return scripted production values, and `landing_from_report` is made `pub` in step 3 so the test builds the landing through production code. A classification test double is not used."
+    },
+    {
+      "criterion": 4,
+      "method": "Two tests. (a) A unit test in `drain.rs` `mod tests::failure`, calling the real `landing_from_report` and `host_cause` directly. (b) The criterion 3 cases 5 and 6 and the controls run through `drain::drain`. The existing test at 4607-4638 is updated for the new variant.",
+      "command": "cargo test -p athena-cli landing",
+      "observes": "`landing_from_report(Err(GhFailure{status Some(503)}.into()))` gives `Landing::HostError` with the key `host: github 503`. The same with a context-wrapped error (`.context(\"after 3 attempts\")`) gives the same key, which shows that the downcast sees through context. Status None, 401, 403 and 429 give HostError. Status 404, 405 and 422 and a plain `anyhow!` give `NotLanded`. Ok/Open/Red, Ok/Open/Green and Ok/Open/None give `NotLanded`. Ok/Open/Pending gives `Waiting` and Ok/Landed gives `Landed` (unchanged).",
+      "fails_without": "If the Err arm still returned NotLanded, or returned HostError for every Err, the assertions on 404 and on 503 fail one way or the other.",
+      "seam": "Entry points `landing_from_report` (made `pub` in step 3) and `host_cause`. No fake. Inputs are production types: `GhFailure` and `PrReport`."
+    },
+    {
+      "criterion": 5,
+      "method": "Unit test `failure_key_masks_wrapped_ids` in drain.rs `tests::failure`, on the pure `failure_key`.",
+      "command": "cargo test -p athena-cli --lib failure_key",
+      "observes": "`failure_key(\"run `athena go 20261103-162416-m9th` again\", names)` equals `failure_key(\"run `athena go 20261103-170000-zzzz` again\", names)`. The same holds for `(job 20261103-162416-m9th)` and `job 20261103-162416-m9th's verification does not hold`. A text of only names or digits is None. Item `a` does not change the word `checks`, and `failure_key(\"a failed\", [\"a\"])` masks only the token `a`.",
+      "fails_without": "Without edge-punctuation trimming, the two backticked texts differ and the equality assertion fails. With substring masking, `checks` is corrupted.",
+      "seam": "Pure function `failure_key` in drain.rs, called directly. It is added in step 2. No fake."
+    },
+    {
+      "criterion": 6,
+      "method": "Review the diff of `Drain::finish`, and run the drain tests that drive both branches of it. Criterion 1's test drives the pass-over branch and criterion 3's test drives the stop branch.",
+      "command": "git diff -- crates/athena-cli/src/drain.rs",
+      "observes": "The `ItemEnd::Failed(failure)` arm no longer calls `set_stop(Stop::RepeatedFailure, ..)` unconditionally. It calls it only in the branch where an earlier different item has an equal shared key. Otherwise it notes `item X failed twice and is paused for this run: <reason>` and calls `pass_over(&item.job, ..)`. The check and insert share one `self.st()` section. A `grep` for `Stop::RepeatedFailure` in drain.rs shows no other setter.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Rewrite the old-rule tests in tests/drain.rs (about 939, 1047-1092, 1260-1282, 4293, 6420-6442, 7194) and reseed `Before::RepeatedFailure` (about 6628) so a real RepeatedFailure is stored first: `Shared.errors` makes two items, bad and bad2, fail with the same shared cause (a Failed run with a USAGE_LIMIT reason). The asserted row counts stay. Then run the whole workspace checks.",
+      "command": "cargo test --locked",
+      "observes": "All workspace tests pass, including the rewritten ones. `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` are clean.",
+      "fails_without": "If the old assertions stayed (a lone item gives RepeatedFailure), the suite fails under the new rule.",
+      "seam": "Entry points `drain::drain` and `drain_concurrent` (the `[parallel] max_concurrency` path) with `Stub` and `Shared`. The scripted run for `Shared` is added in step 8."
+    },
+    {
+      "criterion": 8,
+      "method": "Review the text of drain.rs, display.rs and CHANGELOG.md, and run a display test that renders `display::drain(&report)` for a and b, where a is rejected twice and b lands.",
+      "command": "cargo test -p athena-cli --test drain a_paused_by_failure_item_stays_visible_in_the_drain_output",
+      "observes": "The rendered text names a and a-retry with outcome `rejected` and reason `ended rejected`, and has the note `item a failed twice and is paused`. For the shared-cause stop the text still starts `repeated failure: item b failed twice` and adds `for a cause shared with an earlier item (see notes)`. `git diff -- CHANGELOG.md` shows an Unreleased/Changed entry naming the root cause (`finish` stopped the batch for one item's double failure) and the new rule. The drain.rs module header (about 103), the docs of `Stop::RepeatedFailure` (about 942) and `meaning()` (about 1001), `Report::failed_item` (about 1051), `State.stop` (about 1120) and the `Landing` variants state the new rule. `cargo test -p athena-cli --lib` still passes the `Stop::ALL` meaning test.",
+      "fails_without": "If the pass-over dropped a's job lines or its note, the rendered text would not name a or its rejection and the assertions would fail.",
+      "seam": "Entry points `drain::drain` and `display::drain`, with the existing `Stub` and `Quiet` injected. The seam exists today."
+    }
+  ],
+  "open_questions": [
+    "User: Four texts say a repeated failure of one item stops the drain and become stale: the `athena drain --help` stop list (crates/athena-cli/src/main.rs:254), README.md:126, docs/design/async-drain.md:179 and docs/spec.toml:1351. None is a listed deliverable (the `docs` deliverable has no directory in the snapshot). Should a follow-up job update them and add a docs/decisions.md entry?",
+    "Host: Whether `go_with_stages` can return a `GhFailure` in its Err (for example from the early pull-request push) is not shown by the code read here. The plan treats such a run Err as per item, so a shared gh outage met during a run pauses items one by one until the landing step sees it. Is that acceptable?"
+  ],
+  "producer_section_sha256": "8e16b0f0fea2b1a02e5540a5e10375123019eeb38191e4e57a6e880f2fe19e4e",
+  "resumed_from": "20261103-162416-m9th"
+}
