@@ -1,0 +1,251 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261103-222737-zzsr",
+  "round": 1,
+  "at": "2026-11-03T22:31:15.066131651Z",
+  "invocation_seq": 3,
+  "approach": "In `run_job` (crates/athena-cli/src/drain.rs), the `_ if run.needs_accepting` arm (line 1537) gives the job-limit slot back: take `self.st()` and set `st.started = st.started.saturating_sub(1)` before pushing the line and returning `RunStep::NeedsAccepting`. `st.begun` and the money (the cost already added by `st.budget.add(run.cost)` at line 1527) are left alone. The JobLimit check (1433), the increment (1439) and the passed, held and failed arms are untouched. A new integration test in crates/athena-cli/tests/drain.rs uses the existing `Stub` with `needs_accepting: vec![\"a\"]` and `max_jobs: 1`. Docs, `--job-limit` help and CHANGELOG are updated. The producer runs the new test with the decrement temporarily removed and with it restored, and quotes each command and its output in the report. The criterion 5 checks (fmt, clippy, workspace tests) are run as separate commands after the fix is restored, each quoted with its result.",
+  "decisions": [
+    {
+      "choice": "Give the slot back in the `needs_accepting` arm of `run_job`, by decrementing `st.started` under the state lock.",
+      "reason": "`st.started` (incremented at drain.rs:1439) is the one counter behind the JobLimit check (1433), the approval room check (1889), the fill-plan check (2008), the read-ahead room check (2555) and the restart `jobs_left` (2896). Fixing the counter at the arm fixes every reader at once. Only `Run.needs_accepting` (set at 3572) reaches this arm, so failed, held and budget-short outcomes are unaffected.",
+      "rejected": [
+        {
+          "option": "Special-case the JobLimit stop reason or skip the limit check when it would stop the drain.",
+          "why": "Treats the symptom. The counter stays wrong for read-ahead and restart, which read `started`."
+        },
+        {
+          "option": "Increment `st.started` only after the run result is known.",
+          "why": "The slot must be taken before the read and run so concurrent workers cannot exceed the limit. It would restructure admission, far more than one focused change."
+        },
+        {
+          "option": "Skip the increment when `source` is `Source::Reread`.",
+          "why": "Whether the re-read ends as needs accepting is known only after the run. A re-read that does not need accepting should still count as a job."
+        }
+      ]
+    },
+    {
+      "choice": "Use `saturating_sub(1)` and leave `st.begun` and the budget accounting alone.",
+      "reason": "The re-read's cost must still count against the money budget (out of scope to change). `begun` records that money was held for the item, which stays true.",
+      "rejected": [
+        {
+          "option": "Also remove the job from `st.begun`.",
+          "why": "Changes budget-hold semantics, which is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Drive the test through the existing stub `needs_accepting` run result, not `Source::Reread`.",
+      "reason": "The reading accepts this. `run_job` reacts only to `Run.needs_accepting`, whatever produced it, and the seam exists (tests/drain.rs:89 and 223). The existing test at 1305 uses the same route.",
+      "rejected": [
+        {
+          "option": "Build a new stub that returns `Source::Reread` through the stale-reading path.",
+          "why": "Needs read-ahead and concurrency setup and adds no coverage of the counter."
+        }
+      ]
+    },
+    {
+      "choice": "Show the old-counter failure by running the new test with the decrement temporarily removed, and quote the commands and outputs in the report.",
+      "reason": "Job 20261103-193428-df2m was rejected for citing no command for criterion 2. The verifier has no stash or checkout, so the report must carry the recorded output.",
+      "rejected": [
+        {
+          "option": "Only describe the assertion that would fail.",
+          "why": "This is the exact failure of the earlier job."
+        }
+      ]
+    },
+    {
+      "choice": "Demonstrate criterion 5 with three separate whole commands (fmt, clippy, workspace test), each with a stated failure mode and the cargo toolchain as seam.",
+      "reason": "The verifier may run only whole simple commands, so `&&` chains are replaced by separate runs. The criterion's value is that the new code and test do not break the checks Athena itself runs.",
+      "rejected": [
+        {
+          "option": "One chained command with `&&`.",
+          "why": "Not a whole simple command; the verifier cannot run it."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Give the slot back in the `_ if run.needs_accepting` arm of `run_job` (decrement `st.started` under the lock, with a comment); update the module docs and the `Limits::max_jobs` doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the regression test for `max_jobs: 1` with `a` needing accepting and `b` runnable; no existing assertion changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Update the `--job-limit` help and the `job limit` stop-reason text to say a re-read that only needs accepting does not count.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add one entry under Unreleased / Fixed naming the cause (the slot was never returned) and the fix.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `the_job_limit_stops_the_loop` (tests/drain.rs:1422), `a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure` (1305) and the stub's `needs_accepting` handling (89, 223). Grep tests/drain.rs for `urgent` to find the urgent-queued-request test.",
+    "In drain.rs `run_job`, edit the `_ if run.needs_accepting` arm (1537): before `self.push(line)`, take `let mut st = self.st();`, set `st.started = st.started.saturating_sub(1);`, release the lock, then push and return `RunStep::NeedsAccepting`. Comment: the re-read only needs accepting, so the slot is returned; its cost stays on the budget; with several workers a full limit seen while it was in flight is not undone. Leave the JobLimit check, the increment and the other arms unchanged.",
+    "In tests/drain.rs add `a_re_read_that_needs_accepting_does_not_use_a_job_limit_slot` next to `the_job_limit_stops_the_loop`: `Stub { items: vec![\"a\",\"b\"], needs_accepting: vec![\"a\"], outcomes: passing(), ratings: RefCell::new(vec![3,3]), ..Stub::default() }` with `Limits { max_jobs: 1, ..limits(9.0) }`. Assert `jobs[0].outcome == \"needs accepting\"`, `landed == 1`, `stop != Stop::JobLimit`, the log has `run a`, `run b` and `land b`, and `queued` holds `a`. Add a doc comment saying why.",
+    "Old-counter check: temporarily comment out the decrement, run `cargo test -p athena-cli --test drain a_re_read_that_needs_accepting_does_not_use_a_job_limit_slot` and then `cargo test -p athena-cli --test drain`. Copy each command and its failing output into the report; confirm the new test is the only failure.",
+    "Restore the decrement (not commented out), rerun both commands and copy the passing output into the report. Check with `git diff -- crates/athena-cli/src/drain.rs` that the decrement is in the final tree.",
+    "Update the docs and help: drain.rs module docs (the `A configuration change` bullet and the job-limit mentions at ~23 and ~49), the `Limits::max_jobs` doc (~253), the main.rs `job limit` stop-reason line (~256) and the `--job-limit` arg doc (~288). Each says a re-read that only needs accepting does not count toward the job limit. Add one CHANGELOG.md entry under `## [Unreleased]` / `### Fixed`.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --workspace --locked`, one command at a time, and record each command with its result in the report. Run `git diff -- crates/athena-cli/tests/drain.rs` and check that no assertion was removed or weakened."
+  ],
+  "risks": [
+    {
+      "risk": "The decrement could run when the slot was not taken, so `started` underflows or the limit is exceeded.",
+      "mitigation": "The arm is reached only after the increment at drain.rs:1439 in the same call, so the decrement exactly undoes it. `saturating_sub` guards against underflow."
+    },
+    {
+      "risk": "With several workers, a worker may meet the JobLimit check while `a` is in flight and end its own item with JobLimit before the slot comes back.",
+      "mitigation": "This is the existing behavior for a full limit; the fix targets the sequential case in the criterion. The producer notes the limit in a comment and does not widen the change."
+    },
+    {
+      "risk": "The report again cites no command for criterion 2, or none for criterion 5, as happened in job 20261103-193428-df2m.",
+      "mitigation": "Steps 4, 5 and 7 require each command and its output to be copied into the report; a report line without a command and output counts as not done."
+    },
+    {
+      "risk": "The test passes for the wrong reason, for example `b` is blocked by something else.",
+      "mitigation": "The test also asserts the log has `run a`, `run b`, `land b`, and that `a` stays in `report.queued`. The old-counter run must fail on this test only."
+    },
+    {
+      "risk": "The temporary removal of the decrement is left in the tree.",
+      "mitigation": "Step 5 restores it and checks with `git diff` that the decrement is present; criterion 3 reads the final diff."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`st.started` job counter",
+      "dependent": "crates/athena-cli/src/drain.rs:1433 (JobLimit check in `run_job`)",
+      "kind": "code",
+      "test": "`the_job_limit_stops_the_loop` (tests/drain.rs:1422) and the new test. A passed, held or failed job still takes its slot, so the limit is unchanged for them.",
+      "reason": null
+    },
+    {
+      "name": "`st.started` job counter",
+      "dependent": "crates/athena-cli/src/drain.rs:1889 (`approve` room check `st.started + approved.len() < max_jobs`)",
+      "kind": "code",
+      "test": "The `Stop::JobLimit` tests at tests/drain.rs ~4698 and 4732 and the job-limit case of the passed-over test (~5053), run in criterion 4. A returned slot only leaves more room, and only after a needs-accepting end.",
+      "reason": null
+    },
+    {
+      "name": "`st.started` job counter",
+      "dependent": "crates/athena-cli/src/drain.rs:2008 (fill-plan read check `st.started < max_jobs`)",
+      "kind": "code",
+      "test": "Full `cargo test -p athena-cli --test drain` run (criterion 4).",
+      "reason": "It reads the counter after the needs-accepting job has ended. A smaller `started` can only admit another read, which is the intended room."
+    },
+    {
+      "name": "`st.started` job counter",
+      "dependent": "crates/athena-cli/src/drain.rs:2555 (read-ahead room check `started + held >= max_jobs`)",
+      "kind": "code",
+      "test": "The existing read-ahead and concurrency tests in tests/drain.rs, run in criterion 4.",
+      "reason": "Read-ahead only decides whether to read ahead. A returned slot may allow a read-ahead that would not have happened; the limit is checked again in `run_job` (1433) before any run."
+    },
+    {
+      "name": "`st.started` job counter",
+      "dependent": "crates/athena-cli/src/drain.rs:2896 (restart: `jobs_left = limits.max_jobs.saturating_sub(st.started)`)",
+      "kind": "code",
+      "test": "The existing restart and rebuild tests in tests/drain.rs, run in criterion 4.",
+      "reason": "The rebuilt drain carries on with the jobs left. A needs-accepting re-read no longer shrinks that number, which matches the new meaning of the limit."
+    },
+    {
+      "name": "needs-accepting outcome",
+      "dependent": "crates/athena-cli/src/drain.rs:1765 and ~2411 (`RunStep::NeedsAccepting` into `ItemEnd::NeedsAccepting` into pass_over)",
+      "kind": "code",
+      "test": "`a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure` (tests/drain.rs:1305) and the passed-over test (~5044).",
+      "reason": "The return value and item-end handling do not change. The item is passed over and left queued, so no loop forms: each queued item is passed once."
+    },
+    {
+      "name": "re-read cost against the money budget",
+      "dependent": "crates/athena-cli/src/drain.rs:1462 and 1527 (`st.budget.add(read.cost)`, `st.budget.add(run.cost)`) in `run_job`",
+      "kind": "code",
+      "test": "`a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure` (tests/drain.rs:1305, cost 0.1), run in criterion 4.",
+      "reason": "The plan does not touch the budget calls. `st.budget.add(run.cost)` still runs before the match, so the re-read's cost still counts against `--budget`; criterion 3's diff shows no change there."
+    },
+    {
+      "name": "documented meaning of the job limit",
+      "dependent": "crates/athena-cli/src/main.rs ~256 and ~288 (`--job-limit` help and stop-reason text) and drain.rs docs ~23, ~49, ~176-181, ~253",
+      "kind": "rule",
+      "test": "`cargo test --workspace --locked` (criterion 5) catches any help-text snapshot test; the diff read in criterion 6 shows the wording.",
+      "reason": "Text only, updated by plan step 6. No test parses these words."
+    },
+    {
+      "name": "checks Athena runs (fmt, clippy, test) and governance configuration",
+      "dependent": "docs/system-facts.md, athena.toml, defaults.toml, workflows",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No host setting, config key or check name changes; no governance file is touched."
+    },
+    {
+      "name": "`st.started` job counter under concurrency",
+      "dependent": "Concurrent workers (`[parallel] max_concurrency` above 1) reaching `run_job` and its JobLimit exit at drain.rs ~2400",
+      "kind": "code",
+      "test": "The existing concurrency tests in tests/drain.rs, run in criterion 4.",
+      "reason": "The decrement happens under the same state lock as the increment, so the counter stays consistent. A worker that met a full limit while `a` was in flight has already ended its item with JobLimit; that existing behavior is not widened or changed. The plan fixes the sequential case in the criterion."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new test in crates/athena-cli/tests/drain.rs builds `Stub { items: vec![\"a\",\"b\"], needs_accepting: vec![\"a\"], outcomes: passing(), ratings: RefCell::new(vec![3,3]), ..Stub::default() }` and calls `drain::drain(&stub, Limits { max_jobs: 1, ..limits(9.0) }, &Quiet)`. It asserts `jobs[0].outcome == \"needs accepting\"`, `landed == 1`, `stop != Stop::JobLimit`, that the log has `run b` and `land b`, and that `a` is still in `report.queued`.",
+      "command": "cargo test -p athena-cli --test drain a_re_read_that_needs_accepting_does_not_use_a_job_limit_slot",
+      "observes": "The test passes: `a` ends as needs accepting without using the one slot, `b` runs and lands, and the stop is not JobLimit.",
+      "fails_without": "Without the decrement the test fails on `stop != Stop::JobLimit` and `landed == 1`: `b` is never run because `a`'s slot is never returned.",
+      "seam": "Entry point `drain::drain`, the public function the existing `the_job_limit_stops_the_loop` (tests/drain.rs:1422) calls; it reaches `run_job` (drain.rs:1433-1547). Fixture: the existing `Stub` with its `needs_accepting` field (tests/drain.rs:89, 223), passed as the `Steps` argument; `limits()` and `Quiet` exist. The stub only reports `Run.needs_accepting`; the slot accounting under test is the production `run_job`. Exists today; plan step 3 adds only the test function."
+    },
+    {
+      "criterion": 2,
+      "method": "The producer comments out the `st.started` decrement in the needs-accepting arm, runs the command below and then `cargo test -p athena-cli --test drain` as a whole, and records each command with its failing output. It restores the decrement, reruns both, and records the passing output. The report quotes all four runs verbatim, command first. The verifier reruns the passing command and uses `git diff -- crates/athena-cli/src/drain.rs` to confirm the decrement is in the final tree.",
+      "command": "cargo test -p athena-cli --test drain a_re_read_that_needs_accepting_does_not_use_a_job_limit_slot",
+      "observes": "Old-counter run: 1 failed, naming the new test, with `stop` equal to JobLimit and `b` not run; the other tests in the binary pass. Fixed run: the new test ok, 0 failed.",
+      "fails_without": "The recorded failing run is the evidence: with the decrement removed, the new test fails with Stop::JobLimit and `b` not run. If the report quotes no command and output for that run, the criterion is not met.",
+      "seam": "Same as criterion 1: `drain::drain` with the existing `Stub` (exists). The only temporary change is deleting one production line in `run_job` (drain.rs, `_ if run.needs_accepting` arm), which is the logic under test, not a test double. No seam is added."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the drain.rs diff. The `_ if run.needs_accepting` arm of `run_job` must lock the state and decrement `st.started`. The `if st.started >= self.limits.max_jobs` check (1433), the increment (1439), the `Some(OutcomeState::Landed)` arm, the `run.held` arm and the `other` arm must show no changed lines.",
+      "command": "git diff -- crates/athena-cli/src/drain.rs",
+      "observes": "The only code hunk is the decrement in that arm (plus doc and comment lines). No hunk touches the JobLimit check, the increment or the other arms.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Run the whole drain test binary and read the results for `the_job_limit_stops_the_loop` (tests/drain.rs:1422), `a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure` (1305), the passed-over test with the \"Job limit\" case (~5044-5059), the `Stop::JobLimit` tests at ~1585, 4698 and 4732, and the urgent-queued-request test (found by grepping `urgent`). Then read the tests/drain.rs diff: it must add lines only, with no `-` line on an assertion.",
+      "command": "cargo test -p athena-cli --test drain",
+      "observes": "Every test in the binary passes. `git diff -- crates/athena-cli/tests/drain.rs` shows no removed or weakened assertions.",
+      "fails_without": "A counter change that broke the JobLimit stop or the needs-accepting handling would fail `the_job_limit_stops_the_loop`, `a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure` or the passed-over test. For example, a decrement applied in the passed arm would let `the_job_limit_stops_the_loop` run past its limit.",
+      "seam": "Entry point `drain::drain` with the existing `Stub` and the other local `Steps` implementations in tests/drain.rs. Exists today; no step adds a seam."
+    },
+    {
+      "criterion": 5,
+      "method": "After the fix is restored, run each of the three commands separately from the workspace root, in the same form as the checks Athena runs (fmt `--all --check`, clippy `--all-targets --locked -- -D warnings`, test `--locked`), and quote each command with its result. They are run as separate whole commands, not chained.",
+      "command": "cargo fmt --all --check\ncargo clippy --all-targets --locked -- -D warnings\ncargo test --workspace --locked",
+      "observes": "fmt prints no diff and exits 0. clippy reports no warnings and exits 0. The workspace tests report 0 failed in every test binary.",
+      "fails_without": "fmt fails if the new test or the decrement block is not rustfmt-formatted. clippy `-D warnings` fails if the change adds a warning (an unused `mut`, say). `cargo test --workspace` fails if the change breaks any existing test in any crate, such as the drain tests or a help-text or docs test. A fix that was only described and never compiled would also fail here.",
+      "seam": "Entry points are the cargo toolchain commands over the whole workspace, the same ones Athena runs as its fmt, clippy and test checks. No fake or fixture: they run the real source and the real tests, including the new test from step 3. Exists today (the commands are in the verifier's allowed list); no plan step adds a seam."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff. The drain.rs module docs (`A configuration change` bullet ~176-181 and the job-limit mentions at ~23 and ~49), the `Limits::max_jobs` doc (~253), and the main.rs `--job-limit` help (the `job limit` stop-reason line ~256 and the arg doc ~288) must each say that a re-read that only needs accepting does not count toward the job limit. CHANGELOG.md gets one entry under `## [Unreleased]` / `### Fixed`. The wording search is done on the added lines of the diff.",
+      "command": "git diff -- crates/athena-cli/src/drain.rs crates/athena-cli/src/main.rs CHANGELOG.md",
+      "observes": "The added lines carry the wording in the module docs, the `Limits::max_jobs` doc and both main.rs help texts. The CHANGELOG diff shows one new entry in Unreleased.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "f79e82f5b8deafb4e169e3f74c1061b8625e23f4ea8bd3bc7bce4ca2f5efd2b2"
+}
