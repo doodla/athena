@@ -1,0 +1,182 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261102-161126-hn31",
+  "round": 1,
+  "at": "2026-11-03T00:07:36.554649612Z",
+  "invocation_seq": 3,
+  "approach": "Add `check_measure_then_fix(reading)` in crates/athena-core/src/reading.rs: a phrase heuristic over the reading's title, summary and criteria. It refuses a reading that needs a full timed workspace test run AND a fix chosen from its result. Its doc comment names the root cause (two dependent steps in one producer run with one deadline and budget) and cites jobs 20261031-043143-vbee and 20261102-154842-4vkh. Wire it as `step!(check_measure_then_fix(reading));` in `refusing_check`, right after `check_criteria_evidence`. The error tells the reader to split into a measurement stage and a fix stage and to plan the measurement stage only. Add unit tests in reading.rs, a `measure-then-fix` input form with four corpus cases, a seventh `READING_RULES` line in briefs.rs, and a CHANGELOG entry. This revision also gives criterion 4 its test seam (see its demonstration) and maps every input form of the new rule to a corpus case id.",
+  "decisions": [
+    {
+      "choice": "Refuse in the reading gate (a new `step!` in `refusing_check`), not in the orchestrator or the producer brief.",
+      "reason": "The fault starts where a reading is accepted: the gate lets two dependent steps (a long run of unknown outcome and a fix chosen from it) into one producer run with one deadline and budget. A check there prevents the class for every future request, and the corpus mechanism test forces a refusing case for each `step!`.",
+      "rejected": [
+        {
+          "option": "Make the orchestrator chain or split jobs automatically",
+          "why": "Out of scope, and a much larger design."
+        },
+        {
+          "option": "Raise the producer deadline or budget",
+          "why": "Out of scope, and a long run of unknown outcome has no safe bound."
+        },
+        {
+          "option": "Add prose advice to the producer brief only",
+          "why": "Prose is not enforcement, and the producer is already past the point where the deadline fails."
+        }
+      ]
+    },
+    {
+      "choice": "The check reads the reading's own text (title, summary, criteria) and takes no request argument. In the corpus the criteria are built from the request's bullets (`base_reading` uses `request_text_acceptance`), so the request's acceptance text is still covered.",
+      "reason": "Scanning the raw request would refuse every reading of a joined request, so the reader's one corrective retry could never succeed. A reading narrowed to the measurement stage must pass.",
+      "rejected": [
+        {
+          "option": "Scan the raw request text",
+          "why": "No reading could ever be accepted, even a correct measurement-only one."
+        }
+      ]
+    },
+    {
+      "choice": "Require three signals: (1) a full timed workspace test run phrase, (2) a fix word, (3) a dependency phrase. Exempt text that cites already-recorded timings.",
+      "reason": "Keeps the match to the narrow measure-then-fix shape. A measurement-only reading has no fix signal; a fix-only reading cites recorded timings and has no run signal.",
+      "rejected": [
+        {
+          "option": "Refuse any reading that mentions timing or a test run",
+          "why": "Would refuse legitimate measurement-only and ordinary test-adding readings."
+        }
+      ]
+    },
+    {
+      "choice": "Add a seventh `READING_RULES` line for `check_measure_then_fix` in briefs.rs and update the brief tests (length 7, check-name list, section-size bound 2400 to 2700).",
+      "reason": "Criterion 5 asks that the reader brief name the check, as it does for `check_criteria_evidence`. The existing test pairs each check name with its own rule line of at most 220 bytes.",
+      "rejected": [
+        {
+          "option": "Fold the new check into an existing rule line",
+          "why": "The test pairs each check name with its own line."
+        }
+      ]
+    },
+    {
+      "choice": "Cover the rule's input forms with one new corpus tag `measure-then-fix` plus existing tags, and pin the accepted side with two accepting cases.",
+      "reason": "The corpus fails `corpus_covers_the_listed_input_forms` for a listed form with no case, so adding the tag forces the cases to exist.",
+      "rejected": [
+        {
+          "option": "Unit tests only",
+          "why": "The corpus runs `refusing_check` end to end on request-shaped input; unit tests alone would not show the gate order or the request-bullet path."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `check_measure_then_fix` with a doc comment naming the root cause and both jobs; add the `step!` line in `refusing_check` after `check_criteria_evidence`; update the ordering doc comments; add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add the `measure-then-fix` input form (INPUT_FORMS 17 becomes 18) and four cases: two refused, two accepted.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add the seventh `READING_RULES` line for `check_measure_then_fix`, change the array length to 7, and update the brief tests (length, check-name list, size bound).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased `### Changed` entry for the new refusal rule, its root cause, the two jobs, and that the refusal rate rises as intended.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read reading.rs around `refusing_check` and `check_criteria_evidence`. Add `pub fn check_measure_then_fix(reading: &Reading) -> Result<()>` after `check_criteria_evidence`. Return Ok if `capability` is None or `question` is Some. Build the text from title, summary and criteria, lowercased with whitespace collapsed (reuse the normalisation in `producer_evidence_phrase`) and match with `has_phrase`. Signals: (1) a run phrase ('full workspace test', 'whole workspace test', 'full test suite', 'full timed', 'timed workspace test', 'timed test run') together with a timing word ('timed', 'timing', 'timings'); (2) a fix word ('fix', 'speed up', 'speed-up', 'optimi'); (3) a dependency phrase ('chosen from', 'based on the timings', 'from its result', 'from the result', 'depends on the result', 'from the slowest', 'from the measurements'). Exempt when the text cites recorded timings ('recorded timings', 'already recorded', 'shard-timings.txt'). Refuse only when all three signals hold and there is no exemption.",
+    "Write the doc comment: root cause (two dependent steps, a full timed workspace test run of unknown outcome and a fix chosen from its result, in one producer run with one deadline and budget); jobs 20261031-043143-vbee and 20261102-154842-4vkh (both made no change; introspections 20261102-001607-rgxf and 20261102-161107-0634); the sentence 'This check refuses more readings; the higher refusal rate is intended', and 'expected 3% of newly refused readings'. Error text: the reading joins a full timed workspace test run with a fix chosen from its result in one producer run with one deadline and budget; split it into a measurement stage (its only deliverable is the timings entry, written as soon as the run finishes) and a fix stage that cites the recorded timings; plan the measurement stage only. Add `step!(check_measure_then_fix(reading));` after the `check_criteria_evidence` step and update the ordering doc comments of `check_reading_acceptance` and `refusing_check`.",
+    "Add unit tests in reading.rs `mod tests` (names containing `measure_then_fix`), reusing `reading_with_criterion`: (a) joined reading refused with 'measurement stage' and 'fix stage' in the error; (b) variants (case, line break, summary only, criterion only) refused; (c) measurement-only accepted; (d) fix-only citing recorded timings accepted; (e) decline and question accepted; (f) `refusing_check` names `check_measure_then_fix` for a joined reading that passes the earlier checks.",
+    "In refusal_corpus.rs add 'measure-then-fix' to INPUT_FORMS and change the array size 17 to 18. In `cases()` add four cases with source 'rebuilt from the job brief', forms `&[\"dash-bullet\", \"measure-then-fix\"]`, docs-class base reading: `measure-then-fix-vbee-joined` (job 20261031-043143-vbee; request bullets: time the full workspace test run, then fix the slowest test chosen from its result; Refuse(\"check_measure_then_fix\")); `measure-then-fix-4vkh-joined` (job 20261102-154842-4vkh; ten binaries, run id, slowest binary, then fix from the timings; same Refuse); `measurement-only-reading` (bullets ask only for the timings entry from a full timed run; Accept); `fix-only-reading-cites-recorded-timings` (bullets cite the recorded timings and fix one test, no run; Accept). Set each `bullets_expected` to the number of dash bullets in its request text. Cite only these ids; do not claim a result before running.",
+    "In briefs.rs add the seventh line to `READING_RULES` and change its type to `[&str; 7]`. Suggested: 'Measure then fix: do not join a full timed workspace test run with a fix chosen from its result; plan the measurement stage only (`check_measure_then_fix`).' (at most 220 bytes). In `the_reader_brief_names_each_reading_rule_in_one_short_line` add 'check_measure_then_fix' to the check list, change `READING_RULES.len()` from 6 to 7, fix the 'six rule lines' comment, and raise `section.len() < 2400` to `< 2700`.",
+    "In CHANGELOG.md add a bullet under `## [Unreleased]` / `### Changed` for `check_measure_then_fix`: the root cause, jobs 20261031-043143-vbee and 20261102-154842-4vkh, that the refusal rate rises and this is intended, and that splitting stays manual.",
+    "Run `cargo fmt --all`, then `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test -p athena-core`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-context` and `cargo test --workspace`, each as its own command. Fix failures, including any existing test that asserted the rule count or section size."
+  ],
+  "risks": [
+    {
+      "risk": "False refusals: an ordinary reading that mentions timings and a fix is refused.",
+      "mitigation": "Three signals are required (full timed run phrase, fix word, dependency phrase). A recorded-timings citation exempts. Corpus cases `measurement-only-reading` and `fix-only-reading-cites-recorded-timings` pin the accepted side. The reading declares 'expected 3% of newly refused readings'."
+    },
+    {
+      "risk": "The reader retries once and cannot produce an accepted reading.",
+      "mitigation": "The error says to narrow the reading to the measurement stage, whose only deliverable is the timings entry. The check scans the reading, not the request, so a narrowed reading passes (unit test (c) and the corpus case `measurement-only-reading`)."
+    },
+    {
+      "risk": "The reader brief's rules section exceeds the existing `< 2400` size test with a seventh line.",
+      "mitigation": "Raise the bound to 2700, keep the new line at most 220 bytes, and run `cargo test -p athena-context`."
+    },
+    {
+      "risk": "An earlier check refuses a new corpus case first, so it fails its expected check name.",
+      "mitigation": "Put the `step!` after `check_criteria_evidence`. Use the docs-class base reading with Content criteria, and keep the case text free of producer-report wording."
+    },
+    {
+      "risk": "The budget test `system_facts_budgets_match_computed` fails if prompt files change.",
+      "mitigation": "Edit only READING_RULES in briefs.rs, which sits outside the always-loaded prompt sets, and run `cargo test --workspace`."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in `mod tests` of crates/athena-core/src/reading.rs call `check_measure_then_fix` and `refusing_check` on real `Reading` values. Cases: (a) joined reading refused, and the error contains `measurement stage` and `fix stage`; (b) variants refused: upper case, line break inside the phrase, the text in the summary only, the text in a criterion only; (c) measurement-only accepted; (d) fix-only citing recorded timings accepted; (e) a decline and a question accepted; (f) `refusing_check` names `check_measure_then_fix` for a joined reading that passes the earlier checks.",
+      "command": "cargo test -p athena-core measure_then_fix",
+      "observes": "All tests pass with the change. The joined reading's error text names both stages.",
+      "fails_without": "Without the check the tests do not compile (`check_measure_then_fix` is missing). A stub that always accepts fails the joined-reading assertions (`unwrap_err` panics on `Ok`). A stub that refuses everything fails the measurement-only and fix-only assertions.",
+      "seam": "Production entry points `check_measure_then_fix(&Reading)` and `refusing_check`, called directly. Fixture: the existing test helpers `reading_with_criterion` / `scoped_reading` in reading.rs (exist; read); the test sets summary and criteria text on a real `Reading`. No double. Step 3 adds the tests."
+    },
+    {
+      "criterion": 2,
+      "method": "The corpus runs `refusing_check` (via its `run()` helper) on four new cases added in `cases()` by step 4. `measure-then-fix-vbee-joined` (source job 20261031-043143-vbee) and `measure-then-fix-4vkh-joined` (source job 20261102-154842-4vkh) expect `Refuse(\"check_measure_then_fix\")`. `measurement-only-reading` and `fix-only-reading-cites-recorded-timings` expect `Accept`. Each case carries the form tags `dash-bullet` and `measure-then-fix` and pins `bullets_expected`. Request text is rebuilt from the job brief, because job records are not in the snapshot.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "All corpus tests pass: `corpus_cases_get_the_expected_outcome` finds both joined cases refused by the named check and both other cases accepted; `every_acceptance_check_has_a_refusing_corpus_case` finds a case that refuses by the new check; `corpus_covers_the_listed_input_forms` finds the new tag.",
+      "fails_without": "Without the check, `corpus_cases_get_the_expected_outcome` reports the two joined cases as accepted where `Refuse(\"check_measure_then_fix\")` was expected. The mechanism test also fails if the `step!` line exists but no case refuses by it.",
+      "seam": "Production entry point `refusing_check`, called by the corpus `run()` helper (exists; read at line 660). Fixture: a `Case` built with the existing `case(..)` helper, whose `base_reading` derives the criteria from the request bullets through `request_text_acceptance` (exists; read at lines 106 and 175). The cases keep the docs class and Content criteria, so no earlier check refuses first. Step 4 adds the cases and the tag."
+    },
+    {
+      "criterion": 3,
+      "method": "Grep reading.rs. The doc comment above `pub fn check_measure_then_fix` must name the root cause (two dependent steps, a long run of unknown outcome and a fix chosen from it, in one producer run with one deadline and budget) and cite both job ids. `refusing_check` must contain `step!(check_measure_then_fix(reading));`.",
+      "command": "Grep pattern `check_measure_then_fix|20261031-043143-vbee|20261102-154842-4vkh|one deadline` in crates/athena-core/src/reading.rs",
+      "observes": "Matches in the doc comment for both job ids and for `one deadline`, and one match for the `step!` line inside `refusing_check`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Run three whole commands, each by itself: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`. The test run covers the new unit tests, the corpus mechanism tests, the reader-brief tests in crates/athena-context and `system_facts_budgets_match_computed` in crates/athena-cli.",
+      "command": "cargo test --workspace",
+      "observes": "All three exit 0. The workspace tests include every new and changed test, so a missed update (rule count, check-name list, section bound, corpus form list, array length) shows as a failure here.",
+      "fails_without": "Without the matching test updates, `the_reader_brief_names_each_reading_rule_in_one_short_line` (rule count 6 vs 7) or the corpus tests (`INPUT_FORMS` length, missing refusing case) fail. Without formatting or with a clippy warning in the new function, the fmt and clippy commands exit non-zero.",
+      "seam": "Production entry points are the cargo toolchain commands over the whole workspace; there is no fake. Fixtures are the tests that steps 3, 4 and 5 add or update in reading.rs, refusal_corpus.rs and briefs.rs (the existing tests in those files exist; read). Step 7 runs these commands."
+    },
+    {
+      "criterion": 5,
+      "method": "Grep briefs.rs for `check_measure_then_fix`: a `READING_RULES` line ending in (`check_measure_then_fix`) of at most 220 bytes, and the check-name list in `the_reader_brief_names_each_reading_rule_in_one_short_line`. Then run the reader-brief tests, which now expect 7 rule lines.",
+      "command": "cargo test -p athena-context the_reader_brief",
+      "observes": "At least two Grep matches in briefs.rs (the rule line and the test list). The reader-brief tests pass.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Grep CHANGELOG.md for an entry under `## [Unreleased]` / `### Changed` that names the rule, its root cause and jobs 20261031-043143-vbee and 20261102-154842-4vkh.",
+      "command": "Grep pattern `check_measure_then_fix` in CHANGELOG.md",
+      "observes": "A match in the Unreleased section.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "The exact request texts of jobs 20261031-043143-vbee and 20261102-154842-4vkh are not in the snapshot (records are absent; the brief truncates the cause). The corpus cases are rebuilt from the brief's description, so the exact wording the heuristic must match is unverified.",
+    "The check scans the reading (title, summary, criteria), not the raw request. A reader that paraphrases a joined request away from the listed phrases passes; widening the phrase lists is a cheap follow-up.",
+    "Input forms with no new case: star bullets and `1.`/`1)`/`(a)` parts only change how the parser extracts criteria before the check runs. The check sees plain criterion text, so existing cases `star-bullets`, `numbered-dot-parts`, `numbered-paren-parts-not-read-today` and `lettered-paren-parts-not-read-today` already cover those forms and are unchanged."
+  ],
+  "producer_section_sha256": "97e97d05e886a58d1dfb30c6d981ba248259258760b197dc84d514fed811d2da"
+}
