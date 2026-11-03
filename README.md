@@ -5,7 +5,8 @@ It shows how it read the request and what it predicts, before any work starts. I
 sub-agent in an isolated snapshot, has a different model verify the result independently, and lands a
 commit you can trace back to the request, the prediction, the models, the cost, and the verdict. It records
 every model call, scores its own predictions with proper scoring rules, and gates every commit with a
-secret scan.
+secret scan. It is for people who want to hand a repository a short request and get back a commit they can
+trace and check, and it solves the problem of AI edits that arrive unreviewed and unaccountable.
 
 This is v0, the walking skeleton. Its design is [`docs/design/athena-v0.md`](docs/design/athena-v0.md).
 
