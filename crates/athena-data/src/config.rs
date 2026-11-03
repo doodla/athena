@@ -42,6 +42,49 @@ pub struct Config {
     /// when absent and reset in [`Config::reading_inputs`]. Read through [`Config::pipeline`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain: Option<DrainConfig>,
+    /// How many items `athena plan` keeps at each top priority (`[priority_caps]`). Absent means
+    /// [`DEFAULT_URGENT_CAP`] and [`DEFAULT_HIGH_CAP`]. Left out of the serialized form when absent and reset in
+    /// [`Config::reading_inputs`], so it never changes a reading's config digest. Read through
+    /// [`Config::priority_caps`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_caps: Option<PriorityCaps>,
+}
+
+/// The most items a plan keeps at urgent unless `[priority_caps] urgent` says otherwise.
+pub const DEFAULT_URGENT_CAP: u32 = 3;
+/// The most items a plan keeps at high unless `[priority_caps] high` says otherwise.
+pub const DEFAULT_HIGH_CAP: u32 = 10;
+
+/// `[priority_caps]`: how many queued items a plan treats as urgent and as high. Items over a cap are demoted
+/// one tier, in memory, when the plan is built; no record is rewritten and a person's own priority record is
+/// never demoted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PriorityCaps {
+    /// The most items kept at urgent. The default is [`DEFAULT_URGENT_CAP`].
+    #[serde(default = "PriorityCaps::default_urgent")]
+    pub urgent: u32,
+    /// The most items kept at high. The default is [`DEFAULT_HIGH_CAP`].
+    #[serde(default = "PriorityCaps::default_high")]
+    pub high: u32,
+}
+
+impl PriorityCaps {
+    fn default_urgent() -> u32 {
+        DEFAULT_URGENT_CAP
+    }
+    fn default_high() -> u32 {
+        DEFAULT_HIGH_CAP
+    }
+}
+
+impl Default for PriorityCaps {
+    fn default() -> Self {
+        PriorityCaps {
+            urgent: DEFAULT_URGENT_CAP,
+            high: DEFAULT_HIGH_CAP,
+        }
+    }
 }
 
 /// The highest value `[drain.pipeline] max_check_slots` may take. A bound chosen here, not given by the design.
@@ -516,6 +559,8 @@ pub enum ConfigError {
     JobPlan(&'static str),
     #[error("[drain.pipeline] {0} is out of range (see docs/design/async-drain.md section 11)")]
     DrainPipeline(&'static str),
+    #[error("[priority_caps] {0} must be at least 1")]
+    PriorityCaps(&'static str),
     #[error("[models] {0} = {1:?} is not an effort level (one of low, medium, high, xhigh, max)")]
     Effort(&'static str, String),
     #[error("[models] hard_producer_model {0} is not in producer_allowed")]
@@ -555,6 +600,7 @@ impl Config {
         relevant.job_plan = None;
         relevant.disk = None;
         relevant.drain = None;
+        relevant.priority_caps = None;
         serde_json::to_string(&relevant).expect("a parsed configuration serializes")
     }
 
@@ -676,7 +722,19 @@ impl Config {
         if p.max_conflict_returns == 0 {
             return Err(ConfigError::DrainPipeline("max_conflict_returns"));
         }
+        let caps = self.priority_caps();
+        if caps.urgent == 0 {
+            return Err(ConfigError::PriorityCaps("urgent"));
+        }
+        if caps.high == 0 {
+            return Err(ConfigError::PriorityCaps("high"));
+        }
         Ok(())
+    }
+
+    /// The `[priority_caps]` settings, or the defaults (3 urgent, 10 high) when the table is absent.
+    pub fn priority_caps(&self) -> PriorityCaps {
+        self.priority_caps.unwrap_or_default()
     }
 
     /// The `[drain.pipeline]` settings, or [`PipelineConfig::default`] when `[drain]` is absent
@@ -994,6 +1052,39 @@ pub(crate) mod tests {
         // A reading records this digest; the section must not move it.
         assert_eq!(set.reading_inputs(), base.reading_inputs());
         assert_eq!(digest(&set), digest(&base));
+    }
+
+    #[test]
+    fn priority_caps_are_three_and_ten_and_leave_reading_inputs_alone() {
+        let set = Config::parse(REPO_CONFIG).unwrap();
+        let caps = set.priority_caps.expect("athena.toml sets [priority_caps]");
+        assert_eq!((caps.urgent, caps.high), (3, 10));
+        assert_eq!(set.priority_caps(), caps);
+        // Without the table the defaults are the same, and the reading digest is the same either way.
+        let start = REPO_CONFIG.find("[priority_caps]").unwrap();
+        let rest = &REPO_CONFIG[start..];
+        let end = rest[1..].find("\n[").map_or(rest.len(), |i| i + 1);
+        let stripped = format!("{}{}", &REPO_CONFIG[..start], &rest[end..]);
+        let bare = Config::parse(&stripped).unwrap();
+        assert!(bare.priority_caps.is_none());
+        assert_eq!(bare.priority_caps(), PriorityCaps::default());
+        assert_eq!(bare.priority_caps().urgent, 3);
+        assert_eq!(bare.priority_caps().high, 10);
+        assert_eq!(set.reading_inputs(), bare.reading_inputs());
+        assert_eq!(digest(&set), digest(&bare));
+        // One key may be left out; a zero cap is refused.
+        let one = Config::parse(&format!("{stripped}\n[priority_caps]\nurgent = 1\n")).unwrap();
+        assert_eq!(
+            (one.priority_caps().urgent, one.priority_caps().high),
+            (1, 10)
+        );
+        for bad in ["urgent = 0", "high = 0"] {
+            let text = format!("{stripped}\n[priority_caps]\n{bad}\n");
+            assert!(matches!(
+                Config::parse(&text),
+                Err(ConfigError::PriorityCaps(_))
+            ));
+        }
     }
 
     #[test]

@@ -1012,6 +1012,9 @@ pub fn status(v: &StatusView) -> String {
             "off"
         }
     );
+    if let Some(focus) = &v.focus {
+        let _ = writeln!(out, "focus       {focus}");
+    }
     let _ = writeln!(out, "bootstrap   {}", v.bootstrap.note);
     if let Some(report) = v.reconcile.as_ref().filter(|r| !r.is_quiet()) {
         for line in report.lines() {
