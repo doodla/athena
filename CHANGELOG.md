@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- Each card on `decisions.html` now leads with one yes/no question, an `If yes` line, an `If no` line, cost
+  and risk in a few words, and a `Recommend yes` or `Recommend no` line with its reason. The evidence, record
+  id and record link moved into a collapsed section, and the visible text no longer names rungs or roles.
+  Root cause: the owner could not tell what they were deciding, because cards led with a problem statement and
+  file paths. Tests check the order, the collapsed section, and the owner-style rules.
+
 ### Added
 
 - `cargo run -p xtask -- repin` sets `claude_version` in `athena.toml` to the installed Claude Code's reported

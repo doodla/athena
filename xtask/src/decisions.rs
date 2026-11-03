@@ -1,17 +1,21 @@
 //! The owner decision briefs page: `decisions.html`, built beside `index.html` by `cargo run -p xtask -- site`.
 //!
 //! The page lists the Steward's open proposals (work items of kind proposal that no work decision names) read
-//! from the records branch `athena/records`. Each proposal becomes a short brief: its title, rung, source,
-//! evidence, a recommendation, and a link to the record on GitHub at the branch tip. The style is the owner's
-//! (`docs/conventions/owner-style.md`): plain words, nothing invented.
+//! from the records branch `athena/records`. Each proposal becomes a card that the owner can take in at a
+//! glance, in this order: the decision as one yes/no question, one `If yes:` line, one `If no:` line, a cost
+//! and risk line, and a `Recommend yes:` or `Recommend no:` line with its one-line reason. Below them, in a
+//! collapsed `<details>` element, come the rung, raising role, source, evidence and the link to the record on
+//! GitHub at the branch tip. No path, record id, rung name or role name shows outside the collapsed part. The
+//! style is the owner's (`docs/conventions/owner-style.md`): plain words, nothing invented.
 //!
 //! Records are read with `athena_data::records::check_record_file`, so they are the same records every other
-//! reader sees and no new file format exists. A brief shows only what the proposal's fields hold: there is no
-//! cost, risk or approval wording. The recommendation comes from the raising role's recorded limit: a proposal
-//! at or below it is something the role may change itself; one above it, or from a role with no recorded
-//! definition, is for the owner to decide.
+//! reader sees and no new file format exists. A proposal holds no yes/no, cost or risk field, so those lines
+//! are plain-word templates filled from its title and rung; the cost and risk are words, never figures, and
+//! are labelled as Athena's estimate. The recommendation comes from the raising role's recorded limit: a
+//! proposal at or below it is something the role may change itself (recommend yes); one above it, or from a
+//! role with no recorded definition, is not (recommend no).
 //!
-//! A brief of more than [`MAX_WORDS`] words, or without a recommendation line, is refused. The page lists a
+//! A card of more than [`MAX_WORDS`] visible words, or without a recommendation line, is refused. The page lists a
 //! refused or unreadable record as not shown; it never stops the rest of the site from being built. A checkout
 //! without the records branch gets a page that says so and lists no proposals.
 
@@ -34,6 +38,14 @@ pub const MAX_WORDS: usize = 120;
 /// One proposal as a short brief. Every field is text the page shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Brief {
+    /// The decision as one yes/no question.
+    question: String,
+    /// `If yes: ...`
+    yes_line: String,
+    /// `If no: ...`
+    no_line: String,
+    /// Cost and risk in a few words.
+    cost_line: String,
     title: String,
     rung_line: String,
     role_line: String,
@@ -69,25 +81,40 @@ fn role_limit(roles: &[RoleDefinition], name: &str) -> Option<Ladder> {
         .map(|r| r.highest_rung)
 }
 
-/// The recommendation line, from the raising role's recorded limit.
+/// The recommendation line, from the raising role's recorded limit. It starts `Recommend yes:` or
+/// `Recommend no:` and gives one reason, in plain words.
 fn recommendation(item: &WorkItem, roles: &[RoleDefinition]) -> String {
-    let rung = item.rung.as_str();
     match role_limit(roles, &item.role) {
-        None => format!(
-            "Recommendation: Decide yourself. The role is not recorded ({} has no definition), so its limit is unknown.",
-            item.role
-        ),
-        Some(limit) if may_change(limit, item.rung) => format!(
-            "Recommendation: the {} role may change this itself. {rung} is within its limit ({}).",
-            item.role,
-            limit.as_str()
-        ),
-        Some(limit) => format!(
-            "Recommendation: Decide yourself. {rung} is above the limit of the {} role ({}).",
-            item.role,
-            limit.as_str()
-        ),
+        None => "Recommend no: Athena cannot tell how far this change reaches.".to_string(),
+        Some(limit) if may_change(limit, item.rung) => {
+            "Recommend yes: it is small enough for Athena to change on its own.".to_string()
+        }
+        Some(_) => {
+            "Recommend no: it is bigger than Athena may change on its own, so it needs your care."
+                .to_string()
+        }
     }
+}
+
+/// The title as a phrase: trimmed, with closing punctuation removed.
+fn phrase(title: &str) -> &str {
+    title.trim().trim_end_matches(['.', '?', '!', ' '])
+}
+
+/// The cost and risk line, in a few words chosen from how much the change reaches. It is an estimate, and
+/// holds no figures.
+fn cost_line(rung: Ladder) -> String {
+    let (size, reach) = match rung {
+        Ladder::OwnerGoals => ("high cost, high risk", "It changes what Athena is for."),
+        Ladder::BriefRequirements => ("high cost, high risk", "It changes what Athena must do."),
+        Ladder::DesignDecisions => (
+            "medium cost, medium risk",
+            "It changes how Athena is built.",
+        ),
+        Ladder::DefaultsConventions => ("low cost, low risk", "It changes a working rule."),
+        Ladder::Implementation => ("low cost, low risk", "It changes code, tests or notes."),
+    };
+    format!("Cost and risk (Athena's estimate): {size}. {reach}")
 }
 
 impl Brief {
@@ -108,6 +135,10 @@ impl Brief {
                 .collect()
         };
         let brief = Brief {
+            question: format!("Go ahead with this: {}?", phrase(&item.title)),
+            yes_line: "If yes: Athena makes this change and works with it from then on.".into(),
+            no_line: "If no: nothing changes. Athena keeps working as it does today.".into(),
+            cost_line: cost_line(item.rung),
             title: item.title.clone(),
             rung_line: format!("Rung: {}", item.rung.as_str()),
             role_line: format!("Raised by: {}", item.role),
@@ -121,21 +152,18 @@ impl Brief {
         Ok(brief)
     }
 
-    /// Every line of prose the brief displays, in page order.
+    /// Every line of prose the card shows outside the collapsed details, in page order.
     fn lines(&self) -> Vec<String> {
-        let mut lines = vec![
-            self.title.clone(),
-            self.rung_line.clone(),
-            self.role_line.clone(),
-            self.source_line.clone(),
-        ];
-        lines.extend(self.evidence_lines.iter().cloned());
-        lines.push(self.recommendation.clone());
-        lines.push(format!("Record: {}", self.record_path));
-        lines
+        vec![
+            self.question.clone(),
+            self.yes_line.clone(),
+            self.no_line.clone(),
+            self.cost_line.clone(),
+            self.recommendation.clone(),
+        ]
     }
 
-    /// The words of prose the brief displays.
+    /// The words of prose the card shows outside the collapsed details.
     fn words(&self) -> usize {
         self.lines()
             .iter()
@@ -143,11 +171,14 @@ impl Brief {
             .sum()
     }
 
-    /// Refuses a brief that is over [`MAX_WORDS`] words or has no recommendation line.
+    /// Refuses a brief that is over [`MAX_WORDS`] visible words or has no recommendation: a line that starts
+    /// `Recommend yes:` or `Recommend no:` and gives a reason.
     fn check(&self) -> Result<()> {
-        if !self.recommendation.starts_with("Recommendation:")
-            || self.recommendation.trim() == "Recommendation:"
-        {
+        let reason = self
+            .recommendation
+            .strip_prefix("Recommend yes:")
+            .or_else(|| self.recommendation.strip_prefix("Recommend no:"));
+        if reason.is_none_or(|r| r.trim().is_empty()) {
             bail!("the brief of {:?} has no recommendation line", self.title);
         }
         let words = self.words();
@@ -161,7 +192,19 @@ impl Brief {
     }
 
     fn html(&self) -> String {
-        let mut out = format!("<article class=\"card\"><h3>{}</h3>", escape(&self.title));
+        let mut out = format!(
+            "<article class=\"card\"><h3>{}</h3>",
+            escape(&self.question)
+        );
+        for line in [&self.yes_line, &self.no_line, &self.cost_line] {
+            let _ = write!(out, "<p>{}</p>", escape(line));
+        }
+        let _ = write!(
+            out,
+            "<p class=\"recommendation\"><strong>{}</strong></p>\
+             <details><summary>Evidence and record</summary>",
+            escape(&self.recommendation)
+        );
         for line in [&self.rung_line, &self.role_line, &self.source_line] {
             let _ = write!(out, "<p>{}</p>", escape(line));
         }
@@ -171,9 +214,7 @@ impl Brief {
         }
         let _ = write!(
             out,
-            "</ul><p class=\"recommendation\"><strong>{}</strong></p>\
-             <p>Record: <a href=\"{}\">{}</a></p></article>",
-            escape(&self.recommendation),
+            "</ul><p>Record: <a href=\"{}\">{}</a></p></details></article>",
             escape(&self.record_url),
             escape(&self.record_path)
         );
@@ -271,8 +312,9 @@ pub fn locate(root: &Path) -> Records {
 pub fn render(records: &Records) -> String {
     let mut body = String::from(
         "<header><h1>Proposals waiting for your decision</h1>\
-         <p class=\"lede\">Each card is one proposal. It shows what it changes, where it came from, the \
-         evidence, and a recommendation. This page only shows them; it decides nothing.</p></header>",
+         <p class=\"lede\">Each card is one yes or no question. It says what happens if you say yes, \
+         what happens if you say no, the cost and risk, and what Athena recommends. The evidence is folded \
+         below each card. This page only shows them; it decides nothing.</p></header>",
     );
     match records {
         Records::Missing(why) => {
@@ -435,12 +477,146 @@ mod tests {
         assert!(!html_a.contains("Source: job"));
         assert!(html_b.contains("<p>Source: job 20261014-101010-abcd</p>"));
         assert!(!html_b.contains("Source: path"));
-        for html in [html_a, html_b] {
-            let lower = html.to_lowercase();
-            for word in ["cost", "risk", "approve"] {
-                assert!(!lower.contains(word), "{word}");
+        // The cost line comes from the rung: the two rungs differ, so do the lines.
+        assert_ne!(a.cost_line, b.cost_line);
+        assert!(!html_a.contains("approve") && !html_b.contains("approve"));
+    }
+
+    /// The page text a reader sees: the card HTML without its collapsed details, tags removed.
+    fn visible_text(html: &str) -> String {
+        let mut rest = html.to_string();
+        while let Some(start) = rest.find("<details") {
+            let end = rest.find("</details>").expect("details closes") + "</details>".len();
+            rest.replace_range(start..end, " ");
+        }
+        let mut text = String::new();
+        let mut in_tag = false;
+        for c in rest.chars() {
+            match c {
+                '<' => {
+                    in_tag = true;
+                    text.push(' ');
+                }
+                '>' => in_tag = false,
+                c if !in_tag => text.push(c),
+                _ => {}
             }
         }
+        text
+    }
+
+    #[test]
+    fn the_question_yes_no_cost_and_recommendation_come_before_any_path_or_record_id() {
+        let (first, _) = two_fixtures();
+        let roles = [role("steward", Ladder::DesignDecisions)];
+        let card = brief(&first, &roles);
+        let html = card.html();
+        let first_detail = [
+            html.find("docs/design/retry.md").unwrap(),
+            html.find("20261014-101010-abcd").unwrap(),
+            html.find("records/work-items").unwrap(),
+            html.find("href=").unwrap(),
+        ]
+        .into_iter()
+        .min()
+        .unwrap();
+        let mut last = 0;
+        for line in [
+            &card.question,
+            &card.yes_line,
+            &card.no_line,
+            &card.cost_line,
+            &card.recommendation,
+        ] {
+            let at = html.find(&escape(line)).unwrap_or_else(|| panic!("{line}"));
+            assert!(at >= last, "{line} is out of order");
+            assert!(at < first_detail, "{line} comes after a path or record id");
+            last = at;
+        }
+        assert!(card.question.ends_with('?'));
+        assert!(card.yes_line.starts_with("If yes"));
+        assert!(card.no_line.starts_with("If no"));
+        assert!(card.cost_line.contains("cost") && card.cost_line.contains("risk"));
+    }
+
+    #[test]
+    fn evidence_record_id_and_link_sit_in_a_collapsed_details_element() {
+        let (first, second) = two_fixtures();
+        let roles = [role("steward", Ladder::DesignDecisions)];
+        for it in [&first, &second] {
+            let html = brief(it, &roles).html();
+            assert_eq!(html.matches("<details>").count(), 1, "no open attribute");
+            assert!(!html.contains("<details open"));
+            let start = html.find("<details>").unwrap();
+            let end = html.find("</details>").unwrap();
+            let inside = &html[start..end];
+            assert!(inside.contains("Evidence:") && inside.contains("href="));
+            assert!(inside.contains(&path_of(it)));
+            let outside = visible_text(&html);
+            for needle in [
+                "Evidence",
+                "href",
+                "records/",
+                ".md",
+                it.id.as_str(),
+                "20261014-101010-abcd",
+                "abc1234",
+            ] {
+                assert!(!outside.contains(needle), "{needle} is visible: {outside}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_sample_page_of_cards_follows_the_owner_style_rules() {
+        let (first, second) = two_fixtures();
+        let mut third = first.clone();
+        third.id = RecordId::parse("20261017-080000-qrst").unwrap();
+        third.title = "Add a design step before every task?".into();
+        third.role = "ghost".into();
+        let roles = [
+            role("steward", Ladder::DesignDecisions),
+            role("scribe", Ladder::Implementation),
+        ];
+        let cards: Vec<String> = [&first, &second, &third]
+            .into_iter()
+            .map(|i| brief(i, &roles).html())
+            .collect();
+        let banned = [
+            "work",
+            "item",
+            "proposal",
+            "blind",
+            "spot",
+            "job",
+            "commit",
+            "path",
+            "steward",
+            "scribe",
+            "ghost",
+            "rung",
+            "owner-goals",
+            "brief-requirements",
+            "design-decisions",
+            "defaults-conventions",
+            "implementation",
+        ];
+        let mut recommends = Vec::new();
+        for html in &cards {
+            let text = visible_text(html);
+            assert!(text.split_whitespace().count() <= MAX_WORDS, "{text}");
+            assert_eq!(text.matches('?').count(), 1, "{text}");
+            let words: Vec<String> = text
+                .split(|c: char| !c.is_alphanumeric() && c != '-')
+                .map(str::to_lowercase)
+                .collect();
+            for word in banned {
+                assert!(!words.iter().any(|w| w == word), "{word} in: {text}");
+            }
+            recommends.push(text.contains("Recommend yes:"));
+        }
+        // One within the raising role's limit, two not: the recommendation follows the record.
+        assert_eq!(recommends, [true, false, false]);
     }
 
     #[test]
@@ -458,23 +634,26 @@ mod tests {
         let unknown = brief(&mk("20261015-003905-khz8", "ghost"), &roles);
         assert_eq!(
             within.recommendation,
-            "Recommendation: the steward role may change this itself. defaults-conventions is within its limit (defaults-conventions)."
+            "Recommend yes: it is small enough for Athena to change on its own."
         );
         assert_eq!(
             above.recommendation,
-            "Recommendation: Decide yourself. defaults-conventions is above the limit of the scribe role (implementation)."
+            "Recommend no: it is bigger than Athena may change on its own, so it needs your care."
         );
         assert_eq!(
             unknown.recommendation,
-            "Recommendation: Decide yourself. The role is not recorded (ghost has no definition), so its limit is unknown."
+            "Recommend no: Athena cannot tell how far this change reaches."
         );
-        assert!(!within.recommendation.contains("Decide yourself"));
         // The newest recorded version of a role is the one that counts.
         let mut newer = role("scribe", Ladder::DefaultsConventions);
         newer.version = 2;
         let both = [role("scribe", Ladder::Implementation), newer];
         let item = mk("20261015-003904-khz7", "scribe");
-        assert!(brief(&item, &both).recommendation.contains("may change"));
+        assert!(
+            brief(&item, &both)
+                .recommendation
+                .starts_with("Recommend yes:")
+        );
     }
 
     #[test]
@@ -489,24 +668,33 @@ mod tests {
         );
         let ok = Brief::new(&long, &path_of(&long), TIP, &roles).unwrap();
         assert!(ok.words() <= MAX_WORDS);
-        // The extra words are in evidence lines, not the title: every displayed line is counted.
+        // Evidence sits in the collapsed part and does not count towards the visible words.
         long.evidence = (0..40)
             .map(|n| Reference::path(format!("docs/long/file-{n}.md")))
             .collect();
-        let err = Brief::new(&long, &path_of(&long), TIP, &roles).unwrap_err();
-        assert!(format!("{err}").contains("words"), "{err}");
-        // A title alone that is too long is refused too.
+        assert!(Brief::new(&long, &path_of(&long), TIP, &roles).is_ok());
+        // A title that is too long is refused.
         let mut wordy = long.clone();
         wordy.evidence = vec![Reference::path("a.md")];
         wordy.title = "word ".repeat(MAX_WORDS);
-        assert!(Brief::new(&wordy, &path_of(&wordy), TIP, &roles).is_err());
-        // A brief whose recommendation line is empty is refused.
+        let err = Brief::new(&wordy, &path_of(&wordy), TIP, &roles).unwrap_err();
+        assert!(format!("{err}").contains("words"), "{err}");
+        // A brief whose recommendation line is empty, or has no yes/no or no reason, is refused.
         let mut bare = ok.clone();
         bare.recommendation = String::new();
         let err = bare.check().unwrap_err();
         assert!(format!("{err}").contains("no recommendation"), "{err}");
-        bare.recommendation = "Recommendation:".into();
-        assert!(bare.check().is_err());
+        for text in [
+            "Recommendation:",
+            "Recommend yes:",
+            "Recommend no:  ",
+            "Do it.",
+        ] {
+            bare.recommendation = text.into();
+            assert!(bare.check().is_err(), "{text}");
+        }
+        bare.recommendation = "Recommend no: too costly.".into();
+        assert!(bare.check().is_ok());
         assert!(ok.check().is_ok());
     }
 
