@@ -46,7 +46,7 @@
 //!   it as a directory, and the shared append-only files (`CHANGELOG.md`, `docs/decisions.md`, `README.md`)
 //!   are ignored. An item whose touched paths are unknown is not read ahead. Reads and plans made ahead are
 //!   charged to the budget like any other, start only when a read and a run both fit it, count against the
-//!   job limit, and a reading is run as it is,
+//!   job limit (a re-read that only needs accepting gives its slot back), and a reading is run as it is,
 //!   never read a second time. *Stale readings:* a landing may change what a reading assumed. When the job
 //!   starts, the paths landed since its reading began are compared with the paths the reading touches by the
 //!   same rule; on a hit the drain notes it ([`Report::notes`]) and asks [`Steps::recheck`]. If the reading no
@@ -178,7 +178,8 @@
 //!   makes `athena go` read the job again, drain accepts the new reading if its scope (capability, class
 //!   of work, deliverables) is unchanged and runs it in the same drain. If the scope changed, the item is
 //!   left queued with the reason (outcome `needs accepting`, plus a note); that is not a failure and stops
-//!   nothing.
+//!   nothing. A re-read that only needs accepting does not count toward the job limit: its slot is returned,
+//!   so the drain goes on to the next item (its cost still counts against the budget).
 //! - **Interrupted jobs give up their build directories.** At the start of a drain and before each run, drain
 //!   removes `target/` of every job that is dispatched with no closing record, has no process in the registry
 //!   and whose job lock is free ([`athena_core::disk::reclaim_interrupted_targets`]). Work trees, kept
@@ -250,7 +251,8 @@ pub struct Limits {
     pub budget_usd: f64,
     /// The rating, from 1 to 5, at or above which the target is met.
     pub target_rating: u8,
-    /// The most jobs to start. A retry of an item is a job.
+    /// The most jobs to start. A retry of an item is a job. A re-read that only needs accepting does not
+    /// count toward it; its cost still counts against the budget.
     pub max_jobs: u32,
 }
 
@@ -1543,6 +1545,13 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                         .as_deref()
                         .unwrap_or("its reading needs accepting")
                 ));
+                // The re-read only needs accepting: no job ran, so the job-limit slot taken above is returned.
+                // Its cost stays on the budget. With several workers, a full limit that another worker met
+                // while this one was in flight is not undone.
+                {
+                    let mut st = self.st();
+                    st.started = st.started.saturating_sub(1);
+                }
                 self.push(line);
                 RunStep::NeedsAccepting
             }

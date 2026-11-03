@@ -1440,6 +1440,40 @@ fn the_job_limit_stops_the_loop() {
     assert_eq!(report.queued.len(), 1);
 }
 
+/// A re-read that only needs accepting runs no job, so it must not use a `--job-limit` slot: with one slot,
+/// `a` ends as needs accepting and the drain goes on to `b` instead of stopping at the job limit.
+#[test]
+fn a_re_read_that_needs_accepting_does_not_use_a_job_limit_slot() {
+    let stub = Stub {
+        items: vec!["a", "b"],
+        needs_accepting: vec!["a"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![3, 3]),
+        ..Stub::default()
+    };
+    let report = drain::drain(
+        &stub,
+        Limits {
+            max_jobs: 1,
+            ..limits(9.0)
+        },
+        &Quiet,
+    )
+    .unwrap();
+    assert_eq!(report.jobs[0].outcome, "needs accepting");
+    assert_eq!(report.landed, 1);
+    assert_ne!(report.stop, Stop::JobLimit);
+    let log = stub.log.borrow();
+    assert!(log.iter().any(|l| l == "run a"), "{log:?}");
+    assert!(log.iter().any(|l| l == "run b"), "{log:?}");
+    assert!(log.iter().any(|l| l == "land b"), "{log:?}");
+    assert!(
+        report.queued.iter().any(|q| q.job == "a"),
+        "{:?}",
+        report.queued
+    );
+}
+
 #[test]
 fn the_json_report_names_the_stop_the_money_the_rating_and_what_is_left() {
     let stub = Stub {

@@ -167,6 +167,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A re-read that ends as `needs accepting` no longer uses up a `--job-limit` slot. Root cause: `run_job` took
+  the slot before the read and never gave it back when the item was left queued, so with `--job-limit 1` the
+  drain stopped as `job limit` after an item that ran nothing, with the next item untouched. The slot is now
+  returned under the state lock in that outcome only; passed, held and failed jobs still count. The re-read's
+  cost still counts against `--budget`. The drain help, module docs and `Limits::max_jobs` say so.
 - A batch no longer stops as a repeated failure when an item's second failure paused its line. The drain asked
   whether the line was paused only before each attempt, so the failure that did the pausing went unchecked, the
   item ended as failed, and the batch stopped with money and job slots left. It now asks once more after the
