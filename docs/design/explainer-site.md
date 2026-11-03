@@ -53,6 +53,12 @@ published to GitHub Pages from this repository and runs locally with one command
   `actions/upload-pages-artifact` and `actions/deploy-pages`. Permissions are `contents: read`,
   `pages: write` and `id-token: write`, and a `pages` concurrency group stops two deploys overlapping.
   The workflow uploads `target/site`, the xtask default. Because `index.html` sits at the root of the uploaded directory, the Pages URL serves it directly.
+- The same command also writes `decisions.html` beside `index.html`: the owner's briefs of the Steward's open
+  proposals, read from the `athena/records` branch (`xtask/src/decisions.rs`, style in
+  `docs/conventions/owner-style.md`). The Pages checkout holds only `main`, so the workflow first runs
+  `git fetch` of `athena/records` into `refs/heads/athena/records`, before the render step; a test in
+  `xtask/src/decisions.rs` fails if that fetch is missing or comes after the render. Without the branch the
+  page says it is missing and lists no proposals.
 
 ## Alternatives considered
 

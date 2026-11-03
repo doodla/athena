@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- An owner decision briefs page, `decisions.html`, built beside `index.html` by `cargo run -p xtask -- site`
+  (`xtask/src/decisions.rs`; style in `docs/conventions/owner-style.md`). It lists the Steward's open
+  proposals from the `athena/records` branch, read with `check_record_file`, as short briefs: title, rung,
+  source, evidence (or "not recorded"), a recommendation from the raising role's recorded limit ("Decide
+  yourself" above it or when the role is not recorded), and a GitHub link to the record at the branch tip.
+  It shows no cost, risk or approval wording the proposal does not hold. A brief over 120 words of displayed
+  prose, or with no recommendation, is refused and listed as not shown; a checkout without the records branch
+  gets a page that says so. The index links to the page.
+- The Pages workflow now fetches the `athena/records` branch into `refs/heads/athena/records` before it renders
+  the site, because its checkout holds only `main` and the decisions page would otherwise always say the branch
+  is missing. A test fails if the fetch is absent or comes after the render step.
+
 ### Changed
 
 - A reused red CI run now gives the verifier the names of the failing tests and the end of the failing job's
