@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `cargo run -p xtask -- repin` sets `claude_version` in `athena.toml` to the installed Claude Code's reported
+  version, changing nothing else in the file. The pin is still exact; the version-mismatch refusal now names
+  both versions and says to run this command (D154).
 - The homepage header and the README opening now say who Athena is for (people who want a lazy request
   turned into a traceable commit) and the problem it solves (unreviewed, unaccountable AI edits). The
   homepage Next steps now give a `git clone` command, the prerequisites, and what `athena ask` does.

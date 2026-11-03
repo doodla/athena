@@ -215,6 +215,17 @@ Nothing about the state of the work lives in a hand-maintained file. A new conte
 documented in [`docs/records.md`](docs/records.md). Open work, including requests queued for later with
 `athena ask --later`, is listed under `open`, each with the command that picks it up.
 
+## After Claude Code updates itself
+
+Athena runs only the exact Claude Code version pinned as `claude_version` in `athena.toml`. When the installed
+version differs, Athena refuses to start and names both versions. To adopt the installed one, run:
+
+```sh
+cargo run -p xtask -- repin       # rewrites only the claude_version line of athena.toml
+```
+
+then commit the change. `--claude <path>` probes a specific binary instead of the one setup chose.
+
 ## The explainer page
 
 A page explaining how firstmate handles work, rendered from `studies/firstmate-work-handling`. Every

@@ -4209,3 +4209,25 @@ should replace those estimates with its figures.
   reading`, `--lib run_pin_tests` and `--test refusal_corpus`, and `cargo test -p xtask --test policy`. Not
   measured: how many past readings the old rule refused for prose alone, and how often a writer copies a word
   from a `behavior` criterion.
+
+## D154 · The Claude Code pin stays exact; `cargo run -p xtask -- repin` moves it
+
+- **Case:** Claude Code updates itself. The next run then fails in `check_pinned`, because the installed version
+  no longer equals `agents.claude_version` in `athena.toml`, and the person running Athena had to edit the pin
+  by hand. The refusal said only to run `./setup.sh`, which cannot help: setup also looks for the pinned
+  version and would install the old one beside the new.
+- **Decision:** The pin stays an exact match. A new command, `cargo run -p xtask -- repin [--claude <path>]`,
+  runs `claude --version` on the binary setup chose (`claude_bin` in the machine config, else `claude` on
+  `PATH`) and rewrites only the version inside the quotes of the `claude_version` line of `athena.toml`. Every
+  other byte stays, and a second run changes nothing. An empty or non-numeric version, a failed probe or a file
+  with no `claude_version` line is an error and the file is not written. The version-mismatch refusal now names
+  the found and pinned versions and says to run that command. Tests: `cargo test -p athena-agent` (refusal
+  text, exact version accepted) and `cargo test -p xtask` (rewrite, idempotence, refusals).
+- **Alternatives:** (a) Accept newer patch versions: the worker would no longer be held constant, and a
+  patch can change behavior the hermetic flags rely on. (b) Repin automatically at run time: a run would then
+  adopt whatever version is installed without anyone looking at it, and a pin that moves by itself is not a pin.
+- **Tradeoff:** After each Claude Code update someone must run one command and commit the changed
+  `athena.toml`. That is the cost of keeping the pin a deliberate choice.
+- **Reversal cost:** Low. Delete `repin_command` and its tests and restore the old message.
+- **Provenance:** Read: `crates/athena-agent/src/claude.rs`, `xtask/src/main.rs`. Measured: the tests named
+  above. Not measured: how often Claude Code updates.
