@@ -1,0 +1,143 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261102-061427-anxh",
+  "n": 1,
+  "at": "2026-11-02T17:21:54.813673886Z",
+  "invocation_seq": 1,
+  "base_commit": "515337067411fc7b1db66625b25bf0cfc7a7b94d",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Free writer build before the checks disk gate; gate only local runs",
+  "summary": "In check_and_verify, the free-disk gate currently runs before free_producer_build, so the job's own writer build can hold it. The gate moves after that removal and applies only just before a local check run, so a green or red CI result never triggers it. The audience is the Athena operator, who wants fewer false disk holds.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Two new tests; the repo-wide fmt, clippy and test run is deliberately not a separate criterion, per the request."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the hold or no-hold behavior through tests that run the drain."
+    },
+    {
+      "id": "root-cause",
+      "how": "The gate is reordered and made conditional on a local run, rather than raising the disk limit."
+    },
+    {
+      "id": "strangers",
+      "how": "The CHANGELOG entry and comments are written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/run/mod.rs (check_and_verify: disk_gate at ~1413, free_producer_build at ~1463, with_ci_source and run_routed_with_record call at ~1500), crates/athena-core/src/routing.rs (run_routed_with_record, Fallback::run, run_local, Exec trait), crates/athena-core/src/disk.rs (disk_gate, LowDisk), crates/athena-core/src/run/verification.rs (verifier gate), and crates/athena-cli/tests/drain.rs (simulated_free harness). No records or data files are added, so the records allow-list is not touched.",
+    "The CI check results are read inside run_routed_with_record, and the local fallback is run_local through Exec::exec. So the gate goes at the start of the local run (SnapExec or a wrapper around Exec, or Fallback::run), and a low result is returned so check_and_verify holds the job via hold_for_disk as it does today. How that is threaded through is the producer's choice.",
+    "A resumed job with recorded_checks still skips the gate and the checks, as before.",
+    "This relaxes a refusal rule, so no newly refused readings are expected: expected 0% of newly refused readings.",
+    "No governance file (athena.toml, defaults.toml, workflows) needs to change."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/tests/drain.rs (using with_free_space and simulated_free) has a writer build whose size takes simulated free disk below min_free_gb. The job is not held for disk, the build directory is removed first, and the checks run to a verdict. Run `cargo test -p athena-cli --test drain` and check that this test passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test with a GitHub origin and a green CI run for the candidate, and free disk below min_free_gb, shows that the checks stage does not hold for low disk and reuses the CI result (the 'ci   checks reused' line). A companion case with no usable CI result shows the disk gate still holds the job before the local check run. Run `cargo test -p athena-cli --test drain` and check that both pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "In crates/athena-core/src/run/mod.rs check_and_verify, the up-front disk_gate call before the checks is gone. free_producer_build runs before any disk_gate in the checks stage, and the gate is called only on the local-run path (the fallback run). Check by reading the diff.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry saying that the writer build is removed before the checks free-disk check and that the requirement applies only before a local check run.",
+      "kind": "content"
+    },
+    {
+      "text": "The existing verifier-stage gate (verifier_environment_problem) and the dispatch and producer gates are unchanged, and the existing disk-hold tests still pass.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Changing the dispatch, producer or verifier-stage disk gates",
+    "Changing the min_free_gb default or config",
+    "Changing CI-result resolution or routing rules"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.6
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7201044386422977,
+      "p_verification_passes": 0.6776859504132231,
+      "p_user_intervenes": 0.0942643391521197,
+      "cost_usd": {
+        "p10": 0.5537699423918236,
+        "p50": 1.3031956585970657,
+        "p90": 3.606743534472445
+      },
+      "wall_time_s": {
+        "p10": 543.5390783454237,
+        "p50": 1877.2333793644834,
+        "p90": 4090.108969049796
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass probability than the reference, because the gate has to be threaded into the local-fallback path inside routing and two drain tests are needed.",
+  "urgent_reason": "It cuts wasted time from jobs held for low disk that their own removable build caused.",
+  "hard_reason": "It changes a rule that can hold work, the free-disk gate in the checks stage of the run pipeline, so a mistake could hide real low-disk failures.",
+  "producer_effort": "high"
+}

@@ -1153,9 +1153,11 @@ pub(crate) mod check_seam {
 }
 
 /// The seam tests use to give the CI read a fake `gh` runner and a sleeper that spends no time. With nothing
-/// installed, a test build reads no CI result (`routing::NoCi`), so a test that gives the repository a GitHub
-/// origin never reaches the real `gh` or waits. Production builds do not have it. It is per thread.
-#[cfg(test)]
+/// installed, this crate's own test build reads no CI result (`routing::NoCi`), so a test that gives the
+/// repository a GitHub origin never reaches the real `gh` or waits. A build with the `test-support` feature
+/// has the seam too, for the integration tests (see `test_support::install_github_fakes`), but with none
+/// installed it reads through the real `gh`. Production builds do not have it. It is per thread.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod ci_seam {
     use crate::gh::Runner;
     use std::cell::RefCell;
@@ -1285,16 +1287,17 @@ impl Athena {
             pause: std::time::Duration::ZERO,
         };
         let branch = crate::gh::ci_branch(job);
-        #[cfg(test)]
-        {
-            let Some((runner, sleeper)) = ci_seam::current() else {
-                return act(&crate::routing::NoCi, one_read);
-            };
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some((runner, sleeper)) = ci_seam::current() {
             let client = crate::gh::GhClient::new(&*runner, repository);
             let source = client.ci_source(&branch);
             let sleep = move |pause: std::time::Duration| (*sleeper)(pause);
             let paced = crate::routing::Paced::new(&source, &sleep, crate::routing::CI_POLL);
-            act(&paced, wait)
+            return act(&paced, wait);
+        }
+        #[cfg(test)]
+        {
+            act(&crate::routing::NoCi, one_read)
         }
         #[cfg(not(test))]
         {
@@ -1388,9 +1391,11 @@ impl Athena {
         self.check_and_verify(ctx, accepted, closing, built)
     }
 
-    /// The second half of a job: the disk gate, Athena's own checks, the gate before the verifier, the
-    /// verifier and the verdict, for a built candidate. A resumed job at the verifier stage skips the gate
-    /// and the checks and uses the recorded results.
+    /// The second half of a job: Athena's own checks, the gate before the verifier, the verifier and the
+    /// verdict, for a built candidate. The producer's build directory is removed first. The free-disk check of
+    /// the checks comes after that and only just before a check runs here (`SnapExec`), so a CI result that
+    /// stands in for the checks is never held for disk. A resumed job at the verifier stage skips the checks
+    /// and uses the recorded results.
     fn check_and_verify(
         &self,
         ctx: &RunContext<'_>,
@@ -1405,16 +1410,6 @@ impl Athena {
         let p = built.base.clone();
         let c = built.commit.clone();
         let recorded_checks = built.recorded_checks.take();
-
-        // Free disk space, before the checks. Low space makes builds fail in ways that look like faults in the
-        // work, so after the idle build directories are removed, space that is still low holds the job: it is
-        // committed with its records and no outcome, stays dispatched, and the next drain resumes it from the
-        // kept candidate. It is not a failure of the work and no one needs to run `athena retry`.
-        if recorded_checks.is_none()
-            && let Some(low) = self.disk_gate(jc.config.min_free_gb(), &id, ctx.ui)
-        {
-            return Err(self.hold_for_disk(ctx, closing, low));
-        }
 
         // The admitted candidate goes to the job's CI branch, so the repository's CI runs on it. The branch is
         // deleted when the job closes (`finish_dispatched`). The checks below read its push run, and a failure to
@@ -1492,21 +1487,42 @@ impl Athena {
                 timeout: std::time::Duration::from_secs(jc.config.budget.check_timeout_s),
                 redactor: ctx.redactor,
                 cleanup: std::cell::RefCell::new(Vec::new()),
+                id: &id,
+                ui: ctx.ui,
+                min_free_gb: jc.config.min_free_gb(),
+                gated: std::cell::Cell::new(false),
             };
             // The candidate was pushed to the job's CI branch above: a GitHub origin gives its push run, read
             // up to `ci_wait_s`; any other repository gives no CI result, with one read and no wait. A green
             // run stands in for the checks, a red run fails them, and anything else runs them here.
-            let (runs, ci_record) =
-                self.with_ci_source(&id, jc.config.budget.ci_wait_s, |ci, wait| {
-                    crate::routing::run_routed_with_record(
-                        &route,
-                        &c,
-                        &changed_for_skip,
-                        ci,
-                        &exec,
-                        wait,
-                    )
-                })?;
+            //
+            // Free disk space, just before the first check runs here (`SnapExec`). Low space makes builds fail
+            // in ways that look like faults in the work, so after the idle build directories are removed,
+            // space that is still low holds the job: it is committed with its records and no outcome, stays
+            // dispatched, and the next drain resumes it from the kept candidate. It is not a failure of the
+            // work and no one needs to run `athena retry`. A CI result that stands in for the checks reaches
+            // no check run, so it is never held for disk.
+            let routed = self.with_ci_source(&id, jc.config.budget.ci_wait_s, |ci, wait| {
+                crate::routing::run_routed_with_record(
+                    &route,
+                    &c,
+                    &changed_for_skip,
+                    ci,
+                    &exec,
+                    wait,
+                )
+            });
+            let (runs, ci_record) = match routed {
+                Ok(done) => done,
+                Err(e) => {
+                    if let Some(low) = e.downcast_ref::<crate::disk::LowDisk>() {
+                        let low = *low;
+                        let _ = crate::pin::remove_tree(&verify_dir);
+                        return Err(self.hold_for_disk(ctx, closing, low));
+                    }
+                    return Err(e);
+                }
+            };
             check_runs = runs;
             if let Some(record) = &ci_record {
                 ctx.ui.line(&format!(

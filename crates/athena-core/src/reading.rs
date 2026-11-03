@@ -42,10 +42,10 @@ use athena_context::outputs::{
 use athena_context::{CONTRACT, Component, Composed, READER_FRAME, compose};
 use athena_data::records::{
     AnyRecord, Correction, CorrectionKind, Criterion, CriterionKind, CritiqueVerdict,
-    DefaultApplied, Deliverable, DeliverableAction, Finding, Forecast, Forecasts, Intervention,
-    InterventionCategory, InterventionSource, IntrospectionRecord, IntrospectionStatus,
-    IntrospectionTrigger, Invocation, OutcomeState, PreventionKind, PriorityRecord, Quantiles,
-    Reading, Replay, ReplayRefusal, Request, Role,
+    DefaultApplied, Deliverable, DeliverableAction, Finding, FocusRecord, Forecast, Forecasts,
+    Intervention, InterventionCategory, InterventionSource, IntrospectionRecord,
+    IntrospectionStatus, IntrospectionTrigger, Invocation, OutcomeState, PreventionKind,
+    PriorityRecord, Quantiles, Reading, Replay, ReplayRefusal, Request, Role,
 };
 use athena_data::{JobId, RecordId};
 use athena_gate::redact::Redactor;
@@ -944,6 +944,53 @@ impl Athena {
             ),
         )?;
         Ok((job_id, priority))
+    }
+
+    /// `athena focus <text>`: appends a focus record, what the user wants worked on now. The text and the git
+    /// user name are checked before anything is committed; earlier focus records are never touched, and the
+    /// highest `n` is the current focus.
+    pub fn set_focus(&self, text: &str) -> Result<FocusRecord> {
+        let text = text.trim();
+        if text.is_empty() {
+            bail!(
+                "the focus is empty; say what to focus on, for example: athena focus \"speed first\""
+            );
+        }
+        let Some(set_by) = self
+            .git
+            .config_get("user.name")?
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+        else {
+            bail!("git user.name is not set; run git config user.name \"Your Name\" and try again");
+        };
+        let head = self.head()?;
+        let records = crate::store::Records::load(&self.git, &head)?;
+        let n = records.focus.iter().map(|f| f.n).max().unwrap_or(0) + 1;
+        let focus = FocusRecord {
+            n,
+            at: crate::now(),
+            text: text.to_string(),
+            set_by,
+        };
+        focus.validate().map_err(|e| anyhow::anyhow!(e))?;
+        let record = AnyRecord::Focus(focus.clone());
+        self.commit_records(
+            &[NewFile::record(&record)],
+            &message(
+                &format!("Set focus: {}", crate::truncate_at_word(text.lines().next().unwrap_or(""), 60)),
+                "A focus record: what the user wants worked on now. The latest focus record is the current focus.",
+                &[("Athena-Record", record.canonical_path())],
+            ),
+        )?;
+        Ok(focus)
+    }
+
+    /// The current focus (`athena focus`): the focus record with the highest `n`, if any was set.
+    pub fn focus(&self) -> Result<Option<FocusRecord>> {
+        let head = self.head()?;
+        let records = crate::store::Records::load(&self.git, &head)?;
+        Ok(records.current_focus().cloned())
     }
 
     /// Reads a queued request for the first time, as `ask` would have.

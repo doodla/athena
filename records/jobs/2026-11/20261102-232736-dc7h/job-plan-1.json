@@ -1,0 +1,223 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261102-232736-dc7h",
+  "round": 1,
+  "at": "2026-11-02T23:30:54.760427252Z",
+  "invocation_seq": 2,
+  "approach": "Fix the order where the fault is: in `check_and_verify` (run/mod.rs) delete the up-front `disk_gate`. `free_producer_build` already runs at the start of the Checks stage. Move the gate into `SnapExec::exec` (run/checks.rs) so it runs once, just before the first check that really executes. `SnapExec` only runs on the local path. A green or red CI result, a resumed job, a nested run and a fully skipped route never call `exec`, so none of them reach the gate. When the gate is still low, `exec` returns the `LowDisk` error. It passes up through `run_local` and `run_routed_with_record` unchanged: `Fallback` keeps the original error, and the `BadSha` and non-reuse branches use `?`. `check_and_verify` downcasts it, removes the verifier snapshot dir, and returns `hold_for_disk(ctx, closing, low)`, exactly the hold used today. Tests that mark \"checks done\" by the `verify` dir would now hold at the new gate, so their free-space helpers change to key on the Verifier-stage resume mark. Add drain tests for the false-hold fix, CI reuse under low disk, and the local-run hold. Add a CHANGELOG entry and one sentence in docs/architecture.md.",
+  "decisions": [
+    {
+      "choice": "Call disk_gate inside SnapExec::exec, guarded by a Cell<bool> so it runs once, after refuse_if_stopped and before the check seam or run_check.",
+      "reason": "`exec` is called only when a check will execute locally, which is exactly 'only before a local check run'. It needs no change to the routing logic or the CI-result resolution, which are out of scope.",
+      "rejected": [
+        {
+          "option": "Keep one call in check_and_verify, moved after free_producer_build and before with_ci_source.",
+          "why": "It would still gate before a green CI result is read, so a CI-supplied result could trigger a hold. That misses the request."
+        },
+        {
+          "option": "Add a gate hook parameter to routing::run_routed_with_record.",
+          "why": "It changes a routing signature and its many callers and tests, and the brief says not to change routing rules. Only the Exec implementor needs to know."
+        }
+      ]
+    },
+    {
+      "choice": "Surface the hold as an anyhow error carrying LowDisk out of the closure. check_and_verify then checks `downcast_ref::<LowDisk>()` on the with_ci_source result, removes verify_dir, and returns the existing hold_for_disk.",
+      "reason": "hold_for_disk needs the owned Closing, which the closure can't hold. The existing hold path (records committed, no outcome, resume mark kept, next drain resumes) stays the only one.",
+      "rejected": [
+        {
+          "option": "Return the hold from inside exec by passing Closing into SnapExec.",
+          "why": "Closing is moved and mutated by the caller afterwards, so the borrow does not fit."
+        }
+      ]
+    },
+    {
+      "choice": "Change the 'checks have run' signal in the free-space helpers (drain.rs low_once_verifying, test_support::low_once_verifying, binary.rs copy) from 'a verify dir exists' to 'the resume mark says the verifier stage', i.e. `kept/<job>/resume.json` containing `\"verifier\"`.",
+      "reason": "The verify dir is now made before the new gate, so the old signal would hold at the local-run gate and break the existing tests for the verifier gate (criterion 5). The Verifier-stage mark is written only after every check passed (`write_resume_mark` with `recorded_checks`), which is just before the verifier gate.",
+      "rejected": [
+        {
+          "option": "Make the verify snapshot after the gate.",
+          "why": "The snapshot is needed before the CI read and before `exec`, since SnapExec borrows it. The verifier-stage logic would also change, which is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "For the green-CI test in drain.rs, widen `ci_seam` in run/mod.rs from cfg(test) to cfg(any(test, feature=\"test-support\")). A test falls back to NoCi only under cfg(test) and otherwise to the real gh. Add a small public installer and a fake gh Runner in test_support.rs.",
+      "reason": "The integration test crate compiles athena-core without cfg(test), and the seam is thread-local on the test's own thread (drain tests call `athena.go` directly). The fake is a fake `gh` transport only; resolve, routing and the gate stay in production code.",
+      "rejected": [
+        {
+          "option": "Put the CI case in run/tests.rs only.",
+          "why": "Criterion 2 names drain.rs and `cargo test -p athena-cli --test drain`."
+        },
+        {
+          "option": "Put a fake `gh` on PATH.",
+          "why": "It mutates process environment across parallel tests and relies on the host."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Delete the up-front disk_gate in check_and_verify. Intercept a LowDisk error from the with_ci_source result: remove verify_dir and return hold_for_disk. Pass the SnapExec its new fields (min_free_gb, ui, job id, once flag). Widen ci_seam to cfg(any(test, feature=\"test-support\")) with a real-gh fallback outside cfg(test). Update the doc comment of check_and_verify and the resume-mark comments.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "Give SnapExec the gate fields and call disk_gate once in exec, before the first real check, returning the LowDisk error. Update the doc comment of free_producer_build.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the false-hold test, the green-CI-under-low-disk test and the no-CI hold test. Change the local low_once_verifying helper to the Verifier-stage resume mark.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Add the public CI-seam installer and a fake gh Runner that answers the CI-run query. Change low_once_verifying to read the Verifier-stage resume mark.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Update the tests that use test_support::low_once_verifying, if their expectations change. Add a unit test that the gate runs after free_producer_build and not on a CI-reused path, if cheap.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/binary.rs",
+      "action": "modify",
+      "purpose": "Change its local low_once_verifying copy to the same Verifier-stage signal (optional; a hold at either gate may still pass its status assertions).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "New Unreleased entry for the order change and for gating only before a local check run.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/architecture.md",
+      "action": "modify",
+      "purpose": "Reword the 'before the checks' gate sentence (about lines 40-43) to state the new order.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "Doc comment only: say the checks-stage use is now just before a local check run. The `gate` and `disk_gate` code is not changed. Skip if no comment needs it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "purpose": "Not expected to change. Touch only if a doc comment on `Exec` should say that exec may return a hold error that is passed up unchanged. Skip otherwise.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "purpose": "Only if its test at ~1562 depends on the changed test_support::low_once_verifying behavior and fails. Not a deliverable. Skip otherwise.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read run/tests.rs 2429-2660 (CiReplies, ci_reuse_run) and gh/client.rs ci_source to see the exact `gh api` replies the CI read expects. Check that `gh::Runner` is public.",
+    "checks.rs: add fields to SnapExec (`id: &JobId`, `ui: &dyn Ui`, `min_free_gb: u64`, `gated: Cell<bool>`). At the top of `exec`, after `refuse_if_stopped`, if not yet gated, set the flag and call `self.athena.disk_gate(min_free_gb, id, ui)`. On Some(low) return `Err(low.into())`. Update the free_producer_build and SnapExec docs.",
+    "mod.rs check_and_verify: delete the up-front `recorded_checks.is_none() && disk_gate` block and its comment. Fill in the new SnapExec fields. After `with_ci_source(...)`, match on the result: on Err whose `downcast_ref::<LowDisk>()` is Some(low), copy it, `let _ = remove_tree(&verify_dir)` and `return Err(self.hold_for_disk(ctx, closing, low))`. Other errors propagate as before. Fix the doc comments of check_and_verify and write_resume_mark to match.",
+    "mod.rs with_ci_source and ci_seam: gate the seam module as `cfg(any(test, feature=\"test-support\"))`. In the function use the seam when set; with none set, NoCi under cfg(test), the real runner otherwise.",
+    "test_support.rs: add a public installer for the CI seam (a guard that clears it on drop) and a fake gh Runner that returns a green run for a given sha, or no run. Reuse the reply format read in step 1. Change low_once_verifying to read `kept/*/resume.json` for `\"verifier\"`.",
+    "drain.rs and binary.rs: change their local low_once_verifying helpers the same way. Add the three new tests (criteria 1 and 2). Run `cargo test -p athena-cli --test drain` and fix until the existing disk tests and the new ones pass.",
+    "run/tests.rs and scope_guard.rs: run `cargo test -p athena-core` and adjust only tests whose 'checks done' signal changed. Optionally add a unit test that a reuse-route Blocked-by-gate error downcasts to LowDisk.",
+    "CHANGELOG.md: add the entry under `## [Unreleased]` / `### Changed`. docs/architecture.md: reword the 'before the checks' gate sentence. Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` as the final Athena checks."
+  ],
+  "risks": [
+    {
+      "risk": "Existing tests that use 'a verify dir exists' as the 'checks have run' signal now hold at the new local-run gate (the verify snapshot is made before it), which breaks the verifier-gate tests.",
+      "mitigation": "Change the helper signal to the Verifier-stage resume mark in all four places (drain.rs, test_support.rs, binary.rs, plus scope_guard's use via test_support). Run `cargo test -p athena-cli --test drain` and `cargo test -p athena-core`."
+    },
+    {
+      "risk": "A hold after the verifier snapshot, the CI-branch push and the early PR leaves state behind.",
+      "mitigation": "Remove `verify_dir` on the hold path (the same `remove_tree` already used for the timeout stop) and assert in the new tests that it is gone. A resumed job redoes the verifier snapshot as a normal Checks-stage resume does."
+    },
+    {
+      "risk": "The gate runs on a nested or every-check call or twice.",
+      "mitigation": "The gate call sits in `exec` after `refuse_if_stopped`, behind a once flag. Pre-existing tests with plenty of space are unaffected, and the full `cargo test --locked` and clippy run in the final checks."
+    },
+    {
+      "risk": "Space drops during the checks after the gate passes; before this change the gate did not cover that either.",
+      "mitigation": "Keep the gate to the first exec only, as the brief says ('just before a local check run'). The user's default says the workload is a false hold on the job's own build, which the order fix addresses."
+    },
+    {
+      "risk": "Widening ci_seam to a feature changes the production code path (cfg(not(test)) real runner).",
+      "mitigation": "Keep the seam code behind the `test-support` feature, which only the athena-cli dev-dependency enables. Outside cfg(test), an unset seam falls back to the real GhCli. `cargo clippy --all-targets --locked -- -D warnings` must pass."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Add `writer_build_is_removed_before_the_checks_disk_gate_so_the_job_is_not_held` to drain.rs. The fixture is `disk_fixture()` (min_free_gb 10). The free-space reader is a new fn passed to `with_free_space`: it returns 3 GB while any `jobs/*/target/produce` exists and 500 GB otherwise. The wrapped script in the style of `go_with_disk` writes a `target/produce/big` file under the job dir when the Producer role runs. The test calls `athena.go(job, AcceptedBy::User, &lines)` and asserts the result is Finished (not a LowDisk Err) and that `jobs/<id>/target/produce` is gone. It also asserts the lines contain `disk       removed the producer's build directory` before the `checks     ` line, and that no `held       ` line appears.",
+      "command": "cargo test -p athena-cli --test drain",
+      "observes": "The test passes: the job reaches a verdict, the writer build is removed first, and there is no hold.",
+      "fails_without": "With the old order (disk_gate before free_producer_build), the test's free-space function reports 3 GB while `jobs/<id>/target/produce` exists. The up-front gate holds the job with LowDisk, `go` returns Err, and no `checks     ` line is printed, so the test fails.",
+      "seam": "Production entry point `Athena::go` (via `Fixture::athena` and `go_with_disk`-style wiring). The fake is `StateDir::with_free_space(fn)` plus the scripted Producer closure that plants the build dir, both existing in drain.rs today. The free-space fn only reads the filesystem and holds none of the gate logic."
+    },
+    {
+      "criterion": 2,
+      "method": "Add two tests to drain.rs, both using `disk_fixture()`. (a) `low_disk_with_a_green_ci_run_does_not_hold_the_checks_stage`: the repo gets a GitHub origin (`git remote add origin https://github.com/owner/repo`). The fixture's `url.<local bare>.insteadOf` setting lets the CI-branch push land locally. A guard from `athena_core::test_support` installs a fake gh Runner that answers the CI-run query with a green run for the candidate sha. Free space is a constant 3 GB through `with_free_space`. The test runs `athena.go`, asserts the result is Finished with no LowDisk Err, asserts a line starting `ci         checks reused from`, and asserts no `held       ` line. (b) `low_disk_with_no_usable_ci_result_holds_before_the_local_run`: origin and fake runner as in (a), but the runner answers 'no run', or there is no origin. The test asserts `go` returns Err downcastable to `LowDisk` (3 GB / 10 GB), no `checks     ` line, `read_hold` is Some, the job is Dispatched with no outcome, and the verify dir is gone. Then it frees space and `retry` plus `go` reach the checks.",
+      "command": "cargo test -p athena-cli --test drain",
+      "observes": "(a) passes: the green-CI job is not held and prints the reused line. (b) passes: the local path still holds, with the hold marker and amounts, and the checks do not run.",
+      "fails_without": "CI case: with the gate still before the CI read, the job is held for low disk and 'ci         checks reused' never prints, so the assertion fails. Companion case: if the gate were dropped from the local path instead, the checks would run at 3 GB and the hold assertion fails.",
+      "seam": "Production entry point `Athena::go` with `with_ci_source`, `routing::run_routed_with_record`, `SnapExec::exec` and `hold_for_disk` all real. The fake is the gh `Runner` installed through the new `test_support` installer, which sets the thread-local `ci_seam` (widened by a plan step; today the seam is cfg(test) only and not reachable from drain.rs). Free space comes from the existing `with_free_space`."
+    },
+    {
+      "criterion": 3,
+      "method": "Read the diff. In `check_and_verify` the block `if recorded_checks.is_none() && let Some(low) = self.disk_gate(...)` before `push_ci_branch` is removed. `free_producer_build` is still called at the top of the Checks stage. The only new `disk_gate` call is in `SnapExec::exec` in checks.rs, guarded by a once flag. Grep for `disk_gate(` in crates/athena-core/src/run to confirm: the dispatch (line 782), producer (1341) and verifier (verification.rs) gates plus the one new call.",
+      "command": "git diff -- crates/athena-core/src/run/mod.rs crates/athena-core/src/run/checks.rs",
+      "observes": "The diff shows the up-front gate deleted, the gate call only in the local `exec` path, after the producer build is freed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff for a new bullet under `## [Unreleased]` (`### Changed` or `### Fixed`) saying that the writer build is removed before the checks free-disk check, and that the free-disk requirement now applies only before a local check run, so a CI-supplied result is never held for it.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One new entry with both statements and no other CHANGELOG line changed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff to confirm that the dispatch gate (mod.rs ~782), the producer gate (~1341), `verifier_environment_problem` and the verifier-stage `hold_for_disk` in verification.rs, and `gate`/`disk_gate` in disk.rs, are unchanged. Then run the drain test binary. It includes the existing `low_disk_*` tests, `the_real_steps_hold_a_job_on_low_disk...`, `low_disk_after_the_build_holds_the_job_and_does_not_fail_it` and `low_disk_after_the_checks_holds_the_job_before_the_verifier_runs`.",
+      "command": "git diff -- crates/athena-core/src/run/mod.rs crates/athena-core/src/run/verification.rs crates/athena-core/src/disk.rs && cargo test -p athena-cli --test drain",
+      "observes": "The gate code in those files is untouched, and every existing disk-hold test and the new tests pass.",
+      "fails_without": "If the free-space helpers still keyed on the verify dir, `low_disk_after_the_checks_holds_the_job_before_the_verifier_runs` would hold at the new local gate and fail its `checks     ` assertion. If the helper change did not match the verifier gate, the existing test would fail.",
+      "seam": "Existing: `Athena::go` and `drain::drain` with `RealSteps`, with `with_free_space` helpers. The drain.rs `low_once_verifying` is changed to read the Verifier-stage resume mark. Plan step 6 makes this change."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of docs/architecture.md lines ~40-43, the paragraph on `[disk] min_free_gb` 'at three points: at dispatch, before the checks, and immediately before' the verifier. Only the 'before the checks' wording changes, to say the producer's build is removed first and the gate applies just before a local check run. The rest of the paragraph (the failed-job and `athena retry` wording, which already differs from the code and is not this job's to fix) is left as is.",
+      "command": "git diff -- docs/architecture.md",
+      "observes": "A one-sentence change to the checks-stage disk order, with nothing else in the file changed.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Does the `athena.go` of a drain test with a GitHub origin reach a real `git push` and a real `gh` in `push_ci_branch` and `early_pr`? early_seam is cfg(test) only in gh/early.rs and gh/mod.rs, which are not deliverables. The plan assumes the push lands in a local bare repo through an `insteadOf` setting and that a missing or failing `gh` for the early PR is only a warning line, as the code comment says. If that does not hold, the producer must extend early_seam the same way as ci_seam (gh/early.rs, gh/mod.rs) and say so.",
+    "Is `gh::Runner` public so test_support can name it? The reconcile.rs import suggests yes; the producer checks before writing the installer.",
+    "Whether `Fallback` (routing.rs) keeps the LowDisk error type through `bail!` in the reuse route. The read shows it keeps the original in `fallback.error` and returns `Err(e)` for `Outcome::Blocked`, so downcast should work. A unit test for the downcast on the reuse path (CI says no run) is worth adding.",
+    "The existing architecture.md sentence says the last two gates close the job as failed with a retry hint, which differs from the hold behavior. Criterion 6 forbids changing other claims, so the plan leaves it; the producer should mention it in the change description."
+  ],
+  "producer_section_sha256": "9047e68f8e5d2279e04cc9d6a5b3727bdb54a8a87a0484f0be26dc77b17ed2d8"
+}

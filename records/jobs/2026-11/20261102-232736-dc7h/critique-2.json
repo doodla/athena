@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261102-232736-dc7h",
+  "round": 2,
+  "at": "2026-11-02T23:37:08.909963381Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/early.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/early.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not name one core test that the change will break: it uses low_once_built to expect a hold before the checks.",
+      "evidence": "run/tests.rs:1916 `low_disk_before_the_checks_holds_after_the_idle_sweep_and_a_retry_resumes_at_the_checks` installs `crate::test_support::low_once_built`, and `counting(...)` plants the job's `target/produce`. It expects `go` to fail with a LowDisk error, an idle-sweep line before `held`, and the resume stage `Checks`. Under the new order, free_producer_build (mod.rs:1463) removes `target/produce` before the gate in SnapExec::exec. The gate also sweeps the planted idle job's `target/produce`. After that, low_once_built returns plenty and the job is not held, which is exactly the behavior criterion 1 wants. Step 9 and the Risks only mention the probe test and the 'verify dir' signal. The low_once_built doc comment ('stops at the gate before its checks') also becomes false. Fix: Name this test in the run/tests.rs file entry and in step 9. Rewrite it to keep what it covers: the idle sweep runs before the hold, the job is held with no outcome, and the resume stage is Checks. Give it a reader that stays low through the local-run gate, for example low while a `verify` dir exists and verifier_stage_reached is false, as drain.rs's new reader does. Then the core suite still covers the local-run hold and resume-at-Checks. Update the low_once_built doc comment to say the job is not held, because the build is freed before the gate.",
+      "location": "Steps 9 and Risks (crates/athena-core/src/run/tests.rs:1916-2000; crates/athena-core/src/test_support.rs:703-721)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Widening the seams to the test-support feature is justified, but it also compiles them into the athena binary that `cargo test` builds.",
+      "evidence": "athena-cli/Cargo.toml:31 enables `test-support` only in dev-dependencies. When `cargo test` builds the binary used by binary.rs, Cargo turns the feature on for athena-core in that build too. No seam is installed in the binary, so behavior stays the same (real GhCli and GitRemote fallback). This differs from today's cfg(test)-only seams, though, and the extra files are the scope widening Athena already flagged. Fix: In the change description, say that the widened seams are thread-local, start empty, and only test_support installs them, so the production paths are unchanged. Keep the widening limited to the three cfg(test) sites in early.rs, the early_seam module, and ci_seam.",
+      "location": "Files: gh/mod.rs, gh/early.rs; Decision 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the plan against crates/athena-core/src/run/mod.rs (the check_and_verify gate at 1409-1417, free_producer_build at 1463, the SnapExec construction and with_ci_source at 1261-1308 and 1485-1509), run/checks.rs (SnapExec::exec), gh/mod.rs and gh/early.rs (early_seam, with_ci_remote, early_pr_to, delete_ci_branch), test_support.rs (the low_once_* readers), drain.rs (the existing disk tests) and athena-cli/Cargo.toml. The plan fixes the root cause where it starts. It removes the up-front gate. It puts the existing disk_gate in SnapExec::exec, which runs only when a check runs locally, so a green or red CI result, a resumed job and a nested run never reach the gate. A LowDisk error passes up to check_and_verify and becomes hold_for_disk. The demonstrations go through Athena::go with real routing, the real gate and the real hold. The fakes sit only at the free-space hook and the transport edge (remote, PR host and gh Runner). Each demonstration would fail under the old order: low_once_built would hold at the old gate, and the old gate also runs before the CI read. The seam widening closes the real-network risk found in round one: push, early PR, CI read and branch delete all go through the widened seams. The resume-mark signal avoids substring matching. Two minor gaps remain. The plan does not name the core test run/tests.rs:1916, whose premise (low_once_built holds before the checks) the change reverses and which needs a deliberate rewrite. The plan also does not mention that the test-support feature is compiled into the binary that `cargo test` builds. Athena's two out-of-deliverables findings (gh/mod.rs, gh/early.rs) are weighed: the plan justifies these files by the external-service risk, and I accept that reason. No blocker or major finding."
+}

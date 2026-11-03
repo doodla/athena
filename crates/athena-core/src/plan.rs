@@ -417,6 +417,34 @@ pub struct Plan {
     pub refused: Vec<Refusal>,
     /// Items that wait on each other in a loop: not in `order`.
     pub cyclic: Vec<String>,
+    /// Items [`Plan::build_capped`] demoted one tier because their tier was full. Empty from [`Plan::build`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub demoted: Vec<Demotion>,
+}
+
+/// How many items a plan keeps at urgent and at high; `usize::MAX` means no cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TierCaps {
+    pub urgent: usize,
+    pub high: usize,
+}
+
+impl TierCaps {
+    /// No cap: a plan built with it is the plan [`Plan::build_with`] gives.
+    pub const UNLIMITED: TierCaps = TierCaps {
+        urgent: usize::MAX,
+        high: usize::MAX,
+    };
+}
+
+/// One item moved down a tier because its tier was over its cap. The item's own record is not changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Demotion {
+    pub id: String,
+    pub from: Priority,
+    pub to: Priority,
+    /// The cap of the tier the item came from.
+    pub cap: usize,
 }
 
 /// Whether two touched paths overlap: equal, or one is a directory holding the other.
@@ -637,6 +665,84 @@ impl Plan {
             pending.retain(|(_, e)| !done.contains(&e.id));
         }
         plan
+    }
+
+    /// Plans `entries` like [`Plan::build_with`], then keeps at most `caps.urgent` items urgent and `caps.high`
+    /// high. An item over its tier's cap is demoted one tier (urgent to high, high to normal), in memory only:
+    /// `entries` and the records they came from are not changed. Returns the plan, built from the demoted
+    /// copies with [`Plan::demoted`] listing each move, and those copies, which the order check must judge the
+    /// plan against.
+    ///
+    /// Within a tier the items in `person_set` (jobs whose priority a person set with a priority record) are
+    /// counted first and are never demoted, even when they alone exceed the cap. The other items keep the
+    /// remaining slots in the plan's own order and the rest drop. An item demoted from urgent counts in the high
+    /// tier (after the person-set items, before the items that were high all along) and is not demoted again.
+    pub fn build_capped(
+        entries: &[PlanEntry],
+        history: &[JobEnd],
+        caps: TierCaps,
+        person_set: &[String],
+    ) -> (Plan, Vec<PlanEntry>) {
+        let uncapped = Plan::build_with(entries, history);
+        let tier_in_order = |tier: Priority| -> Vec<&PlanEntry> {
+            uncapped
+                .order
+                .iter()
+                .filter_map(|id| entries.iter().find(|e| e.id == *id))
+                .filter(|e| e.priority == tier)
+                .collect()
+        };
+        let by_person = |e: &PlanEntry| person_set.contains(&e.id);
+        let mut capped: Vec<PlanEntry> = entries.to_vec();
+        let mut demoted: Vec<Demotion> = Vec::new();
+        let set_tier = |capped: &mut Vec<PlanEntry>, id: &str, tier: Priority| {
+            if let Some(e) = capped.iter_mut().find(|e| e.id == id) {
+                e.priority = tier;
+            }
+        };
+
+        let urgent = tier_in_order(Priority::Urgent);
+        let urgent_people = urgent.iter().filter(|e| by_person(e)).count();
+        let mut urgent_slots = caps.urgent.saturating_sub(urgent_people);
+        let mut from_urgent = 0;
+        for e in urgent.iter().filter(|e| !by_person(e)) {
+            if urgent_slots > 0 {
+                urgent_slots -= 1;
+                continue;
+            }
+            set_tier(&mut capped, &e.id, Priority::High);
+            from_urgent += 1;
+            demoted.push(Demotion {
+                id: e.id.clone(),
+                from: Priority::Urgent,
+                to: Priority::High,
+                cap: caps.urgent,
+            });
+        }
+
+        let high = tier_in_order(Priority::High);
+        let high_people = high.iter().filter(|e| by_person(e)).count();
+        let mut high_slots = caps
+            .high
+            .saturating_sub(high_people)
+            .saturating_sub(from_urgent);
+        for e in high.iter().filter(|e| !by_person(e)) {
+            if high_slots > 0 {
+                high_slots -= 1;
+                continue;
+            }
+            set_tier(&mut capped, &e.id, Priority::Normal);
+            demoted.push(Demotion {
+                id: e.id.clone(),
+                from: Priority::High,
+                to: Priority::Normal,
+                cap: caps.high,
+            });
+        }
+
+        let mut plan = Plan::build_with(&capped, history);
+        plan.demoted = demoted;
+        (plan, capped)
     }
 
     /// The position of `id` in the order, if it is planned.
@@ -1184,6 +1290,128 @@ mod tests {
     fn with_priority(mut e: PlanEntry, p: Priority) -> PlanEntry {
         e.priority = p;
         e
+    }
+
+    const CAPS: TierCaps = TierCaps {
+        urgent: 3,
+        high: 10,
+    };
+
+    fn tiered(prefix: &str, count: usize, tier: Priority) -> Vec<PlanEntry> {
+        let (_, low) = rungs();
+        (1..=count)
+            .map(|i| {
+                let id = format!("{prefix}{i}");
+                with_priority(entry(&id, low, &[&format!("{id}/")], &[]), tier)
+            })
+            .collect()
+    }
+
+    fn priority_of(entries: &[PlanEntry], id: &str) -> Priority {
+        entries.iter().find(|e| e.id == id).unwrap().priority
+    }
+
+    #[test]
+    fn five_urgent_items_keep_three_urgent_and_a_person_set_one_is_among_them() {
+        let entries = tiered("u", 5, Priority::Urgent);
+        let people = vec!["u5".to_string()];
+        let (plan, capped) = Plan::build_capped(&entries, &[], CAPS, &people);
+        let urgent: Vec<&str> = capped
+            .iter()
+            .filter(|e| e.priority == Priority::Urgent)
+            .map(|e| e.id.as_str())
+            .collect();
+        // The person-set item is the youngest, yet it keeps its tier; the oldest others fill the rest.
+        assert_eq!(urgent, ["u1", "u2", "u5"]);
+        assert_eq!(plan.order[..3], ["u1", "u2", "u5"]);
+        assert_eq!(
+            plan.demoted,
+            [
+                Demotion {
+                    id: "u3".into(),
+                    from: Priority::Urgent,
+                    to: Priority::High,
+                    cap: 3
+                },
+                Demotion {
+                    id: "u4".into(),
+                    from: Priority::Urgent,
+                    to: Priority::High,
+                    cap: 3
+                },
+            ]
+        );
+        assert_eq!(plan.order[3..], ["u3", "u4"]);
+        // The order follows the tiers the plan was built from, so the check finds no contradiction.
+        assert!(plan.priority_violations(&capped).is_empty());
+        // The input is unchanged.
+        assert!(entries.iter().all(|e| e.priority == Priority::Urgent));
+    }
+
+    #[test]
+    fn a_person_set_item_is_never_demoted_even_when_they_alone_exceed_the_cap() {
+        let entries = tiered("u", 4, Priority::Urgent);
+        let people: Vec<String> = ["u1", "u2", "u3", "u4"].map(String::from).to_vec();
+        let (plan, capped) = Plan::build_capped(&entries, &[], CAPS, &people);
+        assert!(plan.demoted.is_empty());
+        assert!(capped.iter().all(|e| e.priority == Priority::Urgent));
+        // With three of four set by a person, the one other item is the one that drops.
+        let (plan, _) = Plan::build_capped(&entries, &[], CAPS, &people[1..]);
+        assert_eq!(plan.demoted.len(), 1);
+        assert_eq!(plan.demoted[0].id, "u1");
+    }
+
+    #[test]
+    fn twelve_high_items_keep_ten_and_a_person_set_one_wins() {
+        let entries = tiered("h", 12, Priority::High);
+        let people = vec!["h12".to_string()];
+        let (plan, capped) = Plan::build_capped(&entries, &[], CAPS, &people);
+        let ids: Vec<&str> = plan.demoted.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, ["h10", "h11"]);
+        assert!(
+            plan.demoted
+                .iter()
+                .all(|d| d.from == Priority::High && d.to == Priority::Normal && d.cap == 10)
+        );
+        assert_eq!(priority_of(&capped, "h12"), Priority::High);
+        assert_eq!(priority_of(&capped, "h10"), Priority::Normal);
+        assert_eq!(plan.order.len(), 12);
+        assert!(plan.priority_violations(&capped).is_empty());
+    }
+
+    #[test]
+    fn an_item_demoted_from_urgent_counts_in_the_high_tier_and_is_not_demoted_twice() {
+        let mut entries = tiered("u", 5, Priority::Urgent);
+        entries.extend(tiered("h", 9, Priority::High));
+        let (plan, capped) = Plan::build_capped(&entries, &[], CAPS, &[]);
+        // Two drop from urgent to high, which then holds 9 + 2 = 11: the youngest high item drops to normal.
+        let moves: Vec<(&str, Priority, Priority)> = plan
+            .demoted
+            .iter()
+            .map(|d| (d.id.as_str(), d.from, d.to))
+            .collect();
+        assert_eq!(
+            moves,
+            [
+                ("u4", Priority::Urgent, Priority::High),
+                ("u5", Priority::Urgent, Priority::High),
+                ("h9", Priority::High, Priority::Normal),
+            ]
+        );
+        assert_eq!(priority_of(&capped, "u4"), Priority::High);
+        assert_eq!(priority_of(&capped, "h9"), Priority::Normal);
+    }
+
+    #[test]
+    fn no_cap_and_items_under_the_caps_change_nothing() {
+        let mut entries = tiered("u", 5, Priority::Urgent);
+        entries.extend(tiered("h", 12, Priority::High));
+        let (plan, capped) = Plan::build_capped(&entries, &[], TierCaps::UNLIMITED, &[]);
+        assert_eq!(plan, Plan::build(&entries));
+        assert_eq!(capped, entries);
+        let few = tiered("u", 3, Priority::Urgent);
+        let (plan, _) = Plan::build_capped(&few, &[], CAPS, &[]);
+        assert!(plan.demoted.is_empty());
     }
 
     #[test]

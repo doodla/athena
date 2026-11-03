@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The writer build is removed before the checks free-disk check, and that check applies only just before a
+  local check run. Root cause: `check_and_verify` measured the disk before the job's own producer build was
+  freed and before the CI result was read, so the job's own build, or a CI result that would have stood in for
+  the checks, could hold the job for low disk. Now the build directory is removed first and the gate runs once
+  in the check executor, just before the first check that runs here; a green or red CI result, a resumed job
+  and a fully skipped route never reach it. A hold there behaves as before: records committed, no outcome, and
+  the next drain resumes the job. The dispatch, producer and verifier gates are unchanged.
 - The reading check refuses a boundary word only in a deliverable path or a `content` acceptance criterion, the
   places a word can reach a tracked file (D153). Root cause: `check_boundary_and_repo_files` scanned every text
   field, but a reading is a record outside the policy scan and the writer already gets the word list and runs the
@@ -295,6 +302,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena focus "<text>"` records what to work on now, and `athena status` shows it. The command appends an
+  `athena.focus/1` record (`records/focus/focus-<n>.json`: `n`, `at`, `text`, and `set_by`, the git user name),
+  prints the text, and never rewrites an earlier record: the one with the highest `n` is the current focus.
+  `athena focus` with no text prints the current focus, and `athena status` (and `status --json`) gains a
+  `focus` line once one is set. A blank text, or a git user name that is unset or blank, is refused before
+  anything is committed. The same job adds priority caps so that priority orders work again: `athena.toml`
+  gains `[priority_caps]` (`urgent = 3`, `high = 10`, the defaults when the table is absent), declared in
+  `crates/athena-data/src/config.rs`. `athena plan` and `athena drain` keep at most that many items urgent and
+  high: the excess is demoted one tier (urgent to high, high to normal; an item demoted from urgent counts in
+  the high tier and is not demoted again), in memory for that plan only, and each demotion shows as one
+  `note        demoted ...` line. No request or priority record is rewritten, and an item whose priority a person
+  set with `athena priority` is never demoted, even when such items alone exceed a cap; the other items keep the
+  free slots in plan order. The table is left out of the reading digest, so existing readings stay valid.
+  (`crates/athena-core/src/plan.rs`: `Plan::build_capped`.)
 - The checks stage now uses GitHub's CI result for the candidate. For a repository whose origin is an https URL
   on github.com, `Athena::with_ci_source` (`crates/athena-core/src/run/mod.rs`) picks the CI source and its wait
   together: the push run of the `ci` workflow on the job's CI branch (`athena/ci/<job id>`), read once and then

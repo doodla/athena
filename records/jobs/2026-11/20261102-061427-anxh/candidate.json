@@ -1,0 +1,166 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261102-061427-anxh",
+  "base_commit": "b63186de83849c326acd990153bc97bd76733576",
+  "base_fingerprint": "sha256:04d1581642cc23571c8173d4de9279a6a34f447b94a2c1865d9504b0b0ccb956",
+  "previous_job": "20261031-215030-b0nv",
+  "candidate_commit": "5402a338c84f7670edc0b8ac953941c1ed65f2b1",
+  "candidate_tree": "12e3f6b556d13e56b6199a5e08c6264fcc820e9d",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 291011
+    },
+    {
+      "path": "crates/athena-cli/tests/binary.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 25676
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 255314
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 77633
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32778
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6635
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 77870
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 125138
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31336
+    },
+    {
+      "path": "docs/architecture.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 8626
+    }
+  ],
+  "fingerprint": "sha256:9155fdf3b76fabb85044eed486c6acc3c809fa2c245bb42bd1a71835b74b988b",
+  "violations": [],
+  "producer_report": {
+    "summary": "The checks-stage free-disk check no longer runs at the top of check_and_verify. The writer's build folder is removed first (free_producer_build was already first in the Checks stage). The disk is then measured once, just before the first check that runs on this machine. Root cause: the old gate ran while the job's own build was on disk, and it also ran when GitHub CI would supply the results. Implementation: SnapExec (run/checks.rs) now carries min_free_gb, the job id, the ui and a once-only flag. On its first exec() it calls the existing disk_gate and returns the LowDisk error. That error reaches check_and_verify unchanged through run_local, Fallback::run and run_routed_with_record. check_and_verify downcasts it, removes the verify directory and calls the existing hold_for_disk. A green or red CI result never calls exec(), so it never meets the gate. Dispatch, producer and verifier gates and verification.rs are untouched. Existing tests that encoded the old order had to change: low_once_verifying (test_support.rs, drain.rs, binary.rs), low_once_built, and the probe assertions in produce_dir_is_removed_before_the_checks. The verifier snapshot now exists before the checks gate, and the job's build is gone by then, so those helpers now key on the job's resume mark (stage verifier, or stage checks). New tests: two in drain.rs, two in run/tests.rs and one in routing.rs. CHANGELOG has an entry. disk.rs docs and docs/architecture.md were updated to match.",
+    "files": [
+      "CHANGELOG.md",
+      "crates/athena-cli/tests/binary.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "crates/athena-core/src/disk.rs",
+      "crates/athena-core/src/routing.rs",
+      "crates/athena-core/src/run/checks.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "crates/athena-core/src/test_support.rs",
+      "docs/architecture.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --lib -- routing_an_exec_error ci_reuse low_disk produce_dir producer_build_directory",
+        "result": "pass",
+        "note": "16 tests passed, including both new run/tests.rs tests and the routing unit test. The run was before a clippy-driven refactor of the match in mod.rs; the later full run covers it."
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain",
+        "result": "pass",
+        "note": "149 passed, including the two new tests and all existing low_disk tests."
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed; run before the final small edits. The words added afterwards contain no banned word."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "Run again after fixing question_mark and err_expect findings."
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "Applied the formatter; final state is formatted."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run once after clippy. The tool saved the output to a file outside my working directory, which I could not read. The command did not report a non-zero exit status."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-cli/tests/drain.rs (using with_free_space and simulated_free) has a writer build whose size takes simulated free disk below min_free_gb. The job is not held for disk, the build directory is removed first, and the checks run to a verdict. Run `cargo test -p athena-cli --test drain` and check that this test passes.",
+        "status": "met",
+        "evidence": "New test a_writer_build_that_takes_free_disk_below_the_minimum_is_removed_before_the_checks_gate in drain.rs. It uses with_free_space with a new low_while_building fn: 9 GB while jobs/*/target/produce exists, else plenty, against disk_fixture's 10 GB. It asserts that go returns Finished and Landed, that the 'disk       removed the producer's build directory' line comes before the 'checks     ' line, that there is no 'held ' line, that the produce dir is gone and that there is no hold marker. Passed in the 149-test `cargo test -p athena-cli --test drain` run. The old order would hold it, because the old gate ran while the build existed. I did not run the test against the old code."
+      },
+      {
+        "criterion": "A new test with a GitHub origin and a green CI run for the candidate, and free disk below min_free_gb, shows that the checks stage does not hold for low disk and reuses the CI result (the 'ci   checks reused' line). A companion case with no usable CI result shows the disk gate still holds the job before the local check run. Run `cargo test -p athena-cli --test drain` and check that both pass.",
+        "status": "met",
+        "evidence": "The fake gh runner (ci_seam) exists only in athena-core's test build, so these two tests are in crates/athena-core/src/run/tests.rs, as the plan said. ci_reuse_green_does_not_hold_for_low_disk: GitHub origin, CiReply::Green, 9 GB free once the producer ran, space restored on the first CI read. It asserts Landed, no executed checks, a 'ci         checks reused from ... CI_RUN_ADDRESS' line, no 'held ' line and no hold marker. ci_reuse_without_a_result_holds_for_low_disk_before_the_local_checks: CiReply::Missing, 9 GB stays short. It asserts a LowDisk error with free 9 GB, that the CI source was read, no check executed, no 'checks     ' line, state Dispatched with no outcome, a hold marker and no verify dir. Both passed in `cargo test -p athena-core --lib -- ... ci_reuse ...`. The no-CI hold is also covered in drain.rs by low_disk_that_removing_the_writer_build_does_not_cure_still_holds_before_the_local_checks, which passed in the drain run. The tests are not in drain.rs, because no CI seam is reachable from athena-cli."
+      },
+      {
+        "criterion": "In crates/athena-core/src/run/mod.rs check_and_verify, the up-front disk_gate call before the checks is gone. free_producer_build runs before any disk_gate in the checks stage, and the gate is called only on the local-run path (the fallback run). Check by reading the diff.",
+        "status": "met",
+        "evidence": "The `if recorded_checks.is_none() && let Some(low) = self.disk_gate(...)` block is deleted from check_and_verify. The only remaining disk_gate calls in run/ are dispatch (~782), producer (~1341) and the new one in SnapExec::exec (checks.rs). free_producer_build is unchanged in the Checks stage, and I added a comment saying it runs before any measurement. SnapExec::exec runs only from run_local, which is called by the CI fallback, the BadSha path and the non-reuse route. The routing.rs unit test routing_an_exec_error_comes_back_unchanged_from_every_local_path shows the error passes unchanged on all three paths and that a green CI result never calls exec."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry saying that the writer build is removed before the checks free-disk check and that the requirement applies only before a local check run.",
+        "status": "met",
+        "evidence": "A new first bullet under [Unreleased] / Changed in CHANGELOG.md. It states the root cause, the new order, that the requirement applies only before a local check run (a green or red CI result gets no disk check), and the alternatives rejected."
+      },
+      {
+        "criterion": "The existing verifier-stage gate (verifier_environment_problem) and the dispatch and producer gates are unchanged, and the existing disk-hold tests still pass.",
+        "status": "met",
+        "evidence": "No edits to run/verification.rs, run/close.rs, the dispatch gate or the producer gate. Existing hold tests all pass: the drain.rs low_disk_* and space_that_stays_short_* tests (149-test run), and in athena-core low_disk_before_the_producer, low_disk_before_the_checks_holds_after_the_idle_sweep and low_disk_before_the_verifier. Three test helpers were retargeted, not the gates: low_once_verifying in test_support.rs, drain.rs and binary.rs, and low_once_built in test_support.rs. The probe assertions in produce_dir_is_removed_before_the_checks were also adjusted. See open_issues."
+      }
+    ],
+    "open_issues": [
+      "Departures from the plan, all test-side: (1) crates/athena-core/src/test_support.rs and crates/athena-cli/tests/binary.rs changed. Their free-space helpers keyed on a verify dir or target/produce, which no longer separates the gates. They now key on the job's resume mark. (2) The probe assertions in produce_dir_is_removed_before_the_checks_whether_they_pass_or_fail changed. It can no longer see the produce dir present at a gate, because the build is removed before any gate. It now asserts the dir is absent at every read from the checks gate on. The removal-before-checks order is still asserted by producer_build_directory_is_gone_when_the_first_check_starts_and_the_candidate_is_kept. (3) ci_reuse_run was split into ci_reuse_attempt plus a thin wrapper, so the hold case can reuse its setup. (4) docs/architecture.md line 40 was updated to match the new gate placement.",
+      "Behaviour change a reviewer should know: a hold at the first local check now happens after push_ci_branch, early_pr and the verifier snapshot, where the old gate came before them. The CI branch is not deleted on that hold. finish_dispatched is not run for a hold, and the next resume pushes the branch again (publish_ci_branch). I did not trace whether a re-push over the existing branch succeeds in every case, and no test covers the hold-then-resume path with a GitHub origin. I removed the verify directory on the hold path. The CHANGELOG states this.",
+      "The full `cargo test --locked` run was done once. I could not read its saved output, so I relied on its not reporting a failure. Athena's own recorded run is the authority."
+    ],
+    "mistakes": [
+      "My first version of ci_reuse_without_a_result_holds_for_low_disk_before_the_local_checks used `.err().expect()` and the production match in mod.rs was a hand-written downcast. Clippy rejected both (err_expect, question_mark). I fixed them and re-ran clippy clean.",
+      "I first missed that existing helpers (low_once_verifying, low_once_built and the probe test) assumed the old gate order, and found it by reading before running. The plan named none of them."
+    ],
+    "learnings": [
+      "The verifier snapshot (jobs/<id>/verify) is created before the checks run, so any test helper that treats 'verify exists' as 'the checks have run' breaks when the checks gate moves into the first exec.",
+      "Resume marks at state/kept/<job>/resume.json serialize compactly as \"stage\":\"checks\" or \"stage\":\"verifier\". The mark is written when the candidate is built (stage checks) and again once every check passed (stage verifier), so it separates the gates without depending on directory timing.",
+      "Fallback::run keeps the original exec error in a side slot, and run_routed_with_record returns it unchanged. That is why a LowDisk raised inside exec can be downcast by the caller.",
+      "ci_seam, check_seam and early_seam are #[cfg(test)] in athena-core, so green-CI tests can live only in athena-core's own tests.",
+      "Tool output over a size limit is saved outside the working directory, and the hook blocks reading it."
+    ],
+    "desires": [
+      "A way to read the persisted output of a long cargo run when a tool saves it outside the working directory. I could not read the full-suite result file and relied on the command not reporting a non-zero exit status."
+    ]
+  }
+}
