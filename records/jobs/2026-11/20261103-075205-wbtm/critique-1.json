@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-075205-wbtm",
+  "round": 1,
+  "at": "2026-11-03T09:23:17.770657213Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Falling back to HEAD's records/ will show stale, already-decided proposals as waiting on the published site.",
+      "evidence": ".github/workflows/pages.yml:26-31 checks out only main (default depth, no fetch of athena/records) and runs `cargo run -p xtask -- site`, so on the live site `resolve_tip` returns Missing. docs/design/records-history.md:104-111 says records/ on main is frozen after the cutover (Stage 1). It is removed only in a later Stage 2 job, and HISTORY.txt shows no such removal. The plan would therefore read main's frozen records/ and filter against frozen decisions only. Proposals decided after the cutover, whose WorkDecisions exist only on athena/records, would be shown to the owner as waiting. That is the reverse of 'real waiting Steward proposals'. The plan's own reason ('covers the pre-cutover layout') does not apply after C0. Fix: Do not treat HEAD's records/ as the records store. When resolve_tip is Missing, render an explicit page: 'the records branch athena/records is not in this checkout, so open proposals cannot be listed'. Keep it distinct from 'none waiting', with no proposals. Keep Diverged as unreadable. Add a test: a temp repo with a proposal committed on HEAD and no athena/records ref gives the 'branch not available' page and lists no proposal. Keep the open question noting that the pages workflow must fetch athena/records (out of scope here) before the live page shows briefs.",
+      "location": "Decision 2 / Step 4 `read_source` (fall back to HEAD when resolve_tip is Missing)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 'absent field' paths the plan tests can never come from real records, while the fields that really are absent (what it would change, a recommendation) are filled in silently.",
+      "evidence": "crates/athena-data/src/records.rs:1873-1885: WorkItem::validate rejects a blank role or source, and a non-blind-spot item with empty evidence. records.rs:2802 runs validate on every parse through check_record_file. So a loaded Proposal always has a role, a source and at least one evidence entry. 'Hold: it cites no evidence' and 'Evidence: not recorded' are reachable only from structs built by hand in tests. For real proposals the recommendation varies only by rung, role and count, so two proposals at the same rung with the same role and count get the same line. Meanwhile 'what it would change' is taken from the title, and the recommendation is derived, yet neither brief says the proposal records no such field. Fix: Keep the derivation, as the accepted reading allows, but label the recommendation as derived, for example 'Recommendation (from rung and evidence; the proposal records none):'. Label the change line the same way ('What it would change: the proposal's title; no separate description is recorded'). In criterion 7, test this always-absent statement on a fixture that validate() accepts, in addition to the empty-evidence struct case.",
+      "location": "Decision 3 / Criterion 7 demonstration (no-evidence and blank-source cases)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Skipping unparseable records silently can turn a parse failure into an empty 'none waiting' page.",
+      "evidence": "The plan says load is 'skipping files that do not parse'. The no-empty-success default asks that an empty list never counts as success on its own. A WorkItem that fails check_record_file (for example a schema change) would vanish without notice. Fix: Count files under records/work-items and records/work-decisions that failed to parse, and show that count with the first error on the page. Make the 'none waiting' text appear only when that count is zero.",
+      "location": "Step 4 `load` (skip files that do not parse)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The loader reads and parses every record blob, when only work items and work decisions are needed.",
+      "evidence": "crates/athena-git/src/lib.rs:818-825 lists the whole tree under the directory given, recursively. Passing 'records' cat-files and parses every job record (requests, invocations, candidates and the rest) on every site build and every site_page.rs run. Fix: Call ls_tree_under twice, for 'records/work-items' and 'records/work-decisions', and parse only those blobs.",
+      "location": "Step 4 `load` (`ls_tree_under(treeish, \"records\")`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan is inconsistent about which hrefs the test scans.",
+      "evidence": "The Risks section says 'Only the rendered brief fragments are scanned for hrefs', so the page's relative back-link is excluded. Demonstration 5 says the scan covers 'every href=\" in the rendered briefs and page body'. Fix: Choose one. Scan the brief fragments for record links, and name the one allowed page-shell link (index.html) explicitly.",
+      "location": "Criterion 5 demonstration vs Risks (scope of the href scan)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan relies on. It exists as described: in xtask/src/site.rs, `source_url`, `ATHENA_URL` and `CSS` are private and `build` writes index.html. In athena-git, `ls_tree_under`, `cat_blobs`, `Git::at`, `run`, `rev_parse` and `records_branch::resolve_tip` are there. In athena-data, `check_record_file`, `AnyRecord::canonical_path`/`to_json`, `WorkItem` and `WorkDecision.work_item` are there. xtask already depends on athena-git and athena-data, so no Cargo change is needed. The open filter matches athena-core's `open_proposals`. The demonstrations drive real entry points with fixtures and would fail without the behavior. The main problem is the fallback to HEAD when the records branch is missing. The pages workflow checks out only main, and main still holds the records frozen at the cutover. The live site would therefore show proposals already decided on athena/records as waiting, which is the reverse of what the request asks. Smaller points: the 'not recorded' paths the plan tests cannot come from real records, because WorkItem::validate requires a role, a source and evidence; records that fail to parse are skipped silently; the loader parses the whole records tree. Revise the fallback, and preferably label the derived recommendation and change line as derived."
+}

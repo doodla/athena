@@ -24,12 +24,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 mod ci_cache;
+mod decisions;
 mod shard;
 mod site;
 mod walltime;
 
 const SITE_USAGE: &str = "cargo run -p xtask -- site [--out <dir>]\n       \
-     writes <dir>/index.html; the default <dir> is site/ in the cargo target directory ($CARGO_TARGET_DIR, else target/),\n       \
+     writes <dir>/index.html and <dir>/decisions.html (the open Steward proposals, one brief each); the default <dir> is site/ in the cargo target directory ($CARGO_TARGET_DIR, else target/),\n       \
      so building never changes the work tree (a verifier's snapshot stays unchanged); an --out inside the work tree is refused";
 
 fn main() -> ExitCode {

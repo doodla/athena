@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- An owner decision briefs page, `decisions.html`, written next to `index.html` by `cargo run -p xtask -- site`
+  and linked from the index. It holds one short brief per open Steward proposal (a work item of kind proposal
+  with no decision), using only the proposal's title, rung, source and evidence, the first evidence pointer, a
+  link to its record on the records branch at the records tip (pinned to Athena's GitHub repository), and the
+  `athena approve-work` / `athena reject-work` commands. The recommendation line reads the raising role's limit
+  from the role records with `may_change`, so a proposal within the limit is not told "Decide yourself" and an
+  unrecorded role is named as not recorded. A brief over 120 words, or with no recommendation, is refused. A
+  checkout without the records branch gets a page that says no proposals could be listed. The owner's style is
+  in `docs/conventions/owner-style.md`. No new record or file format and no new dependency.
+
 ### Changed
 
 - A reused red CI run now gives the verifier the names of the failing tests and the end of the failing job's

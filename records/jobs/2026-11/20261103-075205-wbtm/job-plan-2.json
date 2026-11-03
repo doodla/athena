@@ -1,0 +1,272 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261103-075205-wbtm",
+  "round": 2,
+  "at": "2026-11-03T09:24:34.035177416Z",
+  "invocation_seq": 4,
+  "approach": "Add xtask/src/decisions.rs. It resolves the records branch tip (`athena_git::records_branch::resolve_tip`) and reads only `records/work-items` and `records/work-decisions` at that commit through athena-git (`ls_tree_under` twice, `cat_blobs`) and athena-data `check_record_file`. It keeps WorkItems of kind Proposal that no WorkDecision names. Each brief is built from the item's own fields and renders the title, the rung (plain label plus a five-step ladder), role and source, the evidence list, and a recommendation derived from rung, role and evidence count. The recommendation and 'what it would change' lines are labelled as derived, because the record has no such fields. `records/` paths and job references are linked through `site::source_url` against the pinned sha. A brief over 120 counted words or with no recommendation is refused with an error, and the page lists it under 'could not be shown'. The page has distinct, explicit states for: records branch not in this checkout (no fall back to main's frozen `records/`), unreadable or diverged store, records that failed to parse (count plus first error), none waiting, and the briefs. `site::build` writes decisions.html beside index.html and never fails because records are absent. `site::render` gets one header link. No new record or file format, and no new dependency.",
+  "decisions": [
+    {
+      "choice": "Read records only from the athena/records tip. `resolve_tip` Missing gives a 'records branch not in this checkout, so open proposals cannot be listed' page with no proposals. Diverged and any git error give an 'unreadable' page. HEAD is never used as a records store.",
+      "reason": "After the cutover, records/ on main is frozen (docs/design/records-history.md), and the pages workflow checks out only main, so `resolve_tip` is Missing on the live site. Reading main's records/ would show proposals decided after the cutover as still waiting. A page that says it cannot list proposals is honest. The links need the commit that holds the records, which is the tip.",
+      "rejected": [
+        {
+          "option": "Fall back to HEAD's records/ when the branch is missing (previous plan)",
+          "why": "Shows stale, already-decided proposals as waiting; the finding's evidence shows the fallback is wrong after the cutover."
+        },
+        {
+          "option": "Add a fetch of athena/records to .github/workflows/pages.yml",
+          "why": "Workflows are out of scope and governance; kept as an open question."
+        },
+        {
+          "option": "Use pin.json's sha",
+          "why": "That is the studied system's commit, in a different repository."
+        }
+      ]
+    },
+    {
+      "choice": "Parse only work-items and work-decisions: two `ls_tree_under` calls (`records/work-items`, `records/work-decisions`), one `cat_blobs` over the combined oids, then `check_record_file`. A file that fails to parse is counted with its path and first error and is never dropped silently.",
+      "reason": "This avoids cat-file and parsing every job record on each site build and each site_page.rs run. Counting failures means a schema change cannot turn into a false 'none waiting'.",
+      "rejected": [
+        {
+          "option": "ls_tree_under on 'records' (whole tree)",
+          "why": "Reads and parses all job records; slow and unrelated to the page."
+        },
+        {
+          "option": "Silently skip unparseable files",
+          "why": "Empty success: a parse failure would look like an empty queue."
+        },
+        {
+          "option": "Depend on athena-core or athena-gate for Records::load and open_proposals",
+          "why": "A new dependency edge changes the documented crate graph (policy M21) and Cargo.lock, only to save about 15 lines."
+        }
+      ]
+    },
+    {
+      "choice": "'None waiting' is printed only when files were read, zero failed to parse, and no proposal is open. If failed > 0 and nothing is open, the page says 'N records could not be read; first error: …' instead.",
+      "reason": "The no-empty-success default: an empty list counts only after the outcome behind it is checked.",
+      "rejected": [
+        {
+          "option": "Show 'none waiting' whenever the open list is empty",
+          "why": "Hides parse failures, a missing branch and an empty store behind the same words."
+        }
+      ]
+    },
+    {
+      "choice": "Label both derived lines in every brief. 'What it would change (the proposal's title; no separate description is recorded): <title>' and 'Recommendation (derived from rung and evidence; the proposal records none): <text>'. Recommendation text is a pure function of rung, role and evidence count (zero evidence gives 'Hold: it cites no evidence'). It states no cost or risk and no 'Approve'.",
+      "reason": "WorkItem::validate (records.rs ~1873-1885) rejects a blank role or source and empty evidence on non-blind-spot items, so for real proposals the fields that are always absent are the description and the recommendation. The brief says so instead of presenting derived text as recorded. The accepted reading allows the derivation.",
+      "rejected": [
+        {
+          "option": "Fixed 'Approve' with fixed cost and risk",
+          "why": "The fault of the rejected attempt, and out of scope."
+        },
+        {
+          "option": "Add recommendation or description fields to WorkItem",
+          "why": "A new record format; out of scope."
+        },
+        {
+          "option": "Test 'not recorded' only through hand-built empty-evidence structs",
+          "why": "Those cannot come from a validated record. The test also uses a validate()-accepted fixture and asserts the always-absent statements."
+        }
+      ]
+    },
+    {
+      "choice": "Prose-word counting: whitespace-separated words of the visible text lines of a brief (title, labels, sentences, role/source text, evidence labels, recommendation). URLs, record ids and the ladder graphic are not counted. `MAX_WORDS = 120`. At most 4 evidence entries are listed, then 'and N more'. `render_brief(parts, pin) -> Result<Brief>` errors on over-limit or an empty or whitespace recommendation.",
+      "reason": "One function holds both refusals, so tests drive it with fixtures. The cap stops a proposal with many citations from being refused for citing a lot. The fixed labels cost about 25 words, which the 120 limit already allows for.",
+      "rejected": [
+        {
+          "option": "Count words of the whole HTML",
+          "why": "Counts tags and URLs, not prose."
+        },
+        {
+          "option": "Fail the whole build when one brief is refused",
+          "why": "One long title would take the site down; the page lists it as 'could not be shown' with the reason."
+        }
+      ]
+    },
+    {
+      "choice": "Link policy: a `records/…` path reference goes through `site::source_url(base, sha, path, 0, 0)`. A job reference goes to `<JobId::dir()>/job.json` through `source_url`. Commit references and paths outside `records/` are plain `<code>`. The one allowed page-shell link is `index.html` (a back link outside the brief fragments). The test scans the brief fragments for hrefs, and checks the shell separately for exactly that one relative link.",
+      "reason": "The records commit holds only records/, so other paths or commits at the pinned sha would 404 or be wrong objects. Every brief anchor then starts with https://github.com/ and contains the sha. Naming the shell link removes the scope ambiguity.",
+      "rejected": [
+        {
+          "option": "Relative links to records/…",
+          "why": "They do not open on the published site; the stated fault of the earlier try."
+        },
+        {
+          "option": "Link commit references to /commit/<sha>",
+          "why": "That URL lacks the pinned sha and could point at a commit not on the records branch."
+        },
+        {
+          "option": "Scan all hrefs in the page body for GitHub URLs",
+          "why": "The back link to index.html would fail; the previous plan was inconsistent on this."
+        }
+      ]
+    },
+    {
+      "choice": "Make `source_url`, `ATHENA_URL` and `CSS` pub(crate) in site.rs and reuse them. Add `mod decisions;` to main.rs. No change to xtask/Cargo.toml or Cargo.lock.",
+      "reason": "xtask already depends on athena-git and athena-data; one small visibility edit beats a second URL builder that could drift.",
+      "rejected": [
+        {
+          "option": "Copy source_url into decisions.rs",
+          "why": "Two URL builders could drift apart."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/conventions/owner-style.md",
+      "action": "create",
+      "purpose": "The owner's style paragraph verbatim as a block quote, with a one-line note that it governs the decisions page.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "xtask/src/decisions.rs",
+      "action": "create",
+      "purpose": "Loader (`load`, `read_source`), `open_proposals`, `brief`, `render_brief` with the refusals, `render_page` with its distinct states, and the unit tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "xtask/src/site.rs",
+      "action": "modify",
+      "purpose": "Make `source_url`, `ATHENA_URL` and `CSS` pub(crate). Add the index header link to decisions.html. Write decisions.html in `build`. Add the two site tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "purpose": "Add `mod decisions;`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an [Unreleased] 'Added' entry for the owner decision briefs page.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Create docs/conventions/owner-style.md: a heading, one sentence saying it governs the decisions page, then the owner's paragraph verbatim as a block quote, keeping 'witholding' and 'dont' as written.",
+    "In xtask/src/site.rs make `source_url`, `ATHENA_URL` and `CSS` pub(crate). In `render`, after the 'Next step' paragraph in the header, add `<p class=\"lede\">Decisions waiting for the owner: <a href=\"decisions.html\">open proposals as one-screen briefs</a>.</p>`.",
+    "In xtask/src/main.rs add `mod decisions;` beside the other `mod` lines.",
+    "Create xtask/src/decisions.rs. Types: `Pin { base, sha }`; `Source` = `Read { items, decisions, files, failed: Vec<(String,String)> }` | `BranchMissing` | `Unreadable(String)`. `load(git, treeish)`: `ls_tree_under(treeish, \"records/work-items\")` and `(…, \"records/work-decisions\")`, one `cat_blobs`, `check_record_file` on each; collect `AnyRecord::WorkItem` and `WorkDecision`; count each parse error, with path, into `failed`. `read_source(root)`: `Git::discover`, then `records_branch::resolve_tip`. At{tip} gives `load(git, tip)`; Missing gives `BranchMissing`; Diverged or any error gives `Unreadable`. There is no HEAD fallback. `open_proposals(items, decisions)`: kind Proposal and no decision names the id, oldest first. `rung_label(Ladder)` is an exhaustive match. `recommendation(item)` is derived from rung, role and evidence count. `BriefParts` and `render_brief(parts, pin) -> Result<Brief>`: refuse above `MAX_WORDS = 120` counted words and refuse an empty or whitespace recommendation, with the counting rule documented. `brief(item, pin)` builds the parts: 'not recorded' for a blank role or source or empty evidence, the two labelled derived lines, at most 4 evidence entries then 'and N more', and links through `site::source_url` per the link policy. `render_page(source, pin)`: the full HTML with the shared CSS, one `<article>` per brief, a refused brief under 'could not be shown', the single `index.html` back link in the shell, and distinct text for BranchMissing, Unreadable, failed > 0, and none waiting.",
+    "In `site::build`, after writing index.html, call `decisions::read_source(root)` and `decisions::render_page`, write `out/decisions.html`, and print its path. Any loader error becomes a page, never a build error.",
+    "Write the tests. In decisions.rs: `owner_style_doc_holds_the_rules_verbatim`, `the_loader_reads_work_items_written_by_athena_data`, `decided_proposals_are_not_listed`, `a_checkout_without_the_records_branch_lists_no_proposal`, `two_proposals_with_different_fields_give_different_briefs`, `every_record_link_is_a_pinned_github_url`, `an_over_long_brief_and_one_without_a_recommendation_are_refused`, `an_absent_field_is_said_to_be_not_recorded`. In site.rs: `the_index_links_to_the_decisions_page` and `build_writes_decisions_html_next_to_index_html`.",
+    "Add the CHANGELOG.md entry under [Unreleased], '### Added'.",
+    "Run `cargo test -p xtask`, `cargo clippy -p xtask --all-targets --locked -- -D warnings` and `cargo fmt --all --check`; fix what they report. Do not edit Cargo.toml or Cargo.lock unless a dependency is genuinely missing."
+  ],
+  "risks": [
+    {
+      "risk": "`xtask site` runs in snapshots and CI checkouts with no records, no git, or no athena/records ref. The build must not fail there.",
+      "mitigation": "`read_source` maps every error, a Missing tip and a Diverged tip to an explicit state, and `build` always writes a page. site_page.rs and the non-git temp-root test cover it."
+    },
+    {
+      "risk": "A derived recommendation or 'what it would change' could read as recorded fact.",
+      "mitigation": "Both lines carry a label saying they are derived and that the proposal records none. A test on a validate()-accepted fixture asserts the labels."
+    },
+    {
+      "risk": "Parse failures turn into a false 'none waiting'.",
+      "mitigation": "The loader counts failed files and keeps the first error. 'None waiting' is printed only at zero failures; a test covers both."
+    },
+    {
+      "risk": "The new index link could break an ordering or content assertion in xtask/tests/site_page.rs.",
+      "mitigation": "The change is one `<p>` after the existing next-step paragraph. `cargo test -p xtask` runs site_page.rs."
+    },
+    {
+      "risk": "Fixed labels plus a long title push a brief over 120 words, so a real proposal is refused.",
+      "mitigation": "The refusal appears on the page with its reason and does not fail the build. Evidence is capped at 4 entries. The counting rule is documented in code."
+    },
+    {
+      "risk": "The owner's text has typos ('witholding', 'dont') that a tidy-up would fix, breaking 'verbatim'.",
+      "mitigation": "Copy them exactly; the `include_str!` test asserts the full paragraph."
+    },
+    {
+      "risk": "The loader tests need a git commit in a temp dir and a committer identity.",
+      "mitigation": "Pass `-c user.name=t -c user.email=t@example.invalid` to commit. The address is fake and not personal data."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Plain file read in a test: `include_str!(\"../../docs/conventions/owner-style.md\")`, asserting the two named substrings and the full paragraph, with 'witholding' and 'dont' as written. Also readable with `ls docs/conventions`.",
+      "command": "cargo test -p xtask decisions::tests::owner_style_doc_holds_the_rules_verbatim",
+      "observes": "The doc exists and holds the owner's paragraph verbatim, including 'Show me with big pictures and little words without witholding key details' and 'dont use weird metaphors'.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new bullet under [Unreleased] ('### Added') describes the decisions page (decisions.html), linked from the index, one brief per open Steward proposal, links pinned to a commit, the refusals, and the explicit states for a missing records branch and unparseable records.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Seam: entry point `decisions::load(git, treeish)` (added by plan step 4). Fixture: a real temporary git repo built with `Git::at(dir)` and `.run([...])` (both exist, athena-git lib.rs:141). It commits a Proposal WorkItem, a second Proposal, a WorkDecision naming the second, and a corrupt file under `records/work-items`, each written at `AnyRecord::canonical_path()` with `AnyRecord::to_json()` (both exist, records.rs ~2826-2831). It also commits a job record under `records/<job>/`. The commit uses `-c user.name=t -c user.email=t@example.invalid`. Run `Grep` for `check_record_file` in decisions.rs to see the only parser.",
+      "command": "cargo test -p xtask decisions::tests::the_loader_reads_work_items_written_by_athena_data",
+      "observes": "The loader returns the written WorkItem and WorkDecision records via `check_record_file`. The corrupt file is counted in `failed` with its path and error. The job record is not read: only the two directories are listed. No new parser or format exists, and xtask/Cargo.toml is unchanged.",
+      "fails_without": "If the loader used its own format or read another path, it would not return the records `to_json` wrote. If it read the whole tree or dropped failures silently, the asserted failed count and the unread job record would fail.",
+      "seam": "Entry point `decisions::load`; real temp git repo fixture injected as the `&Git` argument; no double. The seam is added by step 4."
+    },
+    {
+      "criterion": 4,
+      "method": "Entry point `decisions::brief(&WorkItem, &Pin)` (added by step 4). Two validate()-accepted WorkItem fixtures built in the test (fields at records.rs ~1853, with `Reference::path` and `Reference::job`) differ in title, rung, source, role and evidence count. The pin is a plain struct (github base plus a 40-hex sha).",
+      "command": "cargo test -p xtask decisions::tests::two_proposals_with_different_fields_give_different_briefs",
+      "observes": "Both are Ok. The text differs. The recommendation lines differ. Each contains its own title and rung label. Neither contains 'Approve', 'cost' or 'risk' outside the labels.",
+      "fails_without": "A fixed title, rung, source, evidence or recommendation (the rejected 'Approve', cost and risk) would make the two briefs equal, and the assert_ne! on the text and on the recommendation lines would fail.",
+      "seam": "Entry point `decisions::brief`. In-test WorkItem fixtures and an injected Pin argument; nothing is mocked. Added by step 4."
+    },
+    {
+      "criterion": 5,
+      "method": "Entry points `decisions::brief` and `decisions::render_page` (step 4), calling the real `site::source_url`. Two fixtures cite a `records/…` path, a job, a commit and a path outside records/. The pin is injected. The test extracts every href from the brief fragments (the `<article>` blocks), separately from the page shell, and asserts the shell has exactly one relative link, `index.html`.",
+      "command": "cargo test -p xtask decisions::tests::every_record_link_is_a_pinned_github_url",
+      "observes": "Every brief href starts with https://github.com/doodla/athena/blob/<sha>/records/ and contains the sha. None begins with `records/`, `/`, `../` or `#`. The commit and the outside path appear as plain `<code>` with no anchor.",
+      "fails_without": "Relative links, or links built without the sha, would fail the per-href prefix and sha assertions. A linked commit reference or outside path would fail the 'not linked' assertions.",
+      "seam": "Entry points `decisions::brief` and `decisions::render_page`; in-test fixtures; pin argument. Added by step 4."
+    },
+    {
+      "criterion": 6,
+      "method": "Entry points `decisions::render_brief(parts, pin)` and `decisions::brief` (step 4). Parts built in the test: (a) valid parts, (b) a 200-word title, (c) valid parts with recommendation None, (d) a whitespace-only recommendation, (e) a WorkItem with a 200-word title through `brief`. A page built from the item in (e) plus a normal item is also checked.",
+      "command": "cargo test -p xtask decisions::tests::an_over_long_brief_and_one_without_a_recommendation_are_refused",
+      "observes": "(a) is Ok, so the refusals are not a broken fixture. (b) and (e) are Err mentioning 'over 120 words'. (c) and (d) are Err mentioning 'no recommendation'. The page lists the refused proposal under 'could not be shown' with the reason and still contains the other brief. A brief with 120 words or fewer is accepted.",
+      "fails_without": "Without the word check, (b) and (e) would render Ok. Without the recommendation check, (c) and (d) would render Ok. Each unwrap_err would panic.",
+      "seam": "Entry points `decisions::render_brief`, `decisions::brief` and `decisions::render_page`. Parts and fixtures are built in the test; the refusal logic is in production code. Added by step 4."
+    },
+    {
+      "criterion": 7,
+      "method": "Entry points `decisions::brief` and `decisions::render_page` (step 4); the page takes a `Source` enum as an argument. Case 1: a fixture that `WorkItem::validate` accepts (real role, source and one evidence entry), asserting the always-absent statements 'no separate description is recorded' and 'the proposal records none' appear. Case 2: a hand-built struct with empty evidence, asserting 'Evidence: not recorded' and a recommendation starting 'Hold'. Case 3: a blank source, asserting 'not recorded'. Pages: BranchMissing, Unreadable, Read with failed > 0 and zero open, Read with zero failed and zero open.",
+      "command": "cargo test -p xtask decisions::tests::an_absent_field_is_said_to_be_not_recorded",
+      "observes": "Absent fields are stated as not recorded, never filled in. The four page states carry four different explicit texts: 'records branch … not in this checkout', 'could not be read', 'N records could not be read; first error', and 'none waiting'. 'None waiting' appears only in the last.",
+      "fails_without": "A default filler ('low risk', an empty list shown as nothing), unlabelled derived lines, or one shared page for every empty case would fail these asserts.",
+      "seam": "Entry points `decisions::brief` and `decisions::render_page`; the `Source` enum is injected as an argument; no double. Added by step 4."
+    },
+    {
+      "criterion": 8,
+      "method": "New test `the_index_links_to_the_decisions_page` renders the index with the existing `study_dir(...)` fixture and `render` (both exist in site.rs tests) and asserts `href=\"decisions.html\"`. New test `build_writes_decisions_html_next_to_index_html` reuses the setup of the existing `build_writes_index_html_at_the_output_root` on a non-git temp root. Another new test in decisions.rs, `a_checkout_without_the_records_branch_lists_no_proposal`, commits a proposal on HEAD of a temp repo with no athena/records ref and calls `decisions::read_source`.",
+      "command": "cargo test -p xtask site::tests",
+      "observes": "The index has the link. After `build`, `out/decisions.html` exists beside `out/index.html`, build returns Ok, and the page says the records could not be read. For the HEAD-only repo, `read_source` gives BranchMissing, the page says the records branch is not in this checkout, and it lists no proposal.",
+      "fails_without": "A missing link in `render` fails the first test. A `build` that does not write decisions.html fails the second. A HEAD fallback would list the HEAD-committed proposal and fail the third.",
+      "seam": "Entry points `site::render`, `site::build(root, out)` and `decisions::read_source(root)`. The fixtures are the existing temp-dir study and a real temp git repo (`Git::at(...).run`). The real loader is used and no fake is injected. The `read_source` seam is added by step 4; `render` and `build` exist."
+    },
+    {
+      "criterion": 9,
+      "method": "Run the full xtask test suite: the existing site.rs tests, `xtask/tests/site_page.rs` (runs `xtask site --out <dir>` through `CARGO_BIN_EXE_xtask` in snapshots without records) and `xtask/tests/policy.rs`, plus the new tests. The only change to the study rendering is one added header paragraph; the refusals live only in `decisions::render_brief`.",
+      "command": "cargo test -p xtask",
+      "observes": "All existing tests pass unchanged. The study page is unchanged apart from the one added link, and `xtask site` still succeeds where records are absent.",
+      "fails_without": "If study rendering changed or the build failed without records, the existing site.rs tests or site_page.rs would fail.",
+      "seam": "Existing tests and the real `xtask site` binary; they exist today."
+    }
+  ],
+  "open_questions": [
+    "The brief lists xtask/Cargo.toml and Cargo.lock as deliverables. This plan needs neither: xtask already depends on athena-data and athena-git (read in xtask/Cargo.toml), and `check_record_file` is public. If the producer finds a dependency genuinely missing, it should say so and not add one silently.",
+    "The pages workflow (.github/workflows/pages.yml) checks out only main, so the live page will say the records branch is not in this checkout until the workflow fetches athena/records. That workflow change is out of scope here and needs a follow-up job. Until then the live page shows no briefs.",
+    "Job-reference links point to <JobId::dir()>/job.json (JobId::dir at crates/athena-data/src/id.rs:159). They open only once the records commit is pushed to GitHub, which this plan cannot check.",
+    "Refusal corpus: this adds a refusal inside the xtask renderer, not a request or reading rule in athena-core. I did not read crates/athena-core/tests/refusal_corpus.rs this round, so I map no corpus case and cite none. The renderer's refusal inputs (over 120 words, missing recommendation) are covered by the xtask tests in demonstration 6."
+  ],
+  "producer_section_sha256": "216274c244084861c0c99596426f918f7ba5cee2cb1920e4ed227f397efaaf5b"
+}
