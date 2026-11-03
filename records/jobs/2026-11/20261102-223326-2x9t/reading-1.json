@@ -1,0 +1,152 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261102-223326-2x9t",
+  "n": 1,
+  "at": "2026-11-03T05:59:12.206863413Z",
+  "invocation_seq": 2,
+  "base_commit": "b127c2374479ec3c515458901e0bb6b9f5007ba2",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Don't count environment stops toward the drain's repeated-failure rule",
+  "summary": "The drain counts any failed attempt toward its two-attempt limit, so a rejection plus a \"producer login expired\" stop ends the run as \"repeated failure\". An attempt that ends in an environment stop will no longer count; the item stays queued and the run goes on. Audience: people who run the drain and read its stop reason.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The change is Rust in athena-cli."
+    },
+    {
+      "id": "tested",
+      "how": "New drain test plus existing tests for the two-failure case."
+    },
+    {
+      "id": "root-cause",
+      "how": "The drain reuses the shared environment classifier and the other readers of the count are checked."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The criteria run the drain tests and check the run goes on to the next item."
+    },
+    {
+      "id": "buy-first",
+      "how": "The existing disk.rs classifier is reused instead of a new list."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the drain plus a test and a changelog entry."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-cli/src/drain.rs: `attempts` counts `failures` against ATTEMPTS and returns ItemEnd::Failed, which `set_stop`s Stop::RepeatedFailure; `run_job` turns any run outcome that is not passed, needs-accepting or held into RunStep::Failed, with the run's reason in `line.reason`. The environment classifier is `athena_core::disk::is_environment_reason` / `StopCause::of` in crates/athena-core/src/disk.rs (PRODUCER_AUTH = \"environment: producer login expired\"), already used by crates/athena-core/src/scope_guard.rs and crates/athena-core/src/run/mod.rs. The change reuses it and adds no second list. It adds no record or data file under crates/, so check_record_file, AnyRecord and the round-trip test are not involved.",
+    "Existing code: crates/athena-cli/src/drain.rs, crates/athena-core/src/disk.rs, crates/athena-core/src/scope_guard.rs.",
+    "Design: in `run_job`, a run whose reason is an environment stop yields a new non-failure step (like Held/Waiting), which `attempts` maps to an item end that leaves the item queued, notes the reason via pass_over and lets the run go on. Environment stops already reach this path with outcome Failed and a reason.",
+    "Readers of the repeated-failure count found by search: (1) `failures`/ATTEMPTS in Drain::attempts (the rule being fixed); (2) the Stop::RepeatedFailure display in crates/athena-cli/src/display.rs and the report fields in drain.rs (read only after the stop is set; covered by the existing drain.rs tests the_same_item_failing_twice_is_a_repeated_failure_naming_the_item); (3) crates/athena-core/src/steward.rs `repeated_failures`, a per-class count of Rejected/Failed jobs fed to the steward, which also counts environment-stop jobs. The producer decides whether to exclude them there too, with a test, or records why not.",
+    "The goal (environment stops not counted) is in scope and is not an out_of_scope item.",
+    "No refusal rule is added; the change refuses fewer runs as repeated failure, not more readings."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/tests/drain.rs: an item whose first attempt is rejected and whose second ends with reason \"environment: producer login expired\" does not end the run with Stop::RepeatedFailure; the item stays queued and the drain goes on to the next item and works it. Run: cargo test -p athena-cli --test drain.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The existing drain tests the_same_item_failing_twice_is_a_repeated_failure_naming_the_item and a_job_that_does_not_land_twice_still_ends_as_repeated_failure_when_the_config_is_readable still pass: two real failures still stop the run. Run: cargo test -p athena-cli --test drain.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The drain decides an attempt is an environment stop by calling athena_core::disk::is_environment_reason (or StopCause); a Grep of crates/athena-cli finds no new list of environment reason strings.",
+      "kind": "content"
+    },
+    {
+      "text": "The drain.rs module docs state that an attempt ending in an environment stop does not count toward Stop::RepeatedFailure and that the item stays queued.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has a new entry saying that environment stops (login expired, usage limit, low disk, network) no longer count toward the drain's repeated-failure rule.",
+      "kind": "content"
+    },
+    {
+      "text": "The final report lists every reader of the repeated-failure count (at least drain.rs attempts, display.rs, steward.rs repeated_failures), each with a test or a stated reason; if steward.rs is changed, a steward test shows an environment-stop job is not counted.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.08
+    }
+  ],
+  "out_of_scope": [
+    "Changing the scope guard's own counting or the environment classifier's list in disk.rs",
+    "Changing how `athena retry` resumes environment stops",
+    "Reworking the drain's other stop reasons",
+    "Adding a repository-wide fmt, clippy or test run as its own criterion"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.66,
+      "p_user_intervenes": 0.09,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.3
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1800.0,
+        "p90": 4100.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7201044386422977,
+      "p_verification_passes": 0.6747967479674797,
+      "p_user_intervenes": 0.0924205378973105,
+      "cost_usd": {
+        "p10": 0.5540492789073481,
+        "p50": 1.305657404515909,
+        "p90": 3.654605512941591
+      },
+      "wall_time_s": {
+        "p10": 543.0885001951771,
+        "p50": 1906.979758458343,
+        "p90": 4161.866634148893
+      }
+    }
+  },
+  "departures": null,
+  "urgent_reason": "It cuts wasted runs: a drain stopped as \"repeated failure\" because of an expired login and was rerun for nothing.",
+  "hard_reason": "It changes the drain's stopping rule (repeated failure), which decides whether a run is held or goes on.",
+  "producer_effort": "high"
+}
