@@ -710,18 +710,30 @@ fn blind_spot_request(source: &str, title: &str) -> String {
 /// Jobs that ended rejected or failed, grouped by class of work. Only groups of two or more repeat. The
 /// steward is given this count as an input; it decides what the repeats mean.
 pub fn repeated_failures(records: &Records) -> BTreeMap<String, Vec<JobId>> {
+    let mut by_class = failures_by_class(records, None);
+    by_class.retain(|_, jobs| jobs.len() >= 2);
+    by_class
+}
+
+/// Jobs that ended rejected or failed at or after `since` (the time of the closing outcome), grouped by class
+/// of work. A class with one failure is kept: triage sees every recent failure class, not only repeats.
+pub fn failure_classes_since(records: &Records, since: Timestamp) -> BTreeMap<String, Vec<JobId>> {
+    failures_by_class(records, Some(since))
+}
+
+/// The one body behind [`repeated_failures`] and [`failure_classes_since`], so the two cannot drift.
+fn failures_by_class(records: &Records, since: Option<Timestamp>) -> BTreeMap<String, Vec<JobId>> {
     let mut by_class: BTreeMap<String, Vec<JobId>> = BTreeMap::new();
     for job in records.request_jobs() {
-        let ended_badly = job
-            .outcome
-            .as_ref()
-            .is_some_and(|o| matches!(o.state, OutcomeState::Rejected | OutcomeState::Failed));
+        let ended_badly = job.outcome.as_ref().is_some_and(|o| {
+            matches!(o.state, OutcomeState::Rejected | OutcomeState::Failed)
+                && since.is_none_or(|since| o.at >= since)
+        });
         let class = job.job.as_ref().and_then(|j| j.class_of_work.clone());
         if let (true, Some(class)) = (ended_badly, class) {
             by_class.entry(class).or_default().push(job.id().clone());
         }
     }
-    by_class.retain(|_, jobs| jobs.len() >= 2);
     for jobs in by_class.values_mut() {
         jobs.sort();
     }
@@ -994,7 +1006,7 @@ fn pending_dir(state: &StateDir) -> PathBuf {
 
 /// Keeps an invocation's record until a commit carries it. A run that queues nothing makes no commit, so
 /// its record waits for the next one.
-fn stash_invocation(state: &StateDir, record: &Invocation) -> Result<()> {
+pub(crate) fn stash_invocation(state: &StateDir, record: &Invocation) -> Result<()> {
     let dir = pending_dir(state);
     std::fs::create_dir_all(&dir)?;
     let any = AnyRecord::Invocation(Box::new(record.clone()));
@@ -1006,7 +1018,7 @@ fn stash_invocation(state: &StateDir, record: &Invocation) -> Result<()> {
 }
 
 /// The invocation records waiting for a commit, with the files that hold them.
-fn pending_invocations(state: &StateDir) -> Vec<(PathBuf, NewFile)> {
+pub(crate) fn pending_invocations(state: &StateDir) -> Vec<(PathBuf, NewFile)> {
     let Ok(entries) = std::fs::read_dir(pending_dir(state)) else {
         return Vec::new();
     };
@@ -1024,7 +1036,7 @@ fn pending_invocations(state: &StateDir) -> Vec<(PathBuf, NewFile)> {
 }
 
 /// Removes a run's directory in the state directory when the run ends, however it ends.
-struct Cleanup(PathBuf);
+pub(crate) struct Cleanup(pub(crate) PathBuf);
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
@@ -1359,6 +1371,76 @@ mod tests {
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A request job of `class` that ended `state` at `ended`.
+    fn ended_job(
+        id: &str,
+        class: &str,
+        state: &str,
+        ended: &str,
+    ) -> (String, crate::store::JobRecords) {
+        let job: athena_data::records::Job = serde_json::from_value(serde_json::json!({
+            "id": id, "kind": "request", "title": "t", "class_of_work": class,
+            "owner": { "role": "producer" },
+        }))
+        .unwrap();
+        let outcome: athena_data::records::Outcome = serde_json::from_value(serde_json::json!({
+            "job": id, "state": state, "reason": "r", "at": ended, "after_blocked": false,
+        }))
+        .unwrap();
+        let records = crate::store::JobRecords {
+            id: Some(job.id.clone()),
+            job: Some(job),
+            outcome: Some(outcome),
+            ..Default::default()
+        };
+        (id.to_string(), records)
+    }
+
+    #[test]
+    fn failure_classes_since_keeps_single_recent_failures_and_repeated_failures_keeps_repeats() {
+        let mut records = Records::default();
+        records.jobs.extend([
+            ended_job(
+                "20261030-100000-aaaa",
+                "docs",
+                "rejected",
+                "2026-10-30T10:00:00Z",
+            ),
+            ended_job(
+                "20261031-100000-bbbb",
+                "docs",
+                "failed",
+                "2026-10-31T10:00:00Z",
+            ),
+            ended_job(
+                "20261031-110000-cccc",
+                "tests",
+                "failed",
+                "2026-10-31T11:00:00Z",
+            ),
+            ended_job(
+                "20261031-120000-dddd",
+                "tests",
+                "landed",
+                "2026-10-31T12:00:00Z",
+            ),
+        ]);
+        // A cut at the start of the 31st leaves out the first docs failure.
+        let since: Timestamp = "2026-10-31T00:00:00Z".parse().unwrap();
+        let recent = failure_classes_since(&records, since);
+        assert_eq!(recent.keys().collect::<Vec<_>>(), ["docs", "tests"]);
+        assert_eq!(
+            recent["docs"].len(),
+            1,
+            "the failure before the cut is left out"
+        );
+        assert_eq!(recent["tests"].len(), 1, "a landed job is no failure");
+        // Only a class with two or more failures is a repeat, whenever they happened.
+        let repeats = repeated_failures(&records);
+        assert_eq!(repeats.keys().collect::<Vec<_>>(), ["docs"]);
+        assert_eq!(repeats["docs"].len(), 2);
     }
 
     #[test]

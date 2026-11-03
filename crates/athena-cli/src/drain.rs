@@ -580,6 +580,13 @@ pub trait Steps {
     fn review_passes(&self) -> Vec<String> {
         Vec::new()
     }
+    /// The steward's triage pass, asked once after the review passes and before the queue is read: one model
+    /// call sets priorities from the current focus, and the records it writes are in the queue the loop reads
+    /// next. Returns one line for each change it made. A call that fails is one line saying so, never an
+    /// error, so the drain goes on. The default makes no call, as for steps that have no records.
+    fn triage(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// How many items ahead of the running batch [`drain_concurrent`] may read (and plan, for hard jobs) while
     /// more than one job runs at once. 0 (the default) reads nothing ahead. The real steps keep the default
     /// until the drain's pipeline settings are wired in.
@@ -2716,6 +2723,10 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     for line in steps.review_passes() {
         d.ui.line(&line);
     }
+    // Then the steward's triage, so the priorities it sets are in the queue read next.
+    for line in steps.triage() {
+        d.ui.line(&line);
+    }
     // What an earlier run left in the in-flight table is reported and left alone: recovery is later work.
     for line in steps.in_flight() {
         d.note(line);
@@ -3300,6 +3311,19 @@ impl Steps for RealSteps<'_> {
         self.athena.review_passes(self.ui)
     }
 
+    /// Triage over the plan entries of the queue as it stands. A queue that cannot be read, or a call that
+    /// fails, is one line and the drain goes on.
+    fn triage(&self) -> Vec<String> {
+        let failed = |e: anyhow::Error| vec![format!("triage failed: {e:#}; the drain goes on")];
+        match self.queue() {
+            Ok(view) => self
+                .athena
+                .triage(&view.plan, self.priority_caps())
+                .unwrap_or_else(failed),
+            Err(e) => failed(e),
+        }
+    }
+
     fn caps(&self) -> anyhow::Result<Caps> {
         let jc = athena_core::capability::JobConfig::at(&self.athena.git, &self.athena.head()?)?;
         Ok(Caps {
@@ -3400,7 +3424,7 @@ impl Steps for RealSteps<'_> {
                 records
                     .jobs
                     .iter()
-                    .filter(|(_, job)| !job.priorities.is_empty())
+                    .filter(|(_, job)| athena_core::triage::set_by_person(job))
                     .map(|(id, _)| id.clone())
                     .collect()
             })
@@ -3965,6 +3989,10 @@ mod tests {
                 "evidence labels: summary".into(),
             ]
         }
+        fn triage(&self) -> Vec<String> {
+            self.calls.borrow_mut().push("triage");
+            vec!["triage     20261031-082446-vq7x normal -> high: serves the focus".into()]
+        }
         fn caps(&self) -> anyhow::Result<Caps> {
             Ok(Caps {
                 read: 0.5,
@@ -4019,13 +4047,18 @@ mod tests {
         };
         let ui = Kept::default();
         drain(&steps, limits(3.0), &ui).unwrap();
-        assert_eq!(*steps.calls.borrow(), ["review", "queue"]);
+        assert_eq!(*steps.calls.borrow(), ["review", "triage", "queue"]);
         let lines = ui.0.lock().unwrap();
         assert_eq!(
-            *lines,
+            lines[..2],
             ["backfill: summary", "evidence labels: summary"],
             "one line per pass"
         );
+        assert!(
+            lines[2].starts_with("triage     "),
+            "the triage lines follow the passes: {lines:?}"
+        );
+        assert_eq!(lines.len(), 3, "{lines:?}");
     }
 
     #[test]

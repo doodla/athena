@@ -4721,6 +4721,8 @@ fn priority_record(job: &athena_data::JobId, level: &str) -> AnyRecord {
         n: 1,
         at: "2026-10-30T00:00:00Z".parse().unwrap(),
         priority: level.into(),
+        set_by: None,
+        reason: None,
     })
 }
 
@@ -5067,6 +5069,8 @@ fn the_plan_lists_an_approved_proposal_in_its_ordered_place_with_priority_from_t
             n: 1,
             at: "2026-10-17T00:00:00Z".parse().unwrap(),
             priority: "low".into(),
+            set_by: None,
+            reason: None,
         })],
         "Priority record",
     );

@@ -188,6 +188,10 @@ pub const SPEED_WORDS: [&str; 6] = [
     "duplicated checks",
 ];
 
+/// The heading a steward triage prompt starts with. The core's triage brief uses it (`athena_core::triage`),
+/// so the fake can tell a triage prompt from the steward's own.
+pub const TRIAGE_HEADING: &str = "# Steward triage";
+
 /// The file the deterministic producer writes.
 pub const FAKE_DELIVERABLE: &str = "FAKE-CHANGE.md";
 
@@ -387,7 +391,11 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
             "request_reading_mismatch": null,
             "summary": "A fake critique made without a model call."
         })),
-        // A nested run has nothing for the steward to report.
+        // A triage prompt (it starts with the heading of `athena_core::triage`) is answered with no change and
+        // no close proposal. A nested run has nothing else for the steward to report.
+        Role::Steward if spec.user_prompt.starts_with(TRIAGE_HEADING) => {
+            FakeTurn::output(json!({ "changes": [], "close": [] }))
+        }
         Role::Steward => FakeTurn::output(json!({ "items": [] })),
         // A nested run rates nothing: a middling rating with no findings raises no work item.
         Role::Audience => FakeTurn::output(json!({ "rating": 3, "findings": [] })),
@@ -526,6 +534,22 @@ mod tests {
             .unwrap();
         assert_eq!(steward.structured.unwrap()["items"], json!([]));
         assert_eq!(steward.cost_usd, Some(0.0), "no model call, no cost");
+    }
+
+    #[test]
+    fn the_deterministic_fake_answers_a_triage_prompt_with_no_change_and_no_close_proposal() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = FakeAgentDriver::deterministic();
+        let prompt = format!("{TRIAGE_HEADING}\n\n## Current focus\n\nspeed first\n");
+        let answer = driver
+            .invoke(
+                &spec(Role::Steward, &prompt, dir.path().into()),
+                &mut NoSink,
+            )
+            .unwrap()
+            .structured
+            .unwrap();
+        assert_eq!(answer, json!({ "changes": [], "close": [] }));
     }
 
     #[test]

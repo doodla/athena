@@ -529,12 +529,40 @@ pub struct PriorityRecord {
     pub at: Timestamp,
     /// One of [`PRIORITY_LEVELS`].
     pub priority: String,
+    /// The role that set it, for a priority a role set (the steward's triage). Absent for a person's choice
+    /// (`athena priority`), and for every record written before roles could set one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_by: Option<String>,
+    /// The one-line reason a role gave. Present exactly when `set_by` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl PriorityRecord {
+    /// Whether a person chose this priority: no role is named as its author.
+    pub fn is_by_person(&self) -> bool {
+        self.set_by.is_none()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.n == 0 {
             return Err("a priority record is numbered from 1".into());
+        }
+        match (&self.set_by, &self.reason) {
+            (None, None) => {}
+            (Some(role), Some(reason)) => {
+                if role.trim().is_empty() {
+                    return Err("a priority record names the role that set it".into());
+                }
+                if reason.trim().is_empty() || reason.contains('\n') {
+                    return Err("a role's priority record gives a one-line reason".into());
+                }
+            }
+            _ => {
+                return Err(
+                    "a priority record has `set_by` and `reason` together, or neither".into(),
+                );
+            }
         }
         if !PRIORITY_LEVELS.contains(&self.priority.as_str()) {
             return Err(format!(
@@ -3160,6 +3188,62 @@ mod tests {
             focus(0, "speed first", "Ada"),
         ] {
             let record = AnyRecord::Focus(bad);
+            assert!(matches!(
+                check_record_file(&record.canonical_path(), record.to_json().as_bytes()),
+                Err(RecordError::Invalid { .. })
+            ));
+        }
+    }
+
+    fn priority(set_by: Option<&str>, reason: Option<&str>) -> PriorityRecord {
+        PriorityRecord {
+            job: job(),
+            n: 1,
+            at: ts(),
+            priority: "high".into(),
+            set_by: set_by.map(String::from),
+            reason: reason.map(String::from),
+        }
+    }
+
+    #[test]
+    fn a_role_set_priority_record_round_trips_with_its_author_and_reason() {
+        let record = AnyRecord::Priority(priority(Some("steward"), Some("serves the focus")));
+        let text = record.to_json();
+        assert!(text.contains("\"set_by\": \"steward\""), "{text}");
+        assert!(text.contains("\"reason\": \"serves the focus\""), "{text}");
+        let checked = check_record_file(&record.canonical_path(), text.as_bytes()).unwrap();
+        assert_eq!(checked, Some(record));
+    }
+
+    #[test]
+    fn a_priority_record_without_an_author_still_parses_and_counts_as_a_persons() {
+        let person = AnyRecord::Priority(priority(None, None));
+        let text = person.to_json();
+        assert!(
+            !text.contains("set_by") && !text.contains("reason"),
+            "{text}"
+        );
+        let parsed = check_record_file(&person.canonical_path(), text.as_bytes()).unwrap();
+        let Some(AnyRecord::Priority(p)) = parsed else {
+            panic!("a priority record");
+        };
+        assert!(p.is_by_person());
+        // A record written before the fields existed has neither key.
+        let old = r#"{"schema": "athena.priority/1", "job": "20261031-082446-vq7x", "n": 1, "at": "2026-10-30T00:00:00Z", "priority": "low"}"#;
+        assert!(AnyRecord::parse("x", old.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn an_author_without_a_reason_or_a_reason_without_an_author_is_refused() {
+        for bad in [
+            priority(Some("steward"), None),
+            priority(None, Some("why")),
+            priority(Some("steward"), Some("  ")),
+            priority(Some(" "), Some("why")),
+            priority(Some("steward"), Some("two\nlines")),
+        ] {
+            let record = AnyRecord::Priority(bad);
             assert!(matches!(
                 check_record_file(&record.canonical_path(), record.to_json().as_bytes()),
                 Err(RecordError::Invalid { .. })
