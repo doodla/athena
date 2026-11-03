@@ -4209,3 +4209,47 @@ should replace those estimates with its figures.
   reading`, `--lib run_pin_tests` and `--test refusal_corpus`, and `cargo test -p xtask --test policy`. Not
   measured: how many past readings the old rule refused for prose alone, and how often a writer copies a word
   from a `behavior` criterion.
+
+## D154 · A newer patch of the pinned Claude Code is accepted (amends D03)
+
+- **Case:** Claude Code updates itself on the host where Athena runs: 2.1.296, 2.1.299 and 2.1.301 in two days
+  (as stated by the request; not measured here). Each update made `check_pinned` refuse the binary, which
+  stopped every agent until someone repinned `athena.toml` by hand. Repinning is itself a job, and a job cannot
+  start while the agent driver refuses, so the stop could not clear itself.
+- **Root cause:** D03 pinned Claude Code at one version and the check compared the reported version with `==`.
+  That is stricter than the reason for the pin. Athena relies on the hermetic flags and the stream-json shape,
+  which change with a minor release, not with a patch. The check and the harness's own update policy disagreed.
+- **Decision:** Amends D03. The pin in `athena.toml` (`agents.claude_version`) is now the tested minimum. A
+  binary is accepted when it reports the same major and minor as the pin with a patch at or above the pin's, all
+  three parts being plain numbers, or when its text equals the pin exactly (so a pin that is not
+  `major.minor.patch` behaves as before). `claude::accepts` holds the rule and `check_pinned` returns the version
+  the binary reported. `ClaudeCodeDriver::new` stores that version, so `info()` names the version that ran;
+  `with_marker` is the same constructor with the nested-run marker passed in, so tests can build it inside a
+  job. `DeferredDriver::info` returns the reported version once the driver is built and the pin before that, so
+  invocation records name what ran. `xtask setup` cannot use the agent crate, so `claude_accepts` and
+  `pick_claude` repeat the rule: a newer-patch `claude` on `PATH` is used and nothing is installed with npm;
+  with none acceptable, the pin is installed privately as before. The refusal text names the version found
+  (quoted), the path and the pin, and says that a newer patch needs no repin and any other version needs
+  `./setup.sh`. Refused as before: an older patch, another minor or major, and a version that is empty,
+  has a suffix or does not have three numeric parts. `athena.toml` is unchanged.
+- **Alternatives:** (a) Accept any 2.x: a minor release may change flags or stream-json, which the hermetic
+  flags and the parser rely on, and the request is only about patches. (b) Auto-repin: an `xtask` command that
+  rewrites `athena.toml` would still be a job or a hand step, and repinning cannot run as a job while the driver
+  refuses, so it does not remove the stop. (c) Keep the exact match: this is the fault, and every self-update
+  repeats it.
+- **Tradeoff:** A run no longer has one identical Claude Code version on every invocation; two jobs can run
+  different patches, and a patch that breaks Athena is not stopped by the check. It then shows up as a failed
+  invocation, and the fix is to repin to a version that works, as before. The pin stops naming the version that
+  runs. The job record written at dispatch (`run/mod.rs`) is built before any agent starts, and `status` before
+  an agent has run, so both still show the pin; invocation records are written after the driver is built and
+  carry the reported version. Probing at dispatch would start Claude Code for commands that run no agent, which
+  the deferred driver exists to avoid. The rule is written twice (agent crate and `xtask`), with the same test
+  table in each, because `xtask` does not depend on the agent crate.
+- **Reversal cost:** Low. Restore the equality in `check_pinned` and in `pick_claude`/`claude_accepts`, and make
+  `DeferredDriver::info` return the pin again; the tests that assert a newer patch is accepted change with them.
+  No record format or configuration key changes.
+- **Provenance:** Stated: the request's versions and its premise that repinning cannot start as a job. Read:
+  `crates/athena-agent/src/claude.rs`, `crates/athena-cli/src/wiring.rs`, `xtask/src/main.rs`, D03. Measured:
+  `cargo test -p athena-agent`, `cargo test -p athena-cli deferred_driver` and `cargo test -p xtask
+  claude_compat`, each against stand-in binaries that report a chosen version. Not measured: whether a newer
+  patch breaks anything Athena relies on, and how often Claude Code updates.

@@ -36,6 +36,39 @@ mod tests {
         let unique: std::collections::BTreeSet<&&str> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "duplicate ids: {ids:?}");
     }
+
+    /// A program that answers `--version` with `reply` and the exit status `status`.
+    fn version_stand_in(dir: &Path, reply: &str, status: u8) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("claude");
+        let script = format!("#!/bin/sh\necho \"{reply}\"\nexit {status}\n");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn deferred_driver_reports_the_version_that_ran_after_it_is_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let bin = version_stand_in(dir.path(), "2.1.301 (Claude Code)", 0);
+        let driver = DeferredDriver::for_test("2.1.299", Registry::new(state.path()), bin, None);
+        assert_eq!(driver.info().version, "2.1.299");
+        driver.probe();
+        let info = driver.info();
+        assert_eq!(info.name, "claude-code");
+        assert_eq!(info.version, "2.1.301");
+    }
+
+    #[test]
+    fn deferred_driver_reports_the_pin_when_the_binary_cannot_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let bin = version_stand_in(dir.path(), "broken", 1);
+        let driver = DeferredDriver::for_test("2.1.299", Registry::new(state.path()), bin, None);
+        driver.probe();
+        assert_eq!(driver.info().version, "2.1.299");
+    }
 }
 
 /// How long `athena land --pr` waits for a pull request's checks: thirty looks, twenty seconds apart.
@@ -86,9 +119,13 @@ pub fn claude_bin() -> PathBuf {
 /// The real driver, created on first use, so commands that run no agent never start Claude Code.
 #[derive(Debug)]
 pub struct DeferredDriver {
+    /// The pinned Claude Code version, the tested minimum (D154).
     pinned: String,
     registry: Registry,
     driver: OnceLock<Result<ClaudeCodeDriver, String>>,
+    /// Tests give a stand-in binary and a nested-run marker here instead of the real ones.
+    #[cfg(test)]
+    test_override: Option<(PathBuf, Option<String>)>,
 }
 
 impl DeferredDriver {
@@ -97,15 +134,48 @@ impl DeferredDriver {
             pinned,
             registry,
             driver: OnceLock::new(),
+            #[cfg(test)]
+            test_override: None,
         }
+    }
+
+    /// A driver that runs the program at `bin` and reads the nested-run marker as `marker`.
+    #[cfg(test)]
+    fn for_test(pinned: &str, registry: Registry, bin: PathBuf, marker: Option<String>) -> Self {
+        DeferredDriver {
+            test_override: Some((bin, marker)),
+            ..DeferredDriver::new(pinned.to_string(), registry)
+        }
+    }
+
+    /// The real driver, built on first call. This is what `invoke` runs first.
+    fn inner(&self) -> &Result<ClaudeCodeDriver, String> {
+        self.driver.get_or_init(|| {
+            let (bin, marker) = (claude_bin(), nested_marker());
+            #[cfg(test)]
+            let (bin, marker) = self.test_override.clone().unwrap_or((bin, marker));
+            ClaudeCodeDriver::with_marker(bin, &self.pinned, self.registry.clone(), marker)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Builds the real driver now, so `info` reports the version the binary reports.
+    #[cfg(test)]
+    fn probe(&self) {
+        let _ = self.inner();
     }
 }
 
 impl AgentDriver for DeferredDriver {
+    /// The version the binary reported once the driver has been built, else the pinned version. The
+    /// invocation records read this after `invoke`, so they name the version that ran.
     fn info(&self) -> DriverInfo {
-        DriverInfo {
-            name: "claude-code".into(),
-            version: self.pinned.clone(),
+        match self.driver.get() {
+            Some(Ok(driver)) => driver.info(),
+            _ => DriverInfo {
+                name: "claude-code".into(),
+                version: self.pinned.clone(),
+            },
         }
     }
 
@@ -114,11 +184,7 @@ impl AgentDriver for DeferredDriver {
         spec: &AgentInvocation,
         sink: &mut dyn UsageSink,
     ) -> Result<AgentOutput, DriverError> {
-        let driver = self.driver.get_or_init(|| {
-            ClaudeCodeDriver::new(claude_bin(), &self.pinned, self.registry.clone())
-                .map_err(|e| e.to_string())
-        });
-        match driver {
+        match self.inner() {
             Ok(driver) => driver.invoke(spec, sink),
             Err(message) => Err(DriverError::Spawn(message.clone())),
         }

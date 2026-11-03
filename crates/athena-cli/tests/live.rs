@@ -1,4 +1,4 @@
-//! Opt-in live tests: they call real models through the pinned Claude Code, so they need credentials and
+//! Opt-in live tests: they call real models through a Claude Code compatible with the pin, so they need credentials and
 //! cost a few cents. Run them with `cargo test -p athena-cli --test live -- --ignored --test-threads=1`.
 //! They refuse to run inside an Athena job (the nested-run marker), and the agent hook denies `--ignored`
 //! to every agent, so no model call happens outside a job's records and budget (D47).
@@ -57,7 +57,7 @@ fn driver(state: &Path) -> ClaudeCodeDriver {
         &config().agents.claude_version,
         Registry::new(state),
     )
-    .expect("the pinned Claude Code")
+    .expect("a Claude Code compatible with the pin")
 }
 
 fn spec(

@@ -1,0 +1,150 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261103-193428-df2m",
+  "n": 1,
+  "at": "2026-11-03T19:36:27.730491219Z",
+  "invocation_seq": 2,
+  "base_commit": "f59192ced89cadc4fa75e385974d2113da8c113a",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Don't count needs-accepting re-reads toward the drain job limit",
+  "summary": "When a drain re-reads an old request after a settings change and the new reading needs accepting, that attempt must not use one of the --job-limit slots, so the drain goes on to the next item. Audience: the operator running `athena drain` with a job limit and budget. The fix is in the drain's job counter, with a regression test using job limit 1.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New regression test plus cargo test and clippy clean."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix the slot counting in run_job, not a special case for old requests."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The criterion runs a drain with job limit 1 and checks that the next item lands."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that a batch lands the next item after a needs-accepting re-read."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test on the drain tests."
+    },
+    {
+      "id": "rust",
+      "how": "The change is Rust only."
+    },
+    {
+      "id": "small",
+      "how": "One focused counter change with one test."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-cli/src/drain.rs. In `run_job` (~line 1418) the order is: check stop, check `st.started >= limits.max_jobs` (JobLimit), check budget, then `st.started += 1`. It then reads or re-reads (`Source::Reread` calls `steps.reread`), then `steps.run`. `run.needs_accepting` yields `RunStep::NeedsAccepting` (~line 1537), which `attempts` maps to `ItemEnd::NeedsAccepting`, and `finish` passes the item over (~line 2411). Nothing gives the slot back, so the next item hits JobLimit. `approve_all` (~1889), `prepare` (~2008), `pick_ahead` (~2555) and the restart arithmetic (~2896) also read `st.started`. The real needs-accepting source is RealSteps::run (~line 3566). Fix: release the slot (`st.started -= 1`, saturating) when the step ends as NeedsAccepting. Money spent stays counted in the budget. The job-limit check is the one place that measures the limit.",
+    "Code survey: crates/athena-cli/tests/drain.rs. The existing `a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure` (~1305) and `a_reread_whose_scope_changed_is_left_for_a_person_and_is_not_a_failure` (~2933) cover the outcome with a stub that sets `needs_accepting`. `the_job_limit_stops_the_loop` (~1422) shows how to set `max_jobs: 1`. The new test reuses that Stub pattern: item a needs accepting, item b is runnable.",
+    "No record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are not involved. No refusal rule is added or tightened, so no refusal-rate criterion applies.",
+    "Only the NeedsAccepting outcome releases its slot. Failed, held and passed attempts keep counting, and the job-limit stop for those is unchanged.",
+    "A change to docs or CHANGELOG is optional and not required. athena.toml, defaults.toml and workflows need no change."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/tests/drain.rs (Grep for `needs_accepting` near `max_jobs: 1`) drains with job limit 1 where item `a` ends as needs accepting and item `b` is runnable. It asserts `jobs[0].outcome == \"needs accepting\"`, `landed == 1`, and `stop != Stop::JobLimit`. Run `cargo test -p athena-cli --test drain` and it passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The same test, run against the unfixed `run_job` counter (as in the pre-change source in `git diff`), would stop with `Stop::JobLimit` before `b` runs. The assertions show it fails without the fix: `b` is asserted to land, which the old counter prevents.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`git diff` of crates/athena-cli/src/drain.rs shows the `RunStep::NeedsAccepting` path in `run_job` giving the started-job slot back (a decrement of `st.started` under the state lock). The JobLimit check and the other outcomes (Failed, Held, Passed) are unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "A job limit that still binds for ordinary jobs: `cargo test -p athena-cli --test drain` still passes `the_job_limit_stops_the_loop`, `an_urgent_queued_request_is_worked_before_an_approved_in_limit_proposal`, and the two existing needs-accepting tests, with no existing assertions weakened (`git diff` shows no removed asserts in them).",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo test` passes for the workspace and `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Doc comments or help text in crates/athena-cli/src/drain.rs that describe the job limit (the `--job-limit` help and the module docs near ~line 180) say a re-read that only needs accepting does not count toward it. A Grep for that wording finds it.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.93
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Avoiding the re-read itself, or changing which config changes trigger a re-read.",
+    "Changing the money budget accounting; the cost of the re-read still counts against the budget.",
+    "Changing how the other outcomes (failed, held, budget short) count toward the job limit.",
+    "Auto-accepting readings whose scope differs."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.7,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1600.0,
+        "p90": 3900.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.718961038961039,
+      "p_verification_passes": 0.6754617414248021,
+      "p_user_intervenes": 0.09150943396226414,
+      "cost_usd": {
+        "p10": 0.5583261607562551,
+        "p50": 1.3352032163084988,
+        "p90": 3.6195137237244794
+      },
+      "wall_time_s": {
+        "p10": 536.6753604381123,
+        "p50": 1933.1285745969994,
+        "p90": 4195.845979407412
+      }
+    }
+  },
+  "departures": null,
+  "urgent_reason": "It cuts wasted time: a batch spent all its job slots on re-reads that ended in 'needs accepting' and landed nothing.",
+  "hard_reason": "It changes how the drain counts jobs against the job limit, which governs what work a batch runs or holds.",
+  "producer_effort": "high"
+}

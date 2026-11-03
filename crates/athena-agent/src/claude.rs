@@ -57,7 +57,35 @@ fn retry_busy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<
     }
 }
 
-/// Checks that the binary at `bin` reports the pinned version, and returns it.
+/// Reads `major.minor.patch` as three numbers; any other form (a suffix, two parts, empty) is `None`.
+fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = text.split('.');
+    let mut next = || {
+        let part = parts.next()?;
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse::<u64>().ok())
+            .flatten()
+    };
+    let version = (next()?, next()?, next()?);
+    parts.next().is_none().then_some(version)
+}
+
+/// Whether a Claude Code reporting `found` can run where `pinned` is the tested minimum: the same
+/// major and minor with a patch at or above the pin, or exactly the pinned text (which keeps a pin that
+/// is not `major.minor.patch` working as it did). `xtask`'s `claude_accepts` mirrors this rule, because
+/// that crate does not depend on this one; change both together.
+pub fn accepts(found: &str, pinned: &str) -> bool {
+    if found == pinned {
+        return true;
+    }
+    match (parse_version(found), parse_version(pinned)) {
+        (Some((fa, fb, fc)), Some((pa, pb, pc))) => fa == pa && fb == pb && fc >= pc,
+        _ => false,
+    }
+}
+
+/// Checks that the binary at `bin` reports the pinned version or a later patch of the same major and
+/// minor, and returns the version it reports.
 pub fn check_pinned(bin: &Path, pinned: &str) -> Result<String, DriverError> {
     let version = claude_version(bin).ok_or_else(|| {
         DriverError::Spawn(format!(
@@ -65,9 +93,10 @@ pub fn check_pinned(bin: &Path, pinned: &str) -> Result<String, DriverError> {
             bin.display()
         ))
     })?;
-    if version != pinned {
+    if !accepts(&version, pinned) {
         return Err(DriverError::Spawn(format!(
-            "Claude Code {version} at {} is not the pinned {pinned}; run ./setup.sh",
+            "Claude Code {version:?} at {} is not the pinned {pinned} or a later patch of the same major.minor; \
+             a newer patch needs no repin, any other version needs ./setup.sh",
             bin.display()
         )));
     }
@@ -97,9 +126,22 @@ pub fn claude_version(bin: &Path) -> Option<String> {
 }
 
 impl ClaudeCodeDriver {
-    /// A driver for the binary at `bin`, which must report the pinned `version`.
+    /// A driver for the binary at `bin`, which must report the pinned version or a later patch of the
+    /// same major.minor. The driver records the version the binary reports, not the pin.
     pub fn new(bin: PathBuf, pinned: &str, registry: Registry) -> Result<Self, DriverError> {
-        refuse_nested(nested_marker())?;
+        Self::with_marker(bin, pinned, registry, nested_marker())
+    }
+
+    /// Like [`ClaudeCodeDriver::new`], with the nested-run marker given instead of read from the
+    /// environment. Production code calls `new`; this lets tests build the real constructor inside a
+    /// job, where the marker is set.
+    pub fn with_marker(
+        bin: PathBuf,
+        pinned: &str,
+        registry: Registry,
+        marker: Option<String>,
+    ) -> Result<Self, DriverError> {
+        refuse_nested(marker)?;
         let version = check_pinned(&bin, pinned)?;
         Ok(ClaudeCodeDriver {
             refuse_nested_runs: true,
@@ -607,6 +649,21 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
         path
     }
 
+    /// A stand-in whose `--version` reports `version` (the text printed before ` (Claude Code)`); an
+    /// empty `version` prints an empty line.
+    fn stand_in_version(dir: &Path, version: &str) -> PathBuf {
+        let path = dir.join("claude");
+        let line = if version.is_empty() {
+            String::new()
+        } else {
+            format!("{version} (Claude Code)")
+        };
+        let script = STAND_IN.replace("2.1.299 (Claude Code)", &line);
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
     /// A driver for the stand-in, which makes no model call, so the nested-run marker does not apply.
     fn driver(bin: PathBuf, registry: Registry) -> ClaudeCodeDriver {
         let version = check_pinned(&bin, "2.1.299").unwrap();
@@ -855,5 +912,88 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
             check_pinned(&stand_in(dir.path()), "9.9.9"),
             Err(DriverError::Spawn(_))
         ));
+    }
+
+    #[test]
+    fn a_newer_patch_is_accepted_and_the_reported_version_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = stand_in_version(dir.path(), "2.1.301");
+        assert_eq!(check_pinned(&bin, "2.1.299").unwrap(), "2.1.301");
+        let same = tempfile::tempdir().unwrap();
+        let bin = stand_in_version(same.path(), "2.1.299");
+        assert_eq!(check_pinned(&bin, "2.1.299").unwrap(), "2.1.299");
+    }
+
+    /// Rows of (found, pinned, accepted). xtask's `claude_compat` test holds the same rows.
+    const ROWS: [(&str, &str, bool); 15] = [
+        ("2.1.299", "2.1.299", true),
+        ("2.1.301", "2.1.299", true),
+        ("2.1.1000", "2.1.999", true),
+        ("2.1.298", "2.1.299", false),
+        ("2.2.0", "2.1.299", false),
+        ("2.0.999", "2.1.299", false),
+        ("3.1.299", "2.1.299", false),
+        ("", "2.1.299", false),
+        ("abc", "2.1.299", false),
+        ("2.1", "2.1.299", false),
+        ("2.1.301-beta", "2.1.299", false),
+        ("2.1.301.4", "2.1.299", false),
+        ("2.1.+1", "2.1.299", false),
+        ("2.1.301-beta", "2.1.301-beta", true),
+        ("2.1.301", "2.1.301-beta", false),
+    ];
+
+    #[test]
+    fn accepts_follows_the_table() {
+        for (found, pinned, expected) in ROWS {
+            assert_eq!(accepts(found, pinned), expected, "{found:?} vs {pinned:?}");
+        }
+    }
+
+    #[test]
+    fn refused_versions_are_named_with_the_pin_and_the_hint() {
+        for found in ["2.1.298", "2.2.0", "3.1.299", "", "garbage", "2.1.301-beta"] {
+            let dir = tempfile::tempdir().unwrap();
+            let bin = stand_in_version(dir.path(), found);
+            let Err(DriverError::Spawn(message)) = check_pinned(&bin, "2.1.299") else {
+                panic!("{found:?} should be refused");
+            };
+            assert!(message.contains(&format!("{found:?}")), "{message}");
+            assert!(message.contains("2.1.299"), "{message}");
+            assert!(message.contains("needs no repin"), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_driver_records_the_reported_version_not_the_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let bin = stand_in_version(dir.path(), "2.1.301");
+        let driver =
+            ClaudeCodeDriver::with_marker(bin, "2.1.299", Registry::new(state.path()), None)
+                .unwrap();
+        let info = driver.info();
+        assert_eq!(info.name, "claude-code");
+        assert_eq!(info.version, "2.1.301");
+        let other = tempfile::tempdir().unwrap();
+        let bin = stand_in_version(other.path(), "2.1.299");
+        let driver =
+            ClaudeCodeDriver::with_marker(bin, "2.1.299", Registry::new(state.path()), None)
+                .unwrap();
+        assert_eq!(driver.info().version, "2.1.299");
+    }
+
+    #[test]
+    fn a_nested_run_marker_is_refused_by_the_real_constructor() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let bin = stand_in_version(dir.path(), "2.1.301");
+        let result = ClaudeCodeDriver::with_marker(
+            bin,
+            "2.1.299",
+            Registry::new(state.path()),
+            Some("20261010-153012-k7q2".into()),
+        );
+        assert!(matches!(result, Err(DriverError::Nested(_))));
     }
 }

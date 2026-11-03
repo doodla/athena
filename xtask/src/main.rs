@@ -622,19 +622,28 @@ fn ensure_claude(config: &Config) -> Result<PathBuf> {
     let pin = &config.agents.claude_version;
     let local = paths::athena_home().join("claude-code").join(pin);
     let private = local.join("node_modules/.bin/claude");
-    for candidate in [PathBuf::from("claude"), private.clone()] {
-        if let Some(text) = found(candidate.to_str().unwrap_or("claude"), "--version")
-            && text.split_whitespace().next() == Some(pin.as_str())
-        {
-            let resolved = if candidate == Path::new("claude") {
-                which("claude").unwrap_or(candidate)
-            } else {
-                candidate
-            };
-            write_machine_config(&resolved)?;
-            println!("Claude Code {pin} at {}", resolved.display());
-            return Ok(resolved);
-        }
+    let candidates: Vec<(PathBuf, Option<String>)> = [PathBuf::from("claude"), private.clone()]
+        .into_iter()
+        .map(|candidate| {
+            let text = found(candidate.to_str().unwrap_or("claude"), "--version");
+            (candidate, text)
+        })
+        .collect();
+    if let Some(candidate) = pick_claude(&candidates, pin) {
+        let version = candidates
+            .iter()
+            .find(|(path, _)| *path == candidate)
+            .and_then(|(_, text)| text.as_deref())
+            .and_then(|text| text.split_whitespace().next())
+            .unwrap_or(pin);
+        let resolved = if candidate == Path::new("claude") {
+            which("claude").unwrap_or(candidate)
+        } else {
+            candidate
+        };
+        write_machine_config(&resolved)?;
+        println!("Claude Code {version} at {}", resolved.display());
+        return Ok(resolved);
     }
     let npm = found("npm", "--version").ok_or_else(|| {
         anyhow!("Claude Code {pin} is not installed, and npm is needed to install it privately; install Node.js and npm")
@@ -647,6 +656,40 @@ fn ensure_claude(config: &Config) -> Result<PathBuf> {
         .arg(format!("@anthropic-ai/claude-code@{pin}")))?;
     write_machine_config(&private)?;
     Ok(private)
+}
+
+/// Whether the `--version` output `reported` is Claude Code at the pinned version or a later patch of
+/// the same major.minor (D154). This mirrors `accepts` in `crates/athena-agent/src/claude.rs`, because
+/// this crate does not depend on the agent crate; change both together.
+fn claude_accepts(reported: &str, pin: &str) -> bool {
+    fn parts(text: &str) -> Option<(u64, u64, u64)> {
+        let mut it = text.split('.');
+        let mut next = || {
+            let part = it.next()?;
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            part.parse::<u64>().ok()
+        };
+        let version = (next()?, next()?, next()?);
+        it.next().is_none().then_some(version)
+    }
+    let found = reported.split_whitespace().next().unwrap_or("");
+    if found == pin {
+        return true;
+    }
+    match (parts(found), parts(pin)) {
+        (Some((fa, fb, fc)), Some((pa, pb, pc))) => fa == pa && fb == pb && fc >= pc,
+        _ => false,
+    }
+}
+
+/// The first candidate whose `--version` output (if it ran) `claude_accepts`, in order.
+fn pick_claude(candidates: &[(PathBuf, Option<String>)], pin: &str) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .find(|(_, text)| text.as_deref().is_some_and(|t| claude_accepts(t, pin)))
+        .map(|(path, _)| path.clone())
 }
 
 fn which(program: &str) -> Option<PathBuf> {
@@ -740,6 +783,61 @@ fn symlink(_target: &Path, _link: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rows of (found, pinned, accepted); the agent crate's `accepts_follows_the_table` holds the same rows.
+    const CLAUDE_ROWS: [(&str, &str, bool); 15] = [
+        ("2.1.299", "2.1.299", true),
+        ("2.1.301", "2.1.299", true),
+        ("2.1.1000", "2.1.999", true),
+        ("2.1.298", "2.1.299", false),
+        ("2.2.0", "2.1.299", false),
+        ("2.0.999", "2.1.299", false),
+        ("3.1.299", "2.1.299", false),
+        ("", "2.1.299", false),
+        ("abc", "2.1.299", false),
+        ("2.1", "2.1.299", false),
+        ("2.1.301-beta", "2.1.299", false),
+        ("2.1.301.4", "2.1.299", false),
+        ("2.1.+1", "2.1.299", false),
+        ("2.1.301-beta", "2.1.301-beta", true),
+        ("2.1.301", "2.1.301-beta", false),
+    ];
+
+    #[test]
+    fn claude_compat_follows_the_table_on_the_first_token_of_the_output() {
+        for (found, pinned, expected) in CLAUDE_ROWS {
+            let line = format!("{found} (Claude Code)");
+            assert_eq!(claude_accepts(&line, pinned), expected, "{line:?}");
+        }
+        assert!(!claude_accepts("", "2.1.299"));
+    }
+
+    #[test]
+    fn claude_compat_picks_a_newer_patch_on_the_path_over_installing() {
+        let path = PathBuf::from("claude");
+        let private = PathBuf::from("/athena/claude-code/2.1.299/bin/claude");
+        let candidates = [
+            (path.clone(), Some("2.1.301 (Claude Code)".to_string())),
+            (private.clone(), Some("2.1.299 (Claude Code)".to_string())),
+        ];
+        assert_eq!(pick_claude(&candidates, "2.1.299"), Some(path));
+        let older = [
+            (
+                PathBuf::from("claude"),
+                Some("2.1.298 (Claude Code)".to_string()),
+            ),
+            (private.clone(), Some("2.1.299 (Claude Code)".to_string())),
+        ];
+        assert_eq!(pick_claude(&older, "2.1.299"), Some(private));
+        let none = [
+            (
+                PathBuf::from("claude"),
+                Some("2.2.0 (Claude Code)".to_string()),
+            ),
+            (PathBuf::from("/athena/private"), None),
+        ];
+        assert_eq!(pick_claude(&none, "2.1.299"), None);
+    }
 
     #[test]
     fn setup_refuses_inside_a_job() {
