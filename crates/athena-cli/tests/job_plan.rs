@@ -426,9 +426,19 @@ fn plan_of(files: Value, demonstrations: Vec<Value>) -> Value {
         "files": files,
         "steps": ["Edit README.md."],
         "risks": [],
+        "dependents": [{
+            "name": "README.md", "dependent": "nothing reads the README", "kind": "code",
+            "test": null, "reason": "The README is documentation only."
+        }],
         "demonstrations": demonstrations,
         "open_questions": []
     })
+}
+
+/// `plan` with its `dependents` key removed, as a planner that forgot the section would return it.
+fn without_dependents(mut plan: Value) -> Value {
+    plan.as_object_mut().unwrap().remove("dependents");
+    plan
 }
 
 fn readme_file() -> Value {
@@ -830,6 +840,41 @@ fn athena_checks_a_demonstration_for_every_criterion_and_a_fails_without_for_beh
     );
     assert!(
         briefs[2].contains("Criterion 2 has 0 demonstrations"),
+        "{}",
+        briefs[2]
+    );
+}
+
+#[test]
+fn athena_sends_a_plan_without_dependents_back_to_the_planner_with_no_critic_call() {
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    let mut blank_test_and_reason = good_plan();
+    blank_test_and_reason["dependents"][0]["reason"] = json!("  ");
+    scenario.plans = vec![
+        // The key is missing, then the section has an entry with neither a test nor a reason.
+        without_dependents(good_plan()),
+        blank_test_and_reason,
+        good_plan(),
+    ];
+    let calls = scenario.invocations.clone();
+    let briefs = scenario.seen_by_planner.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    // Two mechanical revisions, then the third plan reaches the critic, as round 1.
+    assert_eq!(count(&calls, Role::Planner), 3);
+    assert_eq!(count(&calls, Role::Critic), 1);
+    let briefs = briefs.lock().unwrap();
+    assert_eq!(briefs.len(), 3);
+    assert!(briefs[1].contains("no dependents section"), "{}", briefs[1]);
+    assert!(
+        briefs[2].contains("neither a test nor a reason"),
         "{}",
         briefs[2]
     );

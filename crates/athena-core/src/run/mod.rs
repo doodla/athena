@@ -30,18 +30,20 @@ use athena_context::briefs::{
     producer_prompt_with_plan, render_plan_section, verifier_brief_with_plan,
 };
 use athena_context::outputs::{
-    CriticOutput, CritiqueVerdictOutput, DeliverableActionOutput, PlanOutput, ProducerOutput,
-    SeverityOutput, VerdictOutput, critic_schema, plan_schema, producer_schema, verdict_schema,
+    CriticOutput, CritiqueVerdictOutput, DeliverableActionOutput, DependentKindOutput, PlanOutput,
+    ProducerOutput, SeverityOutput, VerdictOutput, critic_schema, plan_schema, producer_schema,
+    verdict_schema,
 };
 use athena_context::{
     CONTRACT, CRITIC_FRAME, Component, PLANNER_FRAME, PRODUCER_FRAME, VERIFIER_FRAME, compose,
 };
 use athena_data::records::{
     AcceptedBy, AnyRecord, Baseline, Build, Candidate, Caps, ChangeEntry, ChangeStatus, CheckRun,
-    Critique, CritiqueVerdict, DeliverableAction, Demonstration, Finding, FindingSource,
-    Invocation, InvocationOutcome, Job, JobKind, JobPlan, Outcome, OutcomeState, Owner, PinnedRepo,
-    PlanDecision, PlanFile, PlanRisk, PolicyViolation, ProducerReport, Reading, RejectedOption,
-    Replay, ReportedCheck, ReportedCriterion, Role, Score, Severity, Totals, Verdict, Verification,
+    Critique, CritiqueVerdict, DeliverableAction, Demonstration, DependentKind, Finding,
+    FindingSource, Invocation, InvocationOutcome, Job, JobKind, JobPlan, Outcome, OutcomeState,
+    Owner, PinnedRepo, PlanDecision, PlanDependent, PlanFile, PlanRisk, PolicyViolation,
+    ProducerReport, Reading, RejectedOption, Replay, ReportedCheck, ReportedCriterion, Role, Score,
+    Severity, Totals, Verdict, Verification,
 };
 use athena_data::{JobId, sha256_hex};
 use athena_gate::redact::Redactor;

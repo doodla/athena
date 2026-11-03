@@ -877,3 +877,241 @@ fn no_check_bypasses_refusing_check() {
     );
     assert!(inside.contains("refusing_check("));
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// The plan side: Athena's own checks on a plan (`plan_findings`) refuse a plan whose `dependents` section is
+// missing or incomplete. Plans do not exist at reading time, so these cases drive `plan_findings`, not
+// `refusing_check`. The rule refuses more plans than before (every plan without dependents); the higher
+// refusal rate is intended, and expected 15% of newly refused readings is the share the change declares.
+// Sources are the four earlier breakages, where a change left a reader of the changed behavior unexamined,
+// and job 20261102-063419-0beg, the retry of which added the section.
+
+mod plan_side {
+    use athena_agent::policy::Policy;
+    use athena_core::admission::{dependents_unnamed, plan_findings};
+    use athena_data::JobId;
+    use athena_data::records::{
+        Criterion, CriterionKind, Demonstration, DependentKind, Finding, FindingSource, JobPlan,
+        PlanDependent, Role, Severity,
+    };
+
+    /// What `plan_findings` must do with a plan case.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum PlanExpected {
+        Accept,
+        /// A major finding at `dependents` or `dependents, dependent N` whose summary holds the text.
+        Refuse(&'static str),
+    }
+
+    struct PlanCase {
+        id: &'static str,
+        source: &'static str,
+        dependents: Vec<PlanDependent>,
+        expected: PlanExpected,
+    }
+
+    fn entry(
+        name: &str,
+        dependent: &str,
+        test: Option<&str>,
+        reason: Option<&str>,
+    ) -> PlanDependent {
+        PlanDependent {
+            name: name.into(),
+            dependent: dependent.into(),
+            kind: DependentKind::Rule,
+            test: test.map(str::to_string),
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    fn plan_cases() -> Vec<PlanCase> {
+        let ci_reuse_source = "the CI-reuse breakage: a recorded check's exit code changed and the \
+            seen-commands rule in verify.rs stopped counting reused checks; rebuilt from job \
+            20261102-063419-0beg";
+        vec![
+            PlanCase {
+                id: "dependents-missing",
+                source: ci_reuse_source,
+                dependents: vec![],
+                expected: PlanExpected::Refuse("no dependents section"),
+            },
+            PlanCase {
+                id: "dependents-blank-name",
+                source: ci_reuse_source,
+                dependents: vec![entry("  ", "verify.rs judge", Some("a test"), None)],
+                expected: PlanExpected::Refuse("Dependent 1 has a blank name"),
+            },
+            PlanCase {
+                id: "dependents-no-test-or-reason",
+                source: ci_reuse_source,
+                dependents: vec![entry("recorded exit code", "verify.rs judge", None, None)],
+                expected: PlanExpected::Refuse("neither a test nor a reason"),
+            },
+            PlanCase {
+                id: "dependents-whitespace-only-test-and-reason",
+                source: ci_reuse_source,
+                dependents: vec![entry(
+                    "recorded exit code",
+                    "verify.rs judge",
+                    Some(" "),
+                    Some("\n"),
+                )],
+                expected: PlanExpected::Refuse("neither a test nor a reason"),
+            },
+            PlanCase {
+                id: "dependents-test-only",
+                source: ci_reuse_source,
+                dependents: vec![entry(
+                    "recorded exit code",
+                    "verify.rs judge",
+                    Some("cargo test -p athena-core verify"),
+                    None,
+                )],
+                expected: PlanExpected::Accept,
+            },
+            PlanCase {
+                id: "dependents-reason-only",
+                source: ci_reuse_source,
+                dependents: vec![entry(
+                    "recorded exit code",
+                    "status.rs",
+                    None,
+                    Some("it prints the code and never branches on it"),
+                )],
+                expected: PlanExpected::Accept,
+            },
+            PlanCase {
+                id: "dependents-complete-ci-reuse",
+                source: ci_reuse_source,
+                dependents: vec![entry(
+                    "recorded exit code",
+                    "verify.rs judge: the seen-commands filter counts a reused passing check",
+                    Some("cargo test -p athena-core verify"),
+                    None,
+                )],
+                expected: PlanExpected::Accept,
+            },
+        ]
+    }
+
+    fn plan_for(dependents: Vec<PlanDependent>) -> JobPlan {
+        JobPlan {
+            job: JobId::parse("20261031-000000-aaaa").unwrap(),
+            round: 1,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: 2,
+            approach: "Approach.".into(),
+            decisions: vec![],
+            files: vec![],
+            steps: vec![],
+            risks: vec![],
+            dependents,
+            demonstrations: vec![Demonstration {
+                criterion: 1,
+                method: "read".into(),
+                command: "cat x".into(),
+                observes: "it holds".into(),
+                fails_without: None,
+                seam: None,
+            }],
+            open_questions: vec![],
+            producer_section_sha256: "0".repeat(64),
+            resumed_from: None,
+        }
+    }
+
+    fn findings(dependents: Vec<PlanDependent>) -> Vec<Finding> {
+        let mut reading = super::base_reading("");
+        reading.acceptance_criteria = vec![Criterion {
+            text: "The plan lists its dependents".into(),
+            kind: CriterionKind::Content,
+        }];
+        let verifier = Policy {
+            role: Role::Verifier,
+            root: std::path::PathBuf::from("."),
+            commands: Default::default(),
+            writes: false,
+        };
+        plan_findings(&plan_for(dependents), &reading, &verifier, &|_| false)
+    }
+
+    /// The plan cases that fail their expectation, each as a line naming the case and its source.
+    fn plan_mismatches(cases: &[PlanCase]) -> Vec<String> {
+        let mut found = Vec::new();
+        for c in cases {
+            let got = findings(c.dependents.clone());
+            let ok = match c.expected {
+                PlanExpected::Accept => got.is_empty(),
+                PlanExpected::Refuse(text) => {
+                    got.len() == 1
+                        && got[0].severity == Severity::Major
+                        && got[0].source == FindingSource::Athena
+                        && got[0]
+                            .location
+                            .as_deref()
+                            .is_some_and(|l| l.starts_with("dependents"))
+                        && got[0].summary.contains(text)
+                }
+            };
+            if !ok {
+                found.push(format!(
+                    "{} ({}): expected {:?}, got {got:?}",
+                    c.id, c.source, c.expected
+                ));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn plan_cases_get_the_expected_outcome() {
+        let cases = plan_cases();
+        let ids: std::collections::BTreeSet<&str> = cases.iter().map(|c| c.id).collect();
+        assert_eq!(ids.len(), cases.len(), "plan case ids are unique");
+        assert!(
+            cases.iter().any(|c| c.expected == PlanExpected::Accept)
+                && cases
+                    .iter()
+                    .any(|c| matches!(c.expected, PlanExpected::Refuse(_))),
+            "the table holds accepted and refused plans"
+        );
+        let mismatches = plan_mismatches(&cases);
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    #[test]
+    fn a_plan_case_that_expects_the_wrong_outcome_is_reported() {
+        let wrong = vec![
+            PlanCase {
+                id: "missing-but-expected-accepted",
+                source: "test",
+                dependents: vec![],
+                expected: PlanExpected::Accept,
+            },
+            PlanCase {
+                id: "complete-but-expected-refused",
+                source: "test",
+                dependents: vec![entry("n", "d", Some("t"), None)],
+                expected: PlanExpected::Refuse("no dependents section"),
+            },
+        ];
+        assert_eq!(plan_mismatches(&wrong).len(), 2);
+    }
+
+    #[test]
+    fn the_complete_ci_reuse_case_names_the_rule_the_search_finds() {
+        let cases = plan_cases();
+        let complete = cases
+            .iter()
+            .find(|c| c.id == "dependents-complete-ci-reuse")
+            .unwrap();
+        let hits = vec!["crates/athena-core/src/verify.rs".to_string()];
+        assert!(dependents_unnamed(&complete.dependents, &hits).is_empty());
+        let test_only = cases
+            .iter()
+            .find(|c| c.id == "dependents-reason-only")
+            .unwrap();
+        assert_eq!(dependents_unnamed(&test_only.dependents, &hits), hits);
+    }
+}

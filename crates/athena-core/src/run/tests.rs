@@ -532,6 +532,10 @@ mod produce_and_verify_order_tests {
             "files": [{ "path": "README.md", "action": action, "purpose": "Describe the demo." }],
             "steps": ["Edit README.md."],
             "risks": [],
+            "dependents": [{
+                "name": "README.md", "dependent": "nothing reads the README", "kind": "code",
+                "test": null, "reason": "The demo README is documentation only."
+            }],
             "demonstrations": [{
                 "criterion": 1,
                 "method": "read the file",
