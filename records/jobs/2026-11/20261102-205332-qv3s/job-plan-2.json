@@ -1,0 +1,331 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261102-205332-qv3s",
+  "round": 2,
+  "at": "2026-11-03T05:58:46.270145592Z",
+  "invocation_seq": 8,
+  "approach": "Root cause: `resolve` turns a red CI run into a bare failed record, and `runs_from_record` builds the failed `test` CheckRun with empty `failed_tests` and `output_tail`; the verifier brief renders neither, so the verifier reruns the suite. Fix at that source. (1) ci_result.rs gets `FailureDetail {failed_tests, output_tail}` and a defaulted `CiSource::failure_detail(&CiRecord) -> Option<FailureDetail>`. (2) `CiBranchSource::fetch` remembers every failed `test (shard N)` job (id, name, conclusion in failure|timed_out|cancelled, the same set as `GhClient::failing_test`) from the jobs reply it already read. `failure_detail` reads each of those logs through `api_text` and hands them to one pure function, `detail_from_job_logs`. That function strips the GitHub timestamps and runs `checks::failed_test_names` on the shard output (the `<binary> <test>` form of a local run). It adds a header line `failing units: <package> <selector>; ...`, taken from the `== shard k/n: <package> <selector>` lines (xtask/src/shard.rs:317, println in main.rs:108), and then the last 200 lines. COMPLETENESS RULE (answers finding 2): there is no job cap. Names are recorded only if at least one log yields real names. When names exist and any failed shard job was unreadable, listed no tests, or timed out or was cancelled, the list also gets a marker that can never be on a base: `<job name> (log not read)`, `<job name> (no failing tests listed)` or `<job name> (did not finish)`. If more than 50 names are found, the first 50 are kept and `(list cut at 50)` is added. If no log yields names, `failed_tests` stays empty, which is today's check-name rule. Any fetch error gives `None` or markers, never an error or a pass. (3) `run_routed_with_record` calls `ci.failure_detail` only for a CI record that is not all-passed, redacts through a new required `Exec::redact` (SnapExec uses its Redactor; a redaction error drops the detail) and attaches the result to the failed `test` check. (4) `verify::check_result_view(&CheckRun)` fills the new view fields, `failed_tests`, `failing_units` (split off the header line) and `output_tail`, only when `reused && !passed`, so the briefs of local checks stay byte-identical. The verifier brief renders the names, the units, and the clipped, quoted tail. It also gives the instruction to run only those tests with `cargo test -p <crate> <name>` unless there is a reason to run more. It explains the name form: `<binary> <test>`, where the binary is the library crate (`athena_core`), an integration-test file, or `doc-tests <crate>`. The `failing units` line gives the `-p` package and selector (`--lib`, `--test <file>`, `--doc`), so the command reads `cargo test -p athena-core --lib <test>`. It also says that a name in parentheses means the list is incomplete and the whole unit or shard must be run. (5) The `is_pre_existing` doc comment in verify.rs is updated and the CHANGELOG entry carries the reader audit. Facts settled from the snapshot: xtask/src/shard.rs:316-327 runs `cargo test --locked -p <pkg> <selector>` once per unit and does not stop at a failure, so every unit prints its own `Running` line. ci.yml has no CARGO_TERM_COLOR (grep), but ANSI stripping is kept as a defensive step. fail-fast is off (ci.yml:345) and the matrix is 6 shards. run/verification.rs:64-93 builds VerifierInputs from check_runs without returning early on a failure. No refusal or matching rule of the reading kind is added or changed, so refusal_corpus has no case to map. The log parser is a data reader and is covered by the unit tests below.",
+  "decisions": [
+    {
+      "choice": "Carry the detail through a defaulted `CiSource::failure_detail(&CiRecord)` called from `run_routed_with_record`, not new fields on CiRun/CiRecord.",
+      "reason": "Only red reused runs need a log, so the green path makes no extra call, and no CiRun/CiRecord literal or persisted shape changes.",
+      "rejected": [
+        {
+          "option": "Add log fields to CiRun/CiRecord and fetch in `CiBranchSource::fetch`",
+          "why": "It fetches a log on every red poll and edits many literals across tests for no gain."
+        },
+        {
+          "option": "Fetch the log in run/mod.rs after routing",
+          "why": "The routed record would hold the data only after a second step, and the routing-level fake-Runner test could not show it."
+        }
+      ]
+    },
+    {
+      "choice": "Remember the failed shard jobs (id, name, conclusion) in a RefCell on `CiBranchSource`, keyed by the run address, filled in `fetch` from the jobs reply.",
+      "reason": "No extra runs/jobs round trips, and a record for another run returns `None`.",
+      "rejected": [
+        {
+          "option": "Re-list runs and jobs inside `failure_detail`",
+          "why": "Two more API calls per red run, and the run could change between calls."
+        }
+      ]
+    },
+    {
+      "choice": "Completeness first (finding 2): read the log of every failed shard job with no count cap. Add a marker name that never matches a baseline whenever names are recorded and a failed shard was unread, empty, timed out or cancelled, or the list was cut at 50. Record no names when no log yields any.",
+      "reason": "`is_pre_existing` accepts a check when every listed name also failed on the base. A silently incomplete list would hide a new failure in an unread shard and tell the verifier to run only the listed tests. The markers work like `(did not finish)` in checks.rs `Section::close_into`. Empty names keep today's check-name rule, so the comparison only gets stricter, never looser.",
+      "rejected": [
+        {
+          "option": "Read at most 3 logs and skip errors",
+          "why": "Records an incomplete list as complete, the exact hole the critic found."
+        },
+        {
+          "option": "Record no names when any log is missing",
+          "why": "Throws away real information the verifier needs; a marker keeps the names and flags the gap."
+        }
+      ]
+    },
+    {
+      "choice": "Use the conclusion set failure|timed_out|cancelled, as `GhClient::failing_test` does (client.rs:543-548). A timed-out or cancelled shard adds `<job> (did not finish)` even if its log gave names.",
+      "reason": "A cut-off shard can hide further failures, and the set matches the existing reader.",
+      "rejected": [
+        {
+          "option": "Only `failure` jobs",
+          "why": "Silently drops a timed-out shard, so the list looks complete when it is not."
+        }
+      ]
+    },
+    {
+      "choice": "Reuse `checks::failed_test_names` on the timestamp-stripped shard output. Strip only the stamp and one space, so the 4-space indent of the `failures:` list survives.",
+      "reason": "The names have the same `<binary> <test>` form as a local run, so baseline comparison compares like with like. Share the stamp-detection predicate with `failing_test_name`, but not that function, which trims lines.",
+      "rejected": [
+        {
+          "option": "A new ad hoc `failures:` parser in gh/client.rs",
+          "why": "A second format that would never match baseline names."
+        }
+      ]
+    },
+    {
+      "choice": "Make the name-to-command mapping explicit (finding 4): the header line `failing units: <package> <selector>; ...` goes on the first line of the recorded `output_tail`. `verify::check_result_view` splits it into `CheckResultView.failing_units`, and the brief explains the form and the `-p`/selector mapping.",
+      "reason": "A name such as `lifecycle some_test` or `doc-tests athena_core x` does not say which `-p` package or `--test` selector to use, but the shard `== shard k/n: <pkg> <selector>` line does. CheckRun gains no field, and the brief clip cannot cut the header off because it is split first.",
+      "rejected": [
+        {
+          "option": "Explain the form in the brief only",
+          "why": "The verifier would still guess the package and selector."
+        },
+        {
+          "option": "Add a CheckRun field",
+          "why": "Changes an athena-data record, which is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Redact in routing through a required `Exec::redact` (SnapExec implements it with its Redactor). A redaction error records no detail.",
+      "reason": "The log is data and the record is committed; the record must never hold raw text, including at the criterion-1 seam.",
+      "rejected": [
+        {
+          "option": "Redact in run/mod.rs after routing",
+          "why": "The routed record would hold raw text, and the guarantee would depend on the caller."
+        },
+        {
+          "option": "Default identity `redact`",
+          "why": "A future Exec could forget it and leak."
+        }
+      ]
+    },
+    {
+      "choice": "Fill the new `CheckResultView` fields only for `reused && !passed`, through `verify::check_result_view(&CheckRun)`. `CheckResultView` derives Default, so the other literals in verification.rs use `..Default::default()`.",
+      "reason": "The briefs of locally run failed checks stay byte-identical, and the function is the test seam for criterion 2.",
+      "rejected": [
+        {
+          "option": "Show the tail for every failed check",
+          "why": "Changes local briefs and tests beyond the request."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the one-line wiring edit in crates/athena-core/src/run/verification.rs (finding 1) and say so openly.",
+      "reason": "That file is the only place where CheckRuns become CheckResultViews, so the verifier cannot see the data without it. It is the 'verification brief' path that criterion 4 lists inside crates/athena-core, it is not governance, and the edit is small (the closure becomes a call to `check_result_view`, and three literals use `..Default::default()`).",
+      "rejected": [
+        {
+          "option": "Stuff names into `CheckRun.note`, which already reaches the view",
+          "why": "It cannot carry the log tail, and the note is shown in status and the ui line, so it would clutter them."
+        }
+      ]
+    },
+    {
+      "choice": "Update the doc comment of `is_pre_existing` in verify.rs and state the stricter comparison and why it is safe in the CHANGELOG (finding 3).",
+      "reason": "The comment lists 'a reused result' among the cases where the check-name rule stands. After this change a reused red check with names is compared test by test; the markers and the empty-names fallback mean the comparison can only get stricter than today's wholesale pass, and the verdict rules themselves are not edited.",
+      "rejected": [
+        {
+          "option": "Leave the comment",
+          "why": "It would contradict the code."
+        }
+      ]
+    },
+    {
+      "choice": "Record caps are 200 lines and 64 KiB after redaction, with 50 names plus the `(list cut at 50)` marker. The brief clips the tail to 60 lines and 6 KiB and lists at most 30 names. Attach the detail only to the failed check named `test`, and fetch logs only for `test (` shard jobs.",
+      "reason": "Bounded size in the committed record and the prompt; fmt and clippy log fetches are out of scope.",
+      "rejected": [
+        {
+          "option": "Fetch the log of every failed job",
+          "why": "Out of scope and costs more calls."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "action": "modify",
+      "purpose": "Add `FailureDetail` and the defaulted `CiSource::failure_detail(&CiRecord)`; fix the module doc line that says the record is never read by the verifier.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "purpose": "Add the stamp stripper (predicate shared with `failing_test_name`), the pure `detail_from_job_logs` (names via `checks::failed_test_names`, units header, tail, completeness markers, 50-name cut), and the failed-jobs RefCell on `CiBranchSource` filled in `fetch`. Implement `failure_detail` through `api_text`, degrading to `None` or markers.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/mod.rs",
+      "action": "modify",
+      "purpose": "Re-export the new helper if tests or other modules need it, as it does for `failing_test_name`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Add `with_failure_detail(CheckRun, &FailureDetail, redact)` with caps, the failing-units header constant, and unit tests including `log_entry` naming the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "purpose": "Add the required `Exec::redact`; `Paced` forwards `failure_detail` without pacing; `run_routed_with_record` fetches and attaches the detail for a not-all-passed CI record; update the test `Local` Exec and add routing tests (counting CiSource, erring redact).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "`SnapExec` implements `Exec::redact` with its Redactor.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add `check_result_view(&CheckRun)`, update the `is_pre_existing` doc comment, and add tests for reused red checks (subset, superset, marker, empty names).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Wiring only: the inline CheckResultView closure becomes `verify::check_result_view`; the three note literals use `..Default::default()`. Outside the listed deliverables but needed; see the decision.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Derive Default on `CheckResultView` and add `failed_tests`, `failing_units` and `output_tail`. Render the names, units and clipped, quoted tail, the name-form explanation, the incomplete-list warning, and the run-only-the-failing-tests instruction (only when names exist). Add brief tests and update the two existing literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Extend `CiRunner` (job ids, logs reply, Err mode, request log); add log-parser unit tests (stamped lines, indent kept, hyphenated hash, empty list, units header) and the criterion 1 and 3 tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add `CiReply::RedTest`, serve the shard job and its log before the `/jobs` branch, and add the end-to-end verifier-prompt test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "[Unreleased] entry: reused red CI runs give the verifier the failing test names and the log tail; root cause; the marker rule; the stricter comparison and why it is safe; the reader audit.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read checks.rs `log_entry`, reading.rs near the carried-check output, introspect.rs near `clip_tail(.., TAIL_CAP)`, and the `CiRecord` fields (run address) so the audit text is accurate. The shard log shape is settled: `== shard k/n: <pkg> <selector>` then one cargo run per unit, with no ANSI colour in ci.yml.",
+    "ci_result.rs: add `FailureDetail` and the defaulted `CiSource::failure_detail(&self, &CiRecord) -> Option<FailureDetail>`; update the module doc.",
+    "gh/client.rs: factor out the timestamp predicate shared with `failing_test_name` and keep that function's behavior and tests. Add `detail_from_job_logs(jobs: &[(name, conclusion, Option<String>)]) -> Option<FailureDetail>`. It strips stamps (keeping the indent) and ANSI escapes, finds names through `checks::failed_test_names` and units from the `== shard` lines, and takes the tail (last 200 lines, 64 KiB) behind a `failing units:` header. When no log gives names, it returns names empty. Otherwise it adds the markers `(log not read)`, `(no failing tests listed)` and `(did not finish)` per failed or timed-out shard job, and caps the names at 50 with `(list cut at 50)`. Add `failed_jobs: RefCell<Option<(run address, Vec<(id, name, conclusion)>)>>` to `CiBranchSource`, set in `fetch` from the jobs named `test (` with a conclusion of failure, timed_out or cancelled, and cleared otherwise. `failure_detail` matches the address, reads each job's log with `api_text` (HostOperation::ReadChecks), and passes Err as None to `detail_from_job_logs`. Export through gh/mod.rs if needed.",
+    "checks.rs: add `with_failure_detail` (applies names and tail to a `!passed` reused `test` CheckRun; a redact error returns the run unchanged) and the header-prefix constant. Add unit tests.",
+    "routing.rs: add `Exec::redact(&self, &str) -> Result<String>`; forward `failure_detail` in `Paced` (no sleep, no read count); in `run_routed_with_record`, when the CI record is not `all_passed()`, call `ci.failure_detail(&record)` and attach it to the failed `test` check. Update the test `Local` Exec and add the routing tests.",
+    "run/checks.rs: implement `Exec::redact` for `SnapExec` with `self.redactor.redact`.",
+    "briefs.rs: derive Default on `CheckResultView`, add the three fields, and render them under a failed check with names. Add the instruction paragraph, shown only when some check has names, the name-form and selector explanation, and the warning for names in parentheses. Update the two existing literals and add the brief tests, including a view without the new data rendering exactly as before.",
+    "verify.rs: add `check_result_view` (note, tests_ran or empty detail as today; names, units and tail only when `reused && !passed`, with the `failing units:` header split off the tail). Update the `is_pre_existing` doc comment. Use `check_result_view` in run/verification.rs and use `..Default::default()` in the three note literals. Add the verify.rs tests.",
+    "gh/tests.rs: extend `CiRunner` and add the log-parser tests and the criterion 1 and 3 tests (Err, no list, two shards with one Err, timed_out, over 50 names, green run, redaction error) with a stub `Exec`.",
+    "run/tests.rs: add `CiReply::RedTest`, serve the logs path before the `/jobs` branch, and add the end-to-end test asserting the verifier prompt, that no local check ran, and the check names. Confirm `verifier_prompts` is non-empty.",
+    "CHANGELOG.md: add the [Unreleased] entry (root cause, marker rule, stricter comparison and why it is safe, reader audit). Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked -p athena-core -p athena-context`. Grep each audited reader to confirm the claims."
+  ],
+  "risks": [
+    {
+      "risk": "A partly read set of shards is recorded as a complete list, so a new failure hides behind pre-existing names (finding 2).",
+      "mitigation": "Markers for unread, empty and timed-out shards, and for a cut list, never match a baseline. The criterion-3 test with two shards (one Err) and the verify.rs `is_pre_existing` assertion pin it."
+    },
+    {
+      "risk": "A log fetch error, redaction error or malformed log turns a red result into an error or a pass.",
+      "mitigation": "Every failure path gives None or markers, which keep today's failed record. `resolve` and its outcomes are not edited. Tests cover Err, no list and redaction error."
+    },
+    {
+      "risk": "Log text (secrets, large lines) reaches a committed record or the prompt.",
+      "mitigation": "Names and tail go through the Redactor before recording, with caps of 200 lines, 64 KiB and 50 names. The brief clips to 60 lines and 6 KiB and quotes the tail as data."
+    },
+    {
+      "risk": "Names do not match baseline names, so pre-existing failures are judged as new, or the reverse.",
+      "mitigation": "Reuse `failed_test_names` for the same `<binary> <test>` form. verify.rs tests cover subset, superset, marker and empty names."
+    },
+    {
+      "risk": "The verifier runs a wrong command from the `<binary> <test>` name (finding 4).",
+      "mitigation": "The units header gives the package and selector, and the brief explains the mapping. A test asserts the text."
+    },
+    {
+      "risk": "The fake in run/tests.rs matches `/jobs` before the logs path, so the logs request returns the jobs JSON.",
+      "mitigation": "Step 10 serves the logs path first. The existing `Red` reply makes no log call, so its tests are unchanged."
+    },
+    {
+      "risk": "A required `Exec::redact` or new view fields break other constructors.",
+      "mitigation": "Only two Exec impls and six `CheckResultView` literals exist (Grep). Default on the view and the compiler catch any miss."
+    },
+    {
+      "risk": "Stricter comparison for reused red checks fails a verdict that passed before (finding 3).",
+      "mitigation": "It is intended and the markers make it only stricter than a wholesale pass. The doc comment and CHANGELOG state it, and the verdict rules themselves are not edited."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New test `red_reused_run_records_failing_tests_and_log_tail` in gh/tests.rs. It calls the production `crate::routing::run_routed_with_record`, with the production `GhClient::new(&runner, ..).ci_source(CI_BRANCH)` as the `ci` argument. The route covers fmt, clippy and test, and a stub `Exec` records any call and implements `redact` by calling a real Redactor. The fake `gh::Runner` (the existing `CiRunner`, extended in step 9) answers the runs query with a red run for the SHA and answers the jobs query with failed `test (shard 1)`, whose id is 77, plus a green fmt and clippy. It answers `actions/jobs/77/logs` with timestamped cargo output: a `== shard 1/6: athena-core --lib` line, a `Running unittests ... (target/debug/deps/athena_core-abc)` line, an indented `failures:` list of two tests, and `test result: FAILED. 1 passed; 2 failed`. Guards and preconditions: the record is not all-passed and the `test` check failed. The test asserts that the `test` CheckRun has passed=false and reused. It asserts failed_tests == [\"athena_core tests::a\", \"athena_core tests::b\"] and that output_tail starts with `failing units: athena-core --lib` and ends with the last log line with no timestamps. It asserts fmt and clippy have empty names, the stub Exec ran nothing, and the returned record is Some.",
+      "command": "cargo test -p athena-core red_reused_run_records",
+      "observes": "The failed `test` check carries exactly the listed names and the log tail with the units header; no local check ran; fmt and clippy are untouched.",
+      "fails_without": "Without the `failure_detail` call and attach, failed_tests is empty and output_tail is \"\", so the equality and non-empty assertions fail. Without the log fetch, the fake is never asked for `actions/jobs/77/logs`.",
+      "seam": "Entry point `routing::run_routed_with_record` via `GhClient::ci_source`. The fake `gh::Runner` is injected through `GhClient::new(&runner, ..)`; `CiRunner` exists in gh/tests.rs and step 9 extends it with job ids, a logs reply and an Err mode. The stub `Exec` is a new test struct, and the production `Exec::redact` is added in step 5. The parsing, tail and marker logic is production code; the fake only returns canned text."
+    },
+    {
+      "criterion": 2,
+      "method": "Two tests. (a) In crates/athena-core/src/run/tests.rs, add `CiReply::RedTest` to the `CiReplies` fake: a failed `test (shard 0)` job with an id and a stamped log. The fake answers the `actions/jobs/<id>/logs` path before its `path.contains(\"/jobs\")` branch. Then `ci_reuse_run(Some(GITHUB), CiReply::RedTest)` drives `Athena::go` through `with_ci_source`, `ci_seam` and `check_seam`. It asserts that `run.verifier_prompts.last()` contains the failing names, a tail line, the failing-units line, `cargo test -p <crate> <name>`, the unless-there-is-a-reason-to-run-more sentence, and the explanation of the `<binary> <test>` form. It asserts no local check ran and that `run.checks()` carries the names. (b) In crates/athena-context/src/briefs.rs, a test calls `verifier_brief` with a CheckResultView that has failed_tests (one marker entry among them), failing_units and output_tail, and asserts the section, instruction, mapping text and incomplete-list warning. A second test with empty new fields asserts the brief is byte-identical to the old rendering and has no instruction. A verify.rs test calls `check_result_view` on a reused failed CheckRun and on a local failed CheckRun, and asserts the fields are filled only for the first.",
+      "command": "cargo test -p athena-context -p athena-core verifier",
+      "observes": "The verifier prompt shows the failing names, the units, the log tail and the run-only-the-failing-tests instruction for a reused red run, and nothing new for local runs.",
+      "fails_without": "Without the new view fields and the briefs.rs rendering, the prompt lacks the names and tail and the `contains` assertions fail. Without `check_result_view` filling the fields for reused failed checks, the end-to-end prompt lacks them.",
+      "seam": "Entry points `Athena::go` (via `ci_reuse_run`), `verify::check_result_view` (added in step 8) and `athena_context::briefs::verifier_brief`. Fakes: `ci_seam::install`, `check_seam::install` and the verifier script capturing `spec.user_prompt` all exist in run/tests.rs. The `RedTest` reply and the logs-path ordering are added in step 10. The verifier does run after a red check (run/verification.rs:64-93 does not return early), and the test asserts `verifier_prompts` is non-empty."
+    },
+    {
+      "criterion": 3,
+      "method": "Tests named `reused_red_degrades_*` in gh/tests.rs using the same fake Runner and `run_routed_with_record`: (a) the logs call returns Err for the only failed shard: `test` is failed and reused, failed_tests is empty, output_tail is empty, and there is no panic. (b) The log has no `failures:` list: failed with empty failed_tests (a tail may be recorded). (c) Two failed shards, shard 1 with names and shard 2's log returning Err: failed_tests holds shard 1's names plus `test (shard 2) (log not read)`. A timed_out shard adds `(did not finish)`. More than 50 names yields 50 plus `(list cut at 50)`. A verify.rs test, `reused_red_incomplete_list_is_not_pre_existing`, uses a Baseline that lists shard 1's names and asserts `is_pre_existing` is false for the check with the marker and true for the same names without it. (d) A green reused run: the fake records every request path and none contains `/logs`. A routing.rs fake CiSource whose `failure_detail` counts calls shows zero calls. (e) An Exec whose `redact` errs: the detail is dropped and the check stays plain failed.",
+      "command": "cargo test -p athena-core reused_red",
+      "observes": "An unreadable or list-less log leaves today's plain failed record. A partly read set of shards is flagged with a marker so it is never judged pre-existing. A green run makes no log fetch.",
+      "fails_without": "Without the degrade path, an Err from the log read would propagate or panic. Without the markers, case (c) would hold only shard 1's names, and the verify.rs assertion that the check is not pre-existing would fail. Without the `all_passed` guard, the counter in (d) would be above zero.",
+      "seam": "Entry point `run_routed_with_record`; `verify::is_pre_existing` for the baseline assertion. Fakes: the `gh::Runner` fake with an Err mode and multi-shard jobs (CiRunner extended in step 9), a counting CiSource in the routing.rs test module (extends the existing `Ci`; added in step 5), and the erring Exec test struct. They are injected through `GhClient::new` and the `ci` and `exec` arguments. The marker logic is production code in `detail_from_job_logs`; the fakes return only canned replies."
+    },
+    {
+      "criterion": 4,
+      "method": "After the producer finishes, inspect the diff paths.",
+      "command": "git diff --stat",
+      "observes": "Only crates/athena-core (ci_result.rs, gh/client.rs, gh/mod.rs, gh/tests.rs, checks.rs, routing.rs, run/checks.rs, run/tests.rs, verify.rs, and run/verification.rs, the one wiring file outside the deliverable list, justified above), crates/athena-context/src/briefs.rs and CHANGELOG.md appear. No data file, workflow, athena.toml or athena-data path.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the CHANGELOG.md [Unreleased] diff.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "An entry under [Unreleased] states that a reused red CI run now gives the verifier the failing test names and the log tail. It names the root cause (the red record carried no log data), explains the marker rule and the stricter test-by-test comparison, and includes the reader audit of criterion 6.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "The CHANGELOG entry and the producer's summary list each reader with a test or a one-line reason. The verifier checks each with Grep over crates/ for `output_tail|failed_tests|CheckResultView`. Readers. verify.rs `is_pre_existing`, `failure_split` and the judge: new tests (names all on the base stay pre-existing; one new name or a marker makes it the job's own failure; empty names keep the check-name rule), and the doc comment is updated. checks.rs `log_entry` and `failing_names`: a new unit test shows the ui line now names the failing tests of a reused red check. status.rs: only constructs CheckRun, never reads the fields (unaffected). reading.rs carried-check output: already clipped by `tail(.., CARRIED_CHECK_OUTPUT_BYTES)`, so a longer tail cannot grow it. introspect.rs: already `clip_tail(.., TAIL_CAP)`. run/send_back.rs: constructs only. athena-context outputs.rs and lib.rs: Grep finds no `output_tail` or `failed_tests` outside briefs.rs. athena-cli tests: lifecycle.rs asserts the local-run tail bound (local runs unchanged) and status_durations.rs only constructs. The producer re-confirms each claim by reading the line before writing it, and the briefs tests cover the verifier brief reader.",
+      "command": "cargo test -p athena-core is_pre_existing",
+      "observes": "The baseline-comparison tests for a reused red check with names, with a marker and with empty names pass. Grep matches the claimed read-only or construct-only behavior for each listed reader.",
+      "fails_without": "Without the new verify.rs tests, nothing pins that a reused red check with names is compared test by test. Before this change an empty-name reused red check on a base-red check was pre-existing wholesale.",
+      "seam": "Entry points `verify::is_pre_existing` and `verify::failure_split`. Fixtures are CheckRun and Baseline literals; the verify.rs test helpers `reused_from_ci` and the baseline builders exist (read at verify.rs tests). No fake is needed."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the existing verify and local-tail tests unchanged. No assertion is edited; the only edits are the two or three new fields on literals where the compiler needs them, and Default on CheckResultView.",
+      "command": "cargo test -p athena-core verify",
+      "observes": "Existing verify.rs baseline-comparison and verdict tests pass, and the checks.rs tests for local failed and passing tails pass. Local runs are untouched: `run_check` is not edited, and the view fields are filled only for reused failed checks.",
+      "fails_without": "If the change altered failed_tests handling for local runs, for example by always filling the view fields or by changing `is_pre_existing` for non-reused checks, these existing tests would fail.",
+      "seam": "Existing tests; no new seam."
+    }
+  ],
+  "open_questions": [
+    "Whether `CiRecord` exposes a run address usable as the RefCell key was not re-read in this round; the producer confirms the field name in ci_result.rs, and if there is none, keys on the SHA.",
+    "The run/verification.rs edit is outside the reading's deliverable list but inside the criterion-4 scope ('verification brief'); Athena should confirm that it accepts the wiring edit.",
+    "The exact 'did not finish' marker wording for a shard whose log has names but whose job timed out is a producer choice; it only has to differ from any base name."
+  ],
+  "producer_section_sha256": "3d5a8f2b48fd5496eb9cf7d9aab8820089c8bfb1ae32663793fbe136450f4b66"
+}

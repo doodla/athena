@@ -58,6 +58,10 @@ impl crate::routing::Exec for SnapExec<'_> {
             .extend(self.snapshot.restore_to(self.prepared)?);
         Ok(run)
     }
+
+    fn redact(&self, text: &str) -> Result<String> {
+        Ok(self.redactor.redact(text)?)
+    }
 }
 
 impl Athena {

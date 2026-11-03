@@ -9,6 +9,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- A reused red CI run now gives the verifier the names of the failing tests and the end of the failing job's
+  log. Root cause: `resolve` turned a red run into a bare failed record and `runs_from_record` built the failed
+  `test` check with no `failed_tests` and no `output_tail`, and the verifier brief showed neither, so the
+  verifier reran the whole suite to find one failing test and ran out of its budget with no verdict. Now
+  `run_routed_with_record` asks the CI source for `failure_detail` of a red record (a green record makes no
+  log call). The GitHub source reads the log of each failed `test (shard N)` job through the existing `gh`
+  client and records, on the failed `test` check, the names from cargo's `failures:` list (the same
+  `<binary> <test>` form a local run records) and the last 200 lines of the log, led by a `failing units:
+  <package> <selector>` line. Both are redacted before they are recorded, and the tail is capped as a local
+  failed check's is. The verifier brief lists the names and the quoted tail and tells the verifier to run only
+  those tests (`cargo test -p <crate> <name>`) unless it has a reason to run more. A log that cannot be read, a
+  failed redaction or a log with no `failures:` list leaves today's plain failed record. Incomplete lists are
+  marked: when names are recorded and a failed shard's log was unread, listed no test, or the shard timed out
+  or was cancelled, the list also holds `<job> (log not read)`, `<job> (no failing tests listed)` or `<job>
+  (did not finish)`, and a list over 50 names is cut with `(list cut at 50)`. No base has such a name, so a
+  partly read set of shards is never judged pre-existing and the brief says to run the whole shard. The
+  baseline comparison for a reused red check with names is therefore test by test, like a local one; it can
+  only be stricter than the old wholesale check-name rule, which still applies when no names are recorded. No
+  record type changes (`CheckRun` already had both fields). Readers of the check record and the brief:
+  `verify::is_pre_existing` and `failure_split` (new tests for names on the base, a new name, markers and empty
+  names; doc comment updated); `checks::log_entry` (new test: the ui line names the failing tests);
+  `verify::check_result_view` and the verifier brief (new tests; local checks render as before);
+  `status.rs`, `run/send_back.rs` and the `athena-cli` `status_durations` test only construct a `CheckRun`;
+  `reading.rs` clips the carried check output to `CARRIED_CHECK_OUTPUT_BYTES` and `introspect.rs` to
+  `TAIL_CAP`, so a longer tail cannot grow them; `athena-context` `outputs.rs` and `lib.rs` do not read either
+  field; the `athena-cli` `lifecycle` test bounds the tail of a locally run check, which is unchanged.
 - The writer build is removed before the checks free-disk check, and that check applies only just before a
   local check run. Root cause: `check_and_verify` measured the disk before the job's own producer build was
   freed and before the CI result was read, so the job's own build, or a CI result that would have stood in for
