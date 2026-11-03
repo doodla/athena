@@ -96,6 +96,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena drain` no longer ends with a false `repeated failure` when a landing adds a key or section to
+  `athena.toml` that the running build does not know. The job is recorded as landed, as before. Straight after
+  a landing the drain now reads `athena.toml` at the new head; if the running build cannot parse it, the run
+  ends with the new stop `reinstall needed` before another item starts, no failure is counted, and the report
+  has a note with the parse error that says to reinstall Athena (`./setup.sh`) and run `athena drain` again.
+  When the same landing also rebuilt and installed Athena, the run ends as `rebuilt` and carries on. A job that
+  does not land twice still ends as `repeated failure`. The stop is listed in `athena drain --help`. Root
+  cause: the running build's config schema rejects unknown fields, so the next item's read failed on the landed
+  file and was counted as the item's failure; the drain did not tell "the landed config is newer than this
+  build" from "the item failed".
 - `athena drain` now passes over a queued item whose line the scope guard has paused, before it reads the item,
   and goes on to the next item. It prints one line, `plan  <item> passed over: ...`, that names the line and
   says how to lift the pause and where the pause file is. The item is not a failed attempt, so it no longer

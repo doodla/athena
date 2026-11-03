@@ -259,6 +259,8 @@ and the page text passed the source check
 and installed (the steps of ./setup.sh); the new binary carries on with the remaining --budget and --job-limit, \
 so a run is not seen to end here
   rebuild failed    that rebuild failed; the build output is shown and the rest stays queued
+  reinstall needed  a job landed and its athena.toml needs a newer Athena than the one running (a new key, for \
+instance); the job is landed and not a failure; reinstall Athena (./setup.sh) and run the drain again
 
 Order: planning comes first. Every open request is fleshed out (goal, requirements-ladder rung, acceptance, \
 open questions, dependencies, the paths it touches) and all of them are planned together. Drain works the \
