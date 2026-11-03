@@ -92,6 +92,9 @@ struct Stub {
     /// When set, the line of this job is paused with this reason as soon as the job has been run once, as the
     /// scope guard's watcher does after a rejection.
     pause_on_run: Option<(&'static str, &'static str)>,
+    /// When set, the line of this item is paused with this reason as soon as its retry job (`<item>-retry`)
+    /// has been run, that is, by the item's second failed attempt.
+    pause_on_retry: Option<(&'static str, &'static str)>,
     /// Pauses that began during the drain.
     paused_now: RefCell<Vec<(String, String)>>,
     /// When set, the configuration cannot be read once a landing has happened, with this read error: the
@@ -209,6 +212,13 @@ impl Steps for Stub {
             self.paused_now
                 .borrow_mut()
                 .push((job.to_string(), why.to_string()));
+        }
+        if let Some((item, why)) = self.pause_on_retry
+            && job == format!("{item}-retry")
+        {
+            self.paused_now
+                .borrow_mut()
+                .push((item.to_string(), why.to_string()));
         }
         if self.needs_accepting.contains(&job) {
             return Run {
@@ -707,6 +717,109 @@ fn drain_passes_over_an_item_whose_line_is_paused_by_its_own_failed_attempt_with
     assert!(
         printed[0].1.starts_with("plan       x passed over:"),
         "{printed:?}"
+    );
+}
+
+#[test]
+fn drain_passes_over_an_item_whose_second_failure_pauses_its_line_and_runs_the_next_item() {
+    // a is rejected twice; the second failure is what pauses its line. That is not a repeated failure.
+    let stub = Stub {
+        items: vec!["a", "b"],
+        outcomes: RefCell::new(vec![
+            OutcomeState::Rejected,
+            OutcomeState::Rejected,
+            OutcomeState::Landed,
+        ]),
+        ratings: RefCell::new(vec![1]),
+        plan: vec![
+            planned("a", Ladder::Implementation, &["src/a.rs"], &[]),
+            planned("b", Ladder::Implementation, &["src/b.rs"], &[]),
+        ],
+        pause_on_retry: Some(("a", pause_text("a"))),
+        ..Stub::default()
+    };
+    let ui = Stamped::new(&stub);
+    let report = drain::drain(&stub, limits(9.0), &ui).unwrap();
+    assert_eq!(
+        stub.log(),
+        [
+            "read a",
+            "run a",
+            "reread a",
+            "run a-retry",
+            "read b",
+            "run b",
+            "land b",
+            "rate"
+        ]
+    );
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_ne!(report.stop, Stop::RepeatedFailure);
+    assert_eq!(report.failed_item, None);
+    assert_eq!(report.landed, 1);
+    assert_eq!(report.jobs.iter().filter(|j| j.item == "a").count(), 2);
+    // The item is recorded, once, with the pause reason: after its two runs and before b ran.
+    let text = display::drain(&report);
+    let printed = ui.lift_lines("a");
+    assert_eq!(printed.len(), 1, "{printed:?}");
+    assert_eq!(lift_mentions(&text, "a"), 0, "{text}");
+    let (runs_before, line) = &printed[0];
+    assert_eq!(*runs_before, 2, "printed after a's two runs, before b ran");
+    assert!(
+        line.starts_with("plan       a passed over: line a is paused"),
+        "{line}"
+    );
+    assert!(line.contains("To lift it: narrow the request"), "{line}");
+}
+
+#[test]
+fn drain_passes_over_an_item_whose_second_failure_pauses_its_line_and_holds_back_what_depends_on_it()
+ {
+    let stub = Stub {
+        items: vec!["a", "b", "c"],
+        outcomes: RefCell::new(vec![
+            OutcomeState::Rejected,
+            OutcomeState::Rejected,
+            OutcomeState::Landed,
+        ]),
+        ratings: RefCell::new(vec![1]),
+        plan: vec![
+            planned("a", Ladder::Implementation, &["src/a.rs"], &[]),
+            planned("b", Ladder::Implementation, &["src/b.rs"], &[]),
+            planned("c", Ladder::Implementation, &["src/c.rs"], &["a"]),
+        ],
+        pause_on_retry: Some(("a", pause_text("a"))),
+        ..Stub::default()
+    };
+    let ui = Stamped::new(&stub);
+    let report = drain::drain(&stub, limits(9.0), &ui).unwrap();
+    // c waits on a, which is passed over: c is neither read nor run.
+    assert_eq!(
+        stub.log(),
+        [
+            "read a",
+            "run a",
+            "reread a",
+            "run a-retry",
+            "read b",
+            "run b",
+            "land b",
+            "rate"
+        ]
+    );
+    assert_ne!(report.stop, Stop::RepeatedFailure);
+    assert_eq!(report.failed_item, None);
+    assert_eq!(report.landed, 1);
+    let lines = ui.lines.borrow();
+    let c: Vec<_> = lines
+        .iter()
+        .filter(|(_, l)| l.starts_with("plan       c passed over:"))
+        .collect();
+    assert_eq!(c.len(), 1, "{lines:?}");
+    assert!(
+        c[0].1
+            .contains("depends on a, which is held back: its line is paused"),
+        "{c:?}"
     );
 }
 
@@ -3712,8 +3825,10 @@ fn in_flight_row_goes_when_an_item_fails_twice() {
     let fx = Fixture::new();
     let mut first = Scenario::default();
     first.verdict = rejecting_verdict();
+    // A different criterion each time: two rejections of one criterion would pause the line, and a paused
+    // line is passed over, not failed.
     let mut second = Scenario::default();
-    second.verdict = rejecting_verdict();
+    second.verdict = rejecting_second_criterion();
     let watched = drain_watched(&fx, phased(first, second), |_| {});
     assert_eq!(watched.report.landed, 0);
     assert_eq!(
@@ -4354,11 +4469,12 @@ fn rejecting_second_criterion() -> serde_json::Value {
 }
 
 /// A drain over the real steps in which the one queued request is rejected twice, with the given verdicts, so
-/// its two attempts are on one line for the scope guard.
+/// its two attempts are on one line for the scope guard. The report is returned: the item is its failed item
+/// unless the second rejection paused the line.
 fn rejected_twice(
     first_verdict: serde_json::Value,
     second_verdict: serde_json::Value,
-) -> (Fixture, Athena, String) {
+) -> (Fixture, Athena, String, drain::Report) {
     let fx = Fixture::new();
     let mut first = Scenario::default();
     first.verdict = first_verdict;
@@ -4369,15 +4485,18 @@ fn rejected_twice(
     let lander = RecordingLander::default();
     let steps = real_steps_with(&athena, &lander, &Quiet);
     let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
-    assert_eq!(report.failed_item.as_deref(), Some(job.as_str()));
-    (fx, athena, job)
+    assert_eq!(report.landed, 0);
+    (fx, athena, job, report)
 }
 
 #[test]
 fn drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_reading_it() {
     use athena_core::scope_guard::{LineMark, pause_path};
     // Two rejections of one criterion: the scope guard pauses the line.
-    let (fx, athena, job) = rejected_twice(rejecting_verdict(), rejecting_verdict());
+    let (fx, athena, job, first) = rejected_twice(rejecting_verdict(), rejecting_verdict());
+    // The second rejection paused the line, so the item is passed over and the batch does not stop on it.
+    assert_eq!(first.failed_item, None);
+    assert_ne!(first.stop, Stop::RepeatedFailure);
     let file = pause_path(&athena.state, &job);
     assert!(file.exists(), "the line is paused");
     let mark: LineMark = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -4415,7 +4534,9 @@ fn drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_re
 fn drain_real_steps_do_not_hold_an_item_for_a_stored_pause_that_no_longer_holds() {
     use athena_core::scope_guard::{LineMark, flag_path, pause_path};
     // Two rejections of different criteria: the line is flagged, and the scope guard writes no pause.
-    let (_fx, athena, job) = rejected_twice(rejecting_verdict(), rejecting_second_criterion());
+    let (_fx, athena, job, first) =
+        rejected_twice(rejecting_verdict(), rejecting_second_criterion());
+    assert_eq!(first.failed_item.as_deref(), Some(job.as_str()));
     assert!(!pause_path(&athena.state, &job).exists());
     let flag: LineMark =
         serde_json::from_slice(&std::fs::read(flag_path(&athena.state, &job)).unwrap()).unwrap();
