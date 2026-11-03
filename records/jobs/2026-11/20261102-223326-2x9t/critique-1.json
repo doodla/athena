@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261102-223326-2x9t",
+  "round": 1,
+  "at": "2026-11-03T06:02:06.966525704Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "\"The item stays queued for a later run\" is asserted but not delivered: a later drain does not pick up an item whose attempt closed with an environment stop.",
+      "evidence": "The drain builds its items from steward::approved_work, steward::queued_work and steward::interrupted_work (drain.rs:3331-3352). queued_work keeps only jobs in state Queued or Proposed (steward.rs:359). interrupted_work keeps only jobs in state Dispatched (steward.rs:395). A job with an outcome record is JobState::Closed(Failed) (store.rs:118-122). So both the login-expired a-retry and a first-attempt stop on `a` are closed, and no later run lists them. disk::resumable_stop already marks these jobs as resumable, but no queue selection uses it (Grep: only run/mod.rs, scope_guard.rs and reading.rs call it). The plan's pass_over and note only affect this run's report. Open question 3 admits the real Steps::run path was not read. Fix: Make the persistent queue carry the item forward. For example, extend steward::interrupted_work (or add a sibling) to also list drained-channel jobs where disk::resumable_stop(state, reason) is true and no later request retries them, so the next drain retries them through ReadOf::Retry. Use the shared classifier for this; do not add a list. Add a steward test showing a job closed Failed with PRODUCER_AUTH is listed for the next run and a job closed Failed with 'checks failed' is not. Also add a drain-level assertion or report line saying a later run will retry the item. If you decide this is out of scope, say so explicitly and narrow the doc, CHANGELOG and criterion wording so they don't claim 'stays queued for a later run'.",
+      "location": "Plan Approach / Decision 2; crates/athena-core/src/steward.rs:353-417 (queued_work, interrupted_work); crates/athena-core/src/store.rs:114-135",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "In the criterion 1 demonstration, the `report.queued holds a` check is vacuous.",
+      "evidence": "report.queued is view.items with only the landed items removed. It holds `a` even when the run ends in Stop::RepeatedFailure naming `a`, so this assertion passes with or without the fix. Fix: Keep the assertions that do tell the two cases apart: stop != RepeatedFailure, failed_item None, the log reaching `run b`/`land b`, and the 'left queued' note for a. Either drop the report.queued claim as evidence, or replace it with a check on the persistent queue for the next run (see the major finding).",
+      "location": "Demonstrations, Criterion 1; crates/athena-cli/src/drain.rs:2889-2893",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Environment stops on the read path and the landing path still count as failures.",
+      "evidence": "The request says an attempt that ends in an environment stop (including network) must not count. The plan classifies only run.reason. A reader 401, or a landing that fails for a network reason, still reaches `failures += 1`. Fix: Apply the same is_environment_reason check to the reader's error, before returning RunStep::Failed with read:false, and to the not-landed reason where one is available. Or check whether those paths can carry an environment-prefixed reason and record the result in the report. Do not leave it as an unverified open question.",
+      "location": "Plan Open questions 1; drain.rs:1493-1497 (reader error → RunStep::Failed), drain.rs:1792-1797 (LandStep::NotLanded → failures += 1)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Note text is duplicated.",
+      "evidence": "Step 2 adds an 'item X is left queued' note in run_job. Step 3 adds a pass_over with 'environment stop: …' built from last_reason. Held and NeedsAccepting do the same, so this is consistent, but the two strings should match the docs. Fix: Keep one wording, and make the doc bullet quote it.",
+      "location": "Plan Steps 2-3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read drain.rs (run_job, attempts, finish, how the queue view is built), disk.rs (StopCause, is_environment_reason, resumable_stop) and steward.rs (queued_work, interrupted_work, repeated_failures). The in-run part of the plan is sound and goes in the right place. It reuses the shared classifier on run.reason, returns a non-failure step before `failures += 1`, and has a good drain test through the existing Stub seam that would fail without the change. The steward repeated_failures filter is a reasonable fix for a second reader of the count. One major gap remains: the request says the item \"stays queued for a later run\", but nothing in the plan makes that true. Every later drain builds its items from queued_work (Queued or Proposed only) and interrupted_work (Dispatched only). A job closed Failed with an environment reason is in neither, so after this change the item is passed over once and then silently dropped. The existing resumable_stop predicate is the natural, single-classifier way to bring it back. Smaller issues: one assertion in the demonstration (report.queued holds a) is vacuous, and environment stops on the read and landing paths are left unverified. Verdict: revise."
+}

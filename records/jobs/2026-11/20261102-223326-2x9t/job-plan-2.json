@@ -1,0 +1,222 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261102-223326-2x9t",
+  "round": 2,
+  "at": "2026-11-03T06:05:18.884132485Z",
+  "invocation_seq": 5,
+  "approach": "Two linked changes, both using the one classifier `athena_core::disk::is_environment_reason` / `resumable_stop`. (1) drain.rs: an attempt whose run reason, or whose reader error, is an environment stop ends the item with a new non-failure `ItemEnd::Environment(job)`. It is returned before `failures += 1`. The drain adds the item's last job to `tried` so the re-read queue cannot hand it back in the same run, and the next item runs. (2) steward.rs: `interrupted_work` also lists drained-channel jobs closed Failed with an environment reason (via `disk::resumable_stop`, no new list) that no later \"try again on\" request retries. A later drain therefore retries them through `ReadOf::Retry`, and \"stays queued for a later run\" is true in the records, not only in the report. `repeated_failures` skips environment-stop jobs. Landing failures are checked and left alone, with the reason recorded. display.rs needs no change.",
+  "decisions": [
+    {
+      "choice": "Classify with `athena_core::disk::is_environment_reason` on `run.reason` in `run_job`, and on the reader's error text on the read path. No list is added to athena-cli.",
+      "reason": "disk.rs is documented as the one place that says which closing reasons are environment stops. It also handles the older unprefixed 'the producer did not complete: ... 401' form. A new kind of stop is added there once and the drain follows.",
+      "rejected": [
+        {
+          "option": "Match 'environment:' or reason strings in drain.rs",
+          "why": "A second list. The request forbids it, and it would miss the unprefixed 401 form."
+        },
+        {
+          "option": "Add a field to `Run` or change the `Steps` trait",
+          "why": "Touches every stub in tests/drain.rs. The reason is already in `Run.reason` and `Read.error`."
+        }
+      ]
+    },
+    {
+      "choice": "On an environment stop the item ends for this run (`ItemEnd::Environment(job)`). It is not retried in the same run and is passed over like Held.",
+      "reason": "An immediate retry hits the same expired login or full disk, spends budget, and was the second 'failure'. The request says a later run.",
+      "rejected": [
+        {
+          "option": "Skip the count but retry in the same run",
+          "why": "Retries into the same fault and burns budget."
+        },
+        {
+          "option": "Stop the whole drain on an environment stop",
+          "why": "The request says the run goes on to the next item."
+        }
+      ]
+    },
+    {
+      "choice": "Make 'stays queued for a later run' true by extending `steward::interrupted_work` with `disk::resumable_stop(j.state(), reason)`. It keeps the existing drained-channel, not-running and not-already-retried filters. Add a doc line in drain.rs.",
+      "reason": "The drain builds items from approved_work, queued_work and interrupted_work. queued_work needs state Queued or Proposed. A job with an outcome record is Closed(Failed) (store.rs `state()`), so neither lists it today. `resumable_stop` already says which closed-failed jobs are resumable, and Dispatched, the case interrupted_work covers today, already returns true. The change reuses it, and a retried job is excluded by the existing `retried` set, so a-retry is listed once and `a` is not. The queue item has `interrupted: true`, so its first attempt is `athena retry`, which can resume from a kept candidate.",
+      "rejected": [
+        {
+          "option": "Narrow the docs and CHANGELOG to 'not counted' and say the job is closed",
+          "why": "The request says the item stays queued for a later run. Closed with no path back would drop work silently."
+        },
+        {
+          "option": "A new record or marker file for 'environment-stopped' items",
+          "why": "The records already hold the outcome reason. Brief and assumptions say no new record or data file."
+        },
+        {
+          "option": "Add a new function next to interrupted_work",
+          "why": "The drain's `queue()` would merge two lists and every caller needs both. One predicate change in the existing function is smaller."
+        }
+      ]
+    },
+    {
+      "choice": "Insert the environment-stopped job into `State.tried` in `finish`. `ItemEnd::Environment(job)` carries the job the attempt last touched.",
+      "reason": "The drain re-reads the queue after every wave (the `steps.queue()` call after `run(d, ...)`). With the persistent-queue change, a-retry now appears as a new item id and would be retried in the same run, again and again until the job limit. `tried` is what ends that loop.",
+      "rejected": [
+        {
+          "option": "Rely on `passed_over` only",
+          "why": "It only de-duplicates a log line; `batches_for` filters on `tried`."
+        }
+      ]
+    },
+    {
+      "choice": "Landing: leave `LandStep::NotLanded` counting as a failure. Record why in the report and the docs.",
+      "reason": "The job there has already passed and its text comes from the host or the PR report (`landing_from_report`, `recheck_after_rebase`), not from a closing reason. It never starts with 'environment:', so the shared classifier would never match it. Matching network words would be a second list. The existing test a_job_that_does_not_land_twice_still_ends_as_repeated_failure_when_the_config_is_readable keeps the behaviour.",
+      "rejected": [
+        {
+          "option": "Call `is_environment_reason` on the not-landed text",
+          "why": "Dead code: no landing text carries the prefix."
+        }
+      ]
+    },
+    {
+      "choice": "Change `steward::repeated_failures` to skip jobs whose outcome reason is an environment stop. Leave display.rs unchanged.",
+      "reason": "The count is a model input signal 'repeated failure'. Counting a login-expired job there is the same fault. display.rs only formats `Stop::RepeatedFailure` after the stop is set, and no new variant exists.",
+      "rejected": [
+        {
+          "option": "Only record why steward.rs is unchanged",
+          "why": "Leaves the same mislabel in the steward's input; the change is one extra check against the same classifier."
+        },
+        {
+          "option": "Edit display.rs",
+          "why": "Notes and pass-over lines already show the reason. There is nothing new to format."
+        }
+      ]
+    },
+    {
+      "choice": "One wording for the stop: a const in drain.rs, `LEFT_FOR_LATER = \"left queued for a later run: environment stop\"`. The run_job note is `item <id> is <LEFT_FOR_LATER>: <reason>` and the finish pass_over is `<LEFT_FOR_LATER>: <reason>`. The module doc quotes the phrase 'left queued for a later run'.",
+      "reason": "Answers the nit: the note and the pass-over cannot drift from each other or from the docs.",
+      "rejected": [
+        {
+          "option": "Different strings in run_job and finish, as Held does",
+          "why": "That was the duplicated wording the review flagged."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add the `LEFT_FOR_LATER` const, `RunStep::Environment(String)` and `ItemEnd::Environment(String)`. In `run_job`, test `is_environment_reason` on the reader error (before the `unread` check) and on `run.reason` in the final arm. In `attempts`, map the step to the end before `failures += 1`. In `finish`, insert the job into `tried` and `pass_over`. Update the module docs (Retry, interrupted-job, new bullet) and the `Item.interrupted` doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the `Stub` field `environment_stopped` with its `run`, `read` and `queue` branches. Add three `an_environment_stop...` tests. The two existing repeated-failure tests stay unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "purpose": "`interrupted_work` uses `disk::resumable_stop` on state and outcome reason (doc updated). `repeated_failures` skips environment-stop jobs (doc updated). Add tests for both.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "New bullet under [Unreleased] / Changed, as in criterion 5.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read drain.rs run_job (~1403-1565), attempts (~1709-1800), finish (~2330-2401) and the Stub in tests/drain.rs (41-296), and steward.rs interrupted_work (384) and repeated_failures (712) once more before editing.",
+    "drain.rs: add `const LEFT_FOR_LATER: &str = \"left queued for a later run: environment stop\"`. Add `RunStep::Environment(String)` and `ItemEnd::Environment(String)` with doc comments (not a failure, not retried in this run, the item stays queued, nothing else stops).",
+    "drain.rs run_job, read-path arm: after `self.push(line)` and before the `unread` check, if `error.as_deref().is_some_and(athena_core::disk::is_environment_reason)`, add `self.note(format!(\"item {} is {LEFT_FOR_LATER}: {}\", item.job, one_line(reason)))` and return `RunStep::Environment(read.job.clone().unwrap_or_else(|| item.job.clone()))`. In the final `other =>` arm, test `athena_core::disk::is_environment_reason(&run.reason)` first. Then set the outcome string and push the line as now. Add the same note and return `RunStep::Environment(job)`. The classifier is called on the reason; no string is written in athena-cli.",
+    "drain.rs attempts: add `RunStep::Environment(job) => { *last_job = job.clone(); return ItemEnd::Environment(job); }` before any `failures += 1`. finish: `ItemEnd::Environment(job) => { self.st().tried.insert(job); self.pass_over(&item.job, &format!(\"{LEFT_FOR_LATER}: {}\", self.last_reason(&item.job, \"the environment stopped the run\"))) }`. Check `work` and every other match on RunStep and ItemEnd compile.",
+    "drain.rs docs: Retry bullet (~line 160): an attempt ending in an environment stop does not count toward [`Stop::RepeatedFailure`]; the item is left queued for a later run. New bullet 'An environment stop is not a failure' next to the waiting-on-checks bullet: name `athena_core::disk::is_environment_reason` as the one classifier, cover run and reader errors, state that a later drain retries the item through `steward::interrupted_work`, and that a not-landed job still counts because its text comes from the host and never carries the prefix. Extend the 'An interrupted job is retried' bullet (~line 80) and the `Item.interrupted` doc (~line 310) with the environment-stopped case.",
+    "steward.rs: in `interrupted_work`, replace `j.state() != JobState::Dispatched` with `!crate::disk::resumable_stop(j.state(), j.outcome.as_ref().map(|o| o.reason.as_str()))`; keep the `running` and `retried` filters. Update the doc comment. In `repeated_failures`, make `ended_badly` also require `!crate::disk::is_environment_reason(&o.reason)`, and update the doc comment. Add tests in `mod tests` covering every case listed under criterion 6.",
+    "tests/drain.rs: add `environment_stopped: Vec<&'static str>` to `Stub` with a doc comment. `Stub::run` returns the PRODUCER_AUTH Failed run for listed jobs without consuming `outcomes`. `Stub::read` returns `error: Some(PRODUCER_AUTH...)` for a listed `reread` job (the reader-error variant uses a separate field `reader_environment_error` or the same list with a documented rule). `Stub::queue` lists a listed job as an `interrupted: true` item once `run <job>` is in the log. Add the three `an_environment_stop...` tests described under criterion 1.",
+    "CHANGELOG.md: add the bullet under [Unreleased] / ### Changed as described under criterion 5.",
+    "Run `cargo test -p athena-cli --test drain` and `cargo test -p athena-core --lib steward::tests`. The Athena checks (fmt, clippy -D warnings, test) run afterwards and are not an acceptance criterion.",
+    "Final report: list the readers with a test or reason each (drain.rs attempts; drain.rs finish and Stop label; display.rs drain(), unchanged; steward.rs repeated_failures and interrupted_work, changed; tests/job_plan.rs, names the variant only). Also state the landing-path finding, the reader-path check and the backlog effect."
+  ],
+  "risks": [
+    {
+      "risk": "A persistent fault (an expired login) makes the drain walk the whole queue and fail each item once per run.",
+      "mitigation": "Each item gets one attempt per run and is not retried in it. The job limit and the budget bound the run, and the guard in `run_job` stops further starts. The docs say so."
+    },
+    {
+      "risk": "The same-run requeue loop: the re-read queue lists the closed job (a-retry) as a new item.",
+      "mitigation": "`finish` inserts the job into `tried`, and the drain test's `queue()` re-lists it and asserts one run."
+    },
+    {
+      "risk": "A work failure taken for an environment stop (the classifier accepts any 'environment:' prefix).",
+      "mitigation": "The classifier is applied only to the reason of a run that did not pass and was not needs-accepting or held. The existing tests with 'ended rejected' and 'checks failed' still expect RepeatedFailure."
+    },
+    {
+      "risk": "The `interrupted_work` change widens what the drain picks up (see open question 2).",
+      "mitigation": "It uses only `resumable_stop`, the same predicate `athena retry` uses. Dispatched jobs already behave this way. Steward tests pin the listed and unlisted cases. If a reviewer rejects it, the drain-side change stands on its own with the docs narrowed."
+    },
+    {
+      "risk": "The new `Stub` field breaks the many tests that build `Stub`.",
+      "mitigation": "`Stub` derives Default and the field defaults to empty; tests with their own `Steps` impls are untouched."
+    },
+    {
+      "risk": "Adding match arms for the two new variants breaks the build elsewhere.",
+      "mitigation": "Grep for `ItemEnd::` and `RunStep::` in drain.rs; `finish` and `attempts` are the only matches (lines ~2358-2399 and ~1746-1779)."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Drive the real drain loop over a scripted world. Items a and b; outcomes [Rejected, Landed x7]; `environment_stopped: [\"a-retry\"]`. The stub run for a-retry returns `Run{outcome: Some(Failed), reason: format!(\"{PRODUCER_AUTH}: 401\"), cost 0.5}` without consuming `outcomes`. Assertions: `report.stop != Stop::RepeatedFailure` and `report.failed_item.is_none()`. The log holds `run a`, `reread a`, `run a-retry` exactly once, no `reread a-retry`, then `read b`, `run b`, `land b`. `report.landed == 1`. A note contains `left queued for a later run` and the PRODUCER_AUTH text. The a-retry job line carries the reason. Two sibling tests: (i) the stop on the first attempt of a (item a ends, b still runs); (ii) the stub `read` of the retry returns `error: Some(PRODUCER_AUTH...)`, same expectations. The earlier `report.queued holds a` check is dropped because it also passes with the bug; the distinguishing checks are the stop, failed_item, the log and the note.",
+      "command": "cargo test -p athena-cli --test drain an_environment_stop",
+      "observes": "The run does not end as repeated failure and goes on to b, which it lands. a-retry is run once in this run (no second attempt and no same-run requeue), and the report says it is left queued for a later run. The first-attempt and reader-error variants pass the same way.",
+      "fails_without": "Without the Environment step, the second attempt counts as failure 2, `ItemEnd::Failed` sets `Stop::RepeatedFailure` naming a, and the stop assertion fails along with `read b` / `run b` / `land b` missing from the log. Without the `tried` insert, the stub's requeued a-retry is run a second time and the 'exactly one run a-retry' assertion fails.",
+      "seam": "Production entry point `athena_cli::drain::drain(&stub, limits(5.0), &Quiet)`. Its guards are `stop_requested`, the budget, `paused` and the job limit. The fake is `Stub`, which implements `Steps` in crates/athena-cli/tests/drain.rs and is passed as the first argument. It exists today. Step 5 adds one field, `environment_stopped: Vec<&'static str>`, and a `Stub::run` branch that only scripts the reason. The same field makes `Stub::queue` list a job once its `run` is in the log, as an `interrupted: true` item, which stands in for the real queue listing the closed job. The classification, the item end and the `tried` handling under test stay in drain.rs."
+    },
+    {
+      "criterion": 2,
+      "method": "Run the two existing tests unchanged. Their reasons are 'ended rejected' (twice) and the second test's passed job that is not landed twice ('checks failed'). Neither is an environment reason, so both must still end with RepeatedFailure naming a.",
+      "command": "cargo test -p athena-cli --test drain the_same_item_failing_twice_is_a_repeated_failure_naming_the_item",
+      "observes": "The test passes. Two real failures still stop the run with item a named. A second invocation with the filter `a_job_that_does_not_land_twice_still_ends_as_repeated_failure_when_the_config_is_readable` shows the landing path still counts.",
+      "fails_without": "If every failure were classed as an environment stop, or the failure count were dropped, Stop::RepeatedFailure would not appear and the assertion on `report.stop` and `failed_item` would fail.",
+      "seam": "Entry point `drain::drain` with the existing `Stub`; both tests exist today and are not edited. The new `environment_stopped` field defaults to empty."
+    },
+    {
+      "criterion": 3,
+      "method": "Grep. In crates/athena-cli/src/drain.rs there must be calls to `athena_core::disk::is_environment_reason` in `run_job` (run reason and reader error) and none to a locally written list. Grep non-test athena-cli sources for the strings 'environment:', 'login expired', 'usage limit' and 'PRODUCER_AUTH' as string literals. The only hit allowed is the existing `athena_core::disk::LOW_DISK` use and doc text. The steward change also calls `crate::disk::is_environment_reason` and `disk::resumable_stop`.",
+      "command": "Grep pattern `is_environment_reason|resumable_stop` in crates/athena-cli/src/drain.rs and crates/athena-core/src/steward.rs; Grep pattern `\"[^\"]*(environment:|login expired|usage limit)` in crates/athena-cli/src with glob `*.rs` excluding tests",
+      "observes": "Calls to the shared classifier in drain.rs and steward.rs, and no new reason-string literal in athena-cli.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Read the module docs. The Retry bullet and a new bullet 'An environment stop is not a failure' say: an attempt that ends in an environment stop (decided by `athena_core::disk::is_environment_reason`) does not count toward `Stop::RepeatedFailure`; the item is 'left queued for a later run' (quoting the const's phrase), the run goes on, and a later drain retries it because `steward::interrupted_work` lists it. The bullet also says a not-landed job still counts, and why. The 'An interrupted job is retried' bullet gains the environment-stopped case.",
+      "command": "Grep pattern `environment stop|left queued for a later run` in crates/athena-cli/src/drain.rs",
+      "observes": "The `//!` docs carry both statements: not counted toward Stop::RepeatedFailure and the item stays queued, with the persistent-queue sentence.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the new bullet under `## [Unreleased]` / `### Changed`. It names login expired, usage limit, low disk and a check timeout, and any other `environment:`-prefixed reason (a network stop counts when the classifier gives it that prefix). It says these no longer count toward the drain's repeated-failure rule, that the item is left queued and retried by a later drain, and that the steward's repeated-failure count skips them. It gives the root cause (a failed attempt counted whatever its reason) and one rejected alternative.",
+      "command": "Grep pattern `repeated-failure` in CHANGELOG.md",
+      "observes": "A new bullet in Unreleased saying environment stops no longer count toward the drain's repeated-failure rule.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Steward tests in `mod tests` of steward.rs on `Records::default()` filled with `JobRecords{id, request: Some(Request{channel, text, received_at,..}), outcome: Some(Outcome{state, reason,..})}`. (a) `repeated_failures`: one Rejected plus one Failed with reason PRODUCER_AUTH in one class_of_work gives an empty map; one Rejected plus one Failed with 'checks failed' gives one group of two. (b) `interrupted_work`: a 'cli' job closed Failed with PRODUCER_AUTH is listed; the same with 'checks failed' is not; a Rejected job is not; a job closed Failed with PRODUCER_AUTH that a later request 'try again on <id>' retries is not listed (the retry itself, if it also failed for the environment, is); a job on another channel is not listed; the existing Dispatched case still is. The final report lists every reader: drain.rs `attempts` (new drain tests plus the two existing tests); drain.rs `finish` and the Stop label; display.rs `drain()` formatting Stop::RepeatedFailure (read only after the stop is set, covered by the existing display assertion 'repeated failure: item a failed twice', unchanged because there is no new variant); steward.rs `repeated_failures` (changed, tests above); steward.rs `interrupted_work` (changed, tests above); tests/job_plan.rs (names the variant only). It also states the landing and reader-path findings.",
+      "command": "cargo test -p athena-core --lib steward::tests",
+      "observes": "The steward tests pass: environment-stop jobs are not counted as repeated failures, and they are listed for the next drain while work failures are not.",
+      "fails_without": "Without the `repeated_failures` filter the login-expired job is counted and the class shows two jobs, so the empty-map assertion fails. Without the `interrupted_work` change the closed login-expired job is not listed, so the 'listed for the next run' assertion fails.",
+      "seam": "Entry points `athena_core::steward::repeated_failures(&Records)` and `athena_core::steward::interrupted_work(&Records, &dyn Fn(&str)->bool)`. Fixture: a `Records` built in the test, like the existing `records_with_job` helper at steward.rs ~1600; `running` is a closure returning false. No process is injected. Step 6 adds the tests and helper."
+    }
+  ],
+  "open_questions": [
+    "Do the real reader errors carry the 'environment:' prefix or the 401 form? `producer_stop_reason` is called only in run/producer.rs (line 208), and I did not read the reader's error text. The reader-path check is therefore correct but may rarely fire; the drain test uses a scripted error. If real reader errors never match, a follow-up should route them through `producer_stop_reason` (in athena-core, outside this change).",
+    "Backlog on first use: jobs closed Failed with an environment reason before this change, on the 'cli' or 'steward' channel and not retried, become drain work. 'cli' is also the channel of plain `athena ask`, and there is no way to dismiss a closed job. Drain limits, budget and the scope-guard pause bound the effect. The producer should keep the rule as stated; a human should decide whether an age limit is wanted.",
+    "'Network' has no cause of its own in `StopCause`; only reasons with the 'environment:' prefix, low disk, a check timeout and the 401/429 forms count. Changing the classifier is out of scope, so a network stop is covered only when its closing reason carries the prefix.",
+    "Whether the real `Steps::run` returns the closing reason of an environment-stopped job in `Run.reason`: drain.rs:1515 sets `line.reason` from it, and `go_with_stages` returns `f.reason` from the finished outcome, but I did not read the producer-stop path end to end."
+  ],
+  "producer_section_sha256": "64b13ee3d23858c2e8295d7f9e3ac65ad7c62ff29804e0a20edfa4b72ea089ce"
+}
