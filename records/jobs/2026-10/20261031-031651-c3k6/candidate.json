@@ -1,0 +1,163 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261031-031651-c3k6",
+  "base_commit": "982d173133abb5c9d8bc1e310572c91479206b3e",
+  "base_fingerprint": "sha256:6dec6fb220089f97c839547dd9afd15c3797b8ca76daa423dbbb6ed78dc1b3b7",
+  "previous_job": "20261103-123447-c3fa",
+  "candidate_commit": "66fbf9c380106deee25f23ebc540e4825a46d9ef",
+  "candidate_tree": "1f69e31b571333ace27c87a602f0fdbb858a8e5b",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 301668
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 177834
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 58831
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23572
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 125503
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 47752
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32539
+    }
+  ],
+  "fingerprint": "sha256:9245990b1a51433e19c1cfa35a187274d3c4553af8a95703e47a05329c916bb8",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: `plan_findings` (crates/athena-core/src/admission.rs), the check Athena runs before every critic call, accepted any open question. Questions that reading the code settles, such as whether the `[parallel] max_concurrency` path reaches landing, went to the critic and used its rounds. The planner brief never told the planner to settle them by reading code. Fix at that gate: a new `open_questions_findings`, called from `plan_findings`. A question that does not begin `User:` or `Host:` is a Major Athena finding at 'open questions'. So is a prefixed question whose own text says the code answers it. A prefixed question that cites a path is allowed. The existing mechanical loop in `planning_round` already sends a Major Athena finding back to the planner with no critic call and no round used, so there is no control-flow change (planning.rs has a comment-only edit). The planner brief gains `OPEN_QUESTION_RULE`: settle code questions by reading and cite file and line; open only `User:`/`Host:` questions; list every existing caller and mode that reaches a changed function. That last part is prose only, because the completeness of a search cannot be checked without the repository. Docs and CHANGELOG describe the rule and the \"expected 5% of newly refused plans (the reading's estimate, not a measurement)\" figure with the intended higher refusal rate. Tests added in admission.rs, briefs.rs, run/tests.rs and a plan-side table in refusal_corpus.rs. The full `cargo test --locked` finished in the background with exit code 0.",
+    "files": [
+      "crates/athena-core/src/admission.rs",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/run/planning.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "crates/athena-core/tests/refusal_corpus.rs",
+      "docs/design/job-planning.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core admission",
+        "result": "pass",
+        "note": "23 passed, including the three new open-question tests"
+      },
+      {
+        "command": "cargo test -p athena-core a_plan_with_an_unaddressed",
+        "result": "pass",
+        "note": "run-level test: the critic's first prompt is round 1, with no critic call between the two planner calls"
+      },
+      {
+        "command": "cargo test -p athena-core --test refusal_corpus",
+        "result": "pass",
+        "note": "11 passed, including open_question_cases_get_the_expected_outcome"
+      },
+      {
+        "command": "cargo test -p athena-context",
+        "result": "pass",
+        "note": "100 passed, including the new wording test and the planner budget test"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "boundary word scan, 17 passed"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran in the background after the 1200s foreground limit; it completed with exit code 0. I read the exit code, not the output."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "The change description names the root cause: plan_findings in crates/athena-core/src/admission.rs let code-answerable open questions through to the critic, and the planner brief did not require settling them by reading code; Grep finds the doc comment for the new rule in admission.rs.",
+        "status": "met",
+        "evidence": "The doc comment on `open_questions_findings` in admission.rs starts 'Root cause it addresses: `plan_findings` let code-answerable open questions through to the critic ... the planner brief did not require ...'. The CHANGELOG entry and docs/design/job-planning.md say the same."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core admission`: a new test builds a plan whose open_questions contains a question citing a crates/ path (e.g. whether `crates/athena-cli/src/main.rs` passes max_concurrency into landing) and asserts plan_findings returns a Major finding located at open questions naming the question; the test fails on the base commit and passes with the change.",
+        "status": "met",
+        "evidence": "`an_unaddressed_open_question_is_a_major_finding_naming_it` passes in `cargo test -p athena-core admission`. It asserts Major, Athena source, location 'open questions' and the question text in the summary. Its questions include the crates/athena-cli/src/main.rs one and the two path-free wordings. On the base commit `plan_findings` has no open-question rule, so it returns no such finding and the assertion fails; I did not run the base commit."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core admission`: a new test shows a plan whose open question is a user decision naming no code path produces no open-question finding, and a plan with no open questions is unchanged, so the rule is not a blanket refusal.",
+        "status": "met",
+        "evidence": "`a_user_or_host_question_and_an_empty_list_are_not_refused` passes. User/Host questions give no finding, including one citing a refusal_corpus.rs path, a bold `**User:**` and a lower-case prefix. An empty list gives the same findings as before."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core run`: a planning test shows a plan with a code-answerable open question is sent back to the planner without a critic call (mechanical pass), not counted as a critic round.",
+        "status": "met",
+        "evidence": "`a_plan_with_an_unaddressed_open_question_is_revised_before_the_critic` passes (run via `cargo test -p athena-core a_plan_with_an_unaddressed`). The call order is Reader, Planner, Planner, Critic, Producer, Verifier. Planner prompt 2 carries 'has no addressee', and critic prompt 1 says 'Plan under review (round 1)'."
+      },
+      {
+        "criterion": "The planner brief in crates/athena-context/src/briefs.rs tells the planner to settle questions answerable from code by reading it and citing file and line, and to list every existing caller and mode that reaches a changed function; docs/design/job-planning.md and CHANGELOG.md describe the new rule.",
+        "status": "met",
+        "evidence": "`OPEN_QUESTION_RULE` is appended to the Report section. `planner_brief_tells_the_planner_to_settle_code_questions_by_reading` passes in `cargo test -p athena-context`. The job-planning.md planner bullet and a new paragraph, and a CHANGELOG Unreleased/Added entry, describe the rule."
+      },
+      {
+        "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`: all pass, including prompt token budget tests for the planner set.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran fmt --check and clippy: both pass. `cargo test -p athena-context` passes with `planner_and_critic_frames_are_short_and_fit_the_budgets`. The full `cargo test --locked` finished in the background with exit code 0."
+      },
+      {
+        "criterion": "The change refuses more plans: expected 5% of newly refused plans, and the higher refusal rate is intended because those plans spent critic rounds on questions code could answer.",
+        "status": "met",
+        "evidence": "The doc comment on `open_questions_findings`, the job-planning.md paragraph, the CHANGELOG entry and the refusal_corpus.rs table comment each say: expected 5% of newly refused plans (the reading's estimate, not a measurement), and the higher refusal rate is intended."
+      }
+    ],
+    "open_issues": [
+      "crates/athena-core/tests/refusal_corpus.rs is not a listed deliverable. I changed it, as the plan says, so the new matching rule has corpus cases. This is the accepted minor finding.",
+      "The `User:`/`Host:` prefix is a declaration, not proof. A code question mislabelled `User:` passes unless it uses one of the code-answering phrases; the critic still reviews open questions.",
+      "The original question text of the two failed jobs was not available (records/ is absent). The corpus cases are labelled synthetic."
+    ],
+    "mistakes": [
+      "My first CHANGELOG edit failed because '### Added' appears 19 times; I retried with the '## [Unreleased]' heading included.",
+      "I first filtered the planning test as `run::tests::a_plan_with_an_unaddressed`, which matched 0 tests; I reran it by bare name."
+    ],
+    "learnings": [
+      "Test modules under crates/athena-core/src/run/tests.rs sit in nested modules, so a test filter must be the bare test name (for example `a_plan_with_an_unaddressed`), not `run::tests::<name>`.",
+      "`cargo fmt --all` rewrites files, so files read before it must be re-read before editing.",
+      "A full `cargo test --locked` took more than 20 minutes here in a cold target dir and went to the background at the 1200s foreground limit."
+    ],
+    "desires": [
+      "A way to run the full test suite within the foreground time limit, or a smaller documented subset."
+    ]
+  }
+}

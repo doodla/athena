@@ -66,7 +66,13 @@ read-only snapshot of the prediction commit with the reader's grant (Read, Grep,
   breaks it unless the plan names that rule);
 - one demonstration per acceptance criterion: the method, the command or test, what it observes, and
   `fails_without` (what would fail if the behavior were missing);
-- open questions.
+- open questions: only what the code cannot show, each beginning `User:` (a decision for the user) or `Host:`
+  (a fact about the host). The planner settles every other question by reading the code and cites file and
+  line. For a change to a function or core flow it also lists every existing caller and mode that reaches it
+  (for example the `[parallel] max_concurrency` path into landing) and each state it reads, including records
+  and job state, each with a test or reason in `dependents`. That listing is prose only, in the planner
+  brief: whether a search found every caller cannot be checked without the repository, so Athena checks only
+  the shape of `dependents`.
 
 **Athena's own checks run first, at no model cost (design).** Each problem is a finding with source `athena`:
 every criterion has exactly one demonstration; every behavior demonstration has `fails_without` and a command
@@ -80,7 +86,22 @@ the list covers what a search turns up is a replay test for the CI-reuse case
 (`ci_reuse_replay_the_seen_commands_filter_turns_up_in_a_search_and_must_be_named` in `admission.rs`, with the
 pure helper `dependents_unnamed`) and a prompt rule, not a production check. A plan record written before the
 field existed has no `dependents`; it still parses and is not re-checked. The refusal is intended to refuse
-more plans than before, every plan without the section. A major finding sends the plan back to the
+more plans than before, every plan without the section.
+
+The open-questions rule (`admission::open_questions_findings`, called from `plan_findings`) is a major finding
+at location `open questions` for a question that does not begin `User:` or `Host:` (leading whitespace, `*`,
+`_` and backticks and letter case are ignored, so `Username:` does not match), and for a prefixed question
+whose own text says the code answers it ("by reading", "in the code", "does the code" and similar). A
+prefixed question may cite a path: a scope question about a file stays allowed. Root cause: `plan_findings`
+let questions that reading the code settles through to the critic (whether the `[parallel] max_concurrency`
+path reaches landing, what old job records look like on the landing branch), so critic rounds went to them
+and two jobs stopped at the round cap; the planner brief did not require settling them by reading. The
+prefix is a declaration, not proof: a code question labelled `User:` is still for the critic to catch. The
+rule refuses more plans: expected 5% of newly refused plans (the reading's estimate, not a measurement), and
+the higher refusal rate is intended, because those plans spent critic rounds on questions code could answer.
+Cases are in the `plan_side` table of `crates/athena-core/tests/refusal_corpus.rs`.
+
+A major finding sends the plan back to the
 planner with no critic call and without using a round, up to two times per round (the revisions that follow
 are the planner's, the critic sees only the plan that passes). A plan that still breaks a rule after the
 second revision stops the job with those findings.

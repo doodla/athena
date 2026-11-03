@@ -1099,6 +1099,138 @@ mod plan_side {
         assert_eq!(plan_mismatches(&wrong).len(), 2);
     }
 
+    // The open-questions rule: only a `User:` or `Host:` question stays open, and one that says the code
+    // answers it is refused. It refuses more plans; expected 5% of newly refused plans (the reading's
+    // estimate, not a measurement); the higher refusal rate is intended, because those plans spent critic
+    // rounds on questions code could answer. The records of the failed jobs are not in the snapshot, so the
+    // reworded cases are synthetic: a paraphrase of the failure class's wording, not the jobs' own text.
+
+    struct OpenQuestionCase {
+        id: &'static str,
+        source: &'static str,
+        question: &'static str,
+        expected: PlanExpected,
+    }
+
+    fn open_question_cases() -> Vec<OpenQuestionCase> {
+        let landing = "synthetic: paraphrase of the failure class in the request (a plan left \
+            questions about the landing path open); jobs 20261030-013555-f5qm and 20261031-030119-tw3v";
+        let made_up = "synthetic: written for this corpus, no job behind it";
+        vec![
+            OpenQuestionCase {
+                id: "question-max-concurrency-into-landing",
+                source: landing,
+                question: "Does the [parallel] max_concurrency path reach landing?",
+                expected: PlanExpected::Refuse("has no addressee"),
+            },
+            OpenQuestionCase {
+                id: "question-old-job-records-on-the-landing-branch",
+                source: landing,
+                question: "What do old job records look like on the landing branch?",
+                expected: PlanExpected::Refuse("has no addressee"),
+            },
+            OpenQuestionCase {
+                id: "question-with-a-code-path-and-no-addressee",
+                source: made_up,
+                question: "Does `crates/athena-cli/src/main.rs` pass max_concurrency into landing?",
+                expected: PlanExpected::Refuse("has no addressee"),
+            },
+            OpenQuestionCase {
+                id: "question-lookalike-prefix",
+                source: made_up,
+                question: "Username: which account lands the change?",
+                expected: PlanExpected::Refuse("has no addressee"),
+            },
+            OpenQuestionCase {
+                id: "user-question-that-says-the-code-answers-it",
+                source: made_up,
+                question: "User: is this found by reading the code?",
+                expected: PlanExpected::Refuse("says the code answers it"),
+            },
+            OpenQuestionCase {
+                id: "host-question-that-says-the-code-answers-it",
+                source: made_up,
+                question: "Host: can we check the code for the answer?",
+                expected: PlanExpected::Refuse("says the code answers it"),
+            },
+            OpenQuestionCase {
+                id: "user-decision",
+                source: made_up,
+                question: "User: Should the CHANGELOG entry go under Added or Changed?",
+                expected: PlanExpected::Accept,
+            },
+            OpenQuestionCase {
+                id: "user-scope-question-citing-a-path",
+                source: made_up,
+                question: "user: may the change edit `crates/athena-core/tests/refusal_corpus.rs`?",
+                expected: PlanExpected::Accept,
+            },
+            OpenQuestionCase {
+                id: "host-fact-marked-in-bold",
+                source: made_up,
+                question: "**Host:** Is the production host disk large enough?",
+                expected: PlanExpected::Accept,
+            },
+        ]
+    }
+
+    fn question_findings(question: &str) -> Vec<Finding> {
+        let mut plan = plan_for(vec![entry(
+            "recorded exit code",
+            "verify.rs judge: the seen-commands filter counts a reused passing check",
+            Some("cargo test -p athena-core verify"),
+            None,
+        )]);
+        plan.open_questions = vec![question.to_string()];
+        let mut reading = super::base_reading("");
+        reading.acceptance_criteria = vec![Criterion {
+            text: "The plan lists its dependents".into(),
+            kind: CriterionKind::Content,
+        }];
+        let verifier = Policy {
+            role: Role::Verifier,
+            root: std::path::PathBuf::from("."),
+            commands: Default::default(),
+            writes: false,
+        };
+        plan_findings(&plan, &reading, &verifier, &|_| false)
+    }
+
+    #[test]
+    fn open_question_cases_get_the_expected_outcome() {
+        let cases = open_question_cases();
+        let ids: std::collections::BTreeSet<&str> = cases.iter().map(|c| c.id).collect();
+        assert_eq!(ids.len(), cases.len(), "open-question case ids are unique");
+        let mut mismatches = Vec::new();
+        for c in &cases {
+            let got = question_findings(c.question);
+            let ok = match c.expected {
+                PlanExpected::Accept => got.is_empty(),
+                PlanExpected::Refuse(text) => {
+                    got.len() == 1
+                        && got[0].severity == Severity::Major
+                        && got[0].source == FindingSource::Athena
+                        && got[0].location.as_deref() == Some("open questions")
+                        && got[0].summary.contains(text)
+                }
+            };
+            if !ok {
+                mismatches.push(format!(
+                    "{} ({}): expected {:?}, got {got:?}",
+                    c.id, c.source, c.expected
+                ));
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+        assert!(
+            cases.iter().any(|c| c.expected == PlanExpected::Accept)
+                && cases
+                    .iter()
+                    .any(|c| matches!(c.expected, PlanExpected::Refuse(_))),
+            "the table holds accepted and refused questions"
+        );
+    }
+
     #[test]
     fn the_complete_ci_reuse_case_names_the_rule_the_search_finds() {
         let cases = plan_cases();
