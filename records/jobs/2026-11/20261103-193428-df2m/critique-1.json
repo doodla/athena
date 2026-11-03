@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-193428-df2m",
+  "round": 1,
+  "at": "2026-11-03T21:45:09.810774952Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The test does not say that a stub `run` returning needs_accepting is the same seam as a real re-read.",
+      "evidence": "In the Stub the item is read with `read a` (Source::Read), then `run a` returns needs_accepting. The real re-read after a settings change happens inside RealSteps::run: `go_with_stages` returns `GoResult::Reread`, which sets `needs_accepting: true` (drain.rs 3563-3574). It does not go through `Source::Reread`. So the Stub does follow the real path, but the test name and the log the test expects do not say this. Fix: Add a one-line comment in the test: the re-read after a settings change happens inside `run` (RealSteps::run → GoResult::Reread), so a stub `run` that returns needs_accepting is the same seam. Match the full log the stub writes, including `read a` / `read b`.",
+      "location": "Plan Demonstrations, criterion 1; crates/athena-cli/tests/drain.rs Stub::run (~200-231)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "If pass-over broke, the new test would hang on a loop instead of failing.",
+      "evidence": "Before the fix, the job limit also capped how often a needs-accepting item could be tried in one drain. After the fix, only pass-over tracking and the budget cap it. Stub::run costs 0.0 for a needs-accepting item, so the budget gives no cap in the test. Fix: Keep the `exactly one run a` assertion. Optionally give the needs-accepting run a non-zero cost, or assert `report.jobs.len() == 2`, so a regression shows as a failure, not a hang.",
+      "location": "Plan Risks, second bullet (re-attempt loop)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The slot is released for every NeedsAccepting outcome, not only re-reads; in practice these are the same.",
+      "evidence": "In the real steps, needs_accepting is set only on the GoResult::Reread arm (drain.rs 3572), so the general release applies only to re-reads. The planned doc wording is therefore accurate. Fix: None required. Optionally say in the code comment that needs_accepting comes only from a re-read in RealSteps::run.",
+      "location": "Plan Decision 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code at the places the plan names. In `run_job` the slot is taken at drain.rs 1439 before the read and is never given back, and the `_ if run.needs_accepting` arm is at 1537. The other readers of `st.started` are exactly the ones the plan lists: 1889, 2008, 2555 and 2896, found by Grep. The real source of a needs-accepting re-read is RealSteps::run, where `GoResult::Reread` sets `needs_accepting: true` (3563-3574). That is inside `steps.run`, so the Stub's `run` returning needs_accepting goes through the same production seam. The fix is a saturating decrement under the same state lock that takes the slot, made where the fault starts. It leaves the budget and the other outcomes alone, and it is safe with parallel workers. The demonstrations run production `drain::drain` with `max_jobs: 1` and assert that b lands and that the stop is not JobLimit. Both assertions fail under the old counter, because b would hit the check at 1433. `the_job_limit_stops_the_loop` (1422-1441) checks that the limit still binds for passed jobs. The doc locations exist (main.rs 256 and the `--job-limit` arg near 290; drain.rs 254), and CHANGELOG has an Unreleased section. No config or schema field is involved, and the work fits one producer run. My findings are minor: the test should say why a stub `run` counts as a re-read, and it should guard against a hang. No blocker or major finding."
+}
