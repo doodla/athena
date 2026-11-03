@@ -1,0 +1,173 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261103-030153-mcr4",
+  "round": 1,
+  "at": "2026-11-03T07:56:29.337338608Z",
+  "invocation_seq": 2,
+  "approach": "The failure class is: the landing step never checks that the running build can read the config it just landed, and the first fix (job 20261101-085726-z7dg) put that check in only one place: the single-reason stop path. The check `Steps::config_after_landing` runs in `State::land`, but its effect is keyed on the stop reason. `set_stop` keeps the first reason, so when another worker already set a stop (repeated failure, requested, budget, rebuilt), the NeedsReinstall stop is dropped. `finish` then rates against a config this build cannot parse, and the end-of-run note is skipped. The fix is to treat `State.unreadable_config` as the single fact: (a) `finish` skips rating whenever it is `Some`; (b) report assembly in `drain_with` forces `Stop::NeedsReinstall` and emits the reinstall note whenever it is `Some` (except `RebuildFailed`, whose build output matters more), and records any overridden `failed_item` in a note; (c) a rebuild that happens after the landing clears it and replaces only a NeedsReinstall stop with Rebuilt. The read goes through one shared helper, `JobConfig::unreadable_at` in capability.rs, used by `RealSteps::config_after_landing` and by the non-drain `athena land` command in main.rs, which prints the same reinstall note. Reinstall wording is a single `drain::reinstall_note(why)`. Tests: a concurrent-drain test (a second worker's repeated failure lands first, then an unreadable-config landing) and a class test across the stub, the parallel stub at bounds 1 and 2, and RealSteps with a real committed athena.toml, for several kinds of unreadable config plus a readable control. CHANGELOG records the root cause.",
+  "decisions": [
+    {
+      "choice": "Key skip-rating, the reinstall note and the final stop on State.unreadable_config.is_some(), not on the stop reason; NeedsReinstall overrides any earlier stop except RebuildFailed when the report is assembled.",
+      "reason": "The fault is that the fact (landed config unreadable) and the stop reason are two things, and set_stop's first-wins rule lets another worker's reason hide the fact. Keying on the fact fixes every ordering of workers at the one place the fact is stored. Overriding at report assembly keeps set_stop's first-wins rule for all other reasons, and workers already stop once any reason is set.",
+      "rejected": [
+        {
+          "option": "Make set_stop let NeedsReinstall replace the stored reason at landing time",
+          "why": "It would also need to special-case Rebuilt/RebuildFailed and still leaves finish and the note keyed on the stop reason; two places to keep in agreement."
+        },
+        {
+          "option": "Keep the check keyed on the stop and only add a test",
+          "why": "That is the instance fix; the concurrent ordering stays broken."
+        }
+      ]
+    },
+    {
+      "choice": "Keep a genuinely failed item visible: when NeedsReinstall replaces RepeatedFailure, clear failed_item and add a note naming the item.",
+      "reason": "The job lines still show the rejected outcome; the run's reason to stop is the reinstall, which is the action the operator must take first. Nothing is lost.",
+      "rejected": [
+        {
+          "option": "Let RepeatedFailure win over NeedsReinstall",
+          "why": "The brief requires the run not to end as 'repeated failure' in this case, and the reinstall would be hidden again."
+        }
+      ]
+    },
+    {
+      "choice": "Add JobConfig::unreadable_at(git, commit) -> Option<String> in capability.rs and use it from both the drain's RealSteps and `athena land`.",
+      "reason": "One definition of 'the running build cannot read the landed config' for every path that lands, drain or not; error text kept for the note.",
+      "rejected": [
+        {
+          "option": "Make the parser tolerant of unknown keys",
+          "why": "Out of scope and weakens the strict schema that protects the job's base config (D38)."
+        },
+        {
+          "option": "Rebuild automatically on unreadable config",
+          "why": "Out of scope; and the rebuild path already exists for BUILD_PATHS landings."
+        }
+      ]
+    },
+    {
+      "choice": "Leave the PR lander (landing_from_report) and Steps::land impls unchanged; the check stays in Drain::land after any Landing::Landed.",
+      "reason": "Every Steps impl funnels through Drain::land under the landing lock, so one check covers all; the class test proves it for several impls rather than one.",
+      "rejected": [
+        {
+          "option": "Check inside PrLander",
+          "why": "Only that one path would be covered; stub and future landers would not."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Key skip-rating, the reinstall note and the final stop on State.unreadable_config in finish() (line ~2338) and drain_with report assembly (~2843); add reinstall_note(why); clear the flag and replace only a NeedsReinstall stop on rebuild; RealSteps::config_after_landing (~3576) calls JobConfig::unreadable_at; update module doc (~117) and Stop::NeedsReinstall docs to name the root cause.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "action": "modify",
+      "purpose": "Add JobConfig::unreadable_at(git, commit) -> Option<String>: the one definition of 'this build cannot read the config at that commit', error text kept.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "`athena land` (Command::Land ~1133): after a Landed result, check the new head with JobConfig::unreadable_at and print drain::reinstall_note to stderr (exit code unchanged); add a small helper with a unit test next to the checkpoint tests (~1676).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Extend the parallel Shared stub (unreadable_for, wait_for, rate logging); add the concurrent-stop test and the class tests over Stub, Shared, RealSteps+ConfigLander and unreadable_at.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased/Fixed entry naming the root cause and where it is fixed.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "capability.rs: add `JobConfig::unreadable_at(git: &Git, commit: &str) -> Option<String>` returning `JobConfig::at(...).err().map(|e| format!(\"{e:#}\"))`, with a doc comment naming the root cause (a landing can make the config unreadable for the running build, and nothing checked).",
+    "drain.rs: add `pub fn reinstall_note(why: &str) -> String` holding the existing note wording (\"the landed athena.toml could not be read by this build ({why}); the job is landed and no failure is counted. Reinstall Athena (./setup.sh in the checkout) and run `athena drain` again\"). Change RealSteps::config_after_landing to head() then JobConfig::unreadable_at (head error text kept as Some).",
+    "drain.rs finish(): replace `matches!(stop, NeedsReinstall)` with `self.st().unreadable_config.is_some()`. In the rebuilt branch clear unreadable_config and, only if the stored stop is NeedsReinstall, replace it with Rebuilt (keep any other worker's earlier reason). Still return without rating while unreadable.",
+    "drain.rs drain_with report assembly (before the Rebuilt/restart block): if unreadable_config is Some and stop != RebuildFailed, set stop = NeedsReinstall; if the replaced stop was RepeatedFailure push a note naming failed_item and clear failed_item; push reinstall_note(why) whenever the final stop is NeedsReinstall. Update the module doc paragraph (~117) and Stop::NeedsReinstall comments: root cause is that the landing never checked that the running build can read what it lands; the check is on the unreadable-config state, not the first stop reason.",
+    "tests/drain.rs mod parallel: extend `Shared` with `unreadable_for: Vec<&'static str>` (config_after_landing returns Some(error text) after those jobs land), `wait_for: Vec<(&'static str, &'static str)>` (run spins up to 5 s until the log holds the entry), and push 'rate' to the log in rate(). Add test `a_landing_with_an_unreadable_config_after_another_workers_stop_is_landed_and_ends_with_reinstall` (bad rejected twice, new waits for 'end bad-retry' and runs 30 ms, bound 2). Run it against the base logic first (revert step 3/4 locally) to confirm it fails.",
+    "tests/drain.rs: add `every_landing_path_ends_in_reinstall_for_any_unreadable_config` (table of three bad-config causes over Stub, Shared bound 1 and 2, RealSteps+ConfigLander; one shared assertion helper; readable control per path) and `unreadable_at_reports_what_the_running_schema_rejects` using Fixture and commit_config.",
+    "main.rs: in Command::Land, after the Landed branch, compute `JobConfig::unreadable_at(&athena.git, &athena.head()?)` and eprint `drain::reinstall_note(&why)`; put the decision in a small `fn reinstall_note_after_landing(git: &Git, landed: bool) -> Option<String>` and unit-test it with a tempdir repo like the checkpoint test (landed=false gives None; bad athena.toml gives Some containing 'Reinstall Athena'; good config gives None).",
+    "CHANGELOG.md: under [Unreleased] add a Fixed bullet: root cause (a landing never checked that the running build can read the config it lands; the first fix keyed the stop on the first stop reason so another worker's stop hid it), the fix (state-keyed skip-rating, note and stop; shared unreadable_at; `athena land` note) and that the job stays landed with no failure counted.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings, cargo test --locked; check git diff --stat touches only the five files."
+  ],
+  "risks": [
+    {
+      "risk": "The concurrent test depends on thread timing (the other worker's failure must be stored before the unreadable landing).",
+      "mitigation": "The landing job's run waits on a log entry written by the other worker, then sleeps 30 ms; the only race left is microseconds. A wrong order makes the test pass on base, not fail on the change, so confirm failure on base once while developing."
+    },
+    {
+      "risk": "Overriding RepeatedFailure hides a real failure.",
+      "mitigation": "Job lines still show the rejected outcome, and a note names the failed item; the item stays queued for the next run."
+    },
+    {
+      "risk": "Any parse error is taken as 'newer schema' (kept from the earlier job).",
+      "mitigation": "The error text stays in the note so other damage is visible; stated in the docs."
+    },
+    {
+      "risk": "Changing the tests/drain.rs Shared stub breaks existing parallel tests.",
+      "mitigation": "New fields default to empty/None via Default; the rate() log line is additive and existing tests assert on specific entries (position, started filter) not whole-log equality for those tests — producer reruns the module."
+    },
+    {
+      "risk": "Large files (drain.rs, tests/drain.rs, CHANGELOG.md) hard to edit.",
+      "mitigation": "Edits are local to named functions; read only the touched ranges."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff: CHANGELOG.md Unreleased entry and the comments in drain.rs and capability.rs state the root cause (the landing never checks that the running build can read the config it lands; fixed where the landed head is read, keyed on the unreadable-config state, not at one job). Searched with Grep.",
+      "command": "git diff -- CHANGELOG.md crates/athena-cli/src/drain.rs crates/athena-core/src/capability.rs",
+      "observes": "An Unreleased/Fixed CHANGELOG bullet naming the root cause and the module docs and unreadable_at doc comment repeating it.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "New test `a_landing_with_an_unreadable_config_after_another_workers_stop_is_landed_and_ends_with_reinstall` in mod parallel of crates/athena-cli/tests/drain.rs. Entry point: public `drain::drain_concurrent(&Shared, limits, &Quiet, 2)`. Precondition: plan has two independent items; `[parallel]` bound 2. Seam: the existing `Shared` stub is extended (step 4) with `unreadable_for: Vec<&str>` (answers `Steps::config_after_landing` with a parse-error text for those jobs, the production check is not in the stub), `wait_for: Vec<(&str,&str)>` (a job's run spins up to 5 s until a log entry appears, plus its run_ms, so the other worker's two rejections and its set_stop come first) and `rate` logging 'rate'. Item `bad` is rejected twice (RepeatedFailure set by worker 2); item `new` lands with the unreadable config. Asserts: report.stop == NeedsReinstall, != RepeatedFailure; `new` landing == \"landed\" and outcome 'passed'; the log has no 'rate'; a note contains the stub's parse error, 'Reinstall Athena' and 'athena drain'; failed_item None and a note names `bad`; text lacks 'repeated failure'.",
+      "command": "cargo test -p athena-cli --test drain a_landing_with_an_unreadable_config_after_another_workers_stop",
+      "observes": "Passes with the change; on the base tree report.stop is RepeatedFailure, 'rate' is in the log and no reinstall note exists.",
+      "fails_without": "Without keying on State.unreadable_config, set_stop(NeedsReinstall) is ignored because RepeatedFailure is already stored, finish rates the unreadable config, and the report ends as repeated failure with no reinstall note.",
+      "seam": "Entry `drain::drain_concurrent` exists (drain.rs:2653). `Shared` stub exists in tests/drain.rs mod parallel (~6157); the new fields and a `rate` log line are added by plan step 4. The logic under test (Drain::land, finish, report assembly) stays in production code; the stub only supplies the read error and timing."
+    },
+    {
+      "criterion": 3,
+      "method": "New test `every_landing_path_ends_in_reinstall_for_any_unreadable_config` in crates/athena-cli/tests/drain.rs. A table of unreadable-config causes (unknown top-level key, unknown section, wrong value type) is run through each landing path: the serial `Stub` via `drain::drain`, `Shared` at bounds 1 and 2 via `drain_concurrent`, and `RealSteps` with `ConfigLander` committing a real athena.toml (fixture exists: Fixture, test_config, rated_scenario, work_everything). A shared helper asserts the same outcome for each: stop NeedsReinstall, job landed and 'passed', no 'rate' call, note carries the error text, no failure counted. A readable control (e.g. test_config with max_concurrency changed, via ConfigLander and via the stubs with no unreadable text) must not end in NeedsReinstall and must be rated. A second test `unreadable_at_reports_what_the_running_schema_rejects` calls `JobConfig::unreadable_at` on a Fixture repo before and after committing each bad config (Some with error text, then None for a readable one). main.rs gets a small helper test for the `athena land` note (step 6).",
+      "command": "cargo test --locked",
+      "observes": "All paths yield the same reinstall outcome; the readable control continues normally and is rated.",
+      "fails_without": "Without the shared state-keyed handling, the paths that run with an earlier stop set (Shared bound 2 case with a prior stop) and the rebuilt/clear logic diverge; without `unreadable_at`, the test does not compile; a regression that checks only the first stop reason or only one steps type fails one of the rows.",
+      "seam": "Entries `drain::drain`, `drain::drain_concurrent`, `RealSteps` with a `Lander` impl (ConfigLander exists in tests/drain.rs ~2641) and `JobConfig::unreadable_at` (added by step 1). The stub's unreadable text is injected through the existing `config_unreadable_after_landing` field and the new `Shared` field; the RealSteps arm uses the real production parse, the stub arms only supply the error string."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three checks Athena will run: fmt, clippy with -D warnings, and the whole test suite.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "No warnings; also `cargo fmt --all --check` shows no diff and `cargo test --locked` passes (including budgets and boundary-word tests).",
+      "fails_without": "A formatting, lint or test failure in the new code (for example an unused import or a changed Stop meaning without its test) would fail the command.",
+      "seam": "The cargo commands on the whole workspace; no new seam."
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the diff paths: only drain.rs, tests/drain.rs, CHANGELOG.md, capability.rs and main.rs under crates/ change; none of gh/client.rs, routing.rs, run/mod.rs, run/tests.rs, run/verification.rs, athena-data/src/config.rs or athena.toml appear.",
+      "command": "git diff --stat",
+      "observes": "The file list is limited to the five deliverables.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Should NeedsReinstall also override a Requested stop? The plan says yes (the reinstall note matters more and the run ended anyway); the code does not settle a preference.",
+    "The real PrLander path (landing_from_report) cannot be run without GitHub; the class test covers it only through Drain::land, which every Steps impl shares."
+  ],
+  "producer_section_sha256": "eb48fb259098d6feef302176483f5d7b4cd022bbf02ff0dc2f4ac56c02e5cb82"
+}

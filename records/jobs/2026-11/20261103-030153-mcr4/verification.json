@@ -1,0 +1,170 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261103-030153-mcr4",
+  "candidate_commit": "d5a7a6cd0e819da33cd25fd271314cbaf34055c3",
+  "verified_fingerprint": "sha256:07550da9e3106c399636ff7febdd205b4f6f63c18906e96a849d19df3b35c0c2",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41606953805 for d5a7a6cd0e819da33cd25fd271314cbaf34055c3",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41606953805 for d5a7a6cd0e819da33cd25fd271314cbaf34055c3",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41606953805 for d5a7a6cd0e819da33cd25fd271314cbaf34055c3",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 7,
+  "criteria": [
+    {
+      "criterion": "The CHANGELOG.md entry and code comments name the root cause: the landing never checks that the running build can read the config it lands, and the fix is where the landed head is read, not at one job.",
+      "kind": "content",
+      "met": true,
+      "evidence": "I read the diff and grepped for 'never check'. The CHANGELOG [Unreleased] Fixed bullet (line 127), the drain.rs module doc (line 123), the comment in Drain::land (line 1672), the capability.rs doc on JobConfig::unreadable_at (line 59) and the main.rs comment (line 1160) all say that a landing never checked that the running build can read the config it lands. They also say the fact is now kept in State.unreadable_config, at the one place every Steps::land funnels through, instead of in the first-reason-wins stop.",
+      "commands": [
+        "git diff HEAD~1 --stat"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A test in crates/athena-cli/tests/drain.rs or drain.rs lands a job whose athena.toml diff adds a key the running schema rejects, while another worker has already set a stop reason: the job is recorded landed (not failed), rating is skipped, the reinstall note with the parse error is reported, and the run does not end as 'repeated failure'. It fails on the base tree and passes with the change. Run: cargo test -p athena-cli drain.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "parallel::a_landing_with_an_unreadable_config_after_another_workers_stop_is_landed_and_ends_with_reinstall passes. It asserts that 'end bad-retry' comes before 'land new' in the log, that stop is NeedsReinstall and not RepeatedFailure, that failed_item is None, that `new` is passed/landed, that rated_unreadable is 0, that a note has NEWER_CONFIG plus 'Reinstall Athena' plus 'athena drain', and that the text lacks 'repeated failure'. I did not run it on the base tree, because I cannot change the snapshot. From the base code shown in the diff: finish keyed on `matches!(stop, NeedsReinstall)` and drain_with only added the note when stop == NeedsReinstall. set_stop (line 1401) keeps the first reason, so on base the run ends RepeatedFailure, the config is rated and there is no note. The assertions would therefore fail on base for behavioral reasons, not only because of the new stub fields.",
+      "commands": [
+        "cargo test --locked -p athena-cli --test drain unreadable"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A second test covers the class, not one job: each Steps/lander path that reports Landed (stub and real steps) yields the same reinstall outcome for any unreadable landed config, and a readable landed config still continues normally. Run: cargo test.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "every_landing_path_ends_in_reinstall_for_any_unreadable_config passes. It runs 28 rows: the Stub, Shared(1), Shared(2) and Real (RealSteps + ConfigLander, which commits a real athena.toml) paths, each with three kinds of unreadable config and a readable control. The 9 combinations that cannot be set up are listed by name and asserted. a_rebuild_after_the_unreadable_landing_restarts_and_leaves_another_workers_stop_alone, unreadable_at_reports_what_the_running_schema_rejects and the main.rs test the_reinstall_note_after_a_landing_reads_the_merged_commit_not_head also pass. Athena's record shows the full cargo test --locked passing.",
+      "commands": [
+        "cargo test --locked -p athena-cli --test drain unreadable",
+        "cargo test --locked -p athena-cli --bin athena the_reinstall_note_after_a_landing",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "cargo fmt --check, cargo clippy --all-targets and cargo test all pass.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's records for d5a7a6cd (CI run 41606953805) show fmt, clippy and test all succeeding.",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Files from job 20261101-061448-sdya (CI wait, gh/client.rs, routing.rs, config.rs, athena.toml) are unchanged in the diff (git diff).",
+      "kind": "content",
+      "met": true,
+      "evidence": "Only five files changed: CHANGELOG.md, crates/athena-cli/src/drain.rs, crates/athena-cli/src/main.rs, crates/athena-cli/tests/drain.rs and crates/athena-core/src/capability.rs. None of gh/client.rs, routing.rs, run/*, athena-data/src/config.rs or athena.toml appear.",
+      "commands": [
+        "git diff HEAD~1 --stat"
+      ],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "`athena land` now ignores commit_exists errors and runs the config check under CI. The changelog does not mention either change.",
+      "evidence": "Before, the whole block was skipped under CI, and `athena.git.commit_exists(merged)?` passed an error up. Now the reinstall-note check runs outside `!ci_is_set()`, and `matches!(commit_exists(merged), Ok(true))` silently swallows a git error, which also skips the checkpoint. This is reasonable, because the exit code is unchanged after a landing, but it is a small behavior change the request did not ask for.",
+      "location": "crates/athena-cli/src/main.rs:1155-1171",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "unreadable_config is never cleared by a later landing that makes the config readable again.",
+      "evidence": "The flag is only set (`if let Some(why) = config_after_landing()`) and only cleared by a rebuild in finish. Suppose an in-flight job lands after the unreadable landing and its config reads fine. The run would still skip rating and end with a reinstall note. This is a rare edge case: it needs a second in-flight landing that reverts the field.",
+      "location": "crates/athena-cli/src/drain.rs:1681-1687",
+      "source": "verifier"
+    },
+    {
+      "severity": "nit",
+      "summary": "The rows with an earlier stop exercise only the Shared stub at bound 2. The RealSteps row covers only the no-earlier-stop case, which the base already handled.",
+      "evidence": "cannot_seed skips Real and serial paths combined with any earlier stop, and states the reason. The production logic under test (Drain::land, finish, drain_with) is the same code for every path, so coverage of the cause is still sound.",
+      "location": "crates/athena-cli/tests/drain.rs: cannot_seed",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "pass",
+  "final_verdict": "pass",
+  "reasons": [],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results",
+    "planned demonstrations and files"
+  ],
+  "summary": "The change passes. It fixes the root cause where it starts. Before, the fact that a landed athena.toml cannot be read by the running build was stored only as the stop reason, and the stop reason keeps whichever reason is found first. So when another worker had already stopped the run (a repeated failure, a stop request, or a rebuild that ran before the landing), the reinstall note was lost and the page was rated against a config this build cannot parse. Now the fact is kept in State.unreadable_config, which is set in Drain::land, the one place every landing goes through. Rating and the final report check that state: the run ends as NeedsReinstall with the note unless the rebuild failed, and a rebuild after the landing clears the state. `athena land` asks the same question of the merged commit through a new JobConfig::unreadable_at. I ran all five new drain tests and the new main.rs test, and they pass. Athena's records show fmt, clippy and the full test suite passing. I could not run the key test on the base tree, but reading the base code shows it would end as RepeatedFailure with a rating and no note, so the test checks the behavior itself, not just the new stub fields. Scope matches the five expected files. Three findings are minor or nit only: a small unrequested change to `athena land` (CI gating, and commit_exists errors now swallowed), the state not clearing if a later landing makes the config readable again, and the rows with an earlier stop running only on the concurrent stub."
+}
