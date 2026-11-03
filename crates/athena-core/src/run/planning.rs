@@ -210,7 +210,9 @@ impl Athena {
         }
 
         // Athena's own checks, at no model cost. A major finding sends the plan back to the planner without a
-        // critic call and without using the round, up to MAX_MECHANICAL_PASSES times in a round.
+        // critic call and without using the round, up to MAX_MECHANICAL_PASSES times in a round. The checks
+        // include the open-questions rule: only a `User:` or `Host:` question stays open, so a question that
+        // reading the code settles never costs a critic round.
         let athena_findings = plan_findings(
             &plan,
             ctx.reading,

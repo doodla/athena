@@ -722,6 +722,56 @@ mod produce_and_verify_order_tests {
         );
     }
 
+    /// `good_plan()` with these open questions.
+    fn plan_with_open_questions(questions: &[&str]) -> serde_json::Value {
+        let mut plan = good_plan();
+        plan["open_questions"] = json!(questions);
+        plan
+    }
+
+    #[test]
+    fn a_plan_with_an_unaddressed_open_question_is_revised_before_the_critic() {
+        let repo = repo_with_planning(3);
+        let (finished, calls) = run_planned(
+            &repo,
+            vec![
+                plan_with_open_questions(&[
+                    "Does the [parallel] max_concurrency path reach landing?",
+                ]),
+                plan_with_open_questions(&["User: Should the change also cover the design docs?"]),
+            ],
+            vec![accepting_critique()],
+        );
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let roles: Vec<Role> = calls.iter().map(|(r, _)| *r).collect();
+        assert_eq!(
+            roles,
+            [
+                Role::Reader,
+                Role::Planner,
+                Role::Planner,
+                Role::Critic,
+                Role::Producer,
+                Role::Verifier
+            ]
+        );
+        let planner = prompts_of(&calls, Role::Planner);
+        assert!(!planner[0].contains("has no addressee"));
+        assert!(
+            planner[1].contains("has no addressee")
+                && planner[1].contains("Does the [parallel] max_concurrency path reach landing?"),
+            "the planner is shown Athena's finding: {}",
+            planner[1]
+        );
+        let critic = prompts_of(&calls, Role::Critic);
+        assert!(
+            critic[0].contains("## Plan under review (round 1)")
+                && critic[0].contains("User: Should the change also cover the design docs?"),
+            "the mechanical pass used no round: {}",
+            critic[0]
+        );
+    }
+
     #[test]
     fn after_a_mechanical_revision_the_critic_still_reviews_in_three_rounds() {
         let repo = repo_with_planning(3);
