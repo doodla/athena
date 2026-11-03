@@ -20,10 +20,10 @@
 //! read and no wait. The workflow's own run for a `build` job is flagged, not performed.
 
 use crate::capability::CheckSpec;
-use crate::checks::{runs_from_record, skip_note, skipped_run};
+use crate::checks::{runs_from_record, skip_note, skipped_run, with_failure_detail};
 use crate::ci_result::{
-    BlockReason, CiRecord, CiRun, CiSource, LocalChecks, Outcome, STEPS, Source, Step, Wait,
-    resolve,
+    BlockReason, CiRecord, CiRun, CiSource, FailureDetail, LocalChecks, Outcome, STEPS, Source,
+    Step, Wait, resolve,
 };
 use anyhow::{Result, bail};
 use athena_data::records::CheckRun;
@@ -162,11 +162,20 @@ impl CiSource for Paced<'_> {
         self.reads.set(self.reads.get() + 1);
         self.inner.fetch(sha)
     }
+
+    /// Forwarded as it is: reading a log is not a poll, so it neither sleeps nor counts as a read.
+    fn failure_detail(&self, record: &CiRecord) -> Option<FailureDetail> {
+        self.inner.failure_detail(record)
+    }
 }
 
 /// Runs one check in the verifier's snapshot (supplied by the job run).
 pub trait Exec {
     fn exec(&self, spec: &CheckSpec) -> Result<CheckRun>;
+
+    /// Redacts text that came from outside (a CI log) before it is recorded. An error means the text must
+    /// not be recorded. Required, so no executor can forget it and let raw log text reach a record.
+    fn redact(&self, text: &str) -> Result<String>;
 }
 
 /// The checks in order, each skipped or run, stopping after the first failure.
@@ -264,7 +273,24 @@ pub fn run_routed_with_record(
     match resolve(sha, changed, ci, &fallback, wait) {
         Outcome::Verified(record) | Outcome::Failed(record) if record.source == Source::Ci => {
             let specs: Vec<CheckSpec> = route.items.iter().map(|i| i.spec.clone()).collect();
-            let reused = runs_from_record(&specs, &record, sha);
+            let mut reused = runs_from_record(&specs, &record, sha);
+            // A red run: what its failing job's log says goes on the failed `test` check, so the verifier
+            // need not rerun the suite to find the failing tests. A green record makes no log call.
+            if !record.all_passed()
+                && let Some(detail) = ci.failure_detail(&record)
+            {
+                let redact = |text: &str| exec.redact(text);
+                reused = reused
+                    .into_iter()
+                    .map(|r| {
+                        if r.name == "test" {
+                            with_failure_detail(r, &detail, &redact)
+                        } else {
+                            r
+                        }
+                    })
+                    .collect();
+            }
             let runs = route
                 .items
                 .iter()
@@ -527,6 +553,109 @@ mod tests {
                 reused: false,
             })
         }
+
+        fn redact(&self, text: &str) -> Result<String> {
+            Ok(text.replace("SECRET", "[redacted]"))
+        }
+    }
+
+    /// A source that serves a canned run and a canned failure detail, and counts the detail reads.
+    struct Detailed {
+        inner: Ci,
+        detail: FailureDetail,
+        detail_reads: Cell<u32>,
+    }
+
+    impl CiSource for Detailed {
+        fn fetch(&self, sha: &str) -> Result<Option<CiRun>> {
+            self.inner.fetch(sha)
+        }
+        fn failure_detail(&self, _: &CiRecord) -> Option<FailureDetail> {
+            self.detail_reads.set(self.detail_reads.get() + 1);
+            Some(self.detail.clone())
+        }
+    }
+
+    fn detailed(conclusion: &str) -> Detailed {
+        Detailed {
+            inner: Ci::new(Some(ci_run(SHA, conclusion))),
+            detail: FailureDetail {
+                failed_tests: vec!["athena_core tests::a".into(), "key SECRET".into()],
+                output_tail: "failing units: athena-core --lib\nlast line SECRET\n".into(),
+            },
+            detail_reads: Cell::new(0),
+        }
+    }
+
+    #[test]
+    fn routing_a_red_run_puts_the_redacted_detail_on_the_failed_test_check_only() {
+        let ci = detailed("failure");
+        let local = Local::new(None);
+        let changed = paths(&["src/a.rs"]);
+        let r = route(Some("code"), specs(), &changed);
+        let (runs, _) = run_routed_with_record(&r, SHA, &changed, &ci, &local, WAIT).unwrap();
+        let test = runs.iter().find(|c| c.name == "test").unwrap();
+        assert!(!test.passed && test.reused);
+        assert_eq!(
+            test.failed_tests,
+            vec!["athena_core tests::a", "key [redacted]"]
+        );
+        assert_eq!(
+            test.output_tail,
+            "failing units: athena-core --lib\nlast line [redacted]\n"
+        );
+        for other in runs.iter().filter(|c| c.name != "test") {
+            assert!(other.failed_tests.is_empty() && other.output_tail.is_empty());
+        }
+        assert!(local.ran.borrow().is_empty());
+    }
+
+    #[test]
+    fn routing_a_green_run_never_reads_a_failure_detail() {
+        let ci = detailed("success");
+        let local = Local::new(None);
+        let changed = paths(&["src/a.rs"]);
+        let r = route(Some("code"), specs(), &changed);
+        let (runs, _) = run_routed_with_record(&r, SHA, &changed, &ci, &local, WAIT).unwrap();
+        assert_eq!(ci.detail_reads.get(), 0);
+        assert!(runs.iter().all(|c| c.failed_tests.is_empty()));
+    }
+
+    #[test]
+    fn routing_a_paced_source_forwards_the_failure_detail_without_a_pause() {
+        let ci = detailed("failure");
+        let (slept, sleep) = recording_sleeper();
+        let paced = Paced::new(&ci, &sleep, CI_POLL);
+        let record = CiRecord {
+            source: Source::Ci,
+            sha: SHA.into(),
+            run_address: None,
+            steps: vec![],
+            duration_s: 0.0,
+        };
+        assert_eq!(paced.failure_detail(&record), Some(ci.detail.clone()));
+        assert!(slept.borrow().is_empty());
+    }
+
+    #[test]
+    fn routing_a_red_run_whose_detail_cannot_be_redacted_stays_plainly_failed() {
+        struct NoRedact(Local);
+        impl Exec for NoRedact {
+            fn exec(&self, spec: &CheckSpec) -> Result<CheckRun> {
+                self.0.exec(spec)
+            }
+            fn redact(&self, _: &str) -> Result<String> {
+                bail!("the redactor is down")
+            }
+        }
+        let ci = detailed("failure");
+        let exec = NoRedact(Local::new(None));
+        let changed = paths(&["src/a.rs"]);
+        let r = route(Some("code"), specs(), &changed);
+        let (runs, _) = run_routed_with_record(&r, SHA, &changed, &ci, &exec, WAIT).unwrap();
+        let test = runs.iter().find(|c| c.name == "test").unwrap();
+        assert!(!test.passed);
+        assert!(test.failed_tests.is_empty() && test.output_tail.is_empty());
     }
 
     fn go(kind: &str, changed: &[&str], ci: &Ci, local: &Local) -> Vec<CheckRun> {

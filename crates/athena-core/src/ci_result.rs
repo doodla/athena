@@ -11,7 +11,9 @@
 //! - when the fallback cannot produce a complete result either, the outcome is [`Outcome::Blocked`] with a
 //!   named reason. Nothing here ever yields [`Outcome::Verified`] without three passed steps for the SHA.
 //!
-//! The record is read by Athena, never by the verifier. Text from a run is data; only fixed fields are kept.
+//! The record itself holds fixed fields only. For a red run, [`CiSource::failure_detail`] can add what the
+//! failing job's log says (the failing tests and the end of the log), so the verifier is not left to rerun the
+//! suite to find them. Text from a run is data: it is redacted and clipped before it is recorded.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -83,10 +85,28 @@ pub struct CiRun {
     pub duration_s: f64,
 }
 
+/// What the log of a red run says about the failure, read after [`CiSource::fetch`] returned the run.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FailureDetail {
+    /// The failing tests as `<binary> <test>` (the form `checks::failed_test_names` gives a local run). An
+    /// entry in parentheses, such as `test (shard 2) (log not read)`, says the list is incomplete. Empty
+    /// when no log named a test.
+    pub failed_tests: Vec<String>,
+    /// The end of the failing job's log, led by a `failing units:` line. Not yet redacted.
+    pub output_tail: String,
+}
+
 /// Reads the run for a SHA from the platform.
 pub trait CiSource {
     /// `Ok(None)`: no run yet. `Err`: the service could not be asked.
     fn fetch(&self, sha: &str) -> Result<Option<CiRun>>;
+
+    /// What the logs of the failed jobs of the run `record` came from say about the failure. Called only for
+    /// a red record. `None` when the source has no log to read, or reading it failed: the failed record then
+    /// stands as it is. The default has nothing to read.
+    fn failure_detail(&self, _record: &CiRecord) -> Option<FailureDetail> {
+        None
+    }
 }
 
 /// Runs the three checks locally for a SHA, once, and returns their steps.

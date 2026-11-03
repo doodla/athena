@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261102-205332-qv3s",
+  "round": 2,
+  "at": "2026-11-03T06:00:47.107487008Z",
+  "invocation_seq": 9,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/verification.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/verification.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "A structured header line is written into the free-text output_tail field and split off later by its prefix.",
+      "evidence": "`CheckRun.output_tail` is free text. The plan writes `failing units: <pkg> <selector>; ...` as its first line, and `verify::check_result_view` splits it off by prefix. Other code reads `output_tail` too: reading.rs uses `tail(.., CARRIED_CHECK_OUTPUT_BYTES)` and introspect.rs uses `clip_tail(.., TAIL_CAP)`. Both keep the end of the text, so the header is the first thing they drop, and anything else that shows the field will print it as if it were log output. Fix: Keep the approach, since it avoids changing an athena-data record. Name the prefix in one shared constant and use it in both checks.rs and verify.rs. Add a unit test showing that a reused red tail which lacks the header is passed through unchanged. In the CHANGELOG reader audit, state that tail-clipping readers may drop the header.",
+      "location": "Decision 6 / step 3 (the `failing units:` header in `output_tail`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A timeout that occurs on both base and candidate now fails the verdict for a reused red check; the plan states this, but it changes a verdict outcome.",
+      "evidence": "verify.rs:136-140 says a reused result keeps the check-name rule, so today a reused red `test` check on a base where `test` also failed counts as pre-existing as a whole. After the change, if a shard timed out, was cancelled or its log could not be read, the check carries a marker such as `test (shard 2) (did not finish)`. That marker never matches a local base name such as `athena_core (did not finish)`, so a flaky timeout that used to be excused now fails the verdict. This follows from the requested `failed_tests` change, but it moves a verdict outcome. Fix: Keep the markers. In the producer summary, report the outcome change explicitly as a consequence of the requested data. Add a verify.rs case where both base and candidate show a timeout, with an assertion documenting that this is now the job's own failure.",
+      "location": "Decision 10 / Risks (stricter comparison); Out of scope: 'Changing ... the verdict rules'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Adding redaction to the Exec trait gives the trait a second, unrelated job.",
+      "evidence": "routing.rs:168 defines `Exec` as 'Runs one check in the verifier's snapshot'. The plan adds `redact` to it only because SnapExec happens to hold a `Redactor` (run/checks.rs:20). Fix: This is acceptable as planned. A cleaner alternative is to pass a redact function, or the `Redactor`, as an argument to `run_routed_with_record`, which would keep `Exec` focused on running checks. Either way, the doc comment should say why redaction sits at this seam.",
+      "location": "Decision 7 / step 5 (`Exec::redact` as a required trait method)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The fixture's shard header does not match the real log format or shard numbering.",
+      "evidence": "xtask/src/main.rs:109 prints `\\n== {name}`, so the line in the real log is preceded by a blank line. Shards are numbered from 0 (shard.rs:295), and ci.yml names jobs `test (shard 0..5)`. Fix: Model the fixture on the real output: include the blank line before `== shard`, and use matching shard numbers in the job name and the header, for example `test (shard 1)` with `== shard 1/6:`.",
+      "location": "Demonstration criterion 1 fixture",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's claims against the snapshot using Read and Grep, and they hold. `CiRecord` has `run_address: Option<String>` (ci_result.rs:58), so the planner's open question about a cache key is settled. `CiSource` has a single `fetch` method, so a defaulted `failure_detail` fits. `Paced` wraps the source and has to forward the new method, and the plan already covers that. Only two `Exec` impls exist: SnapExec, which already holds a `redactor`, and the test `Local`. `checks::failed_test_names` reads `<binary> <test>` sections and needs `failures:` to be the whole line, which is why the plan strips only the timestamp and one space. In gh/client.rs, `failing_test` uses the conclusion set failure|timed_out|cancelled and fetches logs from `actions/jobs/{id}/logs` through `api_text`. Shard jobs are named `test (shard N)` with fail-fast off (ci.yml:339,345). xtask prints `\\n== shard k/n: <unit line>` before each unit (shard.rs:317 calling main.rs:108). run/verification.rs:64-86 builds the `CheckResultView`s inline, and there are six literals. `is_pre_existing` (verify.rs:143-151) behaves as the plan describes. `CiRunner` (gh/tests.rs:299) and `CiReply`/`CiReplies` (run/tests.rs:2447) both exist. The demonstrations drive production code: `run_routed_with_record` with a real `GhClient::ci_source`, `Athena::go`, `verifier_brief` and `is_pre_existing`, with fakes only at the gh Runner boundary. Each demonstration would fail without the new behavior. The completeness markers close the gap where an incomplete list could hide a new failure. The remaining concerns are minor. The plan puts a structured header inside a free-text field. A reused red check on a red base can now fail where it passed before; the plan states this but it touches the out-of-scope line about verdict rules. And `redact` is added to the `Exec` trait."
+}

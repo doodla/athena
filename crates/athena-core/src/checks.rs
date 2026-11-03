@@ -332,6 +332,36 @@ pub fn runs_from_record(specs: &[CheckSpec], record: &CiRecord, sha: &str) -> Ve
         .collect()
 }
 
+/// What the first line of a reused red check's `output_tail` starts with when the CI log named failing units:
+/// `failing units: <package> <selector>; ...` (for example `athena-core --lib`), so a failing test name in
+/// `<binary> <test>` form can be run with `cargo test -p <package> <selector> <test>`.
+pub const FAILING_UNITS_PREFIX: &str = "failing units: ";
+
+/// `run`, a failed check reused from a CI run, with what the run's log said: the failing tests and the end
+/// of the log, redacted through `redact`. A passed run, a run that is not reused, and a detail that cannot
+/// be redacted leave `run` unchanged, so the check stays plainly failed.
+pub fn with_failure_detail(
+    run: CheckRun,
+    detail: &crate::ci_result::FailureDetail,
+    redact: &dyn Fn(&str) -> Result<String>,
+) -> CheckRun {
+    if run.passed || !run.reused {
+        return run;
+    }
+    let names: Result<Vec<String>> = detail.failed_tests.iter().map(|n| redact(n)).collect();
+    let (Ok(failed_tests), Ok(output_tail)) = (names, redact(&detail.output_tail)) else {
+        return run;
+    };
+    CheckRun {
+        failed_tests,
+        output_tail: tail(
+            &tail_lines(&output_tail, FAILED_TAIL_LINES),
+            FAILED_TAIL_BYTES,
+        ),
+        ..run
+    }
+}
+
 /// Where a check runs, and under what limits.
 #[derive(Debug)]
 pub struct CheckContext<'a> {
@@ -551,6 +581,68 @@ mod tests {
             kind: CheckKind::Command,
             skip_when_only: None,
         }
+    }
+
+    fn reused_failed(name: &str) -> CheckRun {
+        let spec = sh_spec(name, "true");
+        let record = CiRecord {
+            source: Source::Ci,
+            sha: "a".repeat(40),
+            run_address: Some("https://example.test/runs/1".into()),
+            steps: vec![crate::ci_result::Step {
+                name: name.into(),
+                conclusion: "failure".into(),
+                duration_s: 1.0,
+            }],
+            duration_s: 1.0,
+        };
+        runs_from_record(&[spec], &record, &"a".repeat(40)).remove(0)
+    }
+
+    fn detail(tests: &[&str], tail: &str) -> crate::ci_result::FailureDetail {
+        crate::ci_result::FailureDetail {
+            failed_tests: tests.iter().map(|t| t.to_string()).collect(),
+            output_tail: tail.into(),
+        }
+    }
+
+    #[test]
+    fn a_reused_failed_check_takes_the_redacted_names_and_tail_and_logs_the_names() {
+        let upper = |t: &str| Ok(t.to_uppercase());
+        let run = with_failure_detail(
+            reused_failed("test"),
+            &detail(
+                &["athena_core a::b"],
+                "failing units: athena-core --lib\nend\n",
+            ),
+            &upper,
+        );
+        assert!(!run.passed && run.reused);
+        assert_eq!(run.failed_tests, vec!["ATHENA_CORE A::B"]);
+        assert_eq!(run.output_tail, "FAILING UNITS: ATHENA-CORE --LIB\nEND\n");
+        assert_eq!(log_entry(&run), "test FAILED: ATHENA_CORE A::B");
+        // The tail is held to the same caps as a local failed check.
+        let long = (0..400).map(|i| format!("l{i}\n")).collect::<String>();
+        let capped = with_failure_detail(reused_failed("test"), &detail(&[], &long), &|t| {
+            Ok(t.to_string())
+        });
+        assert_eq!(capped.output_tail.lines().count(), FAILED_TAIL_LINES);
+        assert!(capped.output_tail.ends_with("l399\n"));
+    }
+
+    #[test]
+    fn a_detail_is_not_applied_to_a_passed_or_local_check_or_when_redaction_fails() {
+        let keep = |t: &str| Ok(t.to_string());
+        let d = detail(&["x y"], "tail");
+        let mut passed = reused_failed("test");
+        passed.passed = true;
+        assert_eq!(with_failure_detail(passed.clone(), &d, &keep), passed);
+        let mut local = reused_failed("test");
+        local.reused = false;
+        assert_eq!(with_failure_detail(local.clone(), &d, &keep), local);
+        let failed = reused_failed("test");
+        let broken = |_: &str| -> Result<String> { anyhow::bail!("down") };
+        assert_eq!(with_failure_detail(failed.clone(), &d, &broken), failed);
     }
 
     #[test]

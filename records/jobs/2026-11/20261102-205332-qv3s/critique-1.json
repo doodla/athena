@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261102-205332-qv3s",
+  "round": 1,
+  "at": "2026-11-03T05:56:42.227115305Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/verification.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/verification.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "An incomplete failing-test list is recorded as if it were complete; it feeds is_pre_existing and the 'run only these tests' instruction",
+      "evidence": "verify.rs:143-151 treats a failed check as pre-existing when every name in check.failed_tests also failed on the base. checks.rs:101-108 (Section::close_into) adds `<binary> (did not finish)` exactly so a cut-short list can never hide a failure behind the names it does list. The plan reads at most 3 of up to 6 failed `test (shard N)` jobs (ci.yml:347, fail-fast off), skips any log it cannot read, and caps names at 50 without saying the list was cut. Example: shard 1 fails test X, which also failed on the base, and shard 2's log returns an error. The record then holds failed_tests=[X], so the check is judged pre-existing, and the brief tells the verifier to run only X. The new failure in shard 2 is hidden. Fix: Record names only when every failed test shard's log was read and parsed. Otherwise add a marker name that can never match the baseline, such as `<job name> (log not read)` or `(list cut at 50)`, in the same way as `(did not finish)`. Alternatively, drop the 3-job cap and record no names when any log is missing. Add a criterion-3 test: two failed shards, one log returns Err, assert the marker is present and verify::is_pre_existing is false against a baseline that lists the other shard's names.",
+      "location": "Plan decisions 2 and 6, step 3 (failure_detail: 'read up to 3 job logs … skip errors'), risk 'more than one failed job'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The verdict change for reused red checks contradicts the is_pre_existing doc comment and touches the out-of-scope line on verdict rules",
+      "evidence": "The doc comment lists 'a reused result' among the cases where the check-name rule stands. After this change a reused red test check with names is compared test by test, which can now fail a verdict that today passes as pre-existing. The reading's out-of-scope list includes 'Changing … the verdict rules'. Fix: Update the doc comment of is_pre_existing in verify.rs, which is already a deliverable, and state the stricter comparison and why it is safe in the CHANGELOG entry. With the major finding fixed, the comparison only gets stricter, never looser.",
+      "location": "crates/athena-core/src/verify.rs:136-140; plan open question 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Recorded names have the form `<binary> <test>`, but the instruction tells the verifier to run `cargo test -p <crate> <name>`, and the binary is not always the package",
+      "evidence": "failed_test_names qualifies each name by the binary from the `Running` line (checks.rs:127-128). For an integration test that is the test file's name (for example `lifecycle`), and for doctests it is `doc-tests <crate>`. Neither tells the verifier which `-p` package and `--test` selector to use. The shard log does name them on each `shard k/n: <unit line>` step line (shard.rs:317). Fix: In the brief, explain the `<binary> <test>` form and how it maps to `-p <package> [--lib|--test <binary>] <test>`. Better, also record or render the failing unit's package and selector from the `shard k/n:` line that comes before the failing section.",
+      "location": "Plan step 7 / decision 3; briefs.rs rendering",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Only shard jobs with conclusion `failure` are remembered; the existing log reader also covers timed_out and cancelled",
+      "evidence": "GhClient::failing_test (client.rs:543-548) selects jobs with conclusion failure, timed_out or cancelled. A run that is red overall can contain a timed-out shard. If that shard is skipped silently, the names are incomplete, which is the major finding again. Fix: Use the same conclusion set as failing_test. A shard that timed out or was cancelled should add the 'not read / did not finish' marker instead of being left out.",
+      "location": "Plan step 3 ('ids of jobs named `test (` with conclusion `failure`')",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Several open questions can be settled from the snapshot",
+      "evidence": "xtask/src/shard.rs:316-327 runs `cargo test --locked -p <pkg> <selector>` once per unit and does not stop at a failure, so each unit prints a Running line. ci.yml has no CARGO_TERM_COLOR. run/verification.rs:64-93 builds VerifierInputs from check_runs without returning early on failure. Fix: Turn these into stated facts with their sources. Keep the ANSI-strip fallback only as a defensive measure.",
+      "location": "Plan open questions 1-3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes the fault where it starts. Today a red reused run becomes a CiRecord with fixed fields only (ci_result.rs:53-61), and run_routed_with_record copies it into CheckRuns with no names (routing.rs:264-287). I read the code the plan relies on and it all exists: failed_test_names in checks.rs:119, failing_test_name and api_text in gh/client.rs, the existing job-log fetch in client.rs:534-564, CiBranchSource::fetch, the Exec trait (routing.rs:168, two impls), SnapExec.redactor (run/checks.rs:20), CheckResultView (briefs.rs:804), and the inline view closure (run/verification.rs:76). Editing run/verification.rs is justified; Athena already flagged that file. Each demonstration names a seam the code provides, and each would fail without the behavior. Some of the plan's open questions can be settled from the code. xtask test-shard runs one `cargo test -p` per unit and keeps going after a failure (xtask/src/shard.rs:316-327), so every unit prints a `Running` line. ci.yml does not set CARGO_TERM_COLOR. Verification builds the verifier inputs from failed checks too. One finding is major. The plan fetches at most 3 failed shard logs, skips a log it cannot read, and caps names at 50, but it records whatever it got as if it were the full list. That list feeds is_pre_existing, which excuses the check when every name also failed on the base, and the brief tells the verifier to run only those tests. So a new failure in an unread shard can go unseen. The existing `(did not finish)` marker shows how to handle an incomplete list, and the plan should use the same idea. The other findings are minor."
+}

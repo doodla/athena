@@ -54,6 +54,39 @@ impl Verified {
     }
 }
 
+/// One recorded check as the verifier sees it: the command, the conclusion, and the note (or the test count).
+///
+/// A failed check whose result was reused from a CI run also carries the failing tests, the failing units
+/// and the end of the log, read from the CI log when the check was recorded, so the verifier runs only those
+/// tests. A check Athena ran itself shows none of that: its brief line is as it always was.
+pub fn check_result_view(r: &CheckRun) -> athena_context::briefs::CheckResultView {
+    use crate::checks::FAILING_UNITS_PREFIX;
+    let mut view = athena_context::briefs::CheckResultView {
+        name: r.name.clone(),
+        command: r.command.join(" "),
+        passed: r.passed,
+        detail: match (r.tests_ran, &r.note) {
+            (_, Some(note)) => note.clone(),
+            (Some(n), None) => format!("{n} tests ran"),
+            (None, None) => String::new(),
+        },
+        ..Default::default()
+    };
+    if r.reused && !r.passed {
+        view.failed_tests = r.failed_tests.clone();
+        let (header, rest) = match r.output_tail.split_once('\n') {
+            Some((first, rest)) if first.starts_with(FAILING_UNITS_PREFIX) => (first, rest),
+            _ => ("", r.output_tail.as_str()),
+        };
+        view.failing_units = header
+            .strip_prefix(FAILING_UNITS_PREFIX)
+            .unwrap_or_default()
+            .to_string();
+        view.output_tail = rest.to_string();
+    }
+    view
+}
+
 /// The line Athena writes into the verifier's input about a reused check result: where it came from, the
 /// SHA it is for, and each check's conclusion. The verifier never fetches the result itself; it gets this
 /// text only when the record's SHA equals the candidate's, and nothing otherwise.
@@ -137,8 +170,11 @@ pub struct VerdictInputs<'a> {
 /// that failed on the base excused every failure in it, including a new, different failing test. When both
 /// runs name their failing tests ([`CheckRun::failed_tests`]), every failing test now must also have failed on
 /// the base, or the check is the job's own failure. When either side names none (a timeout, a build error, a
-/// check that is not a plain `cargo test`, a reused result, an older record) the check-name rule stands.
-/// A failure that comes only from a concurrent change merged after the base is not in the baseline and is
+/// check that is not a plain `cargo test`, a reused result whose log named no test, an older record) the
+/// check-name rule stands. A reused red CI check whose log named failing tests is compared test by test like a
+/// local one; its names carry an entry in parentheses (`test (shard 2) (log not read)`) when a shard's log was
+/// unread, listed nothing, or did not finish, and no base has such a name, so a partly read set of shards is
+/// never excused by the tests that were listed. A failure that comes only from a concurrent change merged after the base is not in the baseline and is
 /// not separated here.
 pub fn is_pre_existing(check: &CheckRun, baseline: Option<&Baseline>) -> bool {
     let Some(base) = baseline.filter(|b| !check.passed && b.failed_before(&check.name)) else {
@@ -756,6 +792,95 @@ mod tests {
         CheckRun {
             failed_tests: tests.iter().map(|t| t.to_string()).collect(),
             ..check(false)
+        }
+    }
+
+    /// A failed `test` check reused from a red CI run, with the names and tail its log gave.
+    fn reused_red(tests: &[&str]) -> CheckRun {
+        CheckRun {
+            failed_tests: tests.iter().map(|t| t.to_string()).collect(),
+            output_tail: "failing units: athena-core --lib\nlast line\n".into(),
+            ..reused_from_ci(false)
+        }
+    }
+
+    #[test]
+    fn check_result_view_shows_names_units_and_tail_only_for_a_reused_failed_check() {
+        let red = check_result_view(&reused_red(&["athena_core tests::a"]));
+        assert_eq!(red.failed_tests, vec!["athena_core tests::a"]);
+        assert_eq!(red.failing_units, "athena-core --lib");
+        assert_eq!(red.output_tail, "last line\n");
+        assert!(!red.passed);
+        // No header: the whole tail is the tail.
+        let plain = check_result_view(&CheckRun {
+            output_tail: "just text".into(),
+            ..reused_red(&[])
+        });
+        assert_eq!(
+            (plain.failing_units.as_str(), plain.output_tail.as_str()),
+            ("", "just text")
+        );
+        // A check Athena ran itself, failed, with names and a tail: the view is as it always was.
+        let local = CheckRun {
+            output_tail: "failing units: x\nboom".into(),
+            ..failing(&["athena_core tests::a"])
+        };
+        let view = check_result_view(&local);
+        assert!(view.failed_tests.is_empty() && view.output_tail.is_empty());
+        assert!(view.failing_units.is_empty());
+        assert_eq!(view.detail, "3 tests ran");
+        // A reused check that passed shows none either.
+        let green = CheckRun {
+            failed_tests: vec!["x".into()],
+            ..reused_from_ci(true)
+        };
+        assert!(check_result_view(&green).failed_tests.is_empty());
+    }
+
+    #[test]
+    fn reused_red_with_names_is_compared_test_by_test() {
+        let base = baseline_with(
+            vec![failing(&["athena_core tests::a", "athena_core tests::b"])],
+            None,
+        );
+        // Every name also failed on the base: pre-existing.
+        assert!(is_pre_existing(
+            &reused_red(&["athena_core tests::a"]),
+            Some(&base)
+        ));
+        // One name the base did not fail: the job's own failure.
+        assert!(!is_pre_existing(
+            &reused_red(&["athena_core tests::a", "athena_core tests::new"]),
+            Some(&base)
+        ));
+        // No names: the check-name rule stands, as before.
+        assert!(is_pre_existing(&reused_red(&[]), Some(&base)));
+    }
+
+    #[test]
+    fn reused_red_incomplete_list_is_not_pre_existing() {
+        let base = baseline_with(vec![failing(&["athena_core tests::a"])], None);
+        let complete = reused_red(&["athena_core tests::a"]);
+        assert!(is_pre_existing(&complete, Some(&base)));
+        for marker in [
+            "test (shard 2) (log not read)",
+            "test (shard 2) (no failing tests listed)",
+            "test (shard 2) (did not finish)",
+            "(list cut at 50)",
+        ] {
+            let incomplete = reused_red(&["athena_core tests::a", marker]);
+            assert!(
+                !is_pre_existing(&incomplete, Some(&base)),
+                "{marker} must not be excused by the base"
+            );
+            let (new, old) = failure_split(&incomplete, Some(&base));
+            assert_eq!(
+                (new, old),
+                (
+                    vec![marker.to_string()],
+                    vec!["athena_core tests::a".to_string()]
+                )
+            );
         }
     }
 

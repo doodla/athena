@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261102-223326-2x9t",
+  "round": 2,
+  "at": "2026-11-03T06:06:59.574900789Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Widening interrupted_work turns every past job on a drained channel that closed Failed with an environment reason, and was never retried, into drain work. That includes old `athena ask` jobs the user may have already asked again as a new request.",
+      "evidence": "steward.rs:384-417 filters only on state, `running`, the 'try again on' set and DRAINED_CHANNELS. It has no age bound and no check for a later duplicate request. The plan itself lists this as open question 2. Fix: Keep the change, but state the first-run backlog in the CHANGELOG entry and the drain.rs docs. Have the final report say how many such jobs exist, or give a way to see them (for example, `athena status` already shows interrupted jobs), so the user is not surprised. Leave any age limit to a later request, as the plan proposes.",
+      "location": "Plan decision 3 / step 6 (steward::interrupted_work), crates/athena-core/src/steward.rs:395",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The reader-error check rests on error text the planner did not read. Whether it ever matches in production is unknown, and on a queued read it also replaces the existing 'read once more' (Unread) path.",
+      "evidence": "drain.rs:3466 takes `error` from `Proposal.reader_error`, which reading.rs:1043-1084 fills from `read_for`. The plan says it did not read that text. Today a queued read with an error returns RunStep::Unread (drain.rs:1484-1492). With the new check placed before it, an environment-stopped reader error ends the item at once instead of being read again. Fix: Read `read_for`'s error construction before editing. If reader errors never carry the 'environment:' prefix or the 'the producer did not complete: ... 401' form, drop the reader branch and its sibling test, and note the gap as a follow-up. If they do, keep it, and say in the docs that it takes precedence over the read-once-more rule.",
+      "location": "Plan step 3, read-path arm; open question 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The brief lists display.rs as a file to modify. The plan leaves it unchanged.",
+      "evidence": "Plan decision 6 says display.rs only formats Stop::RepeatedFailure after the stop is set, and that no new Stop variant exists. That is consistent with the reading's reader list, item (2). Fix: Keep display.rs unchanged. Have the final report say explicitly that this deliverable was dropped and why, so the verifier does not count it as missing.",
+      "location": "Expected deliverables vs plan Files list (crates/athena-cli/src/display.rs)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The requeue of a-retry in the drain test is scripted by the stub, not produced by steward::interrupted_work, so the drain test and the steward test only meet in the docs.",
+      "evidence": "In step 7, `Stub::queue` lists a job as interrupted once `run <job>` is in the log. The real listing is checked separately by the steward tests in criterion 6. Fix: In the drain test, add a comment saying the stub stands in for steward::interrupted_work and naming the steward test that pins the real listing.",
+      "location": "Demonstration for criterion 1, Stub::queue branch",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code by reading it. The plan fixes the fault where it starts. In drain.rs, `attempts` (1709-1800) adds to `failures` for every `RunStep::Failed`. `run_job` (1403-1565) sends every outcome that is not passed, needs-accepting or held to that arm, and `run.reason` is there. Classifying with `athena_core::disk::is_environment_reason` (disk.rs:432) before the count reuses the one existing list. That classifier also reads the older unprefixed 401/429 form. Putting the job into `tried` matters: `batches_for` filters on `tried` (2683), and the queue is read again after every wave (2811). The steward change uses `disk::resumable_stop` (disk.rs:441), which already returns true for Dispatched, so `interrupted_work` keeps its current cases. It is the only change that makes \"stays queued for a later run\" true in the records, because `queued_work` lists only Queued and Proposed jobs. `interrupted_work` has one caller, drain.rs:3346, and `repeated_failures` has one, steward.rs:1082. The test seam exists: `Stub` in tests/drain.rs names a retry `<job>-retry` (line 186), and the existing tests assert `run a-retry`. Each demonstration would fail without its behaviour. I found no blocker or major problem. The minor points are the backlog the `interrupted_work` change adds on first use, a reader-error branch built on error text the planner did not read, and display.rs being listed as a deliverable but left unchanged."
+}

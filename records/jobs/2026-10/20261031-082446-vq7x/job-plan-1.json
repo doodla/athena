@@ -1,0 +1,267 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-082446-vq7x",
+  "round": 1,
+  "at": "2026-11-03T04:06:00.031340858Z",
+  "invocation_seq": 3,
+  "approach": "Add `athena_core::triage`. `Athena::triage(items, caps, ui)` loads the records and returns early if the run is nested or nothing is open. It then makes one steward-role model call (verifier model and budget, as `steward::consult` does). The call carries the focus, the open items (title, rung, effective priority and setter, age, dependencies) and the failure classes of the last two days. The answer is JSON: `changes` (item, priority, reason) and `close` (item, reason). A pure function `plan_changes` validates the answer. It drops unknown or non-open items, bad levels, empty reasons, no-op changes, and any item whose latest priority record has no author, because a person set it. It applies the caps by counting every open item already urgent or high, person-set ones included, and updates the count after each applied change. `PriorityRecord` gains optional `set_by` and `reason`, which are absent for person records. Applied changes are committed as steward-authored priority records. Each `close` entry becomes a steward `WorkItem` of kind Proposal on the brief-requirements rung, which is above the steward's limit, so only a proposal is recorded. The code writes no outcome or close record. `Steps` gets a defaulted `triage() -> Vec<String>` method, like `review_passes`. `drain_with` prints its lines right after the review passes (the Hestia sweep) and before the queue is read. `RealSteps::triage` builds the items from its own `queue()` plan entries. A failed call returns one `triage failed: …; the drain goes on` line and the drain continues. `RealSteps::person_set` stops counting steward-authored records as a person's word.",
+  "decisions": [
+    {
+      "choice": "Add optional `set_by` and `reason` fields to the existing `athena.priority/1` record (serde default, skipped when None). A record with no author counts as a person's.",
+      "reason": "The brief says priority records are attributed to the steward and carry a reason, and that no new record kind is added. Old records still parse. `validate` requires a reason when `set_by` is set and none when it is not, so a steward record without a reason is refused.",
+      "rejected": [
+        {
+          "option": "A new `athena.steward-priority/1` record kind",
+          "why": "The brief says no new kind. It would also need new store, plan and status handling."
+        },
+        {
+          "option": "Record the author only in a commit trailer",
+          "why": "The setter could not be read back from `Records`, so the person-set rule could not be enforced from the records."
+        }
+      ]
+    },
+    {
+      "choice": "The triage call is made in `athena-core` (`Athena::triage`), and the CLI passes in the plan entries it already builds in `RealSteps::queue()`.",
+      "reason": "The rung, effective priority and dependencies are already computed there by `entry_of`. Reusing them avoids a second copy of that logic. The model plumbing (`agent_spec`, `invoke_and_record`, `stash_invocation`) sits beside the steward in core.",
+      "rejected": [
+        {
+          "option": "Recompute rung and priority inside core from `Records`",
+          "why": "It would duplicate `entry_of` and `reading::plan_entry`."
+        }
+      ]
+    },
+    {
+      "choice": "Seam: a defaulted `Steps::triage(&self) -> Vec<String>` called once in `drain_with` straight after the `review_passes` loop.",
+      "reason": "It follows the existing `review_passes` pattern. A failed call is one printed line, not an error, so the drain cannot stop on it. Every stub `Steps` keeps compiling, since the default is empty.",
+      "rejected": [
+        {
+          "option": "Call `Athena::triage` directly inside `drain_with`",
+          "why": "The drain loop is generic over `Steps` and has no `Athena`. Stubs would then trigger model calls."
+        }
+      ]
+    },
+    {
+      "choice": "A close proposal is written as a `WorkItem` (kind Proposal, rung BriefRequirements, key `triage-close:<job>`, evidence the job). It is skipped if the key is already known. No applier is called and no request is queued.",
+      "reason": "BriefRequirements is above the steward's `highest_rung` (DefaultsConventions) and above `Ladder::HIGHEST_SELF_CHANGE`, so by `may_change` it is proposal-only. A person decides it with `athena approve-work`. The module has no code path that writes an outcome or close record, so criterion 6 holds by construction and is also tested.",
+      "rejected": [
+        {
+          "option": "Let the model's priority answer include a 'closed' state",
+          "why": "This is a close and is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "The caps count every open item already urgent or high, then update the count as each change is applied. Changes are applied in the model's order.",
+      "reason": "This matches the plan's caps, which count person-set items. It gives a deterministic result for a fixed answer. A plan-time demotion would still apply on top of this.",
+      "rejected": [
+        {
+          "option": "Apply everything and let `Plan::build_with` demote the extras",
+          "why": "Records would be written that the caps then override, and the drain would print changes that did not hold."
+        }
+      ]
+    },
+    {
+      "choice": "The deterministic fake answers a triage prompt (recognised by its `# Steward triage` heading) with an empty `changes` and `close`. Tests wrap `deterministic_turn` with a script that returns the scripted triage answer or a failed turn.",
+      "reason": "A real drain through the fake must not fail on triage. `FakeTurn` already carries both outcomes. Only the model's answer is faked; the validation, caps and writing under test run for real.",
+      "rejected": [
+        {
+          "option": "Let triage reuse the `{items: []}` steward answer",
+          "why": "The shapes differ, and a silent parse failure would hide bugs."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal or matching rule is added or changed, so `refusal_corpus` is not a demonstration.",
+      "reason": "The answer parser ignores invalid entries. It does not parse requests, acceptance bullets or reading checks, which are what the corpus covers.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/triage.rs",
+      "action": "create",
+      "purpose": "The triage duty. It holds the prompt brief (heading `# Steward triage`) and the answer schema and types. `Athena::triage` makes the call. The pure `plan_changes` applies validation, the person-set guard and the caps. It writes the priority records and the close-proposal work items in one records commit. `set_by_person(job)` is a helper. No close code.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "`pub mod triage;` and one line in the module list doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "purpose": "Add `failure_classes_since(records, since)`. It reuses the logic of `repeated_failures` and keeps single failures too, for the last-two-days input. Share the body so the two cannot drift.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `set_by: Option<String>` and `reason: Option<String>` to `PriorityRecord`. They default to None and are skipped when None. Extend `validate` (a reason is required with `set_by`, and `set_by` must be a role name, not blank). Add unit tests: round trip, an old record parses, and unknown fields are still denied.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Mechanical only: `set_priority` (about line 934) and one test literal (about line 5056) gain `set_by: None, reason: None`. The struct literals would not compile otherwise. No behavior change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add defaulted `Steps::triage`. Call it in `drain_with` right after the review-pass loop and print its lines. Implement it in `RealSteps`, building items from `self.queue()` plan entries and passing the caps. A failure becomes a `triage failed` line. `person_set` ignores steward-authored latest records. Add the call-order unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "The deterministic Steward arm answers a prompt with the triage heading with an empty `{changes: [], close: []}`. Add a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/common/mod.rs",
+      "action": "modify",
+      "purpose": "Add a `triage_script(answer)` helper that wraps `deterministic_turn`: it returns the scripted answer, or a failed turn, for the triage prompt.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/triage.rs",
+      "action": "create",
+      "purpose": "Integration tests for criteria 1 to 3, driving `drain::drain` over the real records with a wrapper `Steps`.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Mechanical only: the two `PriorityRecord` literals (about lines 4719 and 5065) gain `set_by: None, reason: None`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under Unreleased describing the steward triage pass.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs: add the optional `set_by` and `reason` fields to `PriorityRecord` (serde default and skip when None), extend `validate`, and add unit tests (round trip, an old record parses, a half-set pair is refused). Fix the struct literals in `reading.rs` (`set_priority` and the test) and in `tests/drain.rs` with `set_by: None, reason: None`.",
+    "steward.rs: add `failure_classes_since(records, since)` and have `repeated_failures` share its body. Add a unit test with a job that ended in a failure outside the window.",
+    "Create `triage.rs`. Define the answer types and schema JSON. Write `brief` (heading `# Steward triage`, the focus, a table of items with title, rung, priority and setter, age in days, and dependencies, then the recent failure classes, then the rules). Write `set_by_person`. Write the pure `plan_changes(answer, items, records, caps)` with validation, the person-set guard, the caps count and the no-op filter. It returns the priority records, the formatted lines, and the close work items. Add `Athena::triage(items, caps, ui)`: return early if nested or no items; call the model through `agent_spec` and `invoke_and_record` for `Role::Steward`; redact the reasons; commit the records and invocation in one `commit_records`. Write no outcome or close record. Unit tests on `plan_changes`: caps, person-set, unknown id, bad level, empty reason, close, order.",
+    "lib.rs: add `pub mod triage;` and the doc line.",
+    "fake.rs: in the `Role::Steward` arm of `deterministic_turn`, if the user prompt has the triage heading, answer `{changes: [], close: []}`. Add a unit test.",
+    "drain.rs: add the defaulted `Steps::triage`. In `drain_with`, right after the `review_passes` loop, print `steps.triage()` lines with `d.ui.line`. In `RealSteps`, implement `triage` (build items from `self.queue()` plan entries, load `priority_caps()`, call `Athena::triage`, and turn an error into one `triage failed: …; the drain goes on` line). Update `person_set` to use `set_by_person`. Add the call-order unit test beside `Housekeeping`.",
+    "common/mod.rs: add `triage_script(answer: Option<Value>)`. It returns the answer, or a non-success turn when `None`, for the triage prompt, and `deterministic_turn` otherwise.",
+    "Create `tests/triage.rs`: a `Steps` wrapper, a `NoLander`, `StubPage` and a `Lines` `Ui`. The tests are the ones in demonstrations 1 to 3, plus a no-model-call test for an empty queue. Each asserts through `Records::load` and the collected lines, and runs `check_record_file` on each written priority file.",
+    "CHANGELOG.md: add the entry under Unreleased.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix anything they report. Confirm with `git diff --stat` that no governance file changed. There is no refusal or matching rule here, so `refusal_corpus` is not part of the checks."
+  ],
+  "risks": [
+    {
+      "risk": "Steward-authored priority records are read as a person's word by `person_set`, so the plan never demotes them and the caps are not enforced on them.",
+      "mitigation": "`RealSteps::person_set` uses `triage::set_by_person`, which looks only at the latest record's author. A test checks that a steward-set urgent item over the cap is demoted by the plan."
+    },
+    {
+      "risk": "Old priority records have no author. Reading a missing author as 'person' is right for them, but a malformed steward record could pass as a person's.",
+      "mitigation": "`validate` makes `reason` and `set_by` go together, and `deny_unknown_fields` stays. The unit tests cover both forms."
+    },
+    {
+      "risk": "The model names a job id that does not exist or is not open (running, closed), or returns bad JSON or a bad level.",
+      "mitigation": "`plan_changes` keeps only ids from the supplied open items and only the four known levels, and needs a non-empty one-line reason. Bad JSON counts as a failed call and prints a `triage failed` line."
+    },
+    {
+      "risk": "Triage runs on every drain and costs a call even when nothing is open.",
+      "mitigation": "No model call when no item is open, or when the run is nested. Tested through the invocation count in the script."
+    },
+    {
+      "risk": "Two drains, or a person, write a priority record for the same job at the same time, so `n` collides.",
+      "mitigation": "`n` is computed from the records just loaded, as in `set_priority`. The commit goes through the same `commit_records` gate. A collision fails the commit, and the failure becomes a note and the drain goes on."
+    },
+    {
+      "risk": "A cap skip is silent, because the brief asks for one line per change only.",
+      "mitigation": "This is the stated behavior. The tests assert the records and the line count. A skipped-proposal line can be added later if wanted."
+    },
+    {
+      "risk": "The producer works in a snapshot with no `records/` directory, and `athena.toml` is governance and must not change.",
+      "mitigation": "Tests build their own fixtures. The caps come from the code default (3 and 10) through `Config::priority_caps()`, so no config edit is needed."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Integration test `triage_writes_steward_priority_records_within_caps_and_leaves_person_set_items` in `crates/athena-cli/tests/triage.rs`. It runs the real drain over real `Records`. Setup: a `Fixture`, `athena.set_focus(\"speed first\")`, and 6 queued complete requests (path plus bullet, so nothing is read). One request gets `athena.set_priority(id, \"low\")`, a person's record. The `Steps` wrapper delegates `triage`, `queue`, `plan_entry`, `job_history`, `priority_caps` and `person_set` to a real `RealSteps` and stubs `run`, `land`, `rate` and `check_page`, as the `Replay` wrapper in `tests/drain.rs` does. The fake answer proposes urgent for 4 normal requests (the default cap is 3) and also urgent for the person-set one.",
+      "command": "cargo test -p athena-cli --test triage",
+      "observes": "After `drain::drain`, `Records::load` shows: three steward priority records at urgent, each with `set_by == Some(\"steward\")` and the reason from the answer, each passing `check_record_file`. The fourth urgent proposal, over the cap, has no new record. The person-set request still has exactly its original record, so its latest priority is unchanged. The count of urgent items after the drain is at most 3.",
+      "fails_without": "Without the triage pass no steward priority record is written. Without the person-set guard the person's low item turns urgent. Without the cap check a fourth urgent record appears.",
+      "seam": "Production entry point: `athena_cli::drain::drain`, which calls `Steps::triage`, which for the real steps calls `Athena::triage`. The fake is a `Script` closure injected through `Fixture::athena(script)` that returns the scripted answer for a steward-role invocation whose prompt has the triage heading, and `deterministic_turn` otherwise. The script helper is added to `tests/common/mod.rs` in the steps. The `Steps::triage` hook and `Athena::triage` do not exist yet and are added by the plan steps. `Fixture`, `RealSteps` (public fields), `Lander` stubs and `Lines` exist today (read)."
+    },
+    {
+      "criterion": 2,
+      "method": "Two tests in `crates/athena-cli/tests/triage.rs`. (a) `a_failed_triage_call_prints_a_note_and_the_drain_goes_on`: the script returns a failed `FakeTurn` (non-success outcome) for the triage prompt. The drain runs with two queued requests, and the `Steps` wrapper records which jobs were run. (b) `the_drain_prints_one_line_per_applied_change`: with a good answer that changes 2 items, the lines collected by the drain's `Lines` `Ui` are counted.",
+      "command": "cargo test -p athena-cli --test triage",
+      "observes": "(a) The output has a line starting `triage failed`. Both queued jobs are still run by the wrapper's `run`. No priority record is written and the drain report stops with `QueueEmpty`. (b) Exactly one `triage`-prefixed change line per applied change, each naming the job, the old and new priority, and the reason. The lines appear before any line from running a job.",
+      "fails_without": "Without the catch in `RealSteps::triage`, the error stops the drain or no note is printed, so (a) fails. Without the line printing in `drain_with`, (b) finds no change lines.",
+      "seam": "Entry point: `athena_cli::drain::drain` with the same wrapper, `Lines` `Ui` and script injection as criterion 1. The failure is injected as a `FakeTurn` with a non-success `InvocationOutcome`, so `invoke_and_record` and `consult` run for real and the error path of `Athena::triage` is the one under test. This extends the criterion 1 seam, and the steps add it."
+    },
+    {
+      "criterion": 3,
+      "method": "Test `a_close_proposal_becomes_a_steward_work_item_and_never_a_close` in `crates/athena-cli/tests/triage.rs`. The answer has `close: [{item: <job>, reason}]` and also a priority change for another item. A pure unit test in `triage.rs` checks the same through `plan_changes`.",
+      "command": "cargo test -p athena-cli --test triage",
+      "observes": "`Records::load` shows a new `WorkItem` with role `steward`, kind Proposal, key `triage-close:<job>`, and the job as evidence. The job has no outcome or close record, and its state is still queued, so it is still in the drain's queue. A second drain on the same records adds no second work item (key already known). A grep-style assertion in the test reads the `triage.rs` source via `include_str!` and finds no use of `Outcome` or a close constructor.",
+      "fails_without": "A version that closes the job leaves it with an outcome or out of the queue. A version that ignores `close` writes no work item.",
+      "seam": "Entry point: `athena_cli::drain::drain` as in criterion 1. The injected fake is the scripted triage answer. `WorkItem` writing is a new function in `triage.rs`, added by a plan step. `Records` loading and `WorkItem::validate` exist."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three checks Athena itself runs, on the finished tree. This includes all existing tests, since the `PriorityRecord` fields touch struct literals in `reading.rs` and `tests/drain.rs`.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The existing priority, plan, drain and records round-trip tests still pass, and a person-set record with no author field still parses.",
+      "fails_without": "A literal missing the new fields fails to compile. A malformed `Steps` default or an unused-import warning fails clippy `-D warnings`.",
+      "seam": "Not a seam test: whole-workspace gates. Nothing is injected."
+    },
+    {
+      "criterion": 5,
+      "method": "Read `CHANGELOG.md` under `[Unreleased]` for a bullet describing the steward triage pass at drain start. It names the focus input, the caps, person-set items left alone, close proposals as work items, and that a failed call only prints a note.",
+      "command": "grep -n -i triage CHANGELOG.md",
+      "observes": "At least one hit inside the Unreleased section (before the first release heading), describing the feature in plain words.",
+      "fails_without": null,
+      "seam": "Content check. No seam."
+    },
+    {
+      "criterion": 6,
+      "method": "Grep `crates/athena-cli/src/drain.rs` for `review_passes()` and `triage()` in `drain_with`, and confirm line order: the triage loop is after the review-pass loop and before `steps.queue()`. A unit test in `drain.rs` (a `Steps` stub that logs calls) asserts the call order `review_passes`, `triage`, `queue`. Grep `crates/athena-core/src/triage.rs` for close-writing code.",
+      "command": "grep -n -E \"review_passes\\(\\)|steps\\.triage\\(\\)|steps\\.queue\\(\\)\" crates/athena-cli/src/drain.rs && grep -n -i -E \"AnyRecord::(Outcome|Close)|OutcomeState|fn close\" crates/athena-core/src/triage.rs",
+      "observes": "The first command lists `review_passes()`, then `triage()`, then the first `queue()` in `drain_with`, in line order. The second finds no match, so the module writes no close or outcome record.",
+      "fails_without": "If triage ran after `queue()` or before the review passes, the call-order unit test and the line-order grep fail.",
+      "seam": "Content check, plus the call-order unit test in `drain.rs`. That test uses a logging `Steps` stub like the existing `Housekeeping` stub (exists, read) with the `triage` hook added in the steps."
+    },
+    {
+      "criterion": 7,
+      "method": "Check that the diff touches only the listed deliverables, plus the minimal literal fixes in `reading.rs` and `tests/drain.rs`, and no governance file.",
+      "command": "git diff --stat",
+      "observes": "The changed paths are among: `triage.rs`, `lib.rs`, `drain.rs`, `tests/triage.rs`, `CHANGELOG.md`, `fake.rs`, `steward.rs`, `records.rs`, `tests/common/mod.rs`, and the literal fixes. `athena.toml`, `defaults.toml`, workflows and the lint and tool configuration do not appear.",
+      "fails_without": null,
+      "seam": "Content check. No seam."
+    }
+  ],
+  "open_questions": [
+    "`reading.rs` and `tests/drain.rs` are not in the deliverable list (`reading.rs` is named in out_of_scope), but both build `PriorityRecord` literals that cannot compile after adding fields. The plan edits them minimally. If that is refused, the fields cannot be added and the author would have to live elsewhere.",
+    "Where the job outcome time is kept (for 'failure classes seen in the last two days') was not read. The producer should use the closing outcome's timestamp field, and `failure_classes_since` should say which it used.",
+    "The exact `InvocationOutcome` variant for a failed turn (used by the failure test) and the `Athena::agent_spec` and `invoke_and_record` visibility from a new core module were not checked. Both are used by `steward.rs` in the same crate, so they should work.",
+    "The model call's cost is not charged to the drain budget, the same as the steward run and the review passes. Is that acceptable? The plan assumes yes.",
+    "`reading::plan_entry` skips topic-based raising when any priority record exists (`job.priorities.is_empty()`). A steward record therefore also suppresses that raise. The plan leaves it as is. Tell me if the check should look only at person-set records.",
+    "Which `### Added` or `### Changed` heading inside `[Unreleased]` should hold the entry. The producer should follow the placement of the focus entry from the dependency job."
+  ],
+  "producer_section_sha256": "013a6687630183d892f442d9695f1af013b249aac11b4b55ed015dd9b13ca0ac"
+}

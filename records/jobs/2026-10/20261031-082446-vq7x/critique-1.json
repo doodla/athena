@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261031-082446-vq7x",
+  "round": 1,
+  "at": "2026-11-03T04:07:57.793898085Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Applying changes in the model's order can wrongly skip a raise that a later lowering in the same answer would have made room for.",
+      "evidence": "The plan says 'Changes are applied in the model's order' and the count updates after each one. If item A is raised to urgent before item B is lowered from urgent, A is skipped even though B frees the slot. The result depends on the model's order, not on what the answer means. Fix: Apply every lowering first, then the raisings in the model's order. Add a plan_changes unit test where a lowering listed after a raising lets the raising stand.",
+      "location": "Decision 5 / plan_changes cap handling",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan leaves to the producer a question the code already answers.",
+      "evidence": "crates/athena-data/src/records.rs:866: `pub struct Outcome { job, state, reason, at: Timestamp, ... }`. repeated_failures (steward.rs:712) already reads job.outcome and its state. Fix: Say that failure_classes_since filters on Outcome.at >= now - 2 days, with states Rejected or Failed, and drop the open question.",
+      "location": "Open questions: outcome time for 'failure classes seen in the last two days'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The model's reason for a close proposal is not stored anywhere, and the required `source` is not named.",
+      "evidence": "WorkItem (records.rs:1853) has id, at, role, kind, key, title, rung, source and evidence, with no reason field. validate needs a non-empty source.value, and evidence is required for kind Proposal. approve_work builds its request from the item's source and evidence (work_decisions.rs:330). Fix: Put the job and the one-line reason in the title (for example 'Close <job>: <reason>'). Set source to the job reference, or to the triage invocation. Assert the title and source in the criterion 3 test.",
+      "location": "Decision 4 / close proposal WorkItem",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The failure test does not show that other steps' lines are still printed, which criterion 2 asks for.",
+      "evidence": "The criterion says the drain 'still prints the changes from other steps'. The wrapper passes triage, queue, plan_entry, job_history, priority_caps and person_set through to RealSteps but not review_passes, and test (a) asserts only the 'triage failed' line and the jobs run. Fix: Have the wrapper's review_passes return a fixed line. Assert it is printed before the 'triage failed' line, with a job-run line after it.",
+      "location": "Demonstration for criterion 2(a)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The grep chain reports failure exactly when triage.rs is correct.",
+      "evidence": "`grep ... drain.rs && grep -n -i -E \"AnyRecord::(Outcome|Close)|OutcomeState|fn close\" crates/athena-core/src/triage.rs`: the second grep exits 1 when nothing matches, the outcome the plan wants, so the whole command fails. Fix: Write the second part as `! grep -n -i -E ... crates/athena-core/src/triage.rs`. In the include_str! test, search for constructor patterns such as `AnyRecord::Outcome(`, not the bare word 'Outcome', which a doc comment could contain.",
+      "location": "Demonstration for criterion 6, Run command",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Every existing real drain with open items will now make one more steward call and may commit an invocation record. The plan does not plan for the effect on existing tests.",
+      "evidence": "Triage returns early only when the run is nested or nothing is open. tests/drain.rs runs RealSteps drains through deterministic_turn, and at least one test there counts invocations. The plan says it commits 'the records and invocation in one commit_records' but does not say what happens when there are no changes. Fix: State whether a triage with no changes still commits its invocation record (a stash with no records commit is simpler). In step 10, list the existing tests that count invocations or commits and expect to update them.",
+      "location": "Steps 3 and 6 / existing drain tests",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan reuses the steward's standing system prompt, which describes a different task and answer shape.",
+      "evidence": "consult builds `steward_system_prompt(&role.prompt, role.version)` with tools Read, Grep, Glob, Bash and the `{items}` schema (steward.rs:1086-1118). Triage answers {changes, close}, and a new prompt file is out of scope. Fix: Say that triage reuses the steward system prompt but grants no tools (or read-only tools with no Bash), and that the triage brief states the answer shape plainly so it overrides the standing prompt. The schema enforces the shape either way.",
+      "location": "Approach / Athena::triage model call",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. One model call runs after the Hestia sweep (review_passes, drain.rs:2716) and before steps.queue() (drain.rs:2723). Both the serial and concurrent drains go through drain_with, so the hook covers both. Changes are written as steward-authored priority records within the caps. Items whose latest record a person set are guarded, close answers become proposal-only WorkItems, and a failed call becomes one printed line. I confirmed by reading that the code it names exists: PriorityRecord (records.rs:525, no author or reason yet), RealSteps::person_set (drain.rs:3397, which today counts any priority record as a person's), priority_caps, steward::repeated_failures and consult, the fake's Script, deterministic_turn and its Steward arm (fake.rs:391), Fixture::athena(script), and WorkItem. The demonstrations drive the real drain::drain with only the model answer scripted. Each would fail without the behavior. Athena's scope findings on reading.rs and tests/drain.rs are justified: adding struct fields forces those literal edits. Remaining issues are minor: the cap order depends on the model's order, the failure-time field is left open though Outcome.at exists, the close proposal's reason and source are not placed, criterion 2 does not check other steps' lines, the criterion 6 grep chain fails when it should pass, the existing tests will see an extra model call, and the steward's standing system prompt is reused."
+}

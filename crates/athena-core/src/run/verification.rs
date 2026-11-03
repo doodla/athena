@@ -73,16 +73,7 @@ impl Athena {
             candidate: candidate_view,
             checks: check_runs
                 .iter()
-                .map(|r| CheckResultView {
-                    name: r.name.clone(),
-                    command: r.command.join(" "),
-                    passed: r.passed,
-                    detail: match (r.tests_ran, &r.note) {
-                        (_, Some(note)) => note.clone(),
-                        (Some(n), None) => format!("{n} tests ran"),
-                        (None, None) => String::new(),
-                    },
-                })
+                .map(crate::verify::check_result_view)
                 .collect(),
             commands: athena_agent::policy::describe_commands(&verifier_grant.commands),
             tool_config_from_base: tool_config_from_base.clone(),
@@ -100,6 +91,7 @@ impl Athena {
                 command: "not a check".into(),
                 passed: true,
                 detail: statement,
+                ..Default::default()
             });
         }
         // What the producer's report still lacked after the send-back goes to the verifier as one more
@@ -115,6 +107,7 @@ impl Athena {
                      by it; judge them yourself from the candidate and the recorded check results: {}",
                     report_gaps.join("; ")
                 ),
+                ..Default::default()
             });
         }
         // Criteria the producer left to Athena's checks go the same way: not a check, fails nothing, and
@@ -129,6 +122,7 @@ impl Athena {
                      suite); judge them yourself from the recorded check results: {}",
                     left_criteria.join("; ")
                 ),
+                ..Default::default()
             });
         }
         // The verifier sees the accepted plan's demonstrations and planned files, never its approach or

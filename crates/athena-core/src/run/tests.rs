@@ -2449,6 +2449,9 @@ mod produce_and_verify_order_tests {
         Green,
         /// A finished run whose aggregate job failed because `clippy` failed.
         Red,
+        /// A finished run whose aggregate job failed because one test shard failed; the shard's log lists
+        /// the failing tests.
+        RedTest,
         /// No run on the branch.
         Missing,
         /// A finished run whose aggregate job was cancelled.
@@ -2460,6 +2463,21 @@ mod produce_and_verify_order_tests {
     }
 
     const CI_RUN_ADDRESS: &str = "https://github.com/owner/repo/actions/runs/4242";
+
+    /// The id of the failing test shard job in [`CiReply::RedTest`], and its log: timestamped, with one
+    /// unit that failed two tests.
+    const SHARD_JOB_ID: u64 = 9001;
+    const SHARD_LOG: &str = "\
+2026-11-01T06:01:00.0000001Z == shard 0/6: athena-core --lib
+2026-11-01T06:01:01.0000001Z     Running unittests src/lib.rs (target/debug/deps/athena_core-1a2b3c)
+2026-11-01T06:01:02.0000001Z
+2026-11-01T06:01:03.0000001Z failures:
+2026-11-01T06:01:04.0000001Z     build_inputs::reads_the_lockfile
+2026-11-01T06:01:05.0000001Z     build_inputs::rejects_a_stale_input
+2026-11-01T06:01:06.0000001Z
+2026-11-01T06:01:07.0000001Z test result: FAILED. 8 passed; 2 failed; 0 ignored
+2026-11-01T06:01:08.0000001Z error: test failed, to rerun pass `-p athena-core --lib`
+";
 
     /// A `gh::Runner` that answers the two reads of the CI source from the request path, as the host's
     /// `head_sha` and `branch` filters would, and keeps every path it was asked for.
@@ -2481,7 +2499,7 @@ mod produce_and_verify_order_tests {
                 CiReply::Missing => return json!({ "workflow_runs": [] }),
                 CiReply::Unfinished => ("in_progress", json!(null)),
                 CiReply::Green => ("completed", json!("success")),
-                CiReply::Red => ("completed", json!("failure")),
+                CiReply::Red | CiReply::RedTest => ("completed", json!("failure")),
                 CiReply::Cancelled => ("completed", json!("cancelled")),
                 CiReply::TimedOut => ("completed", json!("timed_out")),
             };
@@ -2506,6 +2524,12 @@ mod produce_and_verify_order_tests {
                     job("fmt", "completed", json!("success")),
                     job("clippy", "completed", json!("failure")),
                     job("test (linux)", "completed", json!("success")),
+                    job(aggregate, "completed", json!("failure")),
+                ],
+                CiReply::RedTest => vec![
+                    job("fmt", "completed", json!("success")),
+                    job("clippy", "completed", json!("success")),
+                    json!({ "id": SHARD_JOB_ID, "name": "test (shard 0)", "status": "completed", "conclusion": "failure" }),
                     job(aggregate, "completed", json!("failure")),
                 ],
                 CiReply::Cancelled => vec![job(aggregate, "completed", json!("cancelled"))],
@@ -2533,6 +2557,10 @@ mod produce_and_verify_order_tests {
                 .find(|a| a.starts_with("repos/"))
                 .expect("a repos path");
             self.paths.borrow_mut().push(path.clone());
+            // The log of the failing shard, asked for before the jobs listing branch below.
+            if path.ends_with(&format!("/actions/jobs/{SHARD_JOB_ID}/logs")) {
+                return Ok(SHARD_LOG.to_string());
+            }
             if path.contains("/jobs") {
                 return Ok(self.jobs().to_string());
             }
@@ -2747,6 +2775,50 @@ mod produce_and_verify_order_tests {
             run.done.reason.contains("clippy"),
             "the failure names the failing check: {}",
             run.done.reason
+        );
+    }
+
+    #[test]
+    fn ci_reuse_red_test_shard_hands_the_verifier_the_failing_tests_and_log_tail() {
+        let run = ci_reuse_run(Some(GITHUB), CiReply::RedTest);
+        assert!(
+            run.executed.is_empty(),
+            "local checks ran: {:?}",
+            run.executed
+        );
+        assert_eq!(run.names(run.checks()), ALL_CHECKS);
+        let test = run.checks().iter().find(|c| c.name == "test").unwrap();
+        assert!(!test.passed && test.reused);
+        assert_eq!(
+            test.failed_tests,
+            vec![
+                "athena_core build_inputs::reads_the_lockfile",
+                "athena_core build_inputs::rejects_a_stale_input"
+            ]
+        );
+        assert!(
+            run.checks()
+                .iter()
+                .filter(|c| c.name != "test")
+                .all(|c| c.passed)
+        );
+        let prompt = run.verifier_prompts.last().expect("the verifier ran");
+        for text in [
+            "`athena_core build_inputs::reads_the_lockfile`",
+            "`athena_core build_inputs::rejects_a_stale_input`",
+            "Failing units (`-p` package and selector): athena-core --lib",
+            "error: test failed, to rerun pass `-p athena-core --lib`",
+            "Run only the failing tests (`cargo test -p <crate> <name>`) unless you have a reason to run more",
+            "`<binary> <test>`",
+        ] {
+            assert!(
+                prompt.contains(text),
+                "the verifier prompt omits {text}: {prompt}"
+            );
+        }
+        assert!(
+            !prompt.contains("2026-11-01T06:01"),
+            "timestamps are stripped"
         );
     }
 
