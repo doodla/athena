@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-162416-m9th",
+  "round": 1,
+  "at": "2026-11-03T16:30:53.41191828Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/main.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/main.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "README.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, README.md",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/design/async-drain.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/design/async-drain.md",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/decisions.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/decisions.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The cause key matches fixed sentences used for single-item verdicts, so two unrelated planning or verifier rejections stop the batch.",
+      "evidence": "Read: drain.rs:3545 sets `reason: f.reason`. planning.rs:420 stops with the fixed `\"the critic rejected the plan\"`, and planning.rs:422 uses `PLANNING_CAP_REASON` = \"the plan still needed revising in the last round\" (records.rs:1386). Neither text contains the item or job, so after masking, every item gets the same key. The request's incident was an item that failed planning twice. A second item failing planning for its own reasons would match and end the batch, which is the reported fault. The plan's Risks section names this case ('a generic verifier rejected') and accepts it. The request instead defines shared as 'the environment, the build, Athena itself'. Fix: Decide shared cause by where the failure came from, not by reason text. (a) A verdict on the item is never shared. That covers a critic Reject, the planning cap, a reading misread, a verifier rejection, a scope-guard signal, or any Finished outcome Rejected whose reason comes from a review verdict. (b) Only these may be shared: a failure from an Err path in `run()` (Athena or host error, drain.rs ~3562), a host or check failure, or a not-landed check failure with the same normalized detail. Compare keys only within (b). The simplest way is to carry a `shared: bool` or a cause kind on `Run` or `JobLine`, set where the reason is made. Don't guess it from the text afterwards. Then add a unit test showing that two items with 'the critic rejected the plan' do not match.",
+      "location": "Approach / Decision 1 (failure_key compares the run reason across items)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The shared-cause test uses the stub's generic 'ended rejected' reason, so it treats a per-item rejection as a shared cause and never shows a real shared cause stopping the batch.",
+      "evidence": "Read: tests/drain.rs:238 sets `reason: format!(\"ended {}\", outcome.as_str())`. The plan relies on two items both reading 'ended rejected' to trigger the stop, and gives the Shared stub the same text for the Before::RepeatedFailure seeding. In production, matching text like this is two separate verdicts (see the finding above). The test passes only because of the false positive, and it would fail once that is fixed. The plan says 'nothing is added to the stub', but a correct test needs a scriptable per-run reason or cause kind. Fix: Give `Stub` (and `Shared`) a scriptable per-run reason or cause kind, for example `reasons: Vec<String>` or an error outcome that stands for an Athena or host failure. Write criterion 2 with two items failing for that shared environment cause, plus a not-landed variant with the same check detail. Add a case to criterion 3 where two items are both 'rejected' and the batch continues. Reseed Before::RepeatedFailure with the shared kind.",
+      "location": "Demonstrations, criterion 2 (two_items_failing_for_the_same_cause_stop_the_batch) and criterion 5 Shared-stub reseeding",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan leaves open how `finish` gets the retry job's name and the failure reason.",
+      "evidence": "Read: `finish(&self, item: &Item, end: ItemEnd)` at drain.rs:2348 has no `last_job`, and `ItemEnd::Failed` carries no data (line 1813). The plan says 'either add it … or read the last line'. Fix: Choose one. The cleanest is `ItemEnd::Failed(Cause)`, built in `attempts` from the last RunStep or LandStep. This also fixes the first finding, because the cause kind is known there.",
+      "location": "Step 4 (last_job not available in finish)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The exact display strings ('job         a (item a) rejected', 'plan       a passed over: failed twice') are guesses.",
+      "evidence": "The pass_over format `plan       {id} passed over: {reason}` is confirmed at drain.rs:1372. The job-line format in display.rs was not checked against the plan's string. Fix: Assert on stable substrings (the item name, its reason text, 'passed over'), not on full padded lines.",
+      "location": "Demonstration, criterion 7",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan changes the right place. The bug starts in the `ItemEnd::Failed` arm of `Drain::finish` (drain.rs line 2379, read), which unconditionally calls `set_stop(Stop::RepeatedFailure, …)`, and the plan follows the existing Paused/Skipped pass-over model. Its dependents list is thorough. The `RepeatedFailure` names in steward.rs, outputs.rs and records.rs belong to an unrelated steward work-item kind, not to this stop. The flaw is in how it decides a cause is shared: it compares the item's normalized `reason` text. I read the real reasons a run produces, and the planning failures from the request's own incident are fixed sentences with no item detail: `\"the critic rejected the plan\"` (planning.rs:420) and `PLANNING_CAP_REASON = \"the plan still needed revising in the last round\"` (records.rs:1386). Under this key, any two unrelated items that fail planning would look shared and stop the batch. That repeats the reported fault. The criterion-2 test then counts this false positive as the correct result, because it relies on the stub's generic `\"ended {outcome}\"` reason. Shared cause should be decided by where the failure came from (an Athena or host error, an environment check, or the same landing-check detail), not by matching any reason text. The tests need a stub reason that stands for a genuinely shared cause."
+}

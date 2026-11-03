@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-162416-m9th",
+  "round": 2,
+  "at": "2026-11-03T16:35:49.634641817Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Finished Failed runs are never shared, which ignores the existing environment classifier, so usage-limit and expired-login failures would no longer stop the batch.",
+      "evidence": "crates/athena-core/src/disk.rs:368-434: `StopCause::of(reason)` reads a closing reason as LowDisk, CheckTimeout, ProducerAuth (401), UsageLimit (429) or OtherEnvironment, and `is_environment_reason` is already used for Failed outcomes (run/mod.rs:598, disk.rs:443). drain.rs never calls it (no StopCause or is_environment_reason match). These are exactly the 'environment / Athena itself' causes the request names. Today they stop at the first item through the unconditional stop. Under the plan they are per-item, so the drain spends two runs on every queued item until the budget or job limit ends it. The plan asks the user about this in an open question that the code already answers. Fix: In run_job's `other` arm, set `shared` also when `other == Some(OutcomeState::Failed) && athena_core::disk::is_environment_reason(&run.reason)`. Key it on the StopCause kind or the normalized reason. Add a drain test: two items whose runs end Failed with a usage-limit reason stop with RepeatedFailure, and a Failed run with a work reason does not. Drop open question 2, or narrow it to Failed reasons that StopCause reads as Work.",
+      "location": "Decision 2 / Approach ('Any run that finished with an outcome (Rejected, Failed, TimedOut) ... is shared: None'); Open question 2",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Every not-landed result is treated as shared, but the real pull-request-state text is a fixed sentence, so two unrelated items with red CI would stop the batch.",
+      "evidence": "drain.rs:3052-3055 builds `Landing::NotLanded(format!(\"pull request {} is {:?}, checks {:?}; it is landed once it is merged\", pr_number, state, checks))`. After the plan masks all-digit tokens, two different items whose own changes fail CI give the same key ('pull request <n> is open, checks some(red) ...'). A red check on an item's own pull request is a verdict on that item, not a shared cause. drain.rs:1648 ('checks failed after rebase: {detail}') can also be item-specific. Only the Err arm (3056, `{error:#}` from gh) is clearly a host or Athena error. Fix: Separate a host error from a pull-request-state report. For example, give `Landing` a variant or flag for the Err arm, or split in `landing_from_report`. Count only host errors (and, if wanted, the after-rebase recheck failure) as shared. Keep pull-request-state not-landed results per-item. Add a test that two items whose landing is the real 'pull request N is Open, checks Some(Red)' text continue.",
+      "location": "Decision 1(c) / Step 4 (LandStep::NotLanded always `shared: true`); Decision 3 masking of all-digit tokens",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The landing cases script detail strings that production never produces, so they cannot catch the false positive above.",
+      "evidence": "The demonstrations use 'checks failed on main' and 'pull request 7 is Closed'. The production format at drain.rs:3052 is 'pull request {n} is {state:?}, checks {checks:?}; it is landed once it is merged', and the stub's default is 'checks failed' (tests/drain.rs:246). Fix: Script the landing details in the exact production format, ideally built through `landing_from_report` or a shared format helper, so the shared/per-item split is tested on text the drain really sees.",
+      "location": "Demonstrations for criteria 2 case (2) and 3 case (3)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the fix in the right place. `Drain::finish` (drain.rs:2379) sets Stop::RepeatedFailure for every ItemEnd::Failed. The plan changes that arm to pass the item over, the way Paused and Skipped already work. The change points it names exist: RunStep::Failed at 1504/1564, the landing text at 1650/1698, and `Run.outcome == None` on the Err path of RealSteps::run (3562). Its test seams are real: Stub.outcomes, the default 'ended rejected' reason and `unlandable`. Two parts of the shared-cause rule are unsound, so the verdict is revise. First, the plan treats every finished Failed outcome as a verdict on the item. But the code already has a classifier, `athena_core::disk::StopCause::of` / `is_environment_reason`, that marks Failed closing reasons such as an expired login (401), a usage limit (429), low disk or a check timeout as environment causes. Today those stop the batch after one item. Under the plan they would never stop it: every item would get two failing runs. Second, the plan counts every not-landed result as shared. The real not-landed text for a pull request whose own checks are red is a fixed sentence ('pull request N is Open, checks Some(Red); ...'). Once the number is masked, any two unrelated items with red CI would match. That is the same false positive the plan rejects for verdict sentences. The demonstrations hide this because they script landing details that production never writes."
+}
