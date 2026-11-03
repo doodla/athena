@@ -145,6 +145,176 @@ pub fn parse_check_run(reply: &Value, name: &str) -> Option<CiRunState> {
         .max_by_key(|r| r.id)
 }
 
+/// Whether `word` is the timestamp GitHub puts at the start of every job-log line (`2026-01-01T00:00:00.1Z`).
+fn is_log_stamp(word: &str) -> bool {
+    word.ends_with('Z') && word.contains('T') && word.starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// `line` without its job-log timestamp and the one space after it, keeping any indent that follows (the
+/// `failures:` list of a test run is indented by four spaces) and without terminal colour escapes.
+fn plain_log_line(line: &str) -> String {
+    let line = line.trim_end_matches('\r');
+    if is_log_stamp(line) {
+        return String::new();
+    }
+    let line = match line.split_once(' ') {
+        Some((stamp, rest)) if is_log_stamp(stamp) => rest,
+        _ => line,
+    };
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            // An escape sequence ends at its first letter.
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The most failing tests kept from the logs; the rest are counted by the [`LIST_CUT`] entry.
+const MAX_RECORDED_TESTS: usize = 50;
+/// The entry that says more tests failed than were kept.
+const LIST_CUT: &str = "(list cut at 50)";
+
+/// One failed `test (shard N)` job of a CI run: its id, name and conclusion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FailedShard {
+    id: u64,
+    name: String,
+    conclusion: String,
+}
+
+/// The failed test-shard jobs of a jobs reply: `test (` jobs that concluded `failure`, `timed_out` or
+/// `cancelled` (the conclusions [`GhClient::failing_test`] reads) and have an id.
+fn failed_shards(jobs: &Value) -> Vec<FailedShard> {
+    jobs["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|j| {
+            let name = j["name"].as_str().filter(|n| n.starts_with("test ("))?;
+            let conclusion = j["conclusion"].as_str()?;
+            matches!(conclusion, "failure" | "timed_out" | "cancelled").then_some(())?;
+            Some(FailedShard {
+                id: j["id"].as_u64()?,
+                name: name.to_string(),
+                conclusion: conclusion.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// The `<package> <selector>` of each unit in `log` whose own part names a failing test. A unit starts at a
+/// `== shard k/n: <package> <selector>` line, which `cargo xtask test-shard` prints before it runs the unit.
+fn failing_units(log: &str) -> Vec<String> {
+    let mut parts: Vec<(Option<&str>, Vec<&str>)> = vec![(None, Vec::new())];
+    for line in log.lines() {
+        if let Some(rest) = line.strip_prefix("== shard ") {
+            parts.push((
+                rest.split_once(": ").map(|(_, unit)| unit.trim()),
+                Vec::new(),
+            ));
+        } else if let Some((_, lines)) = parts.last_mut() {
+            lines.push(line);
+        }
+    }
+    parts
+        .into_iter()
+        .filter_map(|(unit, lines)| {
+            let unit = unit?;
+            (!crate::checks::failed_test_names(&lines.join("\n")).is_empty())
+                .then(|| unit.to_string())
+        })
+        .collect()
+}
+
+/// What the logs of the failed test-shard jobs say, from `(job name, conclusion, log)` with `None` for a log
+/// that could not be read.
+///
+/// The names come from `checks::failed_test_names`, the reader a local run uses, so they are `<binary> <test>`
+/// and compare with a base's names. They are recorded only when at least one log gives some. Then every
+/// failed job whose log was unread, listed no test, or did not finish adds an entry in parentheses
+/// (`<job> (log not read)`, `<job> (no failing tests listed)`, `<job> (did not finish)`), and a list longer
+/// than [`MAX_RECORDED_TESTS`] is cut with [`LIST_CUT`]. Those entries never match a base's names, so a
+/// partly read set of shards can never look like a complete list. With no names the list stays empty and the
+/// tail alone is kept; with no log read, or no job, the result is `None`.
+pub fn detail_from_job_logs(
+    jobs: &[(String, String, Option<String>)],
+) -> Option<crate::ci_result::FailureDetail> {
+    use std::collections::BTreeSet;
+    let plain: Vec<(&str, &str, Option<String>)> = jobs
+        .iter()
+        .map(|(name, conclusion, log)| {
+            let text = log
+                .as_deref()
+                .map(|l| l.lines().map(plain_log_line).collect::<Vec<_>>().join("\n"));
+            (name.as_str(), conclusion.as_str(), text)
+        })
+        .collect();
+    if plain.iter().all(|(_, _, log)| log.is_none()) {
+        return None;
+    }
+    let mut names = BTreeSet::new();
+    let mut units: Vec<String> = Vec::new();
+    let mut markers: Vec<String> = Vec::new();
+    for (name, conclusion, log) in &plain {
+        let found = log.as_deref().map(crate::checks::failed_test_names);
+        match &found {
+            None => markers.push(format!("{name} (log not read)")),
+            Some(f) if f.is_empty() => markers.push(format!("{name} (no failing tests listed)")),
+            Some(f) => names.extend(f.iter().cloned()),
+        }
+        if *conclusion != "failure" {
+            markers.push(format!("{name} (did not finish)"));
+        }
+        for unit in log.as_deref().map(failing_units).unwrap_or_default() {
+            if !units.contains(&unit) {
+                units.push(unit);
+            }
+        }
+    }
+    let readable: Vec<&(&str, &str, Option<String>)> =
+        plain.iter().filter(|(_, _, l)| l.is_some()).collect();
+    let mut text = String::new();
+    for (name, _, log) in &readable {
+        if readable.len() > 1 {
+            text.push_str(&format!("== {name}\n"));
+        }
+        text.push_str(log.as_deref().unwrap_or_default());
+        text.push('\n');
+    }
+    let tail = crate::checks::tail_lines(&text, crate::checks::FAILED_TAIL_LINES);
+    let tail = crate::checks::tail(&tail, crate::checks::FAILED_TAIL_BYTES);
+    let mut failed_tests: Vec<String> = Vec::new();
+    let mut output_tail = tail;
+    if !names.is_empty() {
+        failed_tests = names.into_iter().collect();
+        if failed_tests.len() > MAX_RECORDED_TESTS {
+            failed_tests.truncate(MAX_RECORDED_TESTS);
+            failed_tests.push(LIST_CUT.to_string());
+        }
+        failed_tests.extend(markers);
+        if !units.is_empty() {
+            output_tail = format!(
+                "{}{}\n{output_tail}",
+                crate::checks::FAILING_UNITS_PREFIX,
+                units.join("; ")
+            );
+        }
+    }
+    Some(crate::ci_result::FailureDetail {
+        failed_tests,
+        output_tail,
+    })
+}
+
 /// The longest test name kept from a log.
 pub(super) const TEST_NAME_LIMIT: usize = 200;
 
@@ -164,13 +334,7 @@ pub fn failing_test_name(log: &str) -> Option<String> {
         .map(|line| {
             let line = line.trim();
             match line.split_once(' ') {
-                Some((stamp, rest))
-                    if stamp.ends_with('Z')
-                        && stamp.contains('T')
-                        && stamp.starts_with(|c: char| c.is_ascii_digit()) =>
-                {
-                    rest.trim_start()
-                }
+                Some((stamp, rest)) if is_log_stamp(stamp) => rest.trim_start(),
                 _ => line,
             }
         })
@@ -750,6 +914,10 @@ pub fn parse_ci_run(
 pub struct CiBranchSource<'a> {
     client: &'a GhClient<'a>,
     branch: String,
+    /// The failed test-shard jobs of the run the last [`fetch`](crate::ci_result::CiSource::fetch) read, with
+    /// that run's address, so [`failure_detail`](crate::ci_result::CiSource::failure_detail) needs no more
+    /// listing calls.
+    failed: std::cell::RefCell<Option<(String, Vec<FailedShard>)>>,
 }
 
 impl std::fmt::Debug for CiBranchSource<'_> {
@@ -784,6 +952,7 @@ impl GhClient<'_> {
         CiBranchSource {
             client: self,
             branch: branch.to_string(),
+            failed: std::cell::RefCell::new(None),
         }
     }
 }
@@ -816,7 +985,43 @@ impl crate::ci_result::CiSource for CiBranchSource<'_> {
             )),
             &[],
         )?;
-        Ok(parse_ci_run(&runs, Some(&jobs), branch))
+        let parsed = parse_ci_run(&runs, Some(&jobs), branch);
+        *self.failed.borrow_mut() = parsed
+            .as_ref()
+            .map(|r| (r.address.clone(), failed_shards(&jobs)));
+        Ok(parsed)
+    }
+
+    /// Reads the log of every failed `test (shard N)` job of the run `record` came from and gives the failing
+    /// tests and the end of the log ([`detail_from_job_logs`]). A log that cannot be read is not an error:
+    /// the failed record stands, with a marker in the list when another log named tests.
+    fn failure_detail(
+        &self,
+        record: &crate::ci_result::CiRecord,
+    ) -> Option<crate::ci_result::FailureDetail> {
+        let failed = self.failed.borrow().clone()?;
+        if record.run_address.as_deref() != Some(failed.0.as_str()) {
+            return None;
+        }
+        let jobs: Vec<(String, String, Option<String>)> = failed
+            .1
+            .iter()
+            .map(|job| {
+                let log = self
+                    .client
+                    .api_text(
+                        HostOperation::ReadChecks,
+                        "GET",
+                        &self
+                            .client
+                            .repo_path(&format!("actions/jobs/{}/logs", job.id)),
+                        &[],
+                    )
+                    .ok();
+                (job.name.clone(), job.conclusion.clone(), log)
+            })
+            .collect();
+        detail_from_job_logs(&jobs)
     }
 }
 

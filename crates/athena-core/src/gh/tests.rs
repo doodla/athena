@@ -301,6 +301,8 @@ struct CiRunner {
     runs: Value,
     /// The jobs reply per run id.
     jobs: BTreeMap<u64, Value>,
+    /// The log reply per job id; `None` answers with an error.
+    logs: BTreeMap<u64, Option<String>>,
 }
 impl CiRunner {
     fn new(runs: Vec<Value>, jobs: Vec<(u64, Value)>) -> Self {
@@ -308,7 +310,15 @@ impl CiRunner {
             calls: RefCell::new(vec![]),
             runs: json!({"workflow_runs": runs}),
             jobs: jobs.into_iter().collect(),
+            logs: BTreeMap::new(),
         }
+    }
+    fn with_logs(mut self, logs: Vec<(u64, Option<&str>)>) -> Self {
+        self.logs = logs
+            .into_iter()
+            .map(|(id, log)| (id, log.map(str::to_string)))
+            .collect();
+        self
     }
     fn paths(&self) -> Vec<String> {
         self.calls
@@ -324,6 +334,14 @@ impl Runner for CiRunner {
         let path = args.iter().find(|a| a.starts_with("repos/")).unwrap();
         if path.starts_with("repos/example/project/actions/runs?") {
             return Ok(self.runs.to_string());
+        }
+        if let Some(job) = path.strip_prefix("repos/example/project/actions/jobs/")
+            && let Some(job) = job.strip_suffix("/logs")
+        {
+            return match job.parse::<u64>().ok().and_then(|id| self.logs.get(&id)) {
+                Some(Some(log)) => Ok(log.clone()),
+                _ => anyhow::bail!("no log for {path}"),
+            };
         }
         let id = path
             .strip_prefix("repos/example/project/actions/runs/")
@@ -352,6 +370,345 @@ impl crate::ci_result::LocalChecks for LocalChecks {
             })
             .collect())
     }
+}
+
+/// A log line as GitHub writes it: a timestamp, a space, the text.
+fn stamped(lines: &[&str]) -> String {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("2026-01-01T00:00:{:02}.1234567Z {l}\n", i % 60))
+        .collect()
+}
+
+/// The log of a test shard whose library unit failed two tests, as `cargo test` prints it.
+fn shard_log(shard: u32, tests: &[&str]) -> String {
+    let mut lines = vec![
+        format!("== shard {shard}/6: athena-core --lib"),
+        "    Running unittests src/lib.rs (target/debug/deps/athena_core-0f3a9b)".to_string(),
+        format!("running {} tests", tests.len() + 1),
+        String::new(),
+        "failures:".to_string(),
+        String::new(),
+        "failures:".to_string(),
+    ];
+    lines.extend(tests.iter().map(|t| format!("    {t}")));
+    lines.push(String::new());
+    lines.push(format!(
+        "test result: FAILED. 1 passed; {} failed; 0 ignored",
+        tests.len()
+    ));
+    lines.push("error: test failed, to rerun pass `-p athena-core --lib`".to_string());
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    stamped(&lines)
+}
+
+/// A jobs reply for a red run: fmt and clippy green, the given test shards `(id, name, conclusion)`, and the
+/// aggregate job failed.
+fn red_jobs(shards: &[(u64, &str, &str)]) -> Value {
+    let mut jobs = vec![
+        json!({"id": 1, "name": "fmt", "status": "completed", "conclusion": "success"}),
+        json!({"id": 2, "name": "clippy", "status": "completed", "conclusion": "success"}),
+        json!({"id": 3, "name": "fmt, clippy, tests", "status": "completed", "conclusion": "failure"}),
+    ];
+    jobs.extend(shards.iter().map(|(id, name, conclusion)| {
+        json!({"id": id, "name": name, "status": "completed", "conclusion": conclusion})
+    }));
+    json!({"jobs": jobs})
+}
+
+/// An executor that records what it is asked to run. Its redaction replaces [`SECRET`], so the test needs no
+/// scanner on the machine; `broken` makes redaction fail.
+struct StubExec {
+    ran: RefCell<Vec<String>>,
+    broken: bool,
+}
+const SECRET: &str = "SECRET-TOKEN-1234";
+impl StubExec {
+    fn new(broken: bool) -> Self {
+        StubExec {
+            ran: RefCell::new(vec![]),
+            broken,
+        }
+    }
+}
+impl crate::routing::Exec for StubExec {
+    fn exec(&self, spec: &crate::capability::CheckSpec) -> Result<athena_data::records::CheckRun> {
+        self.ran.borrow_mut().push(spec.name.clone());
+        anyhow::bail!("nothing may run locally")
+    }
+    fn redact(&self, text: &str) -> Result<String> {
+        if self.broken {
+            anyhow::bail!("the redactor is down");
+        }
+        Ok(text.replace(SECRET, "[redacted]"))
+    }
+}
+
+/// Runs the routed checks against `runner` for [`CI_SHA`] and gives the check records, the record of the CI
+/// run, and the paths the runner was asked for.
+fn routed(
+    runner: &CiRunner,
+    exec: &StubExec,
+) -> (
+    Vec<athena_data::records::CheckRun>,
+    Option<crate::ci_result::CiRecord>,
+) {
+    use athena_data::config::CheckKind;
+    let specs: Vec<crate::capability::CheckSpec> = ["fmt", "clippy", "test"]
+        .iter()
+        .map(|n| crate::capability::CheckSpec {
+            name: n.to_string(),
+            run: vec!["true".into()],
+            kind: CheckKind::Command,
+            skip_when_only: None,
+        })
+        .collect();
+    let changed = vec!["crates/athena-core/src/lib.rs".to_string()];
+    let route = crate::routing::route(Some("code"), specs, &changed);
+    let client = GhClient::new(runner, "example/project".into());
+    crate::routing::run_routed_with_record(
+        &route,
+        CI_SHA,
+        &changed,
+        &client.ci_source(CI_BRANCH),
+        exec,
+        one_poll(),
+    )
+    .unwrap()
+}
+
+fn red_run() -> Vec<Value> {
+    vec![ci_run(
+        10,
+        "push",
+        CI_BRANCH,
+        "completed",
+        "failure",
+        "2026-01-01T00:10:00Z",
+    )]
+}
+
+#[test]
+fn red_reused_run_records_failing_tests_and_log_tail() {
+    let log = shard_log(1, &["tests::a", "tests::b"]);
+    let runner = CiRunner::new(
+        red_run(),
+        vec![(10, red_jobs(&[(77, "test (shard 1)", "failure")]))],
+    )
+    .with_logs(vec![(77, Some(&log))]);
+    let exec = StubExec::new(false);
+    let (runs, record) = routed(&runner, &exec);
+    assert!(record.is_some_and(|r| !r.all_passed()));
+    let test = runs.iter().find(|r| r.name == "test").unwrap();
+    assert!(!test.passed && test.reused);
+    assert_eq!(
+        test.failed_tests,
+        vec!["athena_core tests::a", "athena_core tests::b"]
+    );
+    assert!(
+        test.output_tail
+            .starts_with("failing units: athena-core --lib\n"),
+        "{}",
+        test.output_tail
+    );
+    assert!(
+        test.output_tail
+            .ends_with("error: test failed, to rerun pass `-p athena-core --lib`\n"),
+        "the last log line, without its timestamp: {}",
+        test.output_tail
+    );
+    assert!(!test.output_tail.contains("2026-01-01T"));
+    // fmt and clippy are plain; nothing ran locally.
+    for other in runs.iter().filter(|r| r.name != "test") {
+        assert!(other.passed || (other.failed_tests.is_empty() && other.output_tail.is_empty()));
+    }
+    assert!(exec.ran.borrow().is_empty());
+    assert!(
+        runner
+            .paths()
+            .iter()
+            .any(|p| p.ends_with("actions/jobs/77/logs"))
+    );
+}
+
+#[test]
+fn red_reused_run_redacts_the_log_before_recording() {
+    let secret = SECRET;
+    let log = stamped(&[
+        "    Running unittests src/lib.rs (target/debug/deps/athena_core-0f3a9b)",
+        &format!("token {secret} leaked"),
+        "failures:",
+        "    tests::a",
+        "",
+        "test result: FAILED. 0 passed; 1 failed",
+    ]);
+    let runner = CiRunner::new(
+        red_run(),
+        vec![(10, red_jobs(&[(77, "test (shard 1)", "failure")]))],
+    )
+    .with_logs(vec![(77, Some(&log))]);
+    let (runs, _) = routed(&runner, &StubExec::new(false));
+    let test = runs.iter().find(|r| r.name == "test").unwrap();
+    assert_eq!(test.failed_tests, vec!["athena_core tests::a"]);
+    assert!(!test.output_tail.contains(secret), "{}", test.output_tail);
+    assert!(test.output_tail.contains("leaked"));
+}
+
+fn plain_failed_test(runs: &[athena_data::records::CheckRun]) -> &athena_data::records::CheckRun {
+    runs.iter().find(|r| r.name == "test").unwrap()
+}
+
+#[test]
+fn reused_red_degrades_when_the_log_cannot_be_read() {
+    let runner = CiRunner::new(
+        red_run(),
+        vec![(10, red_jobs(&[(77, "test (shard 1)", "failure")]))],
+    )
+    .with_logs(vec![(77, None)]);
+    let (runs, record) = routed(&runner, &StubExec::new(false));
+    assert!(record.is_some());
+    let test = plain_failed_test(&runs);
+    assert!(!test.passed && test.reused);
+    assert!(test.failed_tests.is_empty() && test.output_tail.is_empty());
+}
+
+#[test]
+fn reused_red_degrades_when_the_log_lists_no_failures() {
+    let log = stamped(&["error: could not compile `athena-core`", "build broke"]);
+    let runner = CiRunner::new(
+        red_run(),
+        vec![(10, red_jobs(&[(77, "test (shard 1)", "failure")]))],
+    )
+    .with_logs(vec![(77, Some(&log))]);
+    let (runs, _) = routed(&runner, &StubExec::new(false));
+    let test = plain_failed_test(&runs);
+    assert!(!test.passed);
+    assert!(test.failed_tests.is_empty());
+    assert!(test.output_tail.ends_with("build broke\n"));
+}
+
+#[test]
+fn reused_red_degrades_when_the_redactor_fails() {
+    let log = shard_log(1, &["tests::a"]);
+    let runner = CiRunner::new(
+        red_run(),
+        vec![(10, red_jobs(&[(77, "test (shard 1)", "failure")]))],
+    )
+    .with_logs(vec![(77, Some(&log))]);
+    let (runs, _) = routed(&runner, &StubExec::new(true));
+    let test = plain_failed_test(&runs);
+    assert!(!test.passed);
+    assert!(test.failed_tests.is_empty() && test.output_tail.is_empty());
+}
+
+#[test]
+fn reused_red_flags_a_shard_whose_log_was_not_read_or_did_not_finish() {
+    let log1 = shard_log(1, &["tests::a"]);
+    let jobs = red_jobs(&[
+        (77, "test (shard 1)", "failure"),
+        (78, "test (shard 2)", "failure"),
+        (79, "test (shard 3)", "timed_out"),
+        (80, "test (shard 4)", "failure"),
+    ]);
+    let empty = stamped(&["all fine here"]);
+    let runner = CiRunner::new(red_run(), vec![(10, jobs)]).with_logs(vec![
+        (77, Some(&log1)),
+        (78, None),
+        (79, Some(&log1)),
+        (80, Some(&empty)),
+    ]);
+    let (runs, _) = routed(&runner, &StubExec::new(false));
+    assert_eq!(
+        plain_failed_test(&runs).failed_tests,
+        vec![
+            "athena_core tests::a",
+            "test (shard 2) (log not read)",
+            "test (shard 3) (did not finish)",
+            "test (shard 4) (no failing tests listed)",
+        ]
+    );
+}
+
+#[test]
+fn reused_red_cuts_a_list_of_more_than_fifty_tests() {
+    let names: Vec<String> = (0..60).map(|i| format!("tests::t{i:02}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let log = shard_log(1, &refs);
+    let runner = CiRunner::new(
+        red_run(),
+        vec![(10, red_jobs(&[(77, "test (shard 1)", "failure")]))],
+    )
+    .with_logs(vec![(77, Some(&log))]);
+    let (runs, _) = routed(&runner, &StubExec::new(false));
+    let listed = &plain_failed_test(&runs).failed_tests;
+    assert_eq!(listed.len(), 51);
+    assert_eq!(listed[50], "(list cut at 50)");
+    assert_eq!(listed[0], "athena_core tests::t00");
+}
+
+#[test]
+fn reused_green_run_fetches_no_log_and_records_no_names() {
+    let runner = CiRunner::new(
+        vec![ci_run(
+            10,
+            "push",
+            CI_BRANCH,
+            "completed",
+            "success",
+            "2026-01-01T00:10:00Z",
+        )],
+        vec![(10, green_jobs())],
+    );
+    let (runs, record) = routed(&runner, &StubExec::new(false));
+    assert!(record.is_some_and(|r| r.all_passed()));
+    assert!(
+        runs.iter()
+            .all(|r| r.passed && r.failed_tests.is_empty() && r.output_tail.is_empty())
+    );
+    assert!(runner.paths().iter().all(|p| !p.contains("/logs")));
+}
+
+#[test]
+fn job_log_parser_strips_stamps_keeps_the_indent_and_names_the_units() {
+    let log = shard_log(2, &["a::b::c", "d::e"]);
+    let jobs = vec![(
+        "test (shard 2)".to_string(),
+        "failure".to_string(),
+        Some(log),
+    )];
+    let detail = detail_from_job_logs(&jobs).unwrap();
+    assert_eq!(
+        detail.failed_tests,
+        vec!["athena_core a::b::c", "athena_core d::e"]
+    );
+    assert!(
+        detail
+            .output_tail
+            .starts_with("failing units: athena-core --lib\n== shard 2/6")
+    );
+    assert!(detail.output_tail.contains("\n    a::b::c\n"));
+    // No job, or no readable log: nothing to record.
+    assert_eq!(detail_from_job_logs(&[]), None);
+    let unread = vec![("test (shard 2)".to_string(), "failure".to_string(), None)];
+    assert_eq!(detail_from_job_logs(&unread), None);
+    // A blank stamped line and colour escapes do not disturb the names.
+    let colored = stamped(&[
+        "    Running unittests src/lib.rs (target/debug/deps/athena_core-0f3a9b)",
+        "\u{1b}[31mfailures:\u{1b}[0m",
+        "    x::y",
+        "",
+        "test result: FAILED. 0 passed; 1 failed",
+    ]);
+    let jobs = vec![(
+        "test (shard 2)".to_string(),
+        "failure".to_string(),
+        Some(colored),
+    )];
+    assert_eq!(
+        detail_from_job_logs(&jobs).unwrap().failed_tests,
+        vec!["athena_core x::y"]
+    );
 }
 
 fn one_poll() -> crate::ci_result::Wait {
