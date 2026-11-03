@@ -114,6 +114,13 @@
 //!   [`Report::restart`] holds what is left of the budget and job limit; [`follow_restart`] hands those to the
 //!   new binary (`athena drain` again, see [`reexec_args`]), which carries on with the queue. A stop asked for
 //!   meanwhile wins, and a run with no budget or no job limit left ends as such instead of restarting.
+//! - **A landed config the running build cannot read is not a failure.** Right after a landing the drain asks
+//!   [`Steps::config_after_landing`]. The config was readable when the run started, so if it is not now, the
+//!   landing added something only a newer build understands (a new key, for instance). The job stays
+//!   `landed`, no failure is counted, and the run ends with [`Stop::NeedsReinstall`] before another item
+//!   starts; a note carries the read error and says to reinstall Athena and run the drain again. If the same
+//!   landing also rebuilt and installed Athena, the new binary reads the config and the stop is
+//!   [`Stop::Rebuilt`].
 //!
 //! The loop ([`drain`]) holds every rule and calls the world through [`Steps`], so tests drive it with a
 //! stub and no model, no GitHub and no network:
@@ -518,6 +525,13 @@ pub trait Steps {
     /// do not hold the disk. The default removes nothing, as for steps that have no state directory.
     fn reclaim_interrupted(&self) {}
     fn land(&self, job: &str) -> Landing;
+    /// Why the configuration at the branch head cannot be read, asked only right after a [`Landing::Landed`].
+    /// The configuration was readable when the run started, so a landing that makes it unreadable has brought
+    /// in something this build does not understand (a key or section from a newer Athena). The default is
+    /// that it can be read, as for steps with no configuration.
+    fn config_after_landing(&self) -> Option<String> {
+        None
+    }
     fn rate(&self) -> Rate;
     /// Checks every text input of the page against the pinned source, with a model call per study. It is asked
     /// only when a rating reaches the target after a landing that changed the outcome, and the target is met
@@ -934,10 +948,14 @@ pub enum Stop {
     /// A landing changed Athena's own code and the rebuild failed. Nothing more starts, and
     /// [`Report::rebuild_output`] holds the build output.
     RebuildFailed,
+    /// A job landed and its `athena.toml` can no longer be read by the running build, because the landing
+    /// added something only a newer build understands. The job stays landed and no failure is counted; nothing
+    /// more starts, and the user reinstalls Athena and runs the drain again.
+    NeedsReinstall,
 }
 
 impl Stop {
-    pub const ALL: [Stop; 8] = [
+    pub const ALL: [Stop; 9] = [
         Stop::TargetMet,
         Stop::BudgetSpent,
         Stop::RepeatedFailure,
@@ -946,6 +964,7 @@ impl Stop {
         Stop::Requested,
         Stop::Rebuilt,
         Stop::RebuildFailed,
+        Stop::NeedsReinstall,
     ];
 
     pub fn label(self) -> &'static str {
@@ -958,6 +977,7 @@ impl Stop {
             Stop::Requested => "stop requested",
             Stop::Rebuilt => "rebuilt",
             Stop::RebuildFailed => "rebuild failed",
+            Stop::NeedsReinstall => "reinstall needed",
         }
     }
 
@@ -980,6 +1000,9 @@ impl Stop {
             }
             Stop::RebuildFailed => {
                 "a landing changed Athena's own code and rebuilding it failed; the build output follows and the rest stays queued"
+            }
+            Stop::NeedsReinstall => {
+                "a job landed and its athena.toml needs a newer Athena than the one running; the job is landed and not a failure, so reinstall Athena (./setup.sh) and run the drain again"
             }
         }
     }
@@ -1077,6 +1100,9 @@ struct State {
     rebuild_due: bool,
     /// The build output of a failed rebuild.
     rebuild_output: Option<String>,
+    /// Why the configuration could not be read after a landing ([`Steps::config_after_landing`]); set together
+    /// with [`Stop::NeedsReinstall`].
+    unreadable_config: Option<String>,
     /// What the planning pass spent reading an item, charged to that item's job line when it runs.
     read_cost: std::collections::BTreeMap<String, f64>,
     /// Why the run is ending, once any worker has found a reason (the first reason found stands), and the
@@ -1631,6 +1657,17 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                         st.outcome_landings += 1;
                     }
                     st.landings.push(changed);
+                }
+                // The configuration was readable when the run started, so if it is not now, the landing is
+                // what changed it. A newer schema cannot be told cheaply from other damage, so any read
+                // error here is taken as "the landed config is newer than this build". The stop is set
+                // under the landing lock, before another worker can start an item that would read it.
+                if let Some(why) = self.steps.config_after_landing() {
+                    self.ui.line(&format!(
+                        "drain      {job} landed, but its athena.toml cannot be read by this build; stopping, reinstall Athena"
+                    ));
+                    self.st().unreadable_config = Some(why);
+                    self.set_stop(Stop::NeedsReinstall, None);
                 }
                 self.wake.notify_all();
                 if !outcome {
@@ -2235,6 +2272,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 notes: Vec::new(),
                 rebuild_due: false,
                 rebuild_output: None,
+                unreadable_config: None,
                 read_cost: Default::default(),
                 stop: None,
                 ahead: BTreeMap::new(),
@@ -2297,6 +2335,18 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 let Some(rebuilt) = self.rebuild_if_due() else {
                     return;
                 };
+                let unreadable = matches!(self.st().stop, Some((Stop::NeedsReinstall, _)));
+                if unreadable {
+                    // Rating reads the config this running build cannot parse, so it is skipped.
+                    if rebuilt {
+                        // The installed binary is now the newer build, which reads the landed config: the
+                        // restart carries on, so the reinstall advice no longer applies.
+                        let mut st = self.st();
+                        st.stop = Some((Stop::Rebuilt, None));
+                        st.unreadable_config = None;
+                    }
+                    return;
+                }
                 if let Some(reason) = self.rate() {
                     self.set_stop(reason, None);
                 }
@@ -2791,6 +2841,12 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         st.notes.push(line);
     }
     let (mut stop, failed_item) = st.stop.clone().unwrap_or((Stop::QueueEmpty, None));
+    if stop == Stop::NeedsReinstall {
+        let why = st.unreadable_config.clone().unwrap_or_default();
+        st.notes.push(format!(
+            "the landed athena.toml could not be read by this build ({why}); the job is landed and no failure is counted. Reinstall Athena (./setup.sh in the checkout) and run `athena drain` again"
+        ));
+    }
     // A rebuilt Athena carries on with what is left, unless there is nothing left or a stop was asked for.
     let mut restart = None;
     if stop == Stop::Rebuilt {
@@ -3517,6 +3573,19 @@ impl Steps for RealSteps<'_> {
         landing
     }
 
+    fn config_after_landing(&self) -> Option<String> {
+        // Any read error here is taken as "the landed config is newer than this build": the config was
+        // readable before the landing (`caps` parsed it at the start), so the landing is what changed it.
+        // The error text is kept so damage of another kind stays visible in the report.
+        let head = match self.athena.head() {
+            Ok(head) => head,
+            Err(error) => return Some(format!("{error:#}")),
+        };
+        athena_core::capability::JobConfig::at(&self.athena.git, &head)
+            .err()
+            .map(|error| format!("{error:#}"))
+    }
+
     fn in_flight(&self) -> Vec<String> {
         let found = self.table().read();
         let mut lines: Vec<String> = found
@@ -4086,6 +4155,7 @@ mod tests {
             assert!(!stop.label().is_empty() && !stop.meaning().is_empty());
         }
         assert!(Stop::QueueEmpty.meaning().contains("not success"));
+        assert!(Stop::NeedsReinstall.meaning().contains("reinstall"));
     }
 }
 

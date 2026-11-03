@@ -1,0 +1,213 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261101-085726-z7dg",
+  "round": 1,
+  "at": "2026-11-03T03:06:30.779358511Z",
+  "invocation_seq": 3,
+  "approach": "The drain, not the config parser, learns the difference. Add `Steps::config_after_landing(&self) -> Option<String>` (default `None`, so every existing fake is unchanged). `RealSteps` implements it by calling `JobConfig::at(git, head)` and returning the error text on failure. `Drain::land`, still under the landing lock, calls it right after `Landing::Landed`. On `Some(why)` the job line stays `landed`, the drain keeps `why`, and `set_stop(Stop::NeedsReinstall, None)` ends the run before any other worker starts an item. `finish(ItemEnd::Landed)` skips the rating for that stop, because rating also needs the unreadable config. If the same landing also triggered a successful rebuild, the new binary reads the key, so the stop is cleared and `Stop::Rebuilt` stands. The final report adds a note, only when `NeedsReinstall` is the final stop, telling the user to reinstall and run `athena drain` again. `Stop::NeedsReinstall` gets a label and meaning, goes into `Stop::ALL`, the `drain --help` list in main.rs, and the module doc. `display::drain` already prints label, meaning and notes, so it probably needs no change. Tests cover a stub case, a real-steps case with a fixture repository, a rebuild-wins case and a genuine-failure regression. CHANGELOG gets an entry under Unreleased. Nothing under crates/athena-core/src/run/ looks necessary, because the false failure appears to come from the next item's `go` and read failing on `JobConfig::at(head)?` (run/mod.rs `dispatch`, ~l.740). The producer must confirm that by running the new real-steps test before the fix. If a failure is recorded inside run/, fix it there and cover it in run/tests.rs. Round 2 change: the criterion 6 demonstration now names its seam (the three Athena gates over the whole workspace, including the new tests); nothing else in the design changes.",
+  "decisions": [
+    {
+      "choice": "Classify in the drain, right after a successful landing, with a new Steps method that re-reads the config at the landed head.",
+      "reason": "The drain is the only place that knows the landing succeeded and that the config was readable before it (`caps()` parsed it at drain start). A parse failure after a successful landing therefore means the landed config is newer than the running build. This fixes the classification at its origin, not for one key. The stop is set while the landing lock is held, so no worker starts a next item on the unreadable config.",
+      "rejected": [
+        {
+          "option": "Special-case the error text 'unknown field' or one key name.",
+          "why": "Brittle and not root-cause: any new key, section or value type the old schema rejects would still end in 'repeated failure'."
+        },
+        {
+          "option": "Detect the parse error where it happens (`go`/`dispatch`/reader) and map it to a typed error that `finish` turns into a stop.",
+          "why": "Touches the reader and run paths that many commands share, and the failure would already be counted for the next item. Out of scope beyond the drain and run code."
+        },
+        {
+          "option": "Make `Config::parse` tolerant of unknown keys.",
+          "why": "Out of scope; it would also weaken the admission check on unknown fields."
+        }
+      ]
+    },
+    {
+      "choice": "Add a new `Stop::NeedsReinstall` (label 'reinstall needed'), not a reuse of `Stop::Rebuilt` or `QueueEmpty`.",
+      "reason": "`Rebuilt` means the pass restarts; `QueueEmpty` means nothing was left and the user would not be told to reinstall. A dedicated stop makes the cause visible in the report, in `--help` and to scripts reading the JSON. The existing every-stop-has-a-meaning test and the help test cover it through `Stop::ALL`.",
+      "rejected": [
+        {
+          "option": "Reuse `Stop::Rebuilt`.",
+          "why": "It triggers a restart with the same stale binary and would loop or mislead."
+        },
+        {
+          "option": "Put the reinstall wording only in a note, with stop `QueueEmpty`.",
+          "why": "The stop line would read 'queue empty', which is not what happened, and a test cannot check a stop enum for it."
+        }
+      ]
+    },
+    {
+      "choice": "Stop at once in `Drain::land` (stop set under the landing lock) and skip the rating; `finish` clears this stop only when the same landing's rebuild installed a new build.",
+      "reason": "Setting the stop in `finish` would leave a gap in which a concurrent worker starts the next item against the unreadable config. After a successful rebuild the installed binary is the newer one, so the right stop is `Rebuilt`. The first-reason-stands rule of `set_stop` is otherwise kept.",
+      "rejected": [
+        {
+          "option": "Check only in `finish`.",
+          "why": "Races with concurrent workers in `drain_concurrent` and lets a false failure through."
+        },
+        {
+          "option": "Ignore the rebuild interaction.",
+          "why": "Would tell the user to reinstall after Athena had already reinstalled itself."
+        }
+      ]
+    },
+    {
+      "choice": "Treat any config read error at the landed head, after the landing succeeded, as this case, and say so in a code comment.",
+      "reason": "A newer schema cannot be told from other corruption cheaply. The config was readable before the landing, so the landing is the only change and the advice is right either way. The note includes the parse error text so real corruption stays visible.",
+      "rejected": [
+        {
+          "option": "Parse the error and match 'unknown field'.",
+          "why": "Couples to the error wording and misses new section or type changes."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Stop::NeedsReinstall` (variant, `ALL`, label, meaning); `Steps::config_after_landing` with default `None`; `RealSteps` implementation via `JobConfig::at`; state field for the reason; the check in `Drain::land`; `finish` handling (skip rating, rebuild wins); report note; module doc bullet; unit assertion on the meaning.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Only if `stopped <label>: <meaning>` plus the notes do not already show the reinstall guidance; otherwise untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "List the new stop reason in the `drain` help 'Stop reasons' block (~l.250-261).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Stub field and `config_after_landing`; stub test, real-steps test with a config-committing lander, rebuild-wins test, and genuine-failure regression.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under Unreleased/Fixed describing the clean stop with a reinstall note instead of a false repeated failure.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Only if running the new real-steps test shows a landed job recorded as failed inside run/. Expected untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Only together with a run/mod.rs change, as above.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In drain.rs add `Stop::NeedsReinstall` (variant with doc comment, `ALL` becomes 9 entries, label `reinstall needed`, meaning naming that the landed athena.toml needs a newer build, that the job did land, and that the user should reinstall Athena and run the drain again). Add `Steps::config_after_landing(&self) -> Option<String>` with default `None`, documented as asked only after `Landing::Landed`. Add the module-doc bullet beside the `Rebuilt` bullet (~l.113).",
+    "Implement `config_after_landing` for `RealSteps`: `head()` then `JobConfig::at(&git, &head)`; return `Some(format!(\"{e:#}\"))` on error. Add a comment saying any read error after a successful landing is taken as 'the landed config is newer than this build', since the config was readable before it.",
+    "Add a `State` field (for example `unreadable_config: Option<String>`) initialised in `Drain::new`. In `Drain::land`, in the `Landing::Landed` arm after `st.landings.push(..)`, call `self.steps.config_after_landing()`. If `Some(why)`, store it, `set_stop(Stop::NeedsReinstall, None)` and print a `drain      <job> landed; ...` line. The job line stays `landed` and the arm returns `LandStep::Landed`.",
+    "In `finish(ItemEnd::Landed)`: after `rebuild_if_due`, if `rebuilt == Some(true)` clear a `NeedsReinstall` stop and the stored reason so `Rebuilt` can be set. Otherwise, if the stop is `NeedsReinstall`, return before `self.rate()`. In the report builder, when the final stop is `NeedsReinstall`, push a note with the stored error text and the instruction to reinstall (run `./setup.sh`) and run `athena drain` again.",
+    "In main.rs add the 'reinstall needed' line to the drain help 'Stop reasons' block. Check display.rs: if `stopped <label>: <meaning>` plus the notes already show the guidance, leave it unchanged; otherwise adjust minimally.",
+    "In tests/drain.rs: add the Stub field `config_unreadable_after_landing` and its `config_after_landing`; add `a_landing_whose_config_the_running_build_cannot_read_ends_the_run_with_a_reinstall_note_not_a_failure` (stub), a real-steps counterpart with a config-committing lander (run it before step 3 and keep the failing output in the notes if a failure is recorded in run/), the rebuild-wins test, and the explicit genuine-failure regression. Extend the unit test at drain.rs ~l.4084 with the meaning assertion.",
+    "Run `cargo test -p athena-cli` and fix. If a failed record for the landed job appears in run/, fix it in run/mod.rs and add a test in run/tests.rs.",
+    "Add the CHANGELOG entry under Unreleased/Fixed, written for an outside reader: what the user saw (a false 'repeated failure' after a landing that added a config key), what happens now (job recorded as landed, run ends as 'reinstall needed' with advice to reinstall), and the cause (the running build's strict config schema).",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; check `git diff --stat` for stray files."
+  ],
+  "risks": [
+    {
+      "risk": "A config that is broken for a reason other than a newer schema gets the 'reinstall' advice.",
+      "mitigation": "The note carries the parse error text and says the landed athena.toml could not be read by this build; a code comment states the assumption. The config was readable before the landing, so the landing is the only change."
+    },
+    {
+      "risk": "A concurrent worker has already started an item when the stop is set.",
+      "mitigation": "Set the stop in `land` under the landing lock, before `notify_all`. `run_job` refuses to start once `st.stop` is set, and a started item finishes under the existing rules."
+    },
+    {
+      "risk": "The reinstall stop overrides or hides `Stop::Rebuilt` after a successful rebuild.",
+      "mitigation": "`finish` clears a `NeedsReinstall` stop and its reason when `rebuild_if_due` returned `Some(true)`, then sets `Rebuilt`. A stub test with `rebuilding(Ok(()))` and an unreadable config asserts `Stop::Rebuilt`."
+    },
+    {
+      "risk": "The real-steps test is hard to build (two requests, scripted reader, lander that commits a config).",
+      "mitigation": "It copies existing patterns: `queue_steward_request`, `commit_config`, `Fixture`, `RealSteps` and the `Lander` trait. The stub test covers the logic if the real test fails for fixture reasons."
+    },
+    {
+      "risk": "Adding a `Stop` variant breaks code matching on `Stop` or the JSON output.",
+      "mitigation": "`Stop::` was matched only in drain.rs and display.rs (a `RepeatedFailure` arm with a wildcard fallback); `ALL` and serde kebab-case cover the rest. `cargo clippy --all-targets` and the test run catch the remainder."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two tests in crates/athena-cli/tests/drain.rs. (a) Stub test: `Stub` gains `config_unreadable_after_landing: Option<&'static str>`, returned by its new `config_after_landing` once a `land ..` entry is in its log. Two items `a` and `b` with `passing()` outcomes. Assert `report.stop == Stop::NeedsReinstall`, `report.stop != Stop::RepeatedFailure`, `report.landed == 1`, `report.jobs[0].outcome == \"passed\"` and `report.jobs[0].landing == \"landed\"`. (b) Real-steps test: `Fixture::new()`, two requests from `queue_steward_request`, `RealSteps` with a test `Lander` that calls `commit_config(&fx, &(test_config() + \"\\n[brand_new_section]\\nnew_key = 1\\n\"))` and returns `Landing::Landed`. After `drain::drain`, load `Records::load(&fx.git, &fx.head())` and assert the first job's state is `JobState::Closed(OutcomeState::Landed)`, the stop is `NeedsReinstall`, and the second job was not run.",
+      "command": "cargo test -p athena-cli --test drain a_landing_whose_config_the_running_build_cannot_read",
+      "observes": "The landed job is recorded landed (report line passed/landed; record state Closed(Landed)), the report's stop is NeedsReinstall and not RepeatedFailure, and no second attempt or failure is counted.",
+      "fails_without": "Without the classification the next item's read or run fails on `JobConfig::at(head)`, the item is counted failed twice, and the stop is `Stop::RepeatedFailure` (or the item is skipped), so the stop assertion fails.",
+      "seam": "Production entry point: `drain::drain(&steps, limits, &Quiet)` driving `Drain::land`/`finish`. Seam (a) is `Stub` in tests/drain.rs; the new `Steps::config_after_landing` is added by plan step 1 with a default of `None`, and the Stub field by step 6. Seam (b) is `RealSteps` with a custom `Lander`, which exists today (`Lander` is a pub trait; `RecordingLander` at tests/drain.rs ~l.1626 is the same pattern). `RealSteps::config_after_landing` (step 2) calls the real `JobConfig::at`, with the fixture repo injected via `fx.athena(..)`. The unknown-key config is a real commit made by the test lander, so the parse failure comes from the production strict parser. The drain logic is not in the double."
+    },
+    {
+      "criterion": 2,
+      "method": "The same two tests also render `display::drain(&report)` and assert it contains `stopped     reinstall needed` and the word `reinstall`. They assert `report.notes` has a note with the parse error text that tells the user to reinstall and run `athena drain` again. They assert the stub log has no `rate` entry and the second item has no `run` entry, and that no job line has outcome `failed`, `rejected` or `no outcome` (zero failures counted).",
+      "command": "cargo test -p athena-cli --test drain a_landing_whose_config_the_running_build_cannot_read",
+      "observes": "The text the user sees says to reinstall, the run ends with the dedicated stop, no rating was attempted, and no failure line exists.",
+      "fails_without": "Without the new stop and note the output reads 'repeated failure: item .. failed twice' and has no reinstall wording.",
+      "seam": "Production entry points: `drain::drain` and `display::drain(&report)` (exists, display.rs ~l.617). Fixtures as in criterion 1: Stub field added in step 6, real fixture and test lander exist today."
+    },
+    {
+      "criterion": 3,
+      "method": "Add `a_job_that_does_not_land_twice_still_ends_as_repeated_failure_when_the_config_is_readable`. It uses a `Stub` with `unlandable: vec![\"a\"]` and `config_unreadable_after_landing: None`. It asserts `Stop::RepeatedFailure` with `failed_item == Some(\"a\")`. The existing repeated-failure assertions in tests/drain.rs also run and must pass.",
+      "command": "cargo test -p athena-cli --test drain repeated_failure",
+      "observes": "A genuine landing failure is still counted and stops the run as repeated failure; the new check does not swallow it, because it runs only after `Landing::Landed`.",
+      "fails_without": "If the check ran on every landing result, or the stop were set whenever the config read fails, this test and the existing repeated-failure tests would end with NeedsReinstall or a different stop.",
+      "seam": "Production entry point: `drain::drain` with `Stub` (exists). The `unlandable` field exists today. `Steps::config_after_landing` is added in step 1 with a default of `None`, so existing fakes need no change."
+    },
+    {
+      "criterion": 4,
+      "method": "Inspect the diff against the base for touched paths. Expected: crates/athena-cli/src/drain.rs, display.rs (only if needed), main.rs, crates/athena-cli/tests/drain.rs, CHANGELOG.md, and run/ files only if the producer found a failure recorded there.",
+      "command": "git diff --stat",
+      "observes": "Only the listed files appear; no athena.toml, defaults.toml, workflow, gate crate or other crate file.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Read the added CHANGELOG lines under `## [Unreleased]`, in its `### Fixed` section.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new entry says that when a landing adds config the running build cannot parse, the drain records the job as landed, ends the run with the stop `reinstall needed`, and tells the user to reinstall, where before it counted a false repeated failure.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the full workspace test suite: `cargo test --locked`. It runs the new tests from criteria 1-3 and 7 together with every existing test, including the budgets and help tests. Then, as two separate commands, run `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`. All three must pass with the final tree.",
+      "command": "cargo test --locked",
+      "observes": "Exit status 0 for all three commands: no existing test regresses, the new tests pass, clippy is clean and formatting is unchanged. The budget and help tests in crates/athena-cli/tests/budgets.rs are unaffected because no prompt asset or system-facts line changes.",
+      "fails_without": "Without the behavior the new tests in tests/drain.rs fail (a landed job counted as 'repeated failure'). A `Stop` variant missing a `label`/`meaning` arm, or a `Steps` method added without handling in the fakes, fails to compile; unused code or an unhandled match would fail clippy with -D warnings.",
+      "seam": "Production entry points: the `cargo test`, `cargo clippy` and `cargo fmt` gates over the whole workspace, i.e. the same three Athena runs on the result. The fixtures are the tests added by plan steps 1-6 (Stub field, RealSteps with test Lander, injected via `Fixture`), which exist in tests/drain.rs after those steps; the gates themselves exist today (CI and the 'Checks Athena will run' list). No double is involved."
+    },
+    {
+      "criterion": 7,
+      "method": "`Stop::ALL` gets `NeedsReinstall` (array length 8 to 9). The unit test `every_stop_reason_has_a_label_and_a_meaning` (drain.rs ~l.4084) loops over `Stop::ALL`. The integration test `drain_help_documents_the_flags_and_lists_every_stop_reason` (tests/drain.rs ~l.1559) runs the real binary's `drain --help` and checks every `stop.label()` appears. The help line is added to main.rs (~l.261). The producer also adds an assertion that `NeedsReinstall.meaning()` contains `reinstall`.",
+      "command": "cargo test -p athena-cli every_stop_reason_has_a_label_and_a_meaning drain_help_documents_the_flags_and_lists_every_stop_reason",
+      "observes": "The new stop has a non-empty label and a meaning with the reinstall guidance, and its label is printed in `athena drain --help`.",
+      "fails_without": "If the stop were left out of `Stop::ALL` or the help text, the help test fails; with a missing meaning arm the code does not compile.",
+      "seam": "Production entry points: `Stop::ALL`/`label`/`meaning` (exist) and the `athena` binary via `CARGO_BIN_EXE_athena` (exists). No double."
+    }
+  ],
+  "open_questions": [
+    "Where exactly a landed job is 'recorded as failed': the code read shows the next item's `go` or read failing on `JobConfig::at(head)?` (run/mod.rs ~l.740), giving a failed attempt for the next item and no failed record for the landed one. The producer should run the real-steps test before the fix and, if a failure record for the landed job appears, fix it in run/ with a test in run/tests.rs.",
+    "The concurrent path (`drain_concurrent`): an item already past `run_job`'s stop check when the stop is set finishes under the old rule; the producer should check its outcome with `max_concurrency` above 1 if the fixture allows it.",
+    "I did not read crates/athena-core/tests/refusal_corpus.rs. The change adds no refusal or matching rule over request text (the new stop is a drain end state), so no corpus case is mapped.",
+    "Whether display.rs needs a change at all: `display::drain` prints `stopped <label>: <meaning>` and every note, so the meaning text and the note may be enough."
+  ],
+  "producer_section_sha256": "ce98802761736794075ee17d694b39e43ee209b5a558e92fef8ad6751da37e94"
+}

@@ -94,6 +94,9 @@ struct Stub {
     pause_on_run: Option<(&'static str, &'static str)>,
     /// Pauses that began during the drain.
     paused_now: RefCell<Vec<(String, String)>>,
+    /// When set, the configuration cannot be read once a landing has happened, with this read error: the
+    /// landing added something only a newer build understands.
+    config_unreadable_after_landing: Option<&'static str>,
 }
 
 impl Stub {
@@ -251,6 +254,10 @@ impl Steps for Stub {
                 changed: paths.into_iter().map(String::from).collect(),
             }
         }
+    }
+    fn config_after_landing(&self) -> Option<String> {
+        // Asked only after a landing, so the stub need not check that it was.
+        self.config_unreadable_after_landing.map(String::from)
     }
     fn check_page(&self) -> Check {
         self.log.borrow_mut().push("check".into());
@@ -1060,6 +1067,87 @@ fn the_same_item_failing_twice_is_a_repeated_failure_naming_the_item() {
         "{text}"
     );
     assert!(text.contains("rejected"), "{text}");
+}
+
+#[test]
+fn a_job_that_does_not_land_twice_still_ends_as_repeated_failure_when_the_config_is_readable() {
+    let stub = Stub {
+        items: vec!["a", "b"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![5]),
+        unlandable: vec!["a"],
+        config_unreadable_after_landing: None,
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::RepeatedFailure);
+    assert_eq!(report.failed_item.as_deref(), Some("a"));
+    assert_eq!(report.landed, 0);
+    let text = display::drain(&report);
+    assert!(
+        text.contains("repeated failure: item a failed twice"),
+        "{text}"
+    );
+    assert!(!text.contains("reinstall"), "{text}");
+}
+
+/// What the stub's read error says when the landed config holds something this build does not know.
+const NEWER_CONFIG: &str = "athena.toml: unknown field `brand_new_key`";
+
+#[test]
+fn a_landing_whose_config_the_running_build_cannot_read_ends_the_run_with_a_reinstall_note_not_a_failure()
+ {
+    let stub = Stub {
+        items: vec!["a", "b"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1, 1]),
+        config_unreadable_after_landing: Some(NEWER_CONFIG),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    let text = display::drain(&report);
+    assert_eq!(report.stop, Stop::NeedsReinstall, "{text}");
+    assert_ne!(report.stop, Stop::RepeatedFailure);
+    assert_eq!(report.failed_item, None, "{text}");
+    assert_eq!(report.landed, 1, "{text}");
+    // The job is recorded as landed, and no job line is a failure.
+    assert_eq!(report.jobs.len(), 1, "{text}");
+    assert_eq!(report.jobs[0].outcome, "passed", "{text}");
+    assert_eq!(report.jobs[0].landing, "landed", "{text}");
+    // Nothing more started and the page was not rated (rating reads the unreadable config).
+    assert_eq!(stub.log(), ["read a", "run a", "land a"]);
+    // What the user sees says to reinstall, and carries the read error.
+    assert!(text.contains("stopped     reinstall needed"), "{text}");
+    assert!(
+        report.notes.iter().any(|n| n.contains(NEWER_CONFIG)
+            && n.contains("Reinstall Athena")
+            && n.contains("athena drain")),
+        "{:?}",
+        report.notes
+    );
+    assert!(!text.contains("repeated failure"), "{text}");
+    assert!(!text.contains("failed twice"), "{text}");
+}
+
+#[test]
+fn a_landing_with_an_unreadable_config_that_also_rebuilt_athena_ends_as_rebuilt_not_reinstall() {
+    let stub = Stub {
+        config_unreadable_after_landing: Some(NEWER_CONFIG),
+        ..rebuilding(Ok(()))
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    let text = display::drain(&report);
+    // The installed binary is the newer build now, so the reinstall advice would be wrong.
+    assert_eq!(report.stop, Stop::Rebuilt, "{text}");
+    assert_eq!(rebuilds(&stub), 1);
+    assert!(report.restart.is_some(), "{text}");
+    assert!(!text.contains("Reinstall Athena"), "{text}");
+    assert_eq!(report.jobs[0].landing, "landed", "{text}");
+    assert!(
+        !stub.log().contains(&"rate".to_string()),
+        "{:?}",
+        stub.log()
+    );
 }
 
 #[test]
@@ -2546,6 +2634,85 @@ fn commit_config(fx: &Fixture, config: &str) {
     fx.git
         .run(["commit", "-q", "-m", "Change athena.toml"])
         .unwrap();
+}
+
+/// A land step that lands by committing `config` as the repository's `athena.toml`, as a job whose diff
+/// changes the configuration does.
+struct ConfigLander(String);
+
+impl Lander for ConfigLander {
+    fn land(&self, athena: &Athena, _: &str, _: &dyn athena_core::Ui) -> Landing {
+        write(athena.git.dir(), &[("athena.toml", self.0.as_str())]);
+        athena.git.run(["add", "-A"]).unwrap();
+        athena
+            .git
+            .run(["commit", "-q", "-m", "Land a change to athena.toml"])
+            .unwrap();
+        Landing::Landed {
+            changed: vec!["athena.toml".into()],
+        }
+    }
+}
+
+#[test]
+fn a_landing_whose_config_the_running_build_cannot_read_is_recorded_landed_and_ends_with_reinstall()
+{
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let athena = fx.athena(scenario.script());
+    let first = queue_steward_request(&athena, "Add a greeting to the README.");
+    let second = queue_steward_request(&athena, "Add a farewell to the README.");
+    // The landed job adds a section this build's strict schema does not know.
+    let landed = format!("{}\n[brand_new_section]\nnew_key = 1\n", test_config());
+    let lander = ConfigLander(landed);
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &lander,
+    };
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&report);
+
+    assert_eq!(report.stop, Stop::NeedsReinstall, "{text}");
+    assert_eq!(report.failed_item, None, "{text}");
+    assert_eq!(report.landed, 1, "{text}");
+    assert_eq!(report.jobs.len(), 1, "only one item was started: {text}");
+    assert_eq!(report.jobs[0].outcome, "passed", "{text}");
+    assert_eq!(report.jobs[0].landing, "landed", "{text}");
+    assert!(text.contains("stopped     reinstall needed"), "{text}");
+    assert!(text.to_lowercase().contains("reinstall"), "{text}");
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("Reinstall Athena") && n.contains("athena drain")),
+        "{:?}",
+        report.notes
+    );
+    for line in &report.jobs {
+        assert!(
+            !["failed", "rejected", "no outcome"].contains(&line.outcome.as_str()),
+            "{text}"
+        );
+    }
+
+    // The landed config really is one this build rejects: the drain did not stop for nothing.
+    let head = fx.head();
+    assert!(
+        athena_core::capability::JobConfig::at(&fx.git, &head).is_err(),
+        "the landed config must be one the running build rejects"
+    );
+    // The job's own record says landed.
+    let ran = report.jobs[0].item.clone();
+    assert!(ran == first || ran == second, "{ran}");
+    let records = Records::load(&fx.git, &head).unwrap();
+    let record = records.jobs.get(&report.jobs[0].job).expect("job record");
+    assert_eq!(
+        record.state(),
+        JobState::Closed(OutcomeState::Landed),
+        "{text}"
+    );
 }
 
 /// A script that answers the first reading with `first` and every later one with `later`; every other role
