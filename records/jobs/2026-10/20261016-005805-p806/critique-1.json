@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261016-005805-p806",
+  "round": 1,
+  "at": "2026-11-03T19:40:41.213086328Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Under the accepted reading, persisted invocation and job records would state the wrong Claude Code version.",
+      "evidence": "wiring.rs:105-110: DeferredDriver::info returns `version: self.pinned.clone()`. This is the driver that wiring.rs:172 installs. Its info() is what invocation.rs:199 and :286 and run/mod.rs:916 write into records, and what status.rs:1845 shows. ClaudeCodeDriver::info is never persisted. Today an exact match is required, so the pin always equals the binary's version. Once a newer patch is accepted, every record names the pin while a different binary ran. The reading says 'recording the version actually reported', so the user has already answered the plan's open question. Criterion 3 tests only ClaudeCodeDriver, which no record reads. Fix: Add crates/athena-cli/src/wiring.rs to the files. Make DeferredDriver::info return the inner driver's info() once the OnceLock holds Ok, and the pin otherwise. Add a wiring.rs unit test: with a stand-in claude reporting 2.1.301 (through ATHENA_CLAUDE_BIN or a constructor that takes a bin path) and pin 2.1.299, info() returns 2.1.301 after the first invoke. In D154, state the remaining limit: run/mod.rs:916 records the driver at dispatch, before the binary is probed. If the planner keeps wiring.rs out of scope, D154 and the CHANGELOG must say plainly that records show the tested minimum, not the version that ran, and the plan must give a reason for departing from the accepted reading.",
+      "location": "Plan: Dependents entry 'Driver version recorded in invocation records'; Open questions; crates/athena-cli/src/wiring.rs:105-110",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The xtask test covers the comparison but not which candidate ensure_claude selects.",
+      "evidence": "The demonstration states the limit: ensure_claude runs `found(...)` and npm, so only claude_accepts is tested. If the producer edits the loop condition incorrectly, the table test still passes. Fix: Optionally extract the loop body into a pure `pick_claude(candidates: &[(PathBuf, Option<String>)], pin) -> Option<PathBuf>` that ensure_claude calls, and test that it picks the newer-patch PATH candidate over the private install. Otherwise keep the stated limit as written.",
+      "location": "Plan: Demonstration for criterion 4; xtask/src/main.rs:625-637",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The equal-string escape is harmless but needs a documented reason.",
+      "evidence": "accepts returns true when found == pinned even if neither string parses. Today athena.toml pins 2.1.302, which parses. The escape only matters if someone pins a non-numeric string. Fix: Keep it, and add a table row (\"2.1.301-beta\" vs pin \"2.1.301-beta\" is accepted) so the behavior is tested and not left implicit.",
+      "location": "Plan: Decision 1, the equal-string escape",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read claude.rs (check_pinned at line 61, claude_version at 78, new at 101, the stand-in at 586–617), the ensure_claude loop in xtask/src/main.rs (621–650), DeferredDriver in wiring.rs (86–126), every reader of driver.info() in athena-core, refuse_nested/nested_marker in athena-agent/src/lib.rs, README line 26 and the end of docs/decisions.md (D153 is the last entry). Everything the plan names exists. The design fits the reading: a pure same-major.minor, patch-at-or-above rule, a with_marker seam that tests the real constructor, a duplicated pure rule with a table test in xtask, and D154 appended after D153. The demonstrations would fail without the change and run real entry points with stand-in binaries. One major gap remains. The accepted reading says Athena records \"the version actually reported\", but every persisted record gets its version from DeferredDriver::info, which returns the pin. After this change those records would name 2.1.299 while 2.1.301 actually ran. Before the change the record could never be wrong, because only an exact match ran. The plan sees this and asks it as an open question, but the reading the user accepted already answers it, and the fix is small."
+}

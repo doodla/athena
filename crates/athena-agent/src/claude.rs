@@ -67,7 +67,7 @@ pub fn check_pinned(bin: &Path, pinned: &str) -> Result<String, DriverError> {
     })?;
     if version != pinned {
         return Err(DriverError::Spawn(format!(
-            "Claude Code {version} at {} is not the pinned {pinned}; run ./setup.sh",
+            "Claude Code {version} at {} is not the pinned {pinned}; to adopt the installed version run `cargo run -p xtask -- repin`, then ./setup.sh",
             bin.display()
         )));
     }
@@ -851,9 +851,20 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
     #[test]
     fn a_host_that_is_not_the_pinned_version_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            check_pinned(&stand_in(dir.path()), "9.9.9"),
-            Err(DriverError::Spawn(_))
-        ));
+        let Err(DriverError::Spawn(message)) = check_pinned(&stand_in(dir.path()), "9.9.9") else {
+            panic!("a different version must be refused");
+        };
+        assert!(message.contains("2.1.299"), "{message}");
+        assert!(message.contains("9.9.9"), "{message}");
+        assert!(message.contains("cargo run -p xtask -- repin"), "{message}");
+    }
+
+    #[test]
+    fn a_host_at_exactly_the_pinned_version_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            check_pinned(&stand_in(dir.path()), "2.1.299").unwrap(),
+            "2.1.299"
+        );
     }
 }

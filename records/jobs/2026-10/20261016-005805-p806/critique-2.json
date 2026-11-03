@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261016-005805-p806",
+  "round": 2,
+  "at": "2026-11-03T19:43:05.706492629Z",
+  "invocation_seq": 8,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/wiring.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/wiring.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The setup design doc still says setup uses claude only if `claude --version` matches the pin.",
+      "evidence": "docs/design/athena-v0.md:1411: \"If `claude --version` matches the pin in `athena.toml` (2.1.299), setup uses it.\" Criterion 7 asks that README or setup docs tell the reader a newer patch needs no repin. The plan edits only README.md:26. Fix: Either reword that line to the compatibility rule, or have D154 name it as superseded, so a reader of the setup design is not misled. If the design docs are treated as frozen history, say so in D154.",
+      "location": "Files / docs; docs/design/athena-v0.md:1411",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The recorded version is fixed at the first probe, so a long-running process whose claude self-updates mid-run records the old version for later invocations.",
+      "evidence": "wiring.rs:117 caches the built driver in a OnceLock for the life of the process. The request says claude updates itself about once a day, so a long drain can span an update (estimate, not measured). Fix: State this limit in D154 next to the dispatch-time limit, or note that the version is measured once per process.",
+      "location": "Step 4 / Decision 2 (DeferredDriver OnceLock)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "When `--version` fails to run, the error names neither the pin nor the no-repin hint.",
+      "evidence": "claude.rs:62-66: \"{bin} --version failed; run ./setup.sh\". Criterion 2 asks that unparseable or empty versions be refused with an error naming both the found and pinned versions. The plan routes empty output (exit 0) through the new message, but a nonzero exit keeps the old text. Fix: Add the pinned version to the failed-to-run message, or state that this case is outside criterion 2 because no version was found.",
+      "location": "Step 2 (keep the 'failed to run' message)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The wiring.rs scope widening is justified; keep the open question so the user can veto it.",
+      "evidence": "DeferredDriver::info (wiring.rs:105-110) returns self.pinned unconditionally, and invocation.rs:199 records it. Without this change the reading's 'recording the version actually reported' is unmet in every record. Fix: No change needed beyond keeping the open question and the deliverables note.",
+      "location": "Approach / Athena finding on wiring.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read claude.rs (check_pinned, claude_version, new, the stand-in helpers and the 9.9.9 test), wiring.rs (DeferredDriver), xtask ensure_claude, and grepped for every reader of driver.info(), claude_version and the pinned version strings. The plan puts the change where the fault starts: the `!=` in check_pinned and the `== Some(pin)` in ensure_claude. The rule is narrow and fails closed: same major.minor, three numeric parts, patch at or above the pin, plus an escape when the two strings are equal. Each behavior demonstration goes through a real production seam (check_pinned, accepts, with_marker, DeferredDriver probe/info, pick_claude) with stand-in binaries, and each one would fail under the old equality. The dependents list matches what grep finds: info() is called at invocation.rs:199 and :286, run/mod.rs:916, status.rs:1845, lib.rs:205 and reading.rs:403, and the plan states the limit that the dispatch-time job record still shows the pin. No code keys epochs or anything else on the driver version string, so changing the recorded value is safe. Copying the rule into xtask is justified by the dependency direction, and both test tables carry the same rows. Changing wiring.rs is outside the six listed deliverables, but the reading requires it (\"recording the version actually reported\") and the plan raises it as an open question. Remaining findings are minor: the design doc still describes the exact-match setup rule, a long-running process keeps the version from its first probe, and the error for a failed `--version` run does not name the pin."
+}

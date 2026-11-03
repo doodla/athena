@@ -13,6 +13,8 @@
 //! - `cargo run -p xtask -- build-inputs`: prints the globs the athena binary is built from
 //!   (`BUILD_INPUT_GLOBS`). `setup --ci` skips the build when a stamp beside the binary equals their digest, and
 //!   the `athena-bin` cache key in `.github/workflows/ci.yml` hashes the same globs.
+//! - `cargo run -p xtask -- repin [--claude <path>]`: sets `claude_version` in `athena.toml` to the installed
+//!   Claude Code's reported version. Athena still accepts only that exact version.
 //!
 //! Setup reads every pin from `athena.toml`, reads credentials only to report whether they work, and never
 //! stores them.
@@ -45,9 +47,10 @@ fn main() -> ExitCode {
         Some("fingerprint") => ci_cache::fingerprint_command(),
         Some("ci-cache") => ci_cache::command(&args[1..]),
         Some("build-inputs") => build_inputs_command(),
+        Some("repin") => repin_command(&args[1..]),
         _ => {
             eprintln!(
-                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       cargo run -p xtask -- build-inputs\n       {}\n       {SITE_USAGE}\n       {}\n       {}",
+                "usage: cargo run -p xtask -- setup [--ci] [--force] [--allow-dirty]\n       cargo run -p xtask -- ci\n       cargo run -p xtask -- build-inputs\n       {REPIN_USAGE}\n       {}\n       {SITE_USAGE}\n       {}\n       {}",
                 shard::USAGE,
                 walltime::USAGE,
                 ci_cache::USAGE
@@ -649,6 +652,92 @@ fn ensure_claude(config: &Config) -> Result<PathBuf> {
     Ok(private)
 }
 
+const REPIN_USAGE: &str = "cargo run -p xtask -- repin [--claude <path>]\n       \
+     sets agents.claude_version in athena.toml to the version the installed Claude Code reports (the claude_bin in $ATHENA_HOME/config.toml, else claude on PATH); nothing else in the file changes";
+
+/// `repin [--claude <path>]`: after a Claude Code update, makes the pin in `athena.toml` the installed version.
+fn repin_command(args: &[String]) -> Result<()> {
+    let bin = match args {
+        [] => machine_claude_bin().unwrap_or_else(|| PathBuf::from("claude")),
+        [flag, path] if flag == "--claude" => PathBuf::from(path),
+        _ => bail!("{REPIN_USAGE}"),
+    };
+    let file = repo_root().join("athena.toml");
+    let (old, new) = repin_at(&file, &bin)?;
+    if old == new {
+        println!("claude_version is already {new}; nothing changed");
+    } else {
+        println!("claude_version: {old} -> {new} in {}", file.display());
+        println!("run ./setup.sh to install it if it is not already on this machine");
+    }
+    Ok(())
+}
+
+/// The `claude_bin` setup wrote to `$ATHENA_HOME/config.toml`, if any.
+fn machine_claude_bin() -> Option<PathBuf> {
+    let text = std::fs::read_to_string(paths::athena_home().join("config.toml")).ok()?;
+    let value = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("claude_bin"))?
+        .trim_start()
+        .strip_prefix('=')?;
+    serde_json::from_str::<String>(value.trim())
+        .ok()
+        .map(PathBuf::from)
+}
+
+/// Whether `text` looks like a release version: dot-separated numbers, such as `2.1.305`.
+fn is_version(text: &str) -> bool {
+    let mut parts = text.split('.');
+    let numeric = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit());
+    parts.clone().count() >= 2 && parts.all(numeric)
+}
+
+/// Rewrites the `claude_version` value in the TOML file at `file` to the version `bin` reports, leaving every
+/// other byte as it was. Returns the old and new versions. An empty or unreadable version, or a file with no
+/// `claude_version` line, is an error and the file is not written.
+fn repin_at(file: &Path, bin: &Path) -> Result<(String, String)> {
+    let reported = found(&bin.to_string_lossy(), "--version").with_context(|| {
+        format!(
+            "`{} --version` failed; is Claude Code installed?",
+            bin.display()
+        )
+    })?;
+    let version = reported.split_whitespace().next().unwrap_or("");
+    if !is_version(version) {
+        bail!(
+            "`{} --version` printed {reported:?}, which does not start with a version such as 2.1.305; athena.toml was not changed",
+            bin.display()
+        );
+    }
+    let text =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let mut old = None;
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let rest = line.trim_start().strip_prefix("claude_version");
+        if old.is_none()
+            && let Some(rest) = rest
+            && rest.trim_start().starts_with('=')
+            && let Some(open) = line.find('"')
+            && let Some(len) = line[open + 1..].find('"')
+        {
+            old = Some(line[open + 1..open + 1 + len].to_string());
+            out.push_str(&line[..open + 1]);
+            out.push_str(version);
+            out.push_str(&line[open + 1 + len..]);
+        } else {
+            out.push_str(line);
+        }
+    }
+    let old =
+        old.with_context(|| format!("no claude_version = \"...\" line in {}", file.display()))?;
+    if out != text {
+        std::fs::write(file, out).with_context(|| format!("writing {}", file.display()))?;
+    }
+    Ok((old, version.to_string()))
+}
+
 fn which(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -740,6 +829,48 @@ fn symlink(_target: &Path, _link: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stand_in_claude(dir: &Path, output: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("claude");
+        std::fs::write(&path, format!("#!/bin/sh\necho '{output}'\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    const TOML: &str =
+        "# head\n[agents]\n# note\nclaude_version = \"2.1.302\" # pinned\nenv_pass = [\"HOME\"]\n";
+
+    #[test]
+    fn repin_sets_only_the_version_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = stand_in_claude(dir.path(), "2.1.305 (Claude Code)");
+        let file = dir.path().join("athena.toml");
+        std::fs::write(&file, TOML).unwrap();
+        let (old, new) = repin_at(&file, &bin).unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("2.1.302", "2.1.305"));
+        let expected = TOML.replace("2.1.302", "2.1.305");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), expected);
+        repin_at(&file, &bin).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), expected);
+    }
+
+    #[test]
+    fn repin_refuses_an_empty_or_unparseable_version_and_keeps_the_file() {
+        for output in ["", "   ", "not-a-version", "v2"] {
+            let dir = tempfile::tempdir().unwrap();
+            let bin = stand_in_claude(dir.path(), output);
+            let file = dir.path().join("athena.toml");
+            std::fs::write(&file, TOML).unwrap();
+            assert!(repin_at(&file, &bin).is_err(), "{output:?}");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), TOML);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("athena.toml");
+        std::fs::write(&file, TOML).unwrap();
+        assert!(repin_at(&file, &dir.path().join("missing")).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), TOML);
+    }
 
     #[test]
     fn setup_refuses_inside_a_job() {

@@ -1,0 +1,277 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261016-005805-p806",
+  "round": 1,
+  "at": "2026-11-03T19:39:09.007572674Z",
+  "invocation_seq": 5,
+  "approach": "Add one pure compatibility rule in claude.rs: found and pinned both parse as `major.minor.patch` numbers, major and minor are equal, and found patch >= pinned patch. If the two strings are identical, the check also passes (unchanged behavior). `check_pinned` uses the rule and still returns the version the binary reported, so `ClaudeCodeDriver::new` stores the reported version. The refusal text names both versions and says a newer patch needs no repin. `ClaudeCodeDriver::new` gets a private `with_marker` twin so a test can build the real constructor when the nested-run marker is set. xtask cannot depend on athena-agent, so `ensure_claude` gets a small copy of the rule (a pure function with a table test that matches claude.rs). Docs: append D154 amending D03 to decisions.md (the log is append-only and hash-checked), add a CHANGELOG entry, and fix the README sentence, which still names 2.1.299 although athena.toml pins 2.1.302. athena.toml is not edited.",
+  "decisions": [
+    {
+      "choice": "Same major.minor, patch at or above the pin, parsed as three numeric parts; any other form (prerelease suffix, two parts, empty) is refused unless the string equals the pin exactly.",
+      "reason": "Matches the reading and keeps the pin as the tested minimum. A strict parse means an unexpected output format fails closed with a message naming both versions. The equal-string escape keeps the old behavior for a pin that does not parse.",
+      "rejected": [
+        {
+          "option": "Accept any 2.x",
+          "why": "Minor releases may change flags or stream-json; the hermetic flags (HERMETIC_FLAGS) rely on tested behavior. The request only concerns patch updates."
+        },
+        {
+          "option": "An xtask repin command that rewrites athena.toml (auto-repin)",
+          "why": "Out of scope, and repinning cannot run as a job, so it does not remove the stop."
+        },
+        {
+          "option": "Keep the exact match",
+          "why": "This is the fault: every self-update stops all agents."
+        }
+      ]
+    },
+    {
+      "choice": "Duplicate the rule as a small pure function in xtask/src/main.rs, with a test table identical to the claude.rs one.",
+      "reason": "xtask's Cargo.toml depends on athena-data and athena-git only, not athena-agent, and the deliverables list names no Cargo.toml or athena-data file. Adding a dependency or a shared module widens scope.",
+      "rejected": [
+        {
+          "option": "Put the rule in athena-data and share it",
+          "why": "Touches a file outside the deliverables (D89 makes the deliverables list the scope), and adds an API to the data crate."
+        },
+        {
+          "option": "Add athena-agent as an xtask dependency",
+          "why": "Changes Cargo.toml and the D20 dependency direction for a 10-line function."
+        }
+      ]
+    },
+    {
+      "choice": "Add a private `ClaudeCodeDriver::with_marker(bin, pinned, registry, marker)`; `new` calls it with `nested_marker()`.",
+      "reason": "Criterion 3 needs the real constructor under test. `new` calls `refuse_nested(nested_marker())` (claude.rs:102), which fails inside an Athena job where the checks run, so the test needs the marker injected. Production behavior is unchanged.",
+      "rejected": [
+        {
+          "option": "Build the struct literally in the test, as the existing `driver()` helper does (claude.rs:611)",
+          "why": "That bypasses `new`, so it would not show that `new` records the reported version."
+        }
+      ]
+    },
+    {
+      "choice": "Append D154 to docs/decisions.md as an amendment of D03; do not edit D03.",
+      "reason": "`check_log` in crates/athena-cli/src/decisions.rs hashes a pinned prefix of the log; existing entries are append-only, and recent entries (D153) end the file. Earlier amendments use 'Amends Dnn' (for example line 1068).",
+      "rejected": [
+        {
+          "option": "Edit D03's 'pinned at 2.1.299' text",
+          "why": "Fails the append-only prefix hash test."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "purpose": "Add `accepts(found, pinned)` (private parse into major.minor.patch) and make `check_pinned` use it, returning the reported version; reword both errors; add `with_marker` with `new` delegating to it; add the `stand_in_version` helper and the tests for criteria 1 to 3 and 7.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "purpose": "Add `claude_accepts(reported_line, pin)`, use it in `ensure_claude` instead of `==`, print the version found, comment that it mirrors `claude::accepts`, and add the table test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D154, amending D03: rule, alternatives, what is lost, reversal cost, provenance.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a Changed entry under [Unreleased].",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "Replace the sentence naming 2.1.299 (line 26) with the compatibility rule and say a newer patch needs no repin.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/live.rs",
+      "action": "modify",
+      "purpose": "Reword the `expect` message and, if the file's header says 'the pinned Claude Code', say 'a Claude Code compatible with the pin'. No logic change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In claude.rs, add a private `parse_version(&str) -> Option<(u64,u64,u64)>` that needs exactly three dot-separated all-digit parts, and a `pub fn accepts(found: &str, pinned: &str) -> bool`: true when `found == pinned`, or both parse, major and minor are equal, and found patch >= pinned patch (numeric).",
+    "Rewrite `check_pinned` to call `accepts`; on failure return `DriverError::Spawn` with a message that names the found version (quoted, so an empty one shows) and the binary path, and the pin, and says Athena accepts the same major.minor at that patch or later, so a newer patch needs no repin, and that other versions need ./setup.sh; keep the 'failed to run' message. Return the found version. Add test helper `stand_in_version(dir, version)` (the STAND_IN text with `2.1.299` replaced) next to `stand_in`, leaving `stand_in` and `driver()` as they are.",
+    "Split `ClaudeCodeDriver::new` into `new` (calls `with_marker(.., nested_marker())`) and a private `with_marker(bin, pinned, registry, marker: Option<String>)` holding the old body (`refuse_nested(marker)?; check_pinned; build`). Update the doc comment to say the driver records the reported version.",
+    "Add tests in `stand_in_tests`: newer patch accepted and the returned version is 2.1.301; equal accepted; the table over `accepts` (older patch, other minor, other major, empty, garbage, two parts, a suffix, 1000 vs 999); error text contains found and pinned and the no-repin hint; `with_marker(.., None)` records the reported version in `info()` for 2.1.301 and 2.1.299; `with_marker(.., Some(job))` gives DriverError::Nested.",
+    "In xtask/src/main.rs, add `fn claude_accepts(reported: &str, pin: &str) -> bool` (first whitespace token, same rule, with a comment naming claude.rs `accepts`), replace the `== Some(pin.as_str())` test in the `ensure_claude` loop with it, keep the private install keyed by the pin, print the version found, and add the `claude_compat` table test to the `tests` module.",
+    "Append D154 to the end of docs/decisions.md in the D153 layout (Case, Root cause, Decision with 'Amends D03', Alternatives (any 2.x, auto-repin, keep exact), Tradeoff (no longer one identical version on every run; invocation records via DeferredDriver show the pin), Reversal cost, Provenance with what was read and run). Do not touch earlier bytes.",
+    "Add a CHANGELOG.md entry under [Unreleased] / Changed, in the existing style (cause, change, what is refused, expected newly refused share: none).",
+    "Edit README.md line 26: replace '2.1.299' with the pinned-minimum rule and the no-repin sentence. In live.rs, reword the `expect` message only.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`; confirm `git diff --stat` shows only the six files."
+  ],
+  "risks": [
+    {
+      "risk": "A newer patch could change behavior that the hermetic flags or the stream-json parser depend on, and the run would not stop.",
+      "mitigation": "The rule is limited to the same major.minor and is documented as the tested-minimum pin. D154 states that a failing minor is handled by repinning, and the reversal is two one-line changes."
+    },
+    {
+      "risk": "The xtask copy and claude.rs rule drift apart.",
+      "mitigation": "Both functions carry a comment naming the other, and the two test tables hold the same rows. D154 records the duplication and why."
+    },
+    {
+      "risk": "A future version string with a suffix or a different format is refused, so the stop returns.",
+      "mitigation": "A strict three-numeric-part parse refuses anything else with a message naming both versions; a table row covers `2.1.301-beta` and empty output."
+    },
+    {
+      "risk": "The shared STAND_IN script has the version literal, and a change to it could break the other stand-in tests.",
+      "mitigation": "The step asks the producer to keep the existing 2.1.299 stand-in and `driver()` helper as they are, and add the new helper beside them."
+    },
+    {
+      "risk": "The decisions log is append-only and hash-checked; another landed job may have taken D154.",
+      "mitigation": "Append the entry only after D153, and leave every earlier byte unchanged; `cargo test -p athena-cli decisions` is in the criterion 6 demonstration."
+    },
+    {
+      "risk": "ensure_claude cannot be run by a test because it runs claude and npm, so the test covers the comparison only.",
+      "mitigation": "The criterion 4 demonstration states this limit: `claude_accepts` is the whole of the compared logic and `ensure_claude` calls only it."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "check_pinned / ClaudeCodeDriver::new accept rule",
+      "dependent": "crates/athena-cli/src/wiring.rs:117-123 (`DeferredDriver::invoke` builds `ClaudeCodeDriver::new(claude_bin(), &self.pinned, ..)`)",
+      "kind": "code",
+      "test": "cargo test -p athena-agent (newer_patch, records_the_reported)",
+      "reason": "The call signature is unchanged. It now succeeds for a newer patch instead of returning an error that DeferredDriver stores as DriverError::Spawn. Covered by the criterion 1 and 3 tests."
+    },
+    {
+      "name": "Driver version recorded in invocation records",
+      "dependent": "crates/athena-cli/src/wiring.rs:105-109 (`DeferredDriver::info` returns the pin as the version) and its readers crates/athena-core/src/invocation.rs:199,286, crates/athena-core/src/run/mod.rs:916, crates/athena-core/src/status.rs:1845",
+      "kind": "code",
+      "test": null,
+      "reason": "Not changed: this driver reports the pin, the tested minimum, before any process exists. Only `ClaudeCodeDriver::info` (claude.rs:298) reports the binary's version. D154 states this limit. Changing it needs wiring.rs, which is not a deliverable (see the open question)."
+    },
+    {
+      "name": "ClaudeCodeDriver::new with the athena.toml pin",
+      "dependent": "crates/athena-cli/tests/live.rs:54-61 (`driver()` builds the real driver with the config pin)",
+      "kind": "code",
+      "test": null,
+      "reason": "Signature unchanged; the message of its `expect` is reworded to 'a compatible Claude Code'. The live tests are `#[ignore]` and need credentials, so they are not run by the checks."
+    },
+    {
+      "name": "claude_version config key",
+      "dependent": "crates/athena-data/src/config.rs:357 (`agents.claude_version`) and athena.toml:50 (`claude_version = \"2.1.302\"`)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The key keeps its name, type and meaning (now: the tested minimum). The config parse tests are unaffected because nothing in config.rs or athena.toml changes."
+    },
+    {
+      "name": "ensure_claude candidate match",
+      "dependent": "xtask/src/main.rs:210 (`setup` calls `ensure_claude(&config)` and then `write_machine_config`)",
+      "kind": "code",
+      "test": "cargo test -p xtask claude_compat",
+      "reason": "Only the match test in the candidate loop changes (line 627). The private install directory is still keyed by the pin (line 623), so an npm install still yields the exact pin. write_machine_config writes the path of the accepted binary, which `wiring::claude_bin()` reads. Its success message reports the pin; the step changes it to the version found."
+    },
+    {
+      "name": "CI and setup flow that runs ensure_claude",
+      "dependent": "setup.sh and .github/workflows (CI runs setup via xtask)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not edited. In CI with no claude on PATH, the candidate loop finds nothing and the npm install of the exact pin runs as before. A newer-patch claude on a runner is now used instead of the install."
+    },
+    {
+      "name": "docs/decisions.md as an append-only log",
+      "dependent": "crates/athena-cli/src/decisions.rs (`check_log` append-only prefix hash) and xtask/src/decisions.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli decisions; cargo test -p xtask",
+      "reason": "D154 is appended after D153 and nothing earlier changes; D03 is left as is."
+    },
+    {
+      "name": "Tracked-file scans",
+      "dependent": "xtask/tests/policy.rs (boundary words, personal data) and the system-facts budget test in crates/athena-cli/tests/budgets.rs",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test policy; cargo test -p athena-cli --test budgets",
+      "reason": "New prose and test strings use no banned words or emails. No prompt-set file (briefs, contract, docs/system-facts.md) is touched, so the computed budgets stay the same."
+    },
+    {
+      "name": "Refusal or matching rules on requests and readings",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and the reading and plan checks",
+      "kind": "rule",
+      "test": null,
+      "reason": "The rule changed here is a version comparison on a binary's `--version` output, not a parser of requests or readings. No input form from the refusal corpus (bullets, parts, job citations, retry complaints, paths, brand words) reaches it, so no corpus case applies and none is added. I did not read refusal_corpus.rs, as no corpus rule changes."
+    },
+    {
+      "name": "Record formats",
+      "dependent": "records and job state (check_record_file, AnyRecord)",
+      "kind": "code",
+      "test": null,
+      "reason": "No record type or field is added or changed; `DriverInfo.version` is already a string. The version is measured through the stand-in's `--version`, the same path the driver uses."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in claude.rs `stand_in_tests`: write a stand-in `claude` that prints `2.1.301 (Claude Code)`, call `check_pinned(&bin, \"2.1.299\")` and assert `Ok(\"2.1.301\")`. A second assertion in the same test: a stand-in reporting exactly 2.1.299 is accepted and returns 2.1.299.",
+      "command": "cargo test -p athena-agent newer_patch",
+      "observes": "check_pinned returns Ok with the binary's reported version 2.1.301, not the pin.",
+      "fails_without": "With the old `version != pinned` comparison, check_pinned on a 2.1.301 stand-in against pin 2.1.299 returns Err(Spawn), so the test's unwrap fails.",
+      "seam": "Production entry point: `claude::check_pinned`, which runs the stand-in through `claude_version` (the real `--version` path). Fixture: new helper `stand_in_version(dir, version)` that writes the existing STAND_IN script with the `2.1.299` literal replaced by `version`; the path is passed as the `bin` argument. The existing `stand_in` helper exists (claude.rs:603); the version-taking helper is added by step 2."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests: (a) a table test of the pure `accepts(found, pinned)` function over: 2.1.298 vs pin 2.1.299 (refuse), 2.2.0 and 2.0.999 (refuse), 3.1.299 (refuse), \"\" , \"abc\", \"2.1\", \"2.1.301-beta\" (refuse), 2.1.1000 vs 2.1.999 (accept; numeric, not string, order). (b) For the same forms via stand-in binaries, assert `check_pinned` returns Err(DriverError::Spawn(msg)) where msg contains both the found text and the pinned version, and contains 'needs no repin' for the newer-patch hint. The existing test `a_host_that_is_not_the_pinned_version_is_refused` (claude.rs:852) stays and passes with pin 9.9.9.",
+      "command": "cargo test -p athena-agent refused",
+      "observes": "Each refused form returns an error naming the found and pinned versions; each accepted form returns Ok.",
+      "fails_without": "If the rule accepted any version at or above in string order, or ignored major/minor, the older-patch, other-minor, other-major, and unparseable cases would return Ok; if the message omitted either version, the contains assertions fail.",
+      "seam": "Production entry points: `claude::check_pinned` and the pure `claude::accepts`. Fixture: `stand_in_version` (step 2) with a version string including the empty string (the script echoes an empty line) and a non-version string. Nothing is faked inside the rule."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test: build a stand-in reporting 2.1.301, call `ClaudeCodeDriver::with_marker(bin, \"2.1.299\", registry, None)` (what `new` calls after `nested_marker()`), and assert `driver.info().version == \"2.1.301\"` and name is claude-code. Repeat for a stand-in reporting exactly 2.1.299. A second assertion: `with_marker(.., Some(job))` is refused with DriverError::Nested, and `new` is `with_marker(.., nested_marker())` by construction.",
+      "command": "cargo test -p athena-agent records_the_reported",
+      "observes": "The driver's `info()` version equals the binary's reported version, not the pin.",
+      "fails_without": "If `new` stored the pin instead of the reported version, `info().version` would be 2.1.299 and the assertion for 2.1.301 fails; if `new` had no marker seam the test could not run inside a job, where ATHENA_NESTED is set.",
+      "seam": "Production entry point: `ClaudeCodeDriver::with_marker`, added by step 3; `new` is a one-line call to it. Fixture: `stand_in_version` and `Registry::new(tempdir)` (exists, used at claude.rs:~842). The marker is injected as a parameter."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit test in xtask `tests`: table over the pure `claude_accepts(reported_line, pin)` which takes the first whitespace token of the `--version` line (for example `2.1.301 (Claude Code)`), with the same rows as the claude.rs table (newer patch accepted, equal accepted, older patch, other minor, other major, empty, garbage refused). `ensure_claude` calls this function in its candidate loop in place of `==`.",
+      "command": "cargo test -p xtask claude_compat",
+      "observes": "The comparison accepts a newer-patch line, so the candidate loop returns that binary; the npm install path is reached only when no candidate is accepted.",
+      "fails_without": "With the old `text.split_whitespace().next() == Some(pin.as_str())`, a PATH claude at 2.1.301 against pin 2.1.299 does not match, so ensure_claude falls through to the npm install; the test of `claude_accepts` for that pair fails.",
+      "seam": "Production entry point: `claude_accepts`, the function `ensure_claude` calls (step 5). It is pure, so there is no double. `ensure_claude` itself runs `claude` and `npm`, so it is not driven by the test; this is a limit, stated here. The step makes `ensure_claude` use only this function."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three commands: `cargo test --workspace`, `cargo clippy --workspace --all-targets`, `cargo fmt --check`. Athena's own checks run `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`.",
+      "command": "cargo test --workspace",
+      "observes": "All three exit 0, including the decisions-log prefix test (D154 appended only), the policy tests and the system-facts budget test.",
+      "fails_without": "A compile error, a failing test, a clippy warning, or an unformatted file makes the matching command exit nonzero.",
+      "seam": "No seam: these are the whole-workspace commands. Existing tests that call check_pinned with a stand-in (claude.rs:612, 855) keep passing because 2.1.299 vs pin 2.1.299 and 9.9.9 are still decided the same way."
+    },
+    {
+      "criterion": 6,
+      "method": "Content: docs/decisions.md ends with `## D154 · A newer patch of the pinned Claude Code is accepted (amends D03)` with Case, Root cause, Decision (the rule), Alternatives (any 2.x, auto-repin, keep exact), Tradeoff (a run no longer has one identical version; the invocation records written through DeferredDriver still show the pin), Reversal cost (low: restore `==` in claude.rs and xtask), and Provenance. CHANGELOG.md [Unreleased] gets a Changed entry. The verifier reads both files, and the decisions test checks the append-only prefix.",
+      "command": "cargo test -p athena-cli decisions",
+      "observes": "D154 exists after D153 with the listed parts, D03 text is unchanged, and the CHANGELOG entry exists.",
+      "fails_without": "If D03 were edited, or D154 inserted anywhere but the end, the append-only check in crates/athena-cli/src/decisions.rs fails; a missing entry leaves the content criterion unmet when read.",
+      "seam": "No behavior seam (content criterion). The existing decisions log test in crates/athena-cli/src/decisions.rs, run by `cargo test -p athena-cli decisions`, checks the append-only prefix."
+    },
+    {
+      "criterion": 7,
+      "method": "The refusal text test from criterion 2 asserts the message contains the phrase that a newer patch of the same major.minor needs no repin. README.md is read: the setup paragraph (line 26) says 'Claude Code at the pinned version or a later patch of the same major.minor, or npm to install the pin', without a version literal. `git diff --stat` lists only the deliverables; `cargo test -p xtask --test policy` runs the secret/personal-data and boundary scans over tracked files.",
+      "command": "git diff --stat",
+      "observes": "The diff lists no athena.toml, defaults.toml or .github path; README and the error text carry the hint; the policy test passes.",
+      "fails_without": "If athena.toml, defaults.toml or a workflow were edited, the diff names them; if the refusal text lacked the hint, the claude.rs message test in criterion 2 fails.",
+      "seam": "No behavior seam beyond the criterion 2 message assertion on `check_pinned` (exists after step 1)."
+    }
+  ],
+  "open_questions": [
+    "User: DeferredDriver::info in crates/athena-cli/src/wiring.rs reports the pin, and the invocation records read it, so records will still show the pin and not the binary's patch. Do you want wiring.rs changed (a file outside the listed deliverables) so records carry the reported version, or is the pin as a minimum enough for now?"
+  ],
+  "producer_section_sha256": "815081180e6bd776253e7f1a97f2bd523d47c96f4fbe6d46a7bfda3f3e458471"
+}
