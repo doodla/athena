@@ -12,7 +12,8 @@ use athena_agent::fake::{FakeAgentDriver, FakeTurn};
 use athena_agent::{AgentInvocation, Usage};
 use athena_context::{PRODUCER_FRAME, PromptAsset, VERIFIER_FRAME};
 use athena_data::records::{
-    AcceptedBy, AnyRecord, Build, OutcomeState, PinnedRepo, PolicyViolation, Role,
+    AcceptedBy, AnyRecord, Build, InvocationOutcome, OutcomeState, PinnedRepo, PolicyViolation,
+    Role,
 };
 use athena_git::Git;
 use serde_json::json;
@@ -778,6 +779,108 @@ fn fault_findings(finished: &crate::run::Finished) -> Vec<athena_data::records::
         .filter(|f| f.summary.starts_with(crate::verify::SYSTEM_FAULT_PREFIX))
         .cloned()
         .collect()
+}
+
+/// A verifier that, on its first `n` runs, is stopped at its deadline: the driver reports `TimedOut` with
+/// no verdict. Later runs answer pass. Every run is recorded in `runs`.
+fn timing_out_verifier(runs: Runs, n: usize) -> Tweak {
+    Arc::new(move |spec, turn| {
+        if spec.role != Role::Verifier {
+            return;
+        }
+        let mut runs = runs.lock().unwrap();
+        let seen = runs.len();
+        runs.push((spec.workdir.clone(), spec.workdir.join(TAMPERED).exists()));
+        turn.cost_usd = 0.01;
+        if seen < n {
+            turn.outcome = InvocationOutcome::TimedOut;
+            turn.structured = None;
+            turn.detail = Some("deadline of 1s reached".into());
+        }
+    })
+}
+
+#[test]
+fn a_verifier_that_times_out_once_is_rerun_and_the_second_verdict_decides() {
+    let (finished, runs) = run_with(&config(true), |runs| timing_out_verifier(runs, 1));
+    assert_eq!(runs.len(), 2, "exactly one more verifier run");
+    assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+    let verification = finished.verification.as_ref().unwrap();
+    assert_eq!(verification.summary.as_deref(), Some("Fine."));
+    assert!(
+        verification.reasons.is_empty(),
+        "{:?}",
+        verification.reasons
+    );
+    assert!(verification.agent_verdict.is_some());
+    // The recorded verifier invocation is the second run's: one after the only run of a verifier that
+    // does not time out.
+    let (clean, _) = run_with(&config(true), |runs| timing_out_verifier(runs, 0));
+    let first_seq = clean
+        .verification
+        .as_ref()
+        .unwrap()
+        .verifier_invocation
+        .expect("an invocation");
+    assert_eq!(verification.verifier_invocation, Some(first_seq + 1));
+    // A timeout is not a snapshot fault.
+    assert!(fault_findings(&finished).is_empty());
+}
+
+#[test]
+fn a_verifier_that_times_out_twice_is_unjudged_not_rejected_as_judged() {
+    let (finished, runs) = run_with(&config(true), |runs| timing_out_verifier(runs, 2));
+    assert_eq!(runs.len(), 2, "one rerun at most");
+    assert_eq!(finished.state, OutcomeState::Rejected);
+    let verification = finished.verification.as_ref().unwrap();
+    assert_eq!(verification.agent_verdict, None);
+    assert_eq!(
+        verification.reasons,
+        vec![format!(
+            "{}: deadline of 1s reached",
+            crate::verify::UNJUDGED_REASON_PREFIX
+        )]
+    );
+    for reason in &verification.reasons {
+        assert!(!reason.contains("did not complete"), "{reason}");
+        assert!(!reason.contains("returned no verdict"), "{reason}");
+    }
+    assert!(!verification.criteria.is_empty());
+    for criterion in &verification.criteria {
+        assert!(!criterion.met);
+        assert!(criterion.evidence.contains("unjudged"), "{criterion:?}");
+    }
+    assert!(finished.reason.contains("unjudged"), "{}", finished.reason);
+    assert!(
+        !finished.reason.contains("did not complete"),
+        "{}",
+        finished.reason
+    );
+}
+
+#[test]
+fn non_timeout_verifier_error_is_not_rerun() {
+    let (finished, runs) = run_with(&config(true), |runs| {
+        Arc::new(move |spec: &AgentInvocation, turn: &mut FakeTurn| {
+            if spec.role == Role::Verifier {
+                runs.lock().unwrap().push((spec.workdir.clone(), false));
+                turn.outcome = InvocationOutcome::Error;
+                turn.structured = None;
+                turn.detail = Some("the model errored".into());
+            }
+        })
+    });
+    assert_eq!(runs.len(), 1, "an error is not rerun");
+    assert_eq!(finished.state, OutcomeState::Rejected);
+    let verification = finished.verification.as_ref().unwrap();
+    assert_eq!(
+        verification.reasons,
+        vec!["the verifier did not complete: the model errored"]
+    );
+    assert!(!finished.reason.contains("unjudged"), "{}", finished.reason);
+    for criterion in &verification.criteria {
+        assert!(!criterion.evidence.contains("unjudged"), "{criterion:?}");
+    }
 }
 
 #[test]

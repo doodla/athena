@@ -574,7 +574,7 @@ records/
           04-verifier.json          athena.invocation/1
         candidate.json              athena.candidate/1    change list, fingerprint, producer report (redacted)
         brief-verifier.md           the verifier brief, verbatim, with the diff elided
-        verification.json           athena.verification/1 checks, verdict, findings, commands run
+        verification.json           athena.verification/1 checks, verdict, findings, commands run; a verifier that timed out twice has `unjudged` reasons and no agent verdict
         outcome.json                athena.outcome/1      terminal state, totals
         outcome-landed.json         athena.outcome/1      only when a blocked job lands later
         outcome-abandoned.json      athena.outcome/1      only when a blocked job is closed instead (D52)
@@ -784,7 +784,7 @@ The verifier judges the artifact, not the producer's account of it (D12):
 | Guarantee | Mechanism |
 |---|---|
 | The verifier never sees the producer's reasoning, report, or commands | `VerifierInputs` has no channel for them (type); a canary test; a separate process with `--no-session-persistence`; a separate snapshot repository that shares nothing with the producer's |
-| The verifier judges exactly what will land | The core builds candidate commit C in the user's repository from the producer's change list. The verifier's snapshot holds base and C's visible files in its own repository. Afterwards the core checks that the snapshot is clean and still at C; a verifier that changed anything invalidates its own verdict. |
+| The verifier judges exactly what will land | The core builds candidate commit C in the user's repository from the producer's change list. The verifier's snapshot holds base and C's visible files in its own repository. Afterwards the core checks that the snapshot is clean and still at C; a verifier that changed anything invalidates its own verdict. A verifier stopped at its deadline judged nothing: it is rerun once on a fresh snapshot, and a second timeout records the reason "the verifier timed out, so the criteria are unjudged" (not "the verifier did not complete"), never a pass. |
 | Nothing verifies its own work | The verifier is a different invocation, role, and model. Opus 5.5 verifies and is not in the producer's allowed set, and configuration validation rejects any setup that would let one model verify its own production. |
 | The verdict rests on exercise, not only on reading | The capability's checks run first, by code, in the verifier's snapshot; a failed check rejects the job without spending an agent. Each `behavior` criterion must cite at least one command the verifier actually ran (D43). |
 | The spec is the user's, not the producer's | The verifier receives the verbatim request as well as the reading, and reports any mismatch between them. That also checks the reader. |
