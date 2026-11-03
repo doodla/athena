@@ -51,6 +51,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- A newer patch of the pinned Claude Code no longer stops Athena (D154, amends D03). Root cause: Claude Code
+  updates itself, and `check_pinned` compared the reported version with `==`, so each update stopped every
+  agent until `athena.toml` was repinned by hand, and a repin job cannot start while the driver refuses. Now
+  the pin is the tested minimum: a binary with the same major and minor and a patch at or above the pin is
+  accepted, and the driver, `DeferredDriver::info` (after the driver is built) and so the invocation records
+  name the version the binary reported. `xtask setup` uses the same rule, so a newer-patch `claude` on `PATH` is
+  used instead of an npm install. An older patch, another major or minor, and an empty or unparseable version
+  are still refused, and the message names both versions and says a newer patch needs no repin. This refuses
+  fewer cases, not more: expected 0% of newly refused cases. Limit: the job record written at dispatch and
+  `athena status` before any agent has run still show the pin.
 - A reused red CI run now gives the verifier the names of the failing tests and the end of the failing job's
   log. Root cause: `resolve` turned a red run into a bare failed record and `runs_from_record` built the failed
   `test` check with no `failed_tests` and no `output_tail`, and the verifier brief showed neither, so the
