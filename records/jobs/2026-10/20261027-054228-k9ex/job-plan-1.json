@@ -1,0 +1,217 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-054228-k9ex",
+  "round": 1,
+  "at": "2026-11-02T22:38:50.020481418Z",
+  "invocation_seq": 3,
+  "approach": "Fix where the timeout becomes a failed verdict, with no file outside the brief's deliverables. (1) verify.rs: change the type of `VerdictInputs.verifier_failure` from `Option<String>` to `Option<VerifierFailure>`, a new enum `{ Incomplete(String), TimedOut(String) }`. Every existing literal says `verifier_failure: None`, so it still compiles and send_back.rs needs no edit. `judge` gives `TimedOut` the reason `unjudged: the verifier timed out (...); the criteria were not judged`, separate from 'the verifier did not complete'. It writes 'unjudged' criterion evidence, skips 'returned no verdict', invents no finding, and never passes. The verdict stays `Fail` (athena-data is untouched). (2) run/verification.rs: a verifier invocation that ended `InvocationOutcome::TimedOut` sets a new local `verifier_timeout`, not `verifier_failure`. On a first timeout the same loop reruns the verifier once on the same locked snapshot, the same `check_runs` and the same `inputs`, so no check runs again; the cap of two runs is shared with the snapshot-change rerun. A timeout still present after the loop is passed to `judge` and closes the job as `Failed` with a reason that starts with the existing `disk::ENVIRONMENT_PREFIX`. `StopCause::of` already reads that as `OtherEnvironment`, so `is_environment_reason`, `resumable_stop` and `settle_resume_marks` already treat it as a resumable stop that is not a rejection. disk.rs needs no change. The reason is built by `self.failure(ctx, &reason)`, the call a check timeout uses at run/mod.rs:1569. The Verification record is still written, with the unjudged reason. (3) Tests drive the real `go` flow with a scripted verifier turn, plus `judge` unit tests. (4) Docs, CHANGELOG, and the display `next` line.",
+  "decisions": [
+    {
+      "choice": "Make `verifier_failure` a typed `Option<VerifierFailure>` with variants `Incomplete(String)` and `TimedOut(String)`, instead of adding a second field.",
+      "reason": "The root cause is that one untyped string carried both a timeout and a real failure, and both produced 'the verifier did not complete' and a failed verdict. A typed value keeps the two apart where `judge` reads them, and the pass rule (`verifier_failure.is_none()`) already covers both, so a timeout can never pass. Every existing literal is `verifier_failure: None`, so it compiles unchanged. That removes the edit to run/send_back.rs, which is not a deliverable (findings 3).",
+      "rejected": [
+        {
+          "option": "Add a new field `verifier_timeout` to `VerdictInputs`",
+          "why": "Every literal must then name the field, which forces an edit to run/send_back.rs, a file outside the deliverables."
+        },
+        {
+          "option": "Match 'deadline' or 'timed out' in the free text of `verifier_failure`",
+          "why": "A word list over free text. The invocation already carries a typed `InvocationOutcome::TimedOut`."
+        },
+        {
+          "option": "Add `Verdict::Unjudged` or `OutcomeState::Unjudged` in athena-data",
+          "why": "It changes record schemas, the gate's reading and the round-trip tests. The brief puts the gate's reading out of scope and lists no athena-data file."
+        }
+      ]
+    },
+    {
+      "choice": "Close an unresolved timeout as `OutcomeState::Failed` with a reason starting `disk::ENVIRONMENT_PREFIX` ('environment: unjudged: the verifier timed out ...; this is the verifier's time, not the work, `athena retry <job>`'), built in verification.rs with `self.failure`. `verification_passed` is None and nothing is `verified`.",
+      "reason": "A prefixed reason is already read as an environment stop by `StopCause::of` (`OtherEnvironment`), so `athena retry` can resume it and `settle_resume_marks` keeps the resume mark. This is the same path a check timeout takes, and it needs no new `StopCause` variant, so disk.rs stays untouched (finding 4). The job is not Rejected, so the work is not recorded as rejected. The resume mark is already written once the checks pass (run/mod.rs ~1577), so a retry resumes at the verifier with the recorded checks.",
+      "rejected": [
+        {
+          "option": "Add `StopCause::VerifierTimeout` and `disk::verifier_timeout_reason` in disk.rs",
+          "why": "The existing prefix handling gives the same behavior. disk.rs is not on the brief's list."
+        },
+        {
+          "option": "Keep `Rejected` and change only the reason text",
+          "why": "The job would still count as a rejection of the work, and a retry could not resume at the verifier."
+        },
+        {
+          "option": "Reuse `OutcomeState::TimedOut`",
+          "why": "That state means the producer timed out, and `timeout_seed` resumes from kept producer work."
+        }
+      ]
+    },
+    {
+      "choice": "Rerun once inside the existing verifier loop, sharing its two-run cap, on the same snapshot and inputs.",
+      "reason": "The loop already reruns once for a snapshot change. The checks and brief are already built, so the retry reuses the gathered check results, as the introspections propose. The snapshot-equality check runs first, so a timed-out run that altered the snapshot takes the existing fresh-snapshot path.",
+      "rejected": [
+        {
+          "option": "Per-criterion incremental saving, or a deadline that scales with the work",
+          "why": "Out of scope. `verifier_timeout_s` in athena.toml must not change."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add `pub enum VerifierFailure { Incomplete(String), TimedOut(String) }` and `UNJUDGED_PREFIX`. Change `VerdictInputs.verifier_failure` to `Option<VerifierFailure>`. In `judge` (lines ~356, 499, 528), add the unjudged reason, unjudged criterion evidence, no 'returned no verdict', and no pass. Add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Classify a `TimedOut` invocation into a `verifier_timeout` local. Rerun once on a first timeout within the shared two-run cap. Build `VerifierFailure` for `judge`. On an unresolved timeout, close as Failed through `self.failure` with an `ENVIRONMENT_PREFIX` unjudged reason, `verification_passed` None and `verified` None. Other failures still close Rejected.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add end-to-end tests through `run_with`: timeout then success, double timeout, and a non-timeout verifier error that still closes Rejected.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add a test that a job closed on a double timeout is `resumable_stop` and keeps its resume mark (via the module's existing helpers; drop it if it needs new scaffolding and the run_pin test already asserts `resumable_stop`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Expected no change: `settle_resume_marks` (line 594) already keeps the mark for Failed plus an environment reason. Touch only if compilation or a test needs it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "In the finished-job rendering near line 812, print a `next` line for a Failed job whose reason is the unjudged verifier timeout, pointing to `athena retry <job>`. Add a display test if one exists for that function.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Under Unreleased, an entry naming the root cause and the new unjudged outcome with one retry.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "purpose": "Near the verifier rows (~787-789), state that a verifier timeout is rerun once and then closes unjudged, not as a rejection.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "Update the verifier-failure wording if present; otherwise add one sentence on the `unjudged` reason in the verification record.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the `inputs()`-style builders in verify.rs (~786-870) and the `Tweak`/`FakeTurn` types and `run_with` in run_pin_tests.rs (~726-769). Read fake.rs to confirm that `turn.outcome` and `turn.detail` pass through to the recorded invocation (`vrecord.detail`, `voutput.outcome`). Read `self.failure` and `held_for_timeout` use at run/mod.rs ~1560-1574 as the model for the closing.",
+    "verify.rs: add `VerifierFailure` and `pub const UNJUDGED_PREFIX: &str = \"unjudged\"`. Change the field type and its doc comment, which names the root cause. In `judge`: `Incomplete` keeps the current 'the verifier did not complete: ...' reason; `TimedOut` pushes `unjudged: the verifier timed out ({detail}); the criteria were not judged`, does not add 'returned no verdict', and gives a criterion with no result the evidence 'unjudged: the verifier timed out' and no invented finding. The two `is_none()` checks at ~499 and ~528 stay, so a timeout never passes. The `verifier_failure: None` literals compile unchanged.",
+    "verification.rs: add `let mut verifier_timeout: Option<String> = None;`. In the `Ok((voutput, vrecord))` arm, when `voutput.outcome == InvocationOutcome::TimedOut`, set `verifier_timeout` to the record detail (default 'deadline reached') and leave `verifier_failure` unset. Other non-success outcomes keep the current code. Do not add 'no valid verdict' for a timeout. After the snapshot-equality check passes, if `verifier_timeout.is_some() && verifier_runs < 2`, print a ui line, clear `verifier_timeout`, `verdict_output`, `commands_run` and `verifier_invocation`, and `continue` (still recording the timed-out invocation in `closing.new_invocations`). The snapshot-change branch also clears `verifier_timeout`. The budget `break` and the snapshot-lock break leave a set timeout in place.",
+    "verification.rs, at the `judge` call: pass `verifier_failure: verifier_timeout.clone().map(VerifierFailure::TimedOut).or(verifier_failure.clone().map(VerifierFailure::Incomplete))`. After the Verification is built, if `verifier_timeout` is still Some: keep `changed_paths`, set `closing.happened = self.failure(ctx, &reason)` with `reason = format!(\"{ENVIRONMENT_PREFIX} unjudged: the verifier timed out ({detail}); the criteria were not judged, this is the verifier's time and not the work. `athena retry {id}`\")`, set `verification_passed = None`, `verified = None`, and keep `closing.verification = Some(..)`. Otherwise keep the Landed/Rejected mapping. Check run/close.rs 46-55 uses `happened.reason` first.",
+    "verify.rs tests: (a) a timeout with no output gives Fail, a reason starting `unjudged`, no 'did not complete', no 'returned no verdict', no Major or Blocker finding, and unjudged evidence. (b) A timeout beside a pass output is still Fail. (c) `Incomplete` still gives Fail with 'did not complete'. (d) A blocking failed check gives 'check test failed' and Fail. (e) A judged fail gives \"the verifier's verdict is fail\". (f) A pre-existing failing check with a pass verdict still passes.",
+    "run_pin_tests.rs tests via `run_with(&config(true), ..)` with Verifier-role tweaks: test 1 times out on run 0 only, asserts 2 runs, Landed, final_verdict Pass, empty reasons. Test 2 times out on every run, asserts exactly 2 runs, Failed (not Rejected), reason starts 'environment:' and contains 'unjudged', Verification Fail with a reason starting `UNJUDGED_PREFIX` and none containing 'did not complete', `is_environment_reason`, `resumable_stop`. Test 3 sets `InvocationOutcome::Error` with a detail on every run and asserts Rejected, 'did not complete' and no 'unjudged'.",
+    "run/tests.rs: assert that the double-timeout reason survives `settle_resume_marks` as a resumable stop, using existing helpers only; skip it if it needs new scaffolding.",
+    "display.rs: add the `next` line for the unjudged Failed state (add a display test if the function has one). CHANGELOG.md, docs/design/athena-v0.md and docs/records.md: write the entries described in `files`. Name the root cause in the changelog.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`. To show the new run tests fail on the base, stash only the verification.rs change and the `judge` arm; the tests then fail on assertions."
+  ],
+  "risks": [
+    {
+      "risk": "The Verification record has final_verdict Fail while the outcome is Failed, not Rejected. A gate invariant or consumer may assume Fail goes with Rejected. A grep of athena-gate/src for verification and Failed found nothing.",
+      "mitigation": "The end-to-end test goes through the real `go` flow and the records writer. Run the whole `cargo test --locked`, including the athena-gate and athena-cli lifecycle tests. If something asserts the pairing, keep the state Failed and loosen only that assertion."
+    },
+    {
+      "risk": "Changing the field type breaks a caller I did not find. The grep shows only `verifier_failure: None` literals (verify.rs tests, send_back.rs:270) and the three reads in `judge`.",
+      "mitigation": "The compiler lists any other. None-literals compile unchanged, so send_back.rs and disk.rs stay untouched."
+    },
+    {
+      "risk": "The retry runs a verifier that may time out again and spends budget.",
+      "mitigation": "The cap is two runs. `check_budget` runs at the top of each pass. If it refuses the rerun, the first timeout stays set and the job ends as unjudged, not 'did not complete'; the producer tests this only if the loop makes it cheap."
+    },
+    {
+      "risk": "`go_with_stages` still introspects a Failed job, so an unjudged stop can start an introspection about the work.",
+      "mitigation": "Left unchanged: check-timeout stops behave the same today. Stated in the open questions."
+    },
+    {
+      "risk": "The dropped candidate jobs (run.rs trailer, spec.toml and so on) get mixed in.",
+      "mitigation": "Only the files in `files` are touched. athena.toml, defaults.toml and workflows are unchanged."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the CHANGELOG entry and the doc comment on `VerifierFailure`/`VerdictInputs.verifier_failure`, and check that they name the cause where it originates.",
+      "command": "git diff -- CHANGELOG.md crates/athena-core/src/verify.rs crates/athena-core/src/run/verification.rs",
+      "observes": "The text says a verifier timeout was recorded as `verifier_failure` in run/verification.rs and failed the verdict in verify.rs like a judged failure, so the criteria were rejected unjudged. It also says the fix separates the timeout and reruns once.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the diff for `VerifierFailure::TimedOut`, the `UNJUDGED_PREFIX` constant and the `TimedOut` branch in verification.rs. Run the `judge` unit tests, which call `verify::judge` directly with `VerdictInputs` from the existing `inputs()`-style builders at verify.rs ~786-870 (these exist).",
+      "command": "cargo test -p athena-core verify",
+      "observes": "A timeout without output gives `Fail`, a reason starting `unjudged`, no 'did not complete', no 'returned no verdict', no Major or Blocker finding, and evidence 'unjudged'. A timeout beside a pass output is still `Fail`, so it is never a pass.",
+      "fails_without": "On the base commit `VerifierFailure` does not exist and the timeout is a plain string. The new unit tests do not compile there, so the stash check stubs it: with the new `judge` arm removed they would see 'did not complete' instead of `unjudged`.",
+      "seam": "Production entry point `verify::judge(&VerdictInputs)`; the fixture is a `VerdictInputs` literal built in the test with `verifier_failure: Some(VerifierFailure::TimedOut(..))`. The seam exists today (read in verify.rs); the new tests are added in step 5. No double: `judge` is the real code."
+    },
+    {
+      "criterion": 3,
+      "method": "Two end-to-end tests in run_pin_tests.rs call `run_with(&config(true), ..)`, which reaches `Athena::go`, `verification_stage` and `judge`. The `Tweak` closure (the `Arc<dyn Fn(&AgentInvocation, &mut FakeTurn)>` passed to `athena_with`) acts on the Verifier role only. It records the run in a shared counter and sets `turn.outcome = InvocationOutcome::TimedOut`, `turn.structured = None` and `turn.detail = Some(\"deadline of 2400s reached\")` on run 0 only (test 1) or on every run (test 2). Guards: checks pass first, so the study job reaches the verifier. The deadline is a scripted outcome, so no real time passes; the retry, the classification and the closing live in production code.",
+      "command": "cargo test -p athena-core run && cargo test -p athena-core verify",
+      "observes": "Test 1 (timeout then success): exactly 2 verifier runs, state `Landed`, `verification.final_verdict == Pass`, empty reasons, summary from the second run. Test 2 (timeout twice): exactly 2 runs, not 3; state `Failed`, not `Rejected`; closing reason starts 'environment:' and contains 'unjudged'; `verification.final_verdict == Fail` with a reason starting `UNJUDGED_PREFIX` and none containing 'did not complete'; `is_environment_reason(&finished.reason)`; `resumable_stop(Closed(Failed), Some(&reason))` holds.",
+      "fails_without": "On the base commit the verifier runs once, the timeout becomes `verifier_failure`, and the job closes Rejected with 'the verifier did not complete: ...'. Test 1 sees 1 run and `Rejected`. Test 2 sees `Rejected`, no 'environment:' reason, and 'did not complete' in the Verification reasons. Each assertion fails on an assertion, not on compilation, because the tweak uses only fields that exist in the base.",
+      "seam": "Production entry point `Athena::go` via `run_with` in run_pin_tests.rs. Fixture: the `Tweak` closure passed to `athena_with`, setting only `turn.outcome`, `turn.structured` and `turn.detail` for the Verifier role. The `run_with`/`Tweak` seam exists today (read at run_pin_tests.rs ~726-769). The new tweak helpers are added in step 6."
+    },
+    {
+      "criterion": 4,
+      "method": "Tests that keep real failures failing. (a) End to end through `run_with` with a Verifier tweak that sets `turn.outcome = InvocationOutcome::Error` and a detail, on every run. (b) `judge` unit tests: `VerifierFailure::Incomplete` still gives `Fail` with 'did not complete'; a blocking failed check gives 'check test failed' and `Fail`; a judged fail verdict gives \"the verifier's verdict is fail\"; a pre-existing failing check with a pass verdict still passes.",
+      "command": "cargo test -p athena-core",
+      "observes": "(a) state `Rejected`, a reason containing 'did not complete', and no 'unjudged' in the closing reason or the Verification reasons. (b) The listed reasons and verdicts hold, so the new branch did not swallow other failures.",
+      "fails_without": "If the timeout branch also caught other non-success outcomes, test (a) would see `Failed` and 'unjudged' where it expects `Rejected` and 'did not complete'. If the check or judged-fail paths were loosened, the (b) unit tests would see `Pass` or a missing reason.",
+      "seam": "`Athena::go` via `run_with` with the same `Tweak` seam as criterion 3 (added in step 6; `run_with` exists). `verify::judge` called directly with `VerdictInputs` from the existing builders (exist)."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three checks Athena runs on the result, over the whole workspace, so they cover the `VerifierFailure` type change in every `judge` caller and test literal, every added test, and the formatting of the new code. Any warning is an error because of `-D warnings`.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0 with no warnings, and the run includes the new tests of criteria 3 and 4 and the existing athena-gate and athena-cli suites.",
+      "fails_without": "`cargo fmt --check` fails on unformatted new code. `clippy -D warnings` fails on an unused variant, a non-exhaustive match on `VerifierFailure`, or a needless clone. `cargo test --locked` fails if the typed field breaks any caller or test literal, or if a Fail verification paired with a Failed outcome breaks a gate or CLI test.",
+      "seam": "Production entry points are the cargo toolchain commands themselves over the workspace and the committed Cargo.lock. No fake. The seam exists today: these are the same commands as the 'Checks Athena will run on the result'."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the new tests and check that each asserts the recorded values: `finished.state`, `finished.reason`, `verification.final_verdict` and `verification.reasons` in the run_pin tests, and `Judgment.final_verdict` and `Judgment.reasons` in the unit tests. Wiring-only checks do not count.",
+      "command": "cargo test -p athena-core run_pin",
+      "observes": "The assertions compare the recorded verdict (Pass after the retry, Fail with an `unjudged` reason after two timeouts), the reason text and the closing state. They do not only check that a type or a field exists.",
+      "fails_without": "With the base `verification.rs`, the retry test fails on the run count and state (1 run, Rejected). The double-timeout test fails on state and reason text. A test that only checked that `VerifierFailure` exists would pass on a wrong implementation, which is why these assert values.",
+      "seam": "`Athena::go` via `run_with` and the `Tweak` closure, as in criterion 3 (the seam exists; the tests are added in step 6)."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diffs of the three doc files and check each one.",
+      "command": "git diff -- CHANGELOG.md docs/records.md docs/design/athena-v0.md",
+      "observes": "CHANGELOG.md has an Unreleased entry for the unjudged outcome and the single retry, naming the root cause. athena-v0.md (near the verifier rows ~787-789) says a verifier timeout is rerun once and then closes unjudged, not as a rejection. records.md is changed if it describes the verifier-failure reason; if no such text exists, the producer says so in its report and adds one sentence on the `unjudged` reason in the verification record.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Should an unjudged Failed job skip the introspection that `go_with_stages` starts for Rejected and Failed? The plan leaves it unchanged, as a check timeout does today.",
+    "Does any gate or status consumer require a Fail verification to sit with a Rejected outcome? A grep of athena-gate/src found no such rule, but invariant.rs and the status code were not read in full.",
+    "When the first run times out and `check_budget` refuses the rerun, should the reason be unjudged or the budget text? The plan picks unjudged because the timeout stays set.",
+    "docs/records.md has long lines the search omitted. Whether it describes the verifier-failure reason was not settled by reading."
+  ],
+  "producer_section_sha256": "d43fe69caa723a3aaad2d31650ed6a78f834cd767f6f9f53782830cb26f15501"
+}

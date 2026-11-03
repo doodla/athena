@@ -2,7 +2,7 @@
 //! verification start, and landing waits, boundedly, for the early commit's run and for the pull request's
 //! checks.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::early_seam;
 use super::{
     Checks, CiRunState, GhCli, GhClient, GitRemote, HOST, LandPr, NewPr, PrHost, Remote,
@@ -358,7 +358,7 @@ impl Athena {
 
     /// Runs `act` on the remote the CI branch lives on: origin, or, in tests, the fake in the early seam.
     fn with_ci_remote<T>(&self, act: impl FnOnce(&dyn Remote) -> Result<T>) -> Result<T> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some((remote, _)) = early_seam::current() {
             return act(&*remote);
         }
@@ -440,7 +440,7 @@ impl Athena {
                 host,
             })
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some((remote, host)) = early_seam::current() {
             return request(&*remote, &*host);
         }

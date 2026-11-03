@@ -9,6 +9,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- `test-shard` can split one test binary into parts by test-name module prefix, and `athena-core --lib` is now
+  six parts spread over the CI shards. Root cause of the imbalance (numbers from GitHub run 41469096430, before
+  this change): `athena-core --lib` ran as one binary of 821 tests in 255.11s, 97% of shard 0's test time, so
+  the shard 0 test step took 5m45s against 1m45s for shard 4. The next slowest binaries were lifecycle 143.22s,
+  drain 79.32s, retry 49.45s and job_plan 46.35s, so no whole-binary shuffle could help. Each part is run as
+  `cargo test --locked -p athena-core --lib -- <prefixes>`; the last part is a catch-all that skips every other
+  part's prefix with `--skip`, so a test in a new module still runs once. The filter appears in the `--dry-run`
+  line and in the `xtask/shard-timings.txt` key. The part timings there are estimates from that run (255.11s
+  shared by test count, about 42s each), not per-part measurements, and the four binaries above now carry their
+  measured times. `xtask/tests/shard_parts.rs` lists every `athena-core` library test and checks each is kept
+  by exactly one part, and that a dropped or duplicated prefix is rejected. The shard count stays six, so the
+  workflow is unchanged; the CI runtime after the change is not measured here.
+- The writer build is removed before the checks free-disk check, and that check applies only just before a
+  local check run. Root cause: `check_and_verify` measured the disk before the job's own producer build was
+  freed and before the CI result was read, so the job's own build, or a CI result that would have stood in for
+  the checks, could hold the job for low disk. Now the build directory is removed first and the gate runs once
+  in the check executor, just before the first check that runs here; a green or red CI result, a resumed job
+  and a fully skipped route never reach it. A hold there behaves as before: records committed, no outcome, and
+  the next drain resumes the job. The dispatch, producer and verifier gates are unchanged.
 - The reading check refuses a boundary word only in a deliverable path or a `content` acceptance criterion, the
   places a word can reach a tracked file (D153). Root cause: `check_boundary_and_repo_files` scanned every text
   field, but a reading is a record outside the policy scan and the writer already gets the word list and runs the

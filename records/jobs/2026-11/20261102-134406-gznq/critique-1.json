@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261102-134406-gznq",
+  "round": 1,
+  "at": "2026-11-02T19:31:51.243228232Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The BUILD_PATHS check has no negative test against production code. Fixture E names a seam the code does not provide.",
+      "evidence": "`touches_build(paths: &[String])` reads the const `BUILD_PATHS` directly (status.rs:25), so no caller can hand it a shorter list. `check_build_paths(required)` can only check the real const. Fixture E 'passes a short BUILD_PATHS-like list to the underlying matcher', but no such production matcher exists, so the test would exercise its own copy of the prefix logic. Step 4 shows a failure before the fix, but only once by hand, not as a lasting test. A later bug in `check_build_paths` that always returned Ok would pass every test. Fix: In status.rs, add `pub fn list_touches(list: &[&str], paths: &[String]) -> bool`, holding the current prefix and exact-match logic. Have `touches_build` call it with `&BUILD_PATHS`. Make the check `check_build_paths(list: &[&str], required)` built on `list_touches`. Add a negative test that passes the old five-entry list and asserts an Err naming athena.toml and docs/system-facts.md. Pair it with the real `BUILD_PATHS` returning Ok.",
+      "location": "Plan Demonstrations, Criterion 3, Fixture E; Decision 5 `check_build_paths(required)`; crates/athena-core/src/status.rs:23-29",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "defaults.toml is added to BUILD_PATHS only so it matches xtask's list. No compiled-in use of it is shown.",
+      "evidence": "The plan says no production include of defaults.toml was found. Adding it means drain rebuilds after landings that touch only defaults.toml, and nothing shows that is needed. It is the same kind of hand-declared entry that is never checked against a source, which is the cause this job targets. Fix: Find out whether the binary or setup reads defaults.toml, for example by grepping crates/ and xtask/src for 'defaults.toml'. Keep it in BUILD_PATHS only if something does, and record the reason in D154. Otherwise leave it out and note in D154 why the two lists differ.",
+      "location": "Decision 2 and Open question 4 (defaults.toml)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The ci.yml check now exists twice, with two independent scanners that can drift apart.",
+      "evidence": "policy.rs already asserts the athena-bin keys cover `compiled_in_files()`. The new test copies that scan and that key check. Criterion 2 requires the new test to read ci.yml, so some overlap is needed, but a second scanner is a second hand-kept piece of logic. Fix: Keep the overlap but make it explicit and checkable. Have the new test assert that its required set includes the same known targets policy.rs asserts at line 942. Name the pair in both test doc comments and in D154, so a change to one points to the other.",
+      "location": "Plan Approach and Decision 1 (overlap with xtask/tests/policy.rs:937)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A test that matches an exact phrase in the Unreleased section will break when the next release moves the entry.",
+      "evidence": "The repo already does this: reading.rs:7824 `changelog_describes_the_declared_share_rule` splits on `## [Unreleased]`. So the approach is accepted here, but it adds one more test that must be edited at release time. Fix: Match only the three job ids and one short keyword, not a long phrase, to keep the test cheap to maintain. Or rely on the verifier's content check for criterion 1.",
+      "location": "Demonstration Criterion 1 (changelog test asserting the phrase `real compiled-in inputs`)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot. Its main claims hold. BUILD_PATHS in status.rs:20 has five entries and leaves out athena.toml, docs/system-facts.md, rust-toolchain.toml and defaults.toml. xtask/src/main.rs:263 has BUILD_INPUT_GLOBS with nine entries. xtask/tests/policy.rs:937 already checks the ci.yml athena-bin keys against a scan of compiled-in files. The drain test at drain.rs:1421 lists none of the files being added as 'no' paths. So the plan is right to name BUILD_PATHS as the list nobody checks, and to fix it in status.rs, where the fault starts. The approach is sound: production includes only, the known-target floor, loud failure on an unknown glob, and pure functions over the real ci.yml text. One gap matters. The BUILD_PATHS half of the check has no negative test against production code. `touches_build` reads the const directly, so the plan cannot give it a short list. Fixture E ('passes a short BUILD_PATHS-like list to the underlying matcher') runs on a seam that does not exist. It would test a copy kept inside the test, and a `check_build_paths` that always returned Ok would go unnoticed. The fix is small: add a function that takes the list as a parameter, and have `touches_build` call it."
+}

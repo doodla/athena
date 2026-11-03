@@ -259,14 +259,22 @@ fn shard_units(k: u32, n: u32) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// Passes only if every oracle unit is in exactly one shard and no shard has anything else.
+/// The target a `--dry-run` line belongs to: the line without its ` -- <test-name filter>` tail. A target that
+/// is split into parts (athena-core --lib) prints one line per part, each with its own filter.
+fn unit_key(line: &str) -> &str {
+    line.split_once(" -- ").map_or(line, |(key, _)| key)
+}
+
+/// Passes only if every oracle unit is in exactly one shard and no shard has anything else. A split target is
+/// covered when at least one of its part lines is present and no part line repeats; that the parts together
+/// match each test once is checked in `shard_parts.rs`.
 fn check_cover(shards: &[Vec<String>], oracle: &BTreeSet<String>) -> Result<(), String> {
     let mut count: BTreeMap<&str, usize> = BTreeMap::new();
     for unit in shards.iter().flatten() {
         *count.entry(unit.as_str()).or_default() += 1;
     }
     for (unit, times) in &count {
-        if !oracle.contains(*unit) {
+        if !oracle.contains(unit_key(unit)) {
             return Err(format!(
                 "{unit} is in a shard but is not a workspace test target"
             ));
@@ -278,8 +286,15 @@ fn check_cover(shards: &[Vec<String>], oracle: &BTreeSet<String>) -> Result<(), 
         }
     }
     for unit in oracle {
-        if !count.contains_key(unit.as_str()) {
+        if !count.keys().any(|line| unit_key(line) == unit) {
             return Err(format!("{unit} is in no shard"));
+        }
+    }
+    // A target is either whole or split, never both.
+    for line in count.keys().filter(|l| !l.contains(" -- ")) {
+        let parts = count.keys().filter(|l| unit_key(l) == *line).count();
+        if parts > 1 {
+            return Err(format!("{line} runs whole and as parts"));
         }
     }
     Ok(())
@@ -341,7 +356,8 @@ fn cover_accepts_the_real_shards() {
 #[test]
 fn cover_rejects_a_unit_in_no_shard() {
     let mut shards = real_shards();
-    let removed = shards[0].remove(0);
+    let at = shards[0].iter().position(|l| !l.contains(" -- ")).unwrap();
+    let removed = shards[0].remove(at);
     let err = check_cover(&shards, &oracle()).unwrap_err();
     assert!(err.contains(&removed) && err.contains("no shard"), "{err}");
 }
@@ -404,7 +420,27 @@ fn test_shard_6_is_disjoint_and_equals_the_workspace_target_set() {
             );
         }
     }
-    assert_eq!(union, oracle());
+    let keys: BTreeSet<String> = union.iter().map(|l| unit_key(l).to_string()).collect();
+    assert_eq!(keys, oracle());
+    // athena-core --lib is split, and its parts are spread over at least two shards.
+    let split: Vec<usize> = shards
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.iter().any(|l| l.starts_with("athena-core --lib -- ")))
+        .map(|(k, _)| k)
+        .collect();
+    assert!(
+        split.len() >= 2,
+        "athena-core --lib parts are on shards {split:?}"
+    );
+}
+
+#[test]
+fn cover_rejects_a_target_run_whole_and_as_parts() {
+    let mut shards = real_shards();
+    shards[0].push("athena-core --lib".to_string());
+    let err = check_cover(&shards, &oracle()).unwrap_err();
+    assert!(err.contains("whole and as parts"), "{err}");
 }
 
 #[test]
@@ -412,17 +448,32 @@ fn checked_in_timings_cover_every_workspace_test_unit() {
     // A unit missing from xtask/shard-timings.txt still runs, but falls back to the sorted-position split,
     // so the file must be refreshed (`cargo run -p xtask -- shard-timings`) when test targets change.
     let text = std::fs::read_to_string(root().join("xtask/shard-timings.txt")).unwrap();
-    let timed: BTreeSet<String> = text
+    let lines: Vec<String> = text
         .lines()
         .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
         .map(|l| l.rsplit_once(' ').expect("unit and seconds").0.to_string())
         .collect();
+    let timed: BTreeSet<String> = lines.iter().map(|l| unit_key(l).to_string()).collect();
     assert_eq!(timed, oracle());
+    // The timings key of every unit the splitter prints is in the file, so no part falls back.
+    let keys: BTreeSet<&String> = lines.iter().collect();
+    for unit in real_shards().iter().flatten() {
+        assert!(keys.contains(unit), "no timing for {unit}");
+    }
+    let parts = lines
+        .iter()
+        .filter(|l| l.starts_with("athena-core --lib -- "))
+        .count();
+    assert!(parts >= 2, "athena-core --lib has {parts} part line(s)");
 }
 
 #[test]
 fn test_shard_1_equals_the_workspace() {
-    let one: BTreeSet<String> = shard_units(0, 1).unwrap().into_iter().collect();
+    let one: BTreeSet<String> = shard_units(0, 1)
+        .unwrap()
+        .iter()
+        .map(|l| unit_key(l).to_string())
+        .collect();
     assert_eq!(one, oracle());
 }
 
