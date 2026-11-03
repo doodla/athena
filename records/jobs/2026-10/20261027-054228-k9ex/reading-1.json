@@ -1,0 +1,177 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261027-054228-k9ex",
+  "n": 1,
+  "at": "2026-11-02T22:34:58.689347095Z",
+  "invocation_seq": 1,
+  "base_commit": "a40c2fbf06819c3a9771f17fc416d856c1909c04",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Treat a verifier timeout as unjudged and retry once, not as a failure",
+  "summary": "Jobs 20261010-154005-jsdj, 20261018-120736-90w3 and 20261018-133651-1ncn were rejected because the verifier hit its wall-clock deadline. The cause is in run/verification.rs and verify.rs: a verifier that ran out of time is recorded as `verifier_failure`, which fails the verdict exactly like a judged failure, so the criteria are rejected without being judged. The fix makes a timeout a distinct unjudged outcome and reruns verification once, and a test covers the class.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "The fix goes where the timeout becomes a failed verdict, not at one job."
+    },
+    {
+      "id": "tested",
+      "how": "Tests plus fmt, clippy and cargo test pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the recorded verdict and reason for a timed-out verifier."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is that a timeout is never recorded as a rejection of the work."
+    },
+    {
+      "id": "rust",
+      "how": "All changes are in Rust."
+    },
+    {
+      "id": "small",
+      "how": "One focused change; incremental saving and deadline scaling are left out."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-core/src/run/verification.rs (the verifier loop runs after the checks, and every non-success outcome sets `verifier_failure`; the loop already reruns once when the snapshot changed), crates/athena-core/src/verify.rs (line 356 turns `verifier_failure` into the reason 'the verifier did not complete: ...', and lines 499 and 528 make the verdict fail unless it is None), and crates/athena-data/src/config.rs and athena.toml (`verifier_timeout_s`, currently 2400, a fixed value). Tests live in verify.rs, run/tests.rs and run_pin_tests.rs, where line 859 already checks the 'did not complete' reason. The change adds no record or data file under crates/, so check_record_file, AnyRecord and the round-trip test are not affected.",
+    "Goal and audience: the operator who sees repeated rejections. A job whose work is sound must not be rejected only because the verifier ran out of time.",
+    "Previous jobs: 20261010-154005-jsdj, 20261018-120736-90w3 and 20261018-133651-1ncn were rejected only on the timeout. Their candidate changes (run.rs trailer, docs/spec.toml and xtask/tests/spec.rs, and related docs) are not part of this job. They are dropped here and the user retries them separately. Their finding, the timeout, is addressed by the new outcome and the single retry.",
+    "Scope: on a timeout the verifier is rerun once with the check results already gathered, reused as the introspections propose. If the retry also times out, the reason is recorded as unjudged, not as a rejection of the work. A timeout never counts as a pass. Per-criterion incremental saving and a deadline that scales with the work are left out to keep the change small.",
+    "Governance: athena.toml is not changed. The deadline value stays at 2400s, and the fix is in how a timeout is handled.",
+    "Replay: this is not a new refusal rule. If it changes the verdict mapping, it can only turn rejections into unjudged results, so it refuses no more readings."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description names the root cause: a verifier timeout was recorded as `verifier_failure` in crates/athena-core/src/run/verification.rs and failed the verdict in crates/athena-core/src/verify.rs exactly like a judged failure, so the criteria were rejected unjudged.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-core/src/verify.rs and crates/athena-core/src/run/verification.rs distinguish a timeout from other verifier failures. A timeout yields an unjudged reason, separate from 'the verifier did not complete', and is never a pass. A Grep of the diff shows the new outcome.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-core verify` and `cargo test -p athena-core run`. A new test where the verifier times out on the first run and succeeds on the retry ends with the retry's verdict. A second test where it times out twice ends unjudged, not as a rejection of the work. Both tests fail on the base commit and pass on the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test shows that a non-timeout verifier failure, a failing check, or a judged fail verdict still fails the verdict. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test --locked`. All pass with no warnings.",
+      "kind": "behavior"
+    },
+    {
+      "text": "outcome-check: the tests assert the verdict and reason that verification records for a timed-out verifier, not only that types or wiring exist.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the new outcome. docs/records.md or docs/design/athena-v0.md is updated if it describes the verifier-failure reason.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Re-landing the candidate work of jobs 20261010-154005-jsdj, 20261018-120736-90w3 and 20261018-133651-1ncn (run.rs trailer, docs/spec.toml, xtask/tests/spec.rs, docs edits)",
+    "Changing athena.toml, defaults.toml or workflows, including the verifier_timeout_s value",
+    "Saving each criterion's verdict as it is reached",
+    "Making the deadline scale with the cargo work",
+    "Changing the gate's reading of records"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7201044386422977,
+      "p_verification_passes": 0.6758241758241759,
+      "p_user_intervenes": 0.09402985074626866,
+      "cost_usd": {
+        "p10": 0.5537699423918236,
+        "p50": 1.3031956585970657,
+        "p90": 3.606743534472445
+      },
+      "wall_time_s": {
+        "p10": 543.7645075859656,
+        "p50": 1888.177548489,
+        "p90": 4094.958250458458
+      }
+    }
+  },
+  "departures": "The verifier has timed out on this repository's full cargo checks three times, and this change touches the verification stage and may need a cold build, so cost, wall time and the pass probability are somewhat worse than the reference.",
+  "urgent_reason": "It cuts failed or rejected attempts: three jobs were rejected on a verifier timeout and had to be retried by hand.",
+  "hard_reason": "It changes how a verifier outcome is judged and recorded and adds a retry in the run pipeline's verification stage, so a mistake could wrongly pass or reject work.",
+  "producer_effort": "high"
+}

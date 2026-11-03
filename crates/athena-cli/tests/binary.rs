@@ -265,17 +265,16 @@ fn status_and_check_work_from_the_repository_alone() {
     );
 }
 
-/// Free space that drops once a job has a verifier snapshot: the checks have run, and the gate before the
-/// verifier finds 3 GB.
+/// Free space that drops once a job's checks have passed (its resume mark is at the verifier stage): the gate
+/// before the verifier finds 3 GB.
 fn low_once_verifying(state: &std::path::Path) -> std::io::Result<u64> {
-    let verifying = std::fs::read_dir(state.join("jobs"))
-        .map(|dirs| dirs.flatten().any(|e| e.path().join("verify").exists()))
-        .unwrap_or(false);
-    Ok(if verifying {
-        3_000_000_000
-    } else {
-        500_000_000_000
-    })
+    Ok(
+        if athena_core::test_support::verifier_stage_reached(state) {
+            3_000_000_000
+        } else {
+            500_000_000_000
+        },
+    )
 }
 
 #[test]

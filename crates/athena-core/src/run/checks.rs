@@ -4,6 +4,11 @@
 use super::*;
 
 /// Runs one routed check in the verifier's snapshot, then puts the snapshot back as it was prepared.
+///
+/// It is called only when a check really runs here, so it is also where the free-disk requirement of the
+/// checks is applied: once, just before the first check starts. A CI result that stands in for the checks, a
+/// resumed job and a skipped check never reach it. Low space comes back as a [`crate::disk::LowDisk`] error
+/// that `check_and_verify` turns into a hold.
 pub(super) struct SnapExec<'a> {
     pub(super) athena: &'a Athena,
     pub(super) snapshot: &'a Snapshot,
@@ -14,11 +19,22 @@ pub(super) struct SnapExec<'a> {
     pub(super) timeout: std::time::Duration,
     pub(super) redactor: &'a Redactor,
     pub(super) cleanup: std::cell::RefCell<Vec<String>>,
+    /// The job the checks belong to, for the disk gate.
+    pub(super) id: &'a JobId,
+    pub(super) ui: &'a dyn Ui,
+    pub(super) min_free_gb: u64,
+    /// Whether the disk gate has been applied yet.
+    pub(super) gated: std::cell::Cell<bool>,
 }
 
 impl crate::routing::Exec for SnapExec<'_> {
     fn exec(&self, spec: &crate::capability::CheckSpec) -> Result<CheckRun> {
         self.athena.refuse_if_stopped()?;
+        if !self.gated.replace(true)
+            && let Some(low) = self.athena.disk_gate(self.min_free_gb, self.id, self.ui)
+        {
+            return Err(low.into());
+        }
         #[cfg(test)]
         let seamed = check_seam::current().map(|fake| fake(spec));
         #[cfg(not(test))]
@@ -48,7 +64,8 @@ impl Athena {
     /// Removes the producer's build directory before the candidate's checks start. The checks build in their
     /// own directory, so this one is idle from here on, and it is the largest thing on the disk: left in place
     /// the job would hold two full builds while the checks compile and run. Only the build goes; the
-    /// candidate and its work tree stay. A failure to remove is a warning line only.
+    /// candidate and its work tree stay. A failure to remove is a warning line only. It runs before the
+    /// free-disk check of the checks ([`SnapExec`]), so the job's own build never holds that check.
     pub(super) fn free_producer_build(&self, ctx: &RunContext<'_>, id: &JobId) {
         match self.state.remove_produce(id) {
             Ok(0) => {}
