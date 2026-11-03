@@ -122,6 +122,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A landed job whose `athena.toml` change the running build cannot read now always ends the drain with the
+  reinstall note, whichever other worker stopped the run first, and is never recorded as failed. Root cause:
+  a landing never checked that the running build can read the config it lands (a job can add a field together
+  with the code that reads it, while the build that keeps running is the older one), and the earlier fix kept
+  that fact only as the stop reason, which keeps the first reason found. Under `[parallel]`, another worker's
+  stop (a repeated failure, a stop request, a rebuild) hid the reinstall note, and the page was rated against
+  the config the build cannot parse. The fact is now kept in the drain state where the landed head is read
+  (every `Steps::land` funnels through it): while it is set no rating is taken, and the report ends as
+  `reinstall needed` with the note (a failed rebuild keeps its own stop). A rebuild that runs after the
+  landing clears it and the pass restarts. `athena land` asks the same question of the merged commit through
+  `JobConfig::unreadable_at` and prints the same note to stderr; its exit code is unchanged. Tests cover every
+  landing path against every earlier stop and several kinds of unreadable config.
 - `athena drain` no longer ends with a false `repeated failure` when a landing adds a key or section to
   `athena.toml` that the running build does not know. The job is recorded as landed, as before. Straight after
   a landing the drain now reads `athena.toml` at the new head; if the running build cannot parse it, the run
