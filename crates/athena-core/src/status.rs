@@ -1084,6 +1084,9 @@ pub struct StatusView {
     pub driver: String,
     pub kill_switch_on: bool,
     pub nested: Option<String>,
+    /// The current focus (`athena focus`), in the words it was set in; absent until one is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus: Option<String>,
     pub bootstrap: Bootstrap,
     pub jobs_by_state: BTreeMap<String, usize>,
     pub recent: Vec<JobLine>,
@@ -1842,6 +1845,7 @@ impl Athena {
             driver: format!("{} {}", self.driver.info().name, self.driver.info().version),
             kill_switch_on,
             nested: self.nested.clone(),
+            focus: records.current_focus().map(|f| f.text.clone()),
             bootstrap,
             jobs_by_state,
             recent,

@@ -253,6 +253,8 @@ pub struct Records {
     pub throughput_reviews: Vec<athena_data::records::ThroughputReview>,
     /// Every build measurement (`crate::disk`), oldest first; the last is the latest.
     pub build_measurements: Vec<athena_data::records::BuildMeasurement>,
+    /// Every focus record (`athena focus`), by `n`; the last is the current focus.
+    pub focus: Vec<athena_data::records::FocusRecord>,
     /// Landing records (`landings/`, written after each merge), oldest first. Read from the tree itself and
     /// from the local records branch; one that cannot be read is left out, so a missing branch reads as none.
     pub landings: Vec<athena_data::history::Landing>,
@@ -349,6 +351,7 @@ impl Records {
                 AnyRecord::CodeHealthBaseline(b) => records.code_health_baselines.push(b),
                 AnyRecord::ThroughputReview(t) => records.throughput_reviews.push(*t),
                 AnyRecord::BuildMeasurement(m) => records.build_measurements.push(*m),
+                AnyRecord::Focus(f) => records.focus.push(f),
                 AnyRecord::Invocation(i) if i.role == Role::Auditor => {
                     records.auditor_runs.push(*i);
                 }
@@ -399,6 +402,7 @@ impl Records {
         records
             .build_measurements
             .sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
+        records.focus.sort_by_key(|f| f.n);
         records.interventions.sort_by_key(|i| i.at);
         records.restarts.sort_by_key(|r| r.at);
         records
@@ -494,6 +498,11 @@ impl Records {
     /// The current state of each decision, folded from its append-only state records.
     pub fn decision_state(&self) -> BTreeMap<String, DecisionStateKind> {
         fold_decision_states(&self.decision_states)
+    }
+
+    /// The current focus: the focus record with the highest `n`, if any was set.
+    pub fn current_focus(&self) -> Option<&athena_data::records::FocusRecord> {
+        self.focus.iter().max_by_key(|f| f.n)
     }
 
     /// The newest `athena.default-expectations/1` record for a default, if any.

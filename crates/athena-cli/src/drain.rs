@@ -544,6 +544,16 @@ pub trait Steps {
     fn job_history(&self) -> Vec<JobEnd> {
         Vec::new()
     }
+    /// How many items the plan keeps at urgent and at high (`[priority_caps]`); items over a cap are demoted one
+    /// tier in memory when the plan is built. The default is no cap, so the plan follows the items' own tiers.
+    fn priority_caps(&self) -> athena_core::plan::TierCaps {
+        athena_core::plan::TierCaps::UNLIMITED
+    }
+    /// The queued jobs whose priority a person set with a priority record. A plan never demotes them. The
+    /// default is none.
+    fn person_set(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// Whether the user asked the loop to stop. It is asked only between jobs, never during one, so a job
     /// that has started is finished (and landed and rated) first. Not asking to stop is the default.
     fn stop_requested(&self) -> bool {
@@ -2005,9 +2015,30 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             .filter(|e| !forced.iter().any(|f| f.id == e.id) && !held.contains_key(&e.id))
             .cloned()
             .collect();
-        let mut plan = Plan::build_with(&entries, &self.steps.job_history());
+        // Items over a priority cap are demoted one tier in memory; the order is judged against the tiers it
+        // was built from, so a demotion is not reported as a contradiction.
+        let (mut plan, entries) = Plan::build_capped(
+            &entries,
+            &self.steps.job_history(),
+            self.steps.priority_caps(),
+            &self.steps.person_set(),
+        );
         for contradiction in plan.priority_violations(&entries) {
             self.note_once(format!("plan order contradicts priority: {contradiction}"));
+        }
+        for d in &plan.demoted {
+            let title = entries
+                .iter()
+                .find(|e| e.id == d.id)
+                .map_or("", |e| e.title.as_str());
+            self.note_once(format!(
+                "demoted {} · {title} from {} to {}: over the {} cap of {}",
+                d.id,
+                d.from.as_str(),
+                d.to.as_str(),
+                d.from.as_str(),
+                d.cap
+            ));
         }
         plan.refused.extend(forced);
         // In queue order, so the list does not depend on the map.
@@ -3294,6 +3325,32 @@ impl Steps for RealSteps<'_> {
             .unwrap_or_default()
     }
 
+    fn priority_caps(&self) -> athena_core::plan::TierCaps {
+        let caps = self
+            .athena
+            .head()
+            .and_then(|head| athena_core::capability::JobConfig::at(&self.athena.git, &head))
+            .map(|jc| jc.config.priority_caps())
+            .unwrap_or_default();
+        athena_core::plan::TierCaps {
+            urgent: caps.urgent as usize,
+            high: caps.high as usize,
+        }
+    }
+
+    fn person_set(&self) -> Vec<String> {
+        self.records()
+            .map(|records| {
+                records
+                    .jobs
+                    .iter()
+                    .filter(|(_, job)| !job.priorities.is_empty())
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn approve(&self, proposal: &str) -> Approval {
         match self.athena.approve_in_limit(proposal, self.ui) {
             Ok(p) => Approval {
@@ -3711,6 +3768,111 @@ mod tests {
                 error: None,
             }
         }
+    }
+
+    /// Steps that only list a queue of `(id, priority)` entries, oldest first, with urgent capped at 3.
+    struct Capped {
+        queue: Vec<(&'static str, athena_core::plan::Priority)>,
+        person_set: Vec<String>,
+    }
+
+    impl Steps for Capped {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Ok(Caps {
+                read: 0.5,
+                run: 1.0,
+                rate: 0.5,
+            })
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            Ok(QueueView {
+                items: self
+                    .queue
+                    .iter()
+                    .map(|(id, _)| Item::queued(id, id))
+                    .collect(),
+                plan: self
+                    .queue
+                    .iter()
+                    .map(|(id, priority)| PlanEntry {
+                        goal: format!("goal of {id}"),
+                        rung: Some(athena_data::roles::Ladder::Implementation),
+                        acceptance: vec![format!("{id} works")],
+                        touches: vec![format!("src/{id}.rs")],
+                        priority: *priority,
+                        ..PlanEntry::bare(id, id)
+                    })
+                    .collect(),
+                ..QueueView::default()
+            })
+        }
+        fn priority_caps(&self) -> athena_core::plan::TierCaps {
+            athena_core::plan::TierCaps {
+                urgent: 3,
+                high: 10,
+            }
+        }
+        fn person_set(&self) -> Vec<String> {
+            self.person_set.clone()
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn read(&self, _: ReadOf<'_>) -> Read {
+            panic!("every entry is complete, so nothing is read");
+        }
+        fn run(&self, _: &str) -> Run {
+            panic!("planning runs nothing");
+        }
+        fn land(&self, _: &str) -> Landing {
+            panic!("planning lands nothing");
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("stub")
+        }
+        fn check_cap(&self) -> f64 {
+            0.5
+        }
+        fn rate(&self) -> Rate {
+            panic!("planning rates nothing");
+        }
+    }
+
+    #[test]
+    fn a_plan_demotes_over_the_cap_with_one_note_each_and_no_false_contradiction() {
+        use athena_core::plan::Priority::{High, Urgent};
+        let steps = Capped {
+            queue: vec![
+                ("h0", High),
+                ("u1", Urgent),
+                ("u2", Urgent),
+                ("u3", Urgent),
+                ("u4", Urgent),
+                ("u5", Urgent),
+            ],
+            person_set: vec!["u5".into()],
+        };
+        let report = plan(&steps, 1.0, &Quiet).unwrap();
+        // The person-set item keeps its tier; the two newest others drop. They are planned after the older
+        // high item, which would read as a contradiction if the order were judged by their original tier.
+        assert_eq!(report.plan.order[..3], ["u1", "u2", "u5"]);
+        let demoted: Vec<&str> = report.plan.demoted.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(demoted, ["u3", "u4"]);
+        let lines: Vec<&String> = report
+            .notes
+            .iter()
+            .filter(|n| n.starts_with("demoted "))
+            .collect();
+        assert_eq!(lines.len(), 2, "{:?}", report.notes);
+        assert!(lines[0].starts_with("demoted u3 · u3 from urgent to high"));
+        assert!(
+            !report.notes.iter().any(|n| n.contains("contradicts")),
+            "{:?}",
+            report.notes
+        );
     }
 
     fn limits(budget: f64) -> Limits {
