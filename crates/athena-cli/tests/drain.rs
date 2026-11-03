@@ -1441,6 +1441,38 @@ fn the_job_limit_stops_the_loop() {
 }
 
 #[test]
+fn a_needs_accepting_reread_does_not_use_a_job_slot() {
+    let stub = Stub {
+        items: vec!["a", "b"],
+        needs_accepting: vec!["a"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![3]),
+        ..Stub::default()
+    };
+    let report = drain::drain(
+        &stub,
+        Limits {
+            max_jobs: 1,
+            ..limits(9.0)
+        },
+        &Quiet,
+    )
+    .unwrap();
+    // `a` ends as needs accepting and is not retried; its slot is given back, so `b` still runs and lands.
+    let runs: Vec<String> = stub
+        .log()
+        .into_iter()
+        .filter(|l| l.starts_with("run ") || l.starts_with("land "))
+        .collect();
+    assert_eq!(runs, ["run a", "run b", "land b"]);
+    assert_eq!(report.jobs[0].outcome, "needs accepting");
+    assert_eq!(report.landed, 1);
+    assert_ne!(report.stop, Stop::JobLimit);
+    assert_eq!(report.queued.len(), 1);
+    assert_eq!(report.queued[0].job, "a");
+}
+
+#[test]
 fn the_json_report_names_the_stop_the_money_the_rating_and_what_is_left() {
     let stub = Stub {
         items: vec!["a", "b"],
