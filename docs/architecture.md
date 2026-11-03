@@ -37,8 +37,9 @@ athena go  ──▶ job record + producer brief, committed (prediction commit)
                fail: closing commit with the findings
 ```
 
-The core enforces `[disk] min_free_gb` at three points: at dispatch, before the checks, and immediately before
-the verifier runs (D142), where it also writes and removes a small file in the verifier's snapshot. A failure at
+The core enforces `[disk] min_free_gb` at three points: at dispatch, before the checks (after the producer's
+build directory is removed, and only just before a check runs here, so a CI result that stands in for the checks
+is never held for it), and immediately before the verifier runs (D142), where it also writes and removes a small file in the verifier's snapshot. A failure at
 the last two closes the job as failed with the `environment: low disk` reason and the `athena retry` hint, and
 the verifier gives no verdict, so a full disk is never taken for a fault in the work (`athena_core::disk`).
 

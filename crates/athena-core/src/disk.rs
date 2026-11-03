@@ -12,7 +12,9 @@
 //! - At dispatch, before anything is committed. If space is low, the build directories (`target/`) of idle jobs
 //!   are removed; if it is still low, the job is held: it stays queued, a local marker records the amounts,
 //!   and `go` returns [`LowDisk`]. A later drain picks up the same job.
-//! - Before the checks, once the candidate is built. If space is still low after the same cleanup, the job is
+//! - Before the checks, once the candidate is built: the job's own producer build is removed first, then the
+//!   gate runs just before the first check that runs here. A CI result that stands in for the checks, a
+//!   resumed job and a skipped check never reach it. If space is still low after the same cleanup, the job is
 //!   held, not failed: its records (candidate, invocations, plans) are committed with no outcome and no
 //!   score, a marker records the amounts, and `go` returns [`LowDisk`]. The job stays dispatched with no
 //!   process, which reads as interrupted, so it is no work failure for introspection, failure classes or the
@@ -56,9 +58,9 @@
 //! retry resumes as before. A job with a registry entry or a held lock is running and is not touched.
 //!
 //! Freeing and resuming. The producer's build directory (`target/produce`) is idle once the producer has
-//! finished, since Athena's checks build in their own directory; it is removed before the first check starts,
-//! after the gate that runs before the checks, whether the checks then pass or fail. The job so never holds
-//! two full builds while the checks run. A failed check keeps the last 200 lines of its output in the
+//! finished, since Athena's checks build in their own directory; it is removed when the checks stage starts,
+//! before the gate that runs before the first local check, whether the checks then pass or fail. The job so
+//! never holds two full builds while the checks run, and its own build never holds that gate. A failed check keeps the last 200 lines of its output in the
 //! job's verification record, and the `checks` log line names its failing tests. A job that stops for an
 //! environment cause after its candidate is built, or that is interrupted, leaves a resume mark
 //! ([`crate::state::ResumeMark`]) outside its job directory; [`resumable_stop`] says which stopped jobs

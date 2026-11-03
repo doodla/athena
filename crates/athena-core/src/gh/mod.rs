@@ -74,7 +74,7 @@ pub fn get_args(path: &str) -> Vec<String> {
 }
 
 /// The seam tests use to give `Athena::go` a fake remote and host in place of `gh` and git.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod early_seam {
     use super::{PrHost, Remote};
     use std::cell::RefCell;
