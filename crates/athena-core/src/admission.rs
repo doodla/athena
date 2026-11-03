@@ -165,6 +165,8 @@ fn athena_finding(
 ///
 /// - every planned path is a plain relative file path: not empty, not absolute, no `..`, no trailing `/`, and
 ///   not a directory in the base (`is_directory` says whether a path is one); a major finding otherwise.
+/// - every open question begins `User:` or `Host:` (only a user decision or a host fact stays open) and does
+///   not say the code answers it; a major finding otherwise (see `open_questions_findings`).
 ///
 /// A major finding sends the plan back to the planner without a critic call.
 pub fn plan_findings(
@@ -306,7 +308,74 @@ pub fn plan_findings(
         }
     }
     findings.extend(dependents_findings(&plan.dependents));
+    findings.extend(open_questions_findings(&plan.open_questions));
     findings
+}
+
+/// The open-questions rule. Root cause it addresses: `plan_findings` let code-answerable open questions
+/// through to the critic (for example whether the `[parallel] max_concurrency` path reaches landing, or what
+/// old job records look like on the landing branch), so critic rounds went to questions that reading the code
+/// settles, and the planner brief did not require the planner to settle them by reading code.
+///
+/// Only a question the code cannot show may stay open: a decision for the user or a fact about the host. The
+/// planner declares which with a prefix, `User:` or `Host:` (leading whitespace, `*`, `_` and backticks and
+/// letter case are ignored). A question without the prefix is a major finding, and so is a prefixed question
+/// that itself says the code answers it. A prefixed question may cite a path: a scope question about a file
+/// is legitimate. The prefix is a declaration, not proof; the critic still reviews what passes. Whether a
+/// planner listed every caller and mode that reaches a changed function cannot be checked without the
+/// repository, so that half stays prose in the planner brief, backed by the dependents shape check.
+///
+/// The rule refuses more plans: expected 5% of newly refused plans (the reading's estimate, not a
+/// measurement). The higher refusal rate is intended, because those plans spent critic rounds on questions
+/// code could answer.
+fn open_questions_findings(questions: &[String]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (i, question) in questions.iter().enumerate() {
+        let number = i + 1;
+        if !has_addressee(question) {
+            findings.push(athena_finding(
+                Severity::Major,
+                "open questions".into(),
+                format!("Open question {number} has no addressee: {question}"),
+                "Settle the question by reading the code, and put the answer in the plan with file and line. Only a question the code cannot show stays open: a decision for the user or a fact about the host. Begin such a question with `User:` or `Host:`.".into(),
+            ));
+        } else if says_code_answers(question) {
+            findings.push(athena_finding(
+                Severity::Major,
+                "open questions".into(),
+                format!(
+                    "Open question {number} is addressed to the user or host but says the code answers it: {question}"
+                ),
+                "Read the code, settle the question and put the answer in the plan with file and line; keep it open only if the code cannot show the answer.".into(),
+            ));
+        }
+    }
+    findings
+}
+
+/// True when the question begins with `User:` or `Host:`, ignoring leading whitespace, `*`, `_` and
+/// backticks, and letter case. `Username:` and `Users:` do not match.
+fn has_addressee(question: &str) -> bool {
+    let lowered = question
+        .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | '`'))
+        .to_lowercase();
+    lowered.starts_with("user:") || lowered.starts_with("host:")
+}
+
+/// True when the question's own text says that reading the code answers it.
+fn says_code_answers(question: &str) -> bool {
+    const PHRASES: [&str; 8] = [
+        "by reading",
+        "reading the code",
+        "reading code",
+        "read the code",
+        "check the code",
+        "checking the code",
+        "in the code",
+        "does the code",
+    ];
+    let lowered = question.to_lowercase();
+    PHRASES.iter().any(|p| lowered.contains(p))
 }
 
 /// The dependents rule: a plan lists who relies on what it changes, and every entry names what changes, names
@@ -781,6 +850,25 @@ mod tests {
     /// Athena's findings on a plan whose only variable part is `dependents`. Its reading has one content
     /// criterion and its demonstration needs no seam, so only the dependents rule can fire.
     fn dependents_findings_for(dependents: Vec<PlanDependent>) -> Vec<Finding> {
+        plan_findings_for(dependents, vec![])
+    }
+
+    /// Athena's findings at 'open questions' on a plan whose dependents are complete and whose only variable
+    /// part is `open_questions`.
+    fn open_question_findings_for(questions: Vec<&str>) -> Vec<Finding> {
+        plan_findings_for(
+            vec![complete_dependent()],
+            questions.into_iter().map(str::to_string).collect(),
+        )
+        .into_iter()
+        .filter(|f| f.location.as_deref() == Some("open questions"))
+        .collect()
+    }
+
+    fn plan_findings_for(
+        dependents: Vec<PlanDependent>,
+        open_questions: Vec<String>,
+    ) -> Vec<Finding> {
         use athena_data::records::Role;
         let mut r = reading();
         r.acceptance_criteria = vec![Criterion {
@@ -806,7 +894,7 @@ mod tests {
                 fails_without: None,
                 seam: None,
             }],
-            open_questions: vec![],
+            open_questions,
             producer_section_sha256: "0".repeat(64),
             resumed_from: None,
         };
@@ -817,6 +905,71 @@ mod tests {
             writes: false,
         };
         plan_findings(&plan, &r, &verifier, &|_| false)
+    }
+
+    #[test]
+    fn an_unaddressed_open_question_is_a_major_finding_naming_it() {
+        // The first two are the failure class's own wording: no path and no code-reading phrase.
+        for question in [
+            "Does the [parallel] max_concurrency path reach landing?",
+            "What do old job records look like on the landing branch?",
+            "Is the answer found by reading code?",
+            "Does `crates/athena-cli/src/main.rs` pass max_concurrency into landing?",
+            "landing.rs:120 handles a conflict how?",
+            "Username: should this be refused?",
+            "Users: which of them?",
+        ] {
+            let found = open_question_findings_for(vec![question]);
+            assert_eq!(found.len(), 1, "{question}: {found:?}");
+            assert_eq!(found[0].severity, Severity::Major);
+            assert_eq!(found[0].source, FindingSource::Athena);
+            assert_eq!(found[0].location.as_deref(), Some("open questions"));
+            assert!(found[0].summary.contains(question), "{found:?}");
+            assert!(found[0].summary.contains("no addressee"), "{found:?}");
+        }
+        // Each bad question gets its own finding, numbered from 1.
+        let two = open_question_findings_for(vec!["User: fine?", "bad?", "also bad?"]);
+        assert_eq!(two.len(), 2, "{two:?}");
+        assert!(two[0].summary.contains("Open question 2"), "{two:?}");
+        assert!(two[1].summary.contains("Open question 3"), "{two:?}");
+    }
+
+    #[test]
+    fn a_user_or_host_question_with_a_code_reading_phrase_is_refused() {
+        for question in [
+            "User: is this found by reading the code?",
+            "Host: can we check the code for the answer?",
+            "user: is it set in the code?",
+            "User: does the code pass max_concurrency to landing?",
+        ] {
+            let found = open_question_findings_for(vec![question]);
+            assert_eq!(found.len(), 1, "{question}: {found:?}");
+            assert_eq!(found[0].severity, Severity::Major);
+            assert_eq!(found[0].location.as_deref(), Some("open questions"));
+            assert!(found[0].summary.contains(question), "{found:?}");
+            assert!(found[0].summary.contains("says the code answers it"));
+        }
+    }
+
+    #[test]
+    fn a_user_or_host_question_and_an_empty_list_are_not_refused() {
+        for question in [
+            "User: Should the CHANGELOG entry go under Added or Changed?",
+            "  user: does the user want edits to `crates/athena-core/tests/refusal_corpus.rs`, outside the deliverables?",
+            "Host: Is the production host disk large enough?",
+            "**User:** Should we publish on docs.rs?",
+            "`Host:` is the toolchain pinned?",
+        ] {
+            let found = open_question_findings_for(vec![question]);
+            assert!(found.is_empty(), "{question}: {found:?}");
+        }
+        assert!(open_question_findings_for(vec![]).is_empty());
+        // A plan with no open questions gets the same findings as before the rule.
+        assert_eq!(
+            plan_findings_for(vec![complete_dependent()], vec![]).len(),
+            dependents_findings_for(vec![complete_dependent()]).len()
+        );
+        assert!(dependents_findings_for(vec![complete_dependent()]).is_empty());
     }
 
     #[test]

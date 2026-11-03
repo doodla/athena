@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- An open-questions rule in Athena's own plan checks. Root cause: `plan_findings` let open questions that
+  reading the code settles through to the critic (for example whether the `[parallel] max_concurrency` path
+  reaches landing, or what old job records look like on the landing branch), and the planner brief did not
+  require the planner to settle them by reading code, so critic rounds went to them and jobs
+  20261030-013555-f5qm and 20261031-030119-tw3v stopped at the round cap. Now only a question the code cannot
+  show may stay open, and it must begin `User:` or `Host:`; any other question, and a prefixed question that
+  says the code answers it, is a major finding at `open questions`, so the plan goes back to the planner with
+  no critic call and no round used. The planner brief says so, and asks the planner to list every existing
+  caller and mode that reaches a changed function (prose only; completeness of a search is not checkable
+  without the repository). This refuses more plans: expected 5% of newly refused plans (the reading's
+  estimate, not a measurement), and the higher refusal rate is intended, because those plans spent critic
+  rounds on questions code could answer.
 - A required `dependents` section in every job plan (`PlanOutput`, the stored `JobPlan` record, the planner
   prompt and brief). For each behavior, record, config key, check name or host setting the plan changes, the
   planner lists the code, rules and host settings that read or rely on it, each with a test or a reason it is

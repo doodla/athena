@@ -1,0 +1,33 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261103-135735-32k5",
+  "at": "2026-11-03T13:57:35.985112425Z",
+  "trigger": "failure",
+  "job": "20261103-135304-bwqp",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "failed",
+  "what_happened": "Job 20261103-135304-bwqp (\"Don't count drain environment stops toward repeated failure\", class of work: code) failed in planning, before any code was written. In round 1 of 3 the critic said the plan needed revising. The event text says the job \"failed\" and that the critic judged the reading misread the request, but the critic's own findings say the reading still matches the request. The actual problem is a false assumption in the reading, carried into the plan, that an environment-stopped item \"stays queued\" and a later run tries it again. In the code the drain's work list (approved_work, queued_work, interrupted_work at drain.rs 3370-3391 and steward.rs 353-378) takes only Queued/Proposed or dispatched jobs. A job closed as failed is on none of those lists, so after the change the item would leave the drain for good. The planned assertion that report.queued holds the item passes only because the test double's queue never changes. Minor findings: expired logins and usage limits affect every item, so \"go on to the next item\" would fail through the whole queue. The criterion 3 second-drain check asserts nothing the criterion asks for. Two nits: a plan step number is wrong, and the wording of criterion 4 is off. No acceptance criteria were reported unmet and no checks failed. Nothing was delivered.",
+  "failure_class": "20261031-030110-hnnx",
+  "new_class": false,
+  "earlier_cases": [
+    "20261103-092900-v31e"
+  ],
+  "decisions_matched": [],
+  "cause": "Neither the reading nor the plan was checked against how the drain really builds its list of work. A premise about queue state (\"stays queued\", \"a later run tries again\") was taken as fact, though reading the code would have settled it. Planning checks that the seams a plan names exist. It does not make the plan or reading trace a state claim through the code that consumes that state, here the work-list builders that skip failed jobs. A test double with a fixed queue hid the gap, so the plan's own demonstration could not expose it. Planning keeps no partial plan and has no repair step for a gap the code could answer. A critic finding that comes late costs all the planning spend, and this was found in round 1, so the cost is the failed job, not a lost late round. The change also touches a core flow, the drain, where several states and modes interact.",
+  "prevention_kind": "code-check",
+  "prevention": "Add a planning step that checks the reading's state claims before the plan is built. Every claim about what a job's state does next (stays queued, is retried, is picked up) must name the function that consumes that state, and the plan must show the item's state is in that function's accepted set. Demonstrations for such claims must use real records, not a test double with a fixed queue. A failing check would send the plan back for a repair round that resolves code-answerable questions, rather than letting them reach the critic. For this job, the end state is that an environment-stopped item keeps a status the drain's work-list builders accept, and a test on real records proves it.",
+  "proposed_request": "Make the drain stop counting environment stops toward repeated failure. An item whose run ended for an environment reason must not count as a failed attempt, and must still be picked up by a later drain run.\n\nAcceptance:\n- When a job's run ends for a reason that athena_core::disk::is_environment_reason accepts (low disk, expired login, usage limit), the drain ends that item the way it ends Held, Waiting and Paused items. The failed-attempt count does not rise, and the drain does not retry it in the same run. Reuse is_environment_reason; add no second list of reasons.\n- The item stays in the drain's work list. The work-list builders (queued_work and interrupted_work in steward.rs, and the drain.rs code that calls them, around lines 3370-3391) must include an environment-stopped job. The job must not be closed as rejected or failed. A test on real records (not a test double with a fixed queue) shows the next drain run lists the item and tries it again.\n- When the environment reason is global (expired login, usage limit), the drain stops after the first such item and reports why. It does not go through every queued item, spending a read on each.\n- A test shows that an ordinary failure still counts toward repeated failure as before, and that an environment stop does not.\n- Deliverables: the drain.rs change, the steward.rs work-list change, tests, and a CHANGELOG entry. No new list of environment reasons.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.10813,
+    "input_tokens": 2,
+    "output_tokens": 1577
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "planning_stopped": true,
+  "from_jev": false
+}

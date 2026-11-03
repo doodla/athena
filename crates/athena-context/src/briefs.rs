@@ -1405,6 +1405,16 @@ Second, read `crates/athena-core/tests/refusal_corpus.rs` and map each input for
 Third, make `cargo test -p athena-core --test refusal_corpus` a demonstration that the producer and the verifier run. \
 You cannot run it: cite only the case ids you read, never a result you did not see.";
 
+/// What the planner brief says about open questions and about callers. Root cause: `plan_findings` let
+/// open questions that reading the code settles through to the critic, and the brief did not require the
+/// planner to settle them (jobs 20261030-013555-f5qm and 20261031-030119-tw3v stopped at the round cap).
+/// Athena refuses an open question without a `User:` or `Host:` prefix before the critic sees the plan
+/// (`open_questions_findings` in `crates/athena-core/src/admission.rs`). The caller listing is prose only:
+/// completeness of a search cannot be checked without the repository.
+const OPEN_QUESTION_RULE: &str = "Settle every question the code can answer by reading it, and cite file and line in the plan. \
+Put in open_questions only what the code cannot show, each beginning `User:` (a decision for the user) or `Host:` (a fact about the host); Athena refuses any other question before the critic sees the plan. \
+For a change to a function or core flow, list every existing caller and mode that reaches it (for example the `[parallel] max_concurrency` path into landing) and each state it reads, including records and job state, each with a test or reason in dependents.";
+
 /// The planner's brief: the request, the reading with each criterion numbered by kind, the checks, the
 /// verifier's commands and the state of the deliverables; a revision also quotes the previous plan and every
 /// finding on it.
@@ -1471,7 +1481,7 @@ pub fn planner_brief(inputs: &PlannerInputs) -> String {
     }
     let _ = writeln!(
         out,
-        "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above. Each names the production entry point it calls, its guards and preconditions, the seam, fake or fixture and how it is injected, and whether that seam exists today (checked by reading the code) or which plan step adds it. Never put the logic under test inside the test double.\n\n{REFUSAL_CORPUS_RULE}"
+        "\n## Report\n\nEnd with the plan as your structured output: one demonstration per acceptance criterion, numbered as above. Each names the production entry point it calls, its guards and preconditions, the seam, fake or fixture and how it is injected, and whether that seam exists today (checked by reading the code) or which plan step adds it. Never put the logic under test inside the test double.\n\n{REFUSAL_CORPUS_RULE}\n\n{OPEN_QUESTION_RULE}"
     );
     out
 }
@@ -2242,6 +2252,23 @@ mod tests {
             assert!(report.contains(needle), "missing wording: {needle}");
         }
         assert!(crate::PLANNER_FRAME.text.contains("refusal_corpus"));
+    }
+
+    #[test]
+    fn planner_brief_tells_the_planner_to_settle_code_questions_by_reading() {
+        let brief = planner_brief(&planner_inputs(None));
+        let report = brief.split("## Report").nth(1).expect("report section");
+        for needle in [
+            "Settle every question the code can answer by reading it",
+            "cite file and line",
+            "open_questions only what the code cannot show",
+            "`User:`",
+            "`Host:`",
+            "list every existing caller and mode that reaches it",
+            "`[parallel] max_concurrency` path into landing",
+        ] {
+            assert!(report.contains(needle), "missing wording: {needle}");
+        }
     }
 
     #[test]

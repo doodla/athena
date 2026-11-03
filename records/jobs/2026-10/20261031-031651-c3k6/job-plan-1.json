@@ -1,0 +1,287 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261031-031651-c3k6",
+  "round": 1,
+  "at": "2026-11-03T14:02:43.542451295Z",
+  "invocation_seq": 2,
+  "approach": "Root cause: plan_findings (crates/athena-core/src/admission.rs), the Athena check that runs before every critic call, let open questions through that reading the code would settle. The planner brief also never told the planner to settle them by reading and to list every caller and mode that reaches a changed function. So critic rounds went to questions like \"does the [parallel] max_concurrency path reach landing?\" or \"what do old job records look like?\", and jobs 20261030-013555-f5qm and 20261031-030119-tw3v stopped at the round cap. Fix at that gate. Add a private `open_questions_findings(&[String])` beside `dependents_findings`, called from `plan_findings`. It yields one Major Athena finding at location \"open questions\" for each question that cites a code path (a token containing `crates/`, ending in `.rs` other than docs.rs, or `name.rs:<digits>`) or says reading or checking the code answers it. The finding names the question and tells the planner to settle it by reading and cite file and line. Only user decisions or host facts stay open, written without a code path. The existing mechanical loop in `planning_round` (up to MAX_MECHANICAL_PASSES, no critic call, no round used) already carries a Major finding back to the planner, so planning.rs needs no logic change. Add one constant `OPEN_QUESTION_RULE` to the Report section of `planner_brief` in briefs.rs. The brief sits outside the token-budget sets, so planner.md and docs/system-facts.md stay unchanged. The \"list every existing caller and mode\" instruction (check b) is prose only; the plan says so in the docs. Tests: admission unit tests, one run-level planning test with the scripted planner and critic, a brief wording test, and plan-side refusal-corpus cases. Docs and CHANGELOG record the root cause and the intended higher refusal rate.",
+  "decisions": [
+    {
+      "choice": "Put the rule in plan_findings as a deterministic Major finding, in a new open_questions_findings helper beside dependents_findings.",
+      "reason": "plan_findings is the one gate every plan passes before each critic call (planning.rs line 214), so the fix lands where the rounds were wasted and covers every job, not one. A Major finding already means 'back to the planner, no critic call, no round used', so no new control flow is needed.",
+      "rejected": [
+        {
+          "option": "Tell the critic in its prompt to raise a finding for such questions",
+          "why": "It spends a critic round, which is the cost to remove; the request also excludes changing the critic prompt."
+        },
+        {
+          "option": "Add a record field such as `answerable_by_code` to JobPlan or PlanOutput",
+          "why": "Needs a schema change in athena-data and outputs.rs (out of scope), and relies on the planner marking its own questions, which is the failure."
+        },
+        {
+          "option": "Refuse any plan with a non-empty open_questions",
+          "why": "A blanket refusal also blocks genuine user decisions and host facts the code cannot show; acceptance criterion 3 requires those to stay allowed."
+        }
+      ]
+    },
+    {
+      "choice": "Detect a code-answerable question by tokens: contains `crates/`; ends in `.rs` (not `docs.rs`); or has the form `name.rs:<digits>`. Also by a short phrase list: 'reading the code', 'read the code', 'check the code', 'checking the code'. Strip surrounding punctuation and backticks first.",
+      "reason": "It is mechanical, cheap and matches the reading's stated heuristic. It catches the two failed jobs' questions, whose wording cites a path. A question for the user that names no code path stays allowed.",
+      "rejected": [
+        {
+          "option": "Match function or identifier names such as plan_findings",
+          "why": "Cannot be told apart from ordinary words without reading the repository; it would produce false refusals."
+        },
+        {
+          "option": "Match any `/` or any file extension",
+          "why": "Would refuse questions about docs or about a user's choice of a doc path; the rule targets code."
+        }
+      ]
+    },
+    {
+      "choice": "Put the new planner instruction in a `OPEN_QUESTION_RULE` constant appended to the Report section of planner_brief (briefs.rs), next to REFUSAL_CORPUS_RULE. Leave prompts/planner.md and docs/system-facts.md alone.",
+      "reason": "The brief sits outside the always-loaded token-budget sets, so no budget line in docs/system-facts.md changes, and `system_facts_budgets_match_computed` stays green. It matches the brief's deliverable list (briefs.rs, not planner.md).",
+      "rejected": [
+        {
+          "option": "Edit crates/athena-context/prompts/planner.md",
+          "why": "It is in the planner budget set (966 of 1300); the edit would force a docs/system-facts.md line update, and neither file is a listed deliverable."
+        }
+      ]
+    },
+    {
+      "choice": "Leave planning.rs logic untouched; only refresh the doc comment of `plan_round` to name the new rule among Athena's own checks.",
+      "reason": "planning_round already sends a Major Athena finding back with no critic call (lines 225-240). Test 4 proves this path is taken for the new finding.",
+      "rejected": [
+        {
+          "option": "A separate pre-critic stage for open questions",
+          "why": "Duplicates the mechanical-pass loop and its cap logic."
+        }
+      ]
+    },
+    {
+      "choice": "Check (b), 'list every existing caller and mode that reaches a changed function', stays a prompt rule plus the existing dependents check. It is marked prose only in the docs.",
+      "reason": "Whether a plan has found every caller cannot be known without the repository search; the existing dependents section already makes the planner name dependents, and the reading says no new schema field is added.",
+      "rejected": [
+        {
+          "option": "A new mechanical 'callers' field or check",
+          "why": "Needs a record schema change (out of scope) and could only check the field's shape, not completeness."
+        }
+      ]
+    },
+    {
+      "choice": "Add plan-side refusal-corpus cases for open questions in crates/athena-core/tests/refusal_corpus.rs as a separate small table inside `mod plan_side`, driven through plan_findings.",
+      "reason": "The brief requires every input form of a matching rule to map to a corpus case. The PlanCase struct only carries `dependents`, so a separate table avoids editing the existing literals.",
+      "rejected": [
+        {
+          "option": "Add an `open_questions` field to PlanCase",
+          "why": "Forces edits to every existing PlanCase literal for no gain."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Add `open_questions_findings` plus a token helper `cites_code_path`, call it from `plan_findings`, add the doc comment naming the root cause, the 'expected 5% of newly refused plans' note, and the unit tests with a new `open_question_findings_for` test helper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add the `OPEN_QUESTION_RULE` constant to the Report section of `planner_brief`, and a wording test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Doc comment of `plan_round` only: name the open-question rule among Athena's own checks. No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the open-question plan variant and the test that the plan is revised with no critic call and the critic sees round 1.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add plan-side open-question corpus cases driven through plan_findings (not a listed deliverable, a minor finding; needed to map the rule's input forms to cases).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "purpose": "Describe the rule in the 'Athena's own checks' paragraph, note that the planner must settle code-answerable questions and list every caller and mode (check b is prose only), and the intended higher refusal rate.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased Added entry: root cause, the rule, the brief sentence, 'expected 5% of newly refused plans'.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/src/admission.rs around `plan_findings` (line 170) and `dependents_findings` (line 314), and the tests module helpers (`reading`, `complete_dependent`, `dependents_findings_for`).",
+    "In admission.rs add `fn cites_code_path(token: &str) -> bool`: trim surrounding punctuation and backticks; drop a `:digits` suffix; true when the token contains `crates/`, or ends in `.rs` with a non-empty stem other than `docs`. Add `fn open_questions_findings(questions: &[String]) -> Vec<Finding>`: for each question (numbered from 1), if any whitespace token cites a code path or the lower-cased text contains 'reading the code', 'read the code', 'check the code' or 'checking the code', push `athena_finding(Severity::Major, \"open questions\", format!(\"Open question {n} can be settled by reading the code: {q}\"), evidence)`. The evidence tells the planner to read the code, settle the question in the plan citing the file and line, and keep in open_questions only what the code cannot show (a user decision or host fact), written without a code path. Call `findings.extend(open_questions_findings(&plan.open_questions))` in `plan_findings` after the dependents line. Update the `plan_findings` doc list with the rule and the root cause, and note 'expected 5% of newly refused plans; the higher refusal rate is intended'.",
+    "Add `OPEN_QUESTION_RULE` in briefs.rs next to `REFUSAL_CORPUS_RULE`, appended to the Report format string in `planner_brief`. It says: settle every question the code can answer by reading it and cite file and line; put in open_questions only what the code cannot settle; for a change to a function or core flow, list every existing caller and mode that reaches it (for example the `[parallel] max_concurrency` path into landing) and each state it reads, including records and job state, with a test or reason in dependents. Add the wording test `planner_brief_tells_the_planner_to_settle_code_questions_by_reading`. Keep it to two sentences.",
+    "In the admission.rs tests add `open_question_findings_for(questions: Vec<&str>)` (copy of `dependents_findings_for` that fixes `dependents: vec![complete_dependent()]` and sets `open_questions`, returning only findings at 'open questions') and the two tests of criteria 2 and 3.",
+    "In crates/athena-core/tests/refusal_corpus.rs `mod plan_side`, add a small table `OpenQuestionCase { id, source, question, expected }` driven through `plan_findings` with a copy of `plan_for` that sets `open_questions`, one test `open_question_cases_get_the_expected_outcome`, and the sentence about the intended higher refusal rate. Cases: `open-question-cites-crates-path` (source: job 20261030-013555-f5qm, the max_concurrency path into landing; Refuse), `open-question-cites-rs-file-and-line` (`landing.rs:120`; Refuse), `open-question-cites-rs-in-backticks-with-punctuation` (Refuse), `open-question-says-read-the-code` (source: job 20261031-030119-tw3v, old job records on the landing branch; Refuse), `open-question-user-decision` (Accept), `open-question-docs-rs-site` (Accept), `open-question-none` (existing plan case `dependents-complete-ci-reuse` already covers it; Accept).",
+    "In run/tests.rs add a helper that returns `good_plan()` with `open_questions` set, and the test `a_plan_with_a_code_answerable_open_question_is_revised_before_the_critic` (criterion 4).",
+    "Update the `plan_round` doc comment in planning.rs (comment only), docs/design/job-planning.md (planner bullet list and the 'Athena's own checks' paragraph) and CHANGELOG.md (Unreleased, Added) with root cause, rule and the 'expected 5% of newly refused plans' statement.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, and `cargo test -p athena-core --test refusal_corpus`. (The planner cannot run these; the producer and verifier do.)"
+  ],
+  "risks": [
+    {
+      "risk": "False positive: a genuine question for the user that happens to cite a code path is refused and the planner has to rephrase it.",
+      "mitigation": "The matcher is limited to `crates/`, `.rs` file tokens (not docs.rs) and four explicit phrases; the evidence text tells the planner to restate a user or host question without a code path. The unit test for criterion 3 pins the allowed forms."
+    },
+    {
+      "risk": "False negative: a code-answerable question that names no path or phrase (for example only an identifier) passes the check.",
+      "mitigation": "The matcher is a documented heuristic and the critic still reviews open questions. Check (b) is marked prose only in the docs, not claimed as enforced."
+    },
+    {
+      "risk": "A planner that keeps the question across both mechanical passes stops the job (MAX_MECHANICAL_PASSES = 2).",
+      "mitigation": "The cap and its stop path already exist and are tested. The finding evidence says exactly how to settle the question, and the brief sentence tells the planner up front."
+    },
+    {
+      "risk": "The brief wording edit accidentally shifts a prompt budget or breaks a wording test.",
+      "mitigation": "Add the sentence only to the brief's Report section, not to planner.md; step 8 runs `cargo test --locked` to confirm `system_facts_budgets_match_computed` and the frame-size tests are unchanged."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "plan_findings output (a new Major finding at 'open questions')",
+      "dependent": "crates/athena-core/src/run/planning.rs `planning_round` (line 214, the only production caller of plan_findings): it treats any Major or Blocker Athena finding as a mechanical pass and stops the job after MAX_MECHANICAL_PASSES",
+      "kind": "code",
+      "test": "cargo test -p athena-core run (new `a_plan_with_a_code_answerable_open_question_is_revised_before_the_critic`; existing `a_plan_that_still_breaks_a_rule_after_two_mechanical_passes_stops_without_the_critic`)",
+      "reason": "The loop is generic over findings. A planner that repeats a code-citing question after two mechanical passes stops the job with the findings listed; the existing stop tests cover that path and the new run-level test covers the first pass."
+    },
+    {
+      "name": "plan_findings result length and content for existing fixtures",
+      "dependent": "crates/athena-core/src/admission.rs tests (`findings_for_path` line 595, `seam_findings` line 718, `dependents_findings_for` line 783) and crates/athena-core/tests/refusal_corpus.rs `plan_side::findings` (line 1024)",
+      "kind": "code",
+      "test": "cargo test -p athena-core admission and cargo test -p athena-core --test refusal_corpus",
+      "reason": "Every existing fixture sets `open_questions: vec![]`, so the new rule adds no finding to their counts (the tests assert `found.len()`)."
+    },
+    {
+      "name": "refusal-corpus coverage of a new matching rule",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `plan_side` (the corpus of plan rules)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "The corpus drives plan_findings for dependents cases only. Step 5 adds open-question cases (ids listed in the demonstrations notes below) so every input form of the new rule maps to a case."
+    },
+    {
+      "name": "JobPlan.open_questions field and its rendering",
+      "dependent": "JobPlan.open_questions readers: crates/athena-context/src/briefs.rs `plan_body` (line 1291), PlanOutput in crates/athena-context/src/outputs.rs (line 384), plan_record in planning.rs (line 574)",
+      "kind": "code",
+      "test": null,
+      "reason": "The field, its type and how it is recorded or rendered do not change; the rule only reads it. Stored plans are not re-checked (plan_findings runs only at planning time)."
+    },
+    {
+      "name": "plans produced by fake agents in existing tests",
+      "dependent": "Fake planner outputs in crates/athena-agent/src/fake.rs (line 387) and cli tests (introspection.rs, job_plan.rs, lifecycle.rs) that return `\"open_questions\": []`",
+      "kind": "code",
+      "test": null,
+      "reason": "They carry an empty open_questions list, so the new rule does not fire. A grep of `open_questions` over crates/ found no fixture with a path-citing question except the new tests; drain.rs line 491 sets open_questions on a reading's plan entry, a different type."
+    },
+    {
+      "name": "planner prompt token budget",
+      "dependent": "crates/athena-context/src/lib.rs `planner_and_critic_frames_are_short_and_fit_the_budgets` and docs/system-facts.md `budget planner: 966 of 1300`, checked by `system_facts_budgets_match_computed` in crates/athena-cli/tests/budgets.rs",
+      "kind": "rule",
+      "test": "cargo test --locked (budgets.rs and lib.rs tests)",
+      "reason": "Only the brief's Report section changes; the brief sits outside the budget sets per docs/system-facts.md, and prompts/planner.md is not edited, so the computed planner size stays 966."
+    },
+    {
+      "name": "planner brief Report section",
+      "dependent": "crates/athena-context/src/briefs.rs tests asserting Report wording: `planning_prompts_and_brief_require_a_named_test_seam` (line 2209) and `planner_prompt_and_brief_carry_the_refusal_corpus_rule` (line 2231)",
+      "kind": "code",
+      "test": "cargo test -p athena-context briefs",
+      "reason": "The new constant is appended after REFUSAL_CORPUS_RULE; the existing assertions use `contains` and still hold."
+    },
+    {
+      "name": "the critic's brief and prompt",
+      "dependent": "The critic: crates/athena-context/src/briefs.rs `critic_brief` shows Athena's findings (athena_findings) and crates/athena-context/prompts/critic.md",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not changed. A plan with the new finding never reaches the critic, and for a plan that passes the finding list is empty, as for any plan without Major findings."
+    },
+    {
+      "name": "design description of Athena's own plan checks",
+      "dependent": "docs/design/job-planning.md (the 'Athena's own checks' paragraph and the planner bullet list) and CHANGELOG.md [Unreleased]",
+      "kind": "rule",
+      "test": null,
+      "reason": "Text updated in step 7 to describe the new rule; no code reads these files."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff for the doc comment of the new rule and for the CHANGELOG entry. The doc comment on `open_questions_findings` (and the bullet in the `plan_findings` doc list) names the root cause. That is: plan_findings let code-answerable open questions through to the critic, and the planner brief did not require settling them by reading code. The same sentence goes in the CHANGELOG entry.",
+      "command": "git diff -- crates/athena-core/src/admission.rs CHANGELOG.md",
+      "observes": "The diff of admission.rs adds a doc comment naming plan_findings and code-answerable open questions, and the CHANGELOG diff adds the entry with 'Root cause:'.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test `an_open_question_that_cites_code_is_a_major_finding_naming_it` in the admission.rs tests module. It builds a plan on the existing `dependents_findings_for` pattern (same reading, complete dependent, content-criterion demonstration), whose only variable part is `open_questions`. Questions tested: 'Does `crates/athena-cli/src/main.rs` pass max_concurrency into landing?'; 'what does landing.rs:120 do with a conflict?'; 'Is the answer found by reading the code?'; a path wrapped in backticks and ending in '?'. It asserts, for each, exactly one finding with severity Major, source Athena, location 'open questions', and a summary containing the question text.",
+      "command": "cargo test -p athena-core admission",
+      "observes": "The new test passes: one Major Athena finding per code-answerable question, at 'open questions', naming the question.",
+      "fails_without": "On the base commit plan_findings has no open-question rule, so it returns no finding for these plans and the test's assertion of one Major finding fails.",
+      "seam": "Entry point `admission::plan_findings(&JobPlan, &Reading, &Policy, &dyn Fn(&str)->bool)`, called directly. Fixture: a JobPlan literal plus `reading()` and an empty-command Policy, as in the existing `dependents_findings_for` helper; the production rule is under test and nothing is doubled. The helper exists today (admission.rs line 783); step 4 adds a sibling `open_question_findings_for(Vec<&str>)` that sets only `open_questions`."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test `an_open_question_for_the_user_or_no_question_is_not_refused` in the admission.rs tests module. It uses the same `plan_findings` fixture. Questions that must produce no finding: 'Should the CHANGELOG entry go under Added or Changed?'; 'Does the user want the rule to also cover design docs?'; 'Is the production host's disk large enough?'; 'Should we publish on docs.rs?'. It also checks `open_questions: []`: the result equals the result of `dependents_findings_for` for the same dependents, which is empty. Asserts that no finding has location 'open questions'.",
+      "command": "cargo test -p athena-core admission",
+      "observes": "The new test passes: user-decision questions, a docs.rs mention and an empty list yield no open-question finding, so the rule is not a blanket refusal.",
+      "fails_without": "If the rule refused every non-empty open_questions, or matched any '.rs' token, the user-decision and docs.rs cases would yield a finding and the test would fail.",
+      "seam": "Same production entry point `plan_findings` and the same fixture as criterion 2; step 4 adds the helper. No double."
+    },
+    {
+      "criterion": 4,
+      "method": "Planning test `a_plan_with_a_code_answerable_open_question_is_revised_before_the_critic` in run/tests.rs, using `run_planned` with `repo_with_planning(3)`. The planner queue is [`good_plan()` with open_questions set to a question citing `crates/athena-cli/src/main.rs`, `good_plan()` with an empty list]; the critic queue is [`accepting_critique()`]. It asserts the call order is Reader, Planner, Planner, Critic, Producer, Verifier, so there is no Critic call between the planners. It asserts planner prompt 2 contains the finding text 'can be settled by reading the code' and the question, and critic prompt 1 contains '## Plan under review (round 1)'.",
+      "command": "cargo test -p athena-core run",
+      "observes": "The order of invocations shows the plan went back to the planner with no critic call, and the first plan the critic reviews is labelled round 1, so the mechanical pass used no round.",
+      "fails_without": "Without the rule the first plan passes plan_findings and goes to the critic: the order is Reader, Planner, Critic, the second planner prompt never carries the finding, and the assertions fail.",
+      "seam": "Production entry point `Athena::go` through the existing `run_planned` helper, which drives `planning_round`. The seam is the scripted planner and critic queues injected by `planning_script` (run/tests.rs line 577) into `athena_with`. It exists today. Step 6 adds only a plan-JSON variant (a helper that sets `open_questions` on `good_plan()`). The queue answers only supply plan text; the rule under test (plan_findings) is production code."
+    },
+    {
+      "criterion": 5,
+      "method": "A brief wording test `planner_brief_tells_the_planner_to_settle_code_questions_by_reading` in briefs.rs. It builds `planner_brief(&planner_inputs(None))`, takes the part after '## Report', and asserts it contains the new wording: settle by reading the code; cite file and line; list every existing caller and mode that reaches a changed function. The docs and CHANGELOG are shown by the diff.",
+      "command": "cargo test -p athena-context briefs",
+      "observes": "The wording test passes. `git diff -- docs/design/job-planning.md CHANGELOG.md` shows the rule described in the planning-design checks paragraph and in an Unreleased Added entry.",
+      "fails_without": "Without OPEN_QUESTION_RULE in the Report section, the wording assertions fail.",
+      "seam": "Entry point `briefs::planner_brief(&PlannerInputs)` with the existing `planner_inputs(None)` fixture in briefs.rs tests (used by `planner_prompt_and_brief_carry_the_refusal_corpus_rule`); exists today. Nothing is doubled."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks on the result. This includes the planner token-budget tests (`planner_and_critic_frames_are_short_and_fit_the_budgets`, `system_facts_budgets_match_computed`). They stay green because planner.md and system-facts.md are unchanged and the brief is outside the budget sets.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass. fmt and clippy are run as separate commands: `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`.",
+      "fails_without": "A formatting slip, a clippy warning (for example an unused helper), or an edit that changes the planner set size without updating the facts line would fail one of the three checks.",
+      "seam": "Whole workspace test, fmt and clippy runs; no seam is needed."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff: the doc comment of `open_questions_findings`, the paragraph in docs/design/job-planning.md and the CHANGELOG entry each state that the rule refuses more plans, 'expected 5% of newly refused plans', and that the higher refusal rate is intended because those plans spent critic rounds on questions code could answer. The corpus plan-side comment gets the same sentence.",
+      "command": "git diff -- crates/athena-core/src/admission.rs docs/design/job-planning.md CHANGELOG.md crates/athena-core/tests/refusal_corpus.rs",
+      "observes": "The added lines contain 'expected 5% of newly refused plans' and the intent statement.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Whether `crates/athena-core/tests/refusal_corpus.rs` may be edited: it is not a deliverable in the reading, so Athena raises a minor finding for it. The plan includes it because the corpus is where the brief says refusal-rule cases belong; drop step 5 and the corpus dependent if the reading must stay exact.",
+    "Whether the 'expected 5% of newly refused plans' figure is a measurement or an estimate: no code or record the planner can read gives a rate. It is the reading's own figure and is labelled an estimate in the text."
+  ],
+  "producer_section_sha256": "ae00d68e9bbededec705bb507ea983dbd50f5185b3a02eeded7174e8570e49ff"
+}
