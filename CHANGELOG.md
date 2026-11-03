@@ -326,6 +326,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   set with `athena priority` is never demoted, even when such items alone exceed a cap; the other items keep the
   free slots in plan order. The table is left out of the reading digest, so existing readings stay valid.
   (`crates/athena-core/src/plan.rs`: `Plan::build_capped`.)
+- `athena drain` starts with a steward triage pass that sets priorities from the current focus. It runs once at
+  the start of every drain, right after the review passes and before the queue is read: one model call is given
+  the focus, the open items (title, rung, current priority and who set it, age, dependencies) and the failure
+  classes of the last two days, and returns a priority and a one-line reason for each item it would change.
+  Athena writes each change as an `athena.priority/1` record whose new optional `set_by` is `steward` and whose
+  new `reason` is the model's line (both are absent on a person's record, so every earlier record still reads
+  as a person's), and the drain prints one `triage` line per change. It never changes an item whose latest
+  priority record a person set, and it keeps to the `[priority_caps]`: every item already at urgent or high
+  counts, a person's included, and a change into a full tier is skipped. It never closes anything: a proposal
+  to close an item is recorded as a steward work item (`triage-close:<job>`, on the brief-requirements rung)
+  for a person to decide with `athena approve-work`. A call that fails, or an answer that cannot be read, prints
+  one `triage failed` line and the drain goes on; no call is made when nothing is open. The plan no longer
+  treats a steward-set priority as a person's, so it can still demote it to a cap.
+  (`crates/athena-core/src/triage.rs`: `Athena::triage`, `plan_changes`.)
 - The checks stage now uses GitHub's CI result for the candidate. For a repository whose origin is an https URL
   on github.com, `Athena::with_ci_source` (`crates/athena-core/src/run/mod.rs`) picks the CI source and its wait
   together: the push run of the `ci` workflow on the job's CI branch (`athena/ci/<job id>`), read once and then

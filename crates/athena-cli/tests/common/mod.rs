@@ -449,6 +449,31 @@ pub struct Scenario {
     pub seen_by_planner: Arc<Mutex<Vec<String>>>,
 }
 
+/// A script for the steward's triage call. A triage prompt (it starts with the triage heading) gets `answer`,
+/// or a failed turn when `answer` is None; `calls` counts the triage prompts it was given. Every other
+/// invocation gets the deterministic fake's answer, so a real drain runs on.
+pub fn triage_script(answer: Option<Value>, calls: Arc<Mutex<Vec<String>>>) -> Script {
+    Box::new(move |spec: &AgentInvocation| {
+        if spec.role == Role::Steward
+            && spec
+                .user_prompt
+                .starts_with(athena_agent::fake::TRIAGE_HEADING)
+        {
+            calls.lock().unwrap().push(spec.user_prompt.clone());
+            return match &answer {
+                Some(answer) => FakeTurn::output(answer.clone()),
+                None => FakeTurn {
+                    outcome: athena_data::records::InvocationOutcome::Error,
+                    structured: None,
+                    detail: Some("the fake triage call failed".into()),
+                    ..FakeTurn::output(Value::Null)
+                },
+            };
+        }
+        athena_agent::fake::deterministic_turn(spec)
+    })
+}
+
 /// A fake source checker: from the checker's workspace to its report.
 pub type SourceJudge = Arc<dyn Fn(&Path) -> Value + Send + Sync>;
 

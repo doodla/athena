@@ -45,6 +45,10 @@
 //!   work items the model reports after Athena has validated them; the requirements ladder decides, for each,
 //!   whether a request is queued or only a proposal; [`steward::queued_work`] lists the queued requests that
 //!   `athena drain` (in the `athena-cli` crate) works, lands through the pull-request path, and rates after;
+//! - [`triage`]: the steward's triage duty, run at the start of every drain: one model call reads the current
+//!   focus, the open items and the recent failure classes, and Athena writes the priority changes it asks for
+//!   as steward-authored priority records, within the caps and never over a person's choice; a proposal to close
+//!   an item becomes a work item, and nothing is closed;
 //! - [`work_decisions`]: `athena approve-work` and `athena reject-work`, a person's decision on a steward
 //!   proposal, recorded as an appended work-decision record; approving submits a job whose request carries
 //!   the proposal's cited content in full;
@@ -116,6 +120,7 @@ pub mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod toolconfig;
+pub mod triage;
 pub mod verify;
 pub mod watcher;
 pub mod work_decisions;

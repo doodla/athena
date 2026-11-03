@@ -936,6 +936,8 @@ impl Athena {
                 n,
                 at: crate::now(),
                 priority: priority.as_str().to_string(),
+                set_by: None,
+                reason: None,
             }))],
             &message(
                 &format!("Set priority {}: {job_id}", priority.as_str()),
@@ -5058,6 +5060,8 @@ mod tests {
             n: 1,
             at: crate::now(),
             priority: "low".into(),
+            set_by: None,
+            reason: None,
         }];
         let lookup = Lookup {
             job_exists: &|_| false,
