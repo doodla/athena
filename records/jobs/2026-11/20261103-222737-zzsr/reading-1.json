@@ -1,0 +1,146 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261103-222737-zzsr",
+  "n": 1,
+  "at": "2026-11-03T22:28:07.106275982Z",
+  "invocation_seq": 1,
+  "base_commit": "8e484ff3db3f16732fb8ea5671c5bfd9b71229b5",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Don't count needs-accepting re-reads toward the drain job limit",
+  "summary": "Retry of job 20261103-193428-df2m: when a drain re-read ends as needs accepting, give its --job-limit slot back so the drain goes on to the next item. Audience: the operator running `athena drain`. This time the report must cite a command and its output for every behavior criterion, including the run against the old counter.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New regression test, plus cargo test, clippy and fmt criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria name the test assertions and the commands to run."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is in the job counter in run_job, not in the one stop reason."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in four files."
+    },
+    {
+      "id": "verified",
+      "how": "Criterion 2 requires recorded runs with and without the fix."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs, help and CHANGELOG are updated for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-cli/src/drain.rs. `run_job` checks `st.started >= self.limits.max_jobs` (~line 1433) and then increments `st.started` (~1439). The `_ if run.needs_accepting` arm (~1537) never gives the slot back. `needs_accepting: true` comes only from the re-read result (~3572). Other `st.started` uses are at ~1889, 2008, 2555 and 2896. The tests are in crates/athena-cli/tests/drain.rs; the help text is in crates/athena-cli/src/main.rs. No record or data file is added.",
+    "Job 20261103-193428-df2m is retried. Its candidate (decrement of `st.started` in the needs-accepting arm, docs, test, CHANGELOG) was sound. It was rejected only because behavior criterion 2 cited no command that ran (D43). So the same four files are kept as deliverables and the retry must record the commands. The nit about driving `Source::Reread` is optional; the stub's `needs_accepting` run result is accepted.",
+    "The old-counter demonstration is done with git-free means the verifier can see: the test's assertions (b must land, stop != JobLimit) and the recorded `cargo test` output. The producer should run the new test with the decrement temporarily removed, record the failing output, then restore the fix.",
+    "No governance files change; athena.toml, defaults.toml and workflows are untouched.",
+    "The cost of the re-read still counts against the money budget."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-cli --test drain`. A new test with `max_jobs: 1` has item `a` end as needs accepting and item `b` runnable. It asserts `jobs[0].outcome == \"needs accepting\"`, `landed == 1` and `stop != Stop::JobLimit`, and it passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Fails without the fix, with a command that ran: with the `st.started` decrement in the needs-accepting arm of `run_job` removed, `cargo test -p athena-cli --test drain` fails on the new test (b not run, Stop::JobLimit). The recorded check output shows that failing run and the passing run with the fix.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`git diff` of crates/athena-cli/src/drain.rs shows the `_ if run.needs_accepting` arm of `run_job` returning the slot (`st.started` decremented under the state lock). The JobLimit check and the passed, held and failed outcomes are unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli --test drain`: `the_job_limit_stops_the_loop`, the urgent-queued-request test and the two existing needs-accepting tests still pass. `git diff` shows no assertion removed or weakened.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --workspace`; all are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The drain module docs, the `Limits::max_jobs` doc and the `--job-limit` help in crates/athena-cli/src/main.rs say a re-read that only needs accepting does not count toward the job limit. Grep finds that wording. CHANGELOG.md has an entry.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    }
+  ],
+  "out_of_scope": [
+    "Avoiding the re-read itself, or changing which config changes trigger a re-read.",
+    "Changing the money budget accounting; the re-read's cost still counts against the budget.",
+    "Changing how failed, held or budget-short outcomes count toward the job limit.",
+    "Auto-accepting readings whose scope differs.",
+    "Changes to athena.toml, defaults.toml, workflows or any other governance file."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.8,
+      "p_verification_passes": 0.75,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 400.0,
+        "p50": 1600.0,
+        "p90": 3800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7134020618556701,
+      "p_verification_passes": 0.6727748691099477,
+      "p_user_intervenes": 0.09086651053864168,
+      "cost_usd": {
+        "p10": 0.5586042353193658,
+        "p50": 1.3355031999999998,
+        "p90": 3.616462410896199
+      },
+      "wall_time_s": {
+        "p10": 539.0830900658716,
+        "p50": 1943.9400783931744,
+        "p90": 4194.440212161719
+      }
+    }
+  },
+  "departures": "Slightly higher p_verification_passes than the reference: the earlier candidate was sound and only lacked recorded command evidence.",
+  "hard_reason": "Changes the drain's job counter, which is a limit that holds work in the run pipeline.",
+  "producer_effort": "high"
+}

@@ -653,7 +653,8 @@ a{color:var(--accent)}code{font-family:ui-monospace,monospace;font-size:.9em;wor
 .lede,.pin,footer{color:var(--muted)}\
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:1rem}\
 .card{background:var(--card);border:1px solid var(--line);border-radius:.5rem;padding:.8rem 1rem}\
-.card h3{margin:.2rem 0}.arrow{color:var(--muted);font-weight:normal}\
+.card h3{margin:.2rem 0 .5rem;font-size:1.2rem}.card details{margin-top:.6rem;color:var(--muted);font-size:.85rem}\
+.card summary{cursor:pointer}.arrow{color:var(--muted);font-weight:normal}\
 dt{font-weight:600}dd{margin:0 0 .5rem}\
 .tag{display:inline-block;border:1px solid var(--line);border-radius:1rem;padding:0 .5rem;font-size:.8rem;color:var(--muted)}\
 .cites a,.cites{font-size:.75rem;color:var(--muted)}.mark{color:var(--muted);font-size:.8rem}\
