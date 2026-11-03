@@ -1,0 +1,320 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261103-161454-nmrx",
+  "round": 1,
+  "at": "2026-11-03T16:21:42.072359552Z",
+  "invocation_seq": 3,
+  "approach": "Stay inside the nine listed deliverables, so no athena-gate or land.rs file changes. `check_pr_head` and the history check both go through `athena_gate::invariant::classify_pre_merge`, and that rule stays as it is. All new logic sits in `pr_check.rs`. (a) `pending_candidate(git, sha)` is a detector. It returns a job only when `classify_pre_merge` gives `Err(Uncovered::GovernedChange)`, so there is no closing job and no intervention. It also requires the commit to add exactly one `candidate.json` or `candidate2.json` of a request job whose files hold a candidate and no verification or outcome. (b) `check_pr_head` accepts such a commit as pending when it is the last commit of the range. It also accepts it when a later commit of the range is a JobLanding of the same job. In the second case the landing goes through the existing `landing_problem` and the head-fingerprint comparison. A pending head skips only the fingerprint comparison, because its content is unverified, and `PrReport` gains `pending: Option<PendingHead>` and `is_pending()`. Every other shape keeps its old offence text. (c) `demote_pending_head(git, tip, &mut CheckReport)` is called by `athena check --history` in main.rs. It moves the existing own-commit violation of the tip into a `note:` only when the tip is pending-shaped. It matches only the JobRecords violation on the tip whose detail starts with the history rule's own-commit prefix, so commits on main, attribution findings and every other commit are untouched. (d) display.rs prints a distinct `pr-head pending` line and main.rs adds `pending` to the JSON, while the exit code stays 0 or 2. (e) The `check_pr_head` unit tests, the history binary tests and a reconcile regression cover the shapes, followed by docs, CHANGELOG and D154.",
+  "decisions": [
+    {
+      "choice": "Apply the pending rule in pr_check.rs (detector, `check_pr_head`, history demotion), above the unchanged shared rule `classify_pre_merge`.",
+      "reason": "The brief's deliverables name no athena-gate or land.rs file, and the critic flagged those as scope widening. The loosening is for one head shape only, and it can be written by reading `classify_pre_merge`'s public result (`Uncovered::GovernedChange`) plus `Change`, `Judged` and `JobFiles`, which are public (invariant.rs:320, lib.rs:217/291, jobs.rs:45). `pr_commits` and the landing-record writer keep refusing a candidate commit, so no landing record is written for pending work.",
+      "rejected": [
+        {
+          "option": "Add `Uncovered::Pending` in athena-gate invariant.rs and handle it in history.rs and land.rs (round 1 plan)",
+          "why": "This is the cleaner root-cause site, but it touches four files outside the deliverables. It is kept as a User question in case the user prefers it."
+        },
+        {
+          "option": "Loosen `closing_jobs` or `held` to accept governed changes",
+          "why": "This would change landing and attribution for every caller, not just pre-merge heads."
+        },
+        {
+          "option": "Add a `LandingKind::Pending`",
+          "why": "LandingKind is written into landing records and read by attribution; pending work must never be recorded as a landing."
+        }
+      ]
+    },
+    {
+      "choice": "In `check_pr_head`, a pending commit passes only as the head, or when a later commit of the range is a JobLanding of the same job. A pending head skips the fingerprint comparison, and a stacked landing is judged in full.",
+      "reason": "The first CI run sees the candidate as head. Criterion 4 asks that verification and outcome on top of the candidate be judged fully. A pending commit anywhere else, such as under a hand edit, an intervention, a records-only commit or another job's landing, stays an offence with the old text, so nothing else is loosened.",
+      "rejected": [
+        {
+          "option": "Accept any candidate-shaped commit anywhere in the range",
+          "why": "A hand edit or another landing after it would hide behind the pending pass."
+        },
+        {
+          "option": "Skip the fingerprint comparison whenever a pending commit exists",
+          "why": "A wrong verified fingerprint on the landing would then pass; criterion 4 requires it to fail."
+        }
+      ]
+    },
+    {
+      "choice": "The history check demotes to a note only the tip commit's own-commit violation, and only when the tip is pending-shaped (stacked candidates are not demoted in history).",
+      "reason": "The history check judges the head's own commits as `athena check --history` does today. The early-PR case has the candidate as the tip, and the landing replaces the early head (land.rs:146), so a stacked candidate is not a real history shape. Restricting to the tip and to the prefix `this commit is on the head but not on main, and` keeps commits on main on attribution. The history_pr_head tests fail if the prefix drifts from history.rs:158.",
+      "rejected": [
+        {
+          "option": "Filter any JobRecords violation of a pending-shaped commit",
+          "why": "This could demote attribution findings for commits on main."
+        },
+        {
+          "option": "Edit athena-gate history.rs",
+          "why": "Outside the deliverables."
+        }
+      ]
+    },
+    {
+      "choice": "Show pending as a third visible state: `pr-head pending: ...` in text, `pending` and `pending_job` in the JSON, `note: ... pending` for history, exit code 0.",
+      "reason": "CI must pass the first run, and a log reader must tell pending from verified (criterion 5). The exit contract stays 0 or 2.",
+      "rejected": [
+        {
+          "option": "Print `pr-head pass`",
+          "why": "Hides the unverified state."
+        },
+        {
+          "option": "A new exit code",
+          "why": "CI treats any non-zero code as failure."
+        }
+      ]
+    },
+    {
+      "choice": "Leave reconcile.rs unchanged, and add a regression to tests/reconcile.rs that a pending-shaped head writes no landing record.",
+      "reason": "reconcile.rs does not classify commits; it reaches classification through `pr_commits`, which is unchanged. The test pins that pending work is never recorded as a landing.",
+      "rejected": [
+        {
+          "option": "Special-case pending in reconcile.rs",
+          "why": "Nothing there reads the pre-merge rule, and it would risk recording pending work."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/pr_check.rs",
+      "action": "modify",
+      "purpose": "Add `pending_candidate(git, sha)`, `PendingHead`, `PrReport.pending`, `is_pending()` and the head-or-stacked-landing rule in `check_pr_head`. Add `demote_pending_head(git, tip, &mut CheckReport)` with the shared prefix constant, update the module doc, and add the unit tests with helpers `candidate_head` and `close_candidate`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Add `pending` and `pending_job` to the `--pr-head` JSON, call `pr_check::demote_pending_head` in the `--history` branch before printing, and add `notes` to the history JSON. The exit-code expressions are unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "`pr_head_report` prints the distinct `pr-head pending: ...` line when `report.is_pending()`. Add a unit test of the pass, pending and FAIL lines.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/history_pr_head.rs",
+      "action": "modify",
+      "purpose": "Add the `pending_head` helper, the pending-passes test (exit 0, `note:` pending), the pending-plus-hand-edit failure test, and a `--pr-head` CLI test for the pending line and JSON.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/reconcile.rs",
+      "action": "modify",
+      "purpose": "Add a regression: a pending-shaped pull request head makes `landings_written` stay 0 (reuse the file's `pr_head` and `world` helpers).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/records-history.md",
+      "action": "modify",
+      "purpose": "§5.1: add the pending-head treatment and why the landing head is still fully checked before merge. §10 item 4: record the pending behaviour.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a Changed entry under [Unreleased] for outside readers: candidate-shaped PR heads are pending in `--pr-head` and `--history`, and the landing head is fully judged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Add D154 with the root cause, the call, the rejected options, and the dependence on the landing head being fully judged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reconcile.rs",
+      "action": "modify",
+      "purpose": "Planned unchanged: it reaches classification only through `pr_commits`, which still refuses pending work. Listed only because the brief names it. The producer reads it and touches it only if the reconcile regression shows a real need.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-gate/src/{invariant.rs,jobs.rs,lib.rs} public items (`Change::of_commit`, `Judged::new`, `JobFiles`, `Uncovered`, `Rule`), `JobId::dir` and `is_request`, and `CheckReport` in manage.rs. Confirm D153 is the last decision by Grep on docs/decisions.md.",
+    "In pr_check.rs add `pending_candidate(git, sha) -> Result<Option<JobId>>`. It requires `classify_pre_merge(git, sha)? == Err(Uncovered::GovernedChange)`. It then looks at `Judged::new(git, &Change::of_commit(git, sha)?)` diff entries with status 'A' whose path is `records/jobs/<month>/<id>/candidate.json` or `candidate2.json` and equals `<job.dir()>/<name>` for a request job. It requires `JobFiles::load(git, &change.tree, &job)` to hold a candidate and no verification, outcome or later_outcome. It returns the job only when exactly one such job is found.",
+    "In `check_pr_head` add `PendingHead { sha, job }` and `PrReport.pending: Option<PendingHead>`, with `is_pending()`. For each classified commit whose result is Err, call `pending_candidate`. If it returns Some, accept it as pending when it is the last index (set `report.pending`) or when a later classified commit is a JobLanding with the same job (no offence, and the landing is judged by the existing code). Otherwise push the original offence with the old text. Skip the fingerprint comparison only when the head is pending. Update the module doc.",
+    "In pr_check.rs add `pub const OWN_COMMIT_PREFIX` and `pub fn demote_pending_head(git, tip, report: &mut CheckReport) -> Result<()>`. If `pending_candidate(git, tip)` is Some(job), remove violations with `rule == Rule::JobRecords`, `commit` equal to `tip[..12]` and `detail` starting with the prefix. For each one removed, push the note `commit <12> is pending: job <job> has no verification or outcome yet; the landing head is judged in full before merge`.",
+    "In display.rs make `pr_head_report` print `pr-head pending: <n> commit(s) between <base> and <head>; commit <sha> of job <job> is not yet verified (the landing head is judged in full before merge)` when pending, else the existing pass or FAIL line. Add a unit test of the three lines. In main.rs add `pending` and `pending_job` to the `--pr-head` JSON, call `demote_pending_head(&athena.git, &athena.head()?, &mut report)` in the `--history` branch before printing, and add `notes` to the history JSON. Keep the exit codes.",
+    "In pr_check.rs tests add helpers `candidate_head(git)` (edit a.txt plus `fixtures::candidate`) and `close_candidate(git, base, verdict, claimed)`. Cases: pending head passes with `is_pending()`; stacked landing passes with `is_pending()` false; a wrong fingerprint fails; failed verification fails; a governed change with no job records fails with the old text; pending followed by a hand edit, an intervention, a records-only commit, or another job's landing fails with the old text. Existing tests stay unchanged.",
+    "In history_pr_head.rs add `pending_head(&fx, landing)` (branch from the landing's parent, restore the landing tree, `git rm` verification.json and outcome.json, commit, and assert the candidate is present). Add tests: pending tip passes with `note:` containing 'pending' and '0 violation(s)'; pending plus a hand edit of src/lib.rs fails naming the edit; `athena check --pr-head` on the pending range prints `pr-head pending` and exits 0. Run the history test first to see whether any other check flags the shape. Then, in tests/reconcile.rs, add a regression that a pending-shaped pull request head writes no landing record (`landings_written` stays 0), reusing `world`, `pr_head` and `athena`; read the file's helpers first.",
+    "Write the docs: records-history.md §5.1 and §10 item 4, the CHANGELOG [Unreleased] Changed entry, and decisions.md D154 (root cause, the call, rejected options, dependence on the landing head being fully judged).",
+    "Review the diff: confirm no gate, land.rs or governance file changed (`git status`).",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "The history prefix match (`this commit is on the head but not on main, and`) drifts if the gate's message changes, so the demotion silently stops.",
+      "mitigation": "The prefix is one constant in pr_check.rs, with a comment naming history.rs:158. The history_pr_head pending test fails if the demotion stops, and it is run in criterion 2."
+    },
+    {
+      "risk": "The history check may flag a job with a candidate and no outcome through `reconcile::check_records` or attribution, so the pending history test fails for another reason.",
+      "mitigation": "D149 already lets a held job's records pass the PR head check. The producer runs the history test first. A different failure is reported and the loosening is not widened beyond the pending tip."
+    },
+    {
+      "risk": "Pending is accepted too widely and hides a bad commit.",
+      "mitigation": "The detector requires `Uncovered::GovernedChange` and one added candidate record of a held request job. Acceptance is limited to the head or a same-job stacked landing, which is judged in full. Negative tests cover a hand edit, an intervention, a records-only commit and another job's landing after the pending commit."
+    },
+    {
+      "risk": "A stalled PR with a candidate head would show pending forever.",
+      "mitigation": "Pending only passes the check. Landing still needs the landing head to pass in full, `pr_commits` never records pending work, and the pending state is visible in the CI log."
+    },
+    {
+      "risk": "The history fixture's restored landing tree may hold `candidate2.json` or other record files, or no `candidate.json`, so `pending_head` does not give the intended shape.",
+      "mitigation": "The detector accepts `candidate.json` and `candidate2.json`. The producer asserts the shape in the test (candidate present, verification and outcome absent) before running the check."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "classify_pre_merge result for a candidate-shaped commit",
+      "dependent": "crates/athena-gate/src/invariant.rs `classify_pre_merge`, `Uncovered`, `closing_jobs`, `held` (the shared pre-merge rule, used by land.rs:171 and history.rs:153)",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged. The detector only reads its public result and returns pending only for `Uncovered::GovernedChange`. The existing held-job tests in crates/athena-gate/src/landing_tests.rs are unaffected because no gate file changes."
+    },
+    {
+      "name": "refusal of a candidate-shaped commit when landing records are written",
+      "dependent": "crates/athena-core/src/land.rs `pr_commits` and `classify_commit`, used by gh/records.rs:129 (the landing-record writer) and by reconcile through GitLandingRecords",
+      "kind": "code",
+      "test": "New crates/athena-cli/tests/reconcile.rs regression: a pending-shaped pull request head leaves `landings_written` at 0. The existing land.rs pr_commits tests stay as they are, since land.rs is not edited.",
+      "reason": null
+    },
+    {
+      "name": "check_pr_head and PrReport (new `pending` field, `is_pending()`)",
+      "dependent": "crates/athena-core/src/pr_check.rs `check_pr_head` is called only from crates/athena-cli/src/main.rs:1368 (`--pr-head`) and by pr_check.rs tests. `PrReport` literals are built only in `check_pr_head`.",
+      "kind": "code",
+      "test": "pr_check.rs tests (existing offence and passed() assertions keep their meaning), plus new pending, stacked-landing and negative cases.",
+      "reason": null
+    },
+    {
+      "name": "athena check --history output for a pending-shaped tip",
+      "dependent": "crates/athena-cli/src/main.rs `Command::Check` history branch (line 1385) -> crates/athena-core/src/manage.rs:533 `check_history` -> crates/athena-gate/src/history.rs:122 `check_after_cutover` (own-commit loop at line 152)",
+      "kind": "code",
+      "test": "history_pr_head.rs: the three existing tests (verified-landing head passes, unverified governed change fails naming it, main after C0 judged by attribution) plus the new pending, hand-edit-after-pending and prefix-drift cases.",
+      "reason": null
+    },
+    {
+      "name": "CheckReport violations and notes (demotion moves one violation to a note)",
+      "dependent": "crates/athena-core/src/manage.rs:60-65 `CheckReport.notes`, printed by main.rs:1400 as `note: ...`, and `CheckReport.violations`",
+      "kind": "code",
+      "test": "history_pr_head.rs pending test (violation gone, note present) and the existing three tests (no demotion for non-pending heads).",
+      "reason": "The demotion happens in main.rs on the report after `check_history` returns, so manage.rs and the gate are unchanged. Only a JobRecords violation on the tip with the own-commit prefix is moved, so the counts for commits on main and for attribution findings do not change."
+    },
+    {
+      "name": "athena check --pr-head text and JSON output",
+      "dependent": "crates/athena-cli/src/display.rs `pr_head_report` and the `--pr-head` JSON in main.rs",
+      "kind": "code",
+      "test": "display.rs unit test for the pass, pending and FAIL lines. The JSON keeps `passed`, `offences` and `commits`, and adds `pending` and `pending_job`. The exit code stays `if report.passed() { 0 } else { 2 }`.",
+      "reason": null
+    },
+    {
+      "name": "CI first-run result of the pr-head and history checks on an early candidate head",
+      "dependent": ".github/workflows/ci.yml `pr-head` and history jobs, athena.toml and defaults.toml check configuration",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Not edited (out of scope). The jobs run the same `athena check` commands, so the exit code on a first-run candidate head changes from 2 to 0, and the landing head is still fully judged. Making the checks required stays with the cutover job."
+    },
+    {
+      "name": "Early-PR flow: landing head replaces the early head",
+      "dependent": "docs/system-facts.md 'Early pull request and CI waits' and crates/athena-core/src/gh.rs `early_run_wait` (the early commit is replaced by the landing commit)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The flow is not changed. The checks now pass the early head as pending, and the landing head is still judged as before."
+    },
+    {
+      "name": "Record schemas",
+      "dependent": "crates/athena-data records (check_record_file, AnyRecord, round-trip test)",
+      "kind": "code",
+      "test": null,
+      "reason": "No record or data file is added or changed under crates/. `PrReport` and the new pending types are not serialized records."
+    },
+    {
+      "name": "Refusal and matching rules for requests and readings",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "The change is to a commit-shape check, not a parser, stem list, stop list or reading check. No request or reading input form is added or changed, so no refusal_corpus case applies, and the change adds no new refusal."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in pr_check.rs `mod tests`. It builds a git repository with `pr_repo` and `open_job`, then the new helper `candidate_head` commits an edited governed `a.txt` plus `fixtures::candidate(&job_id())` (no verification or outcome). It calls the production `check_pr_head(git, base, head)`.",
+      "command": "cargo test --locked -p athena-core pr_check",
+      "observes": "`passed()` is true with no offences. `is_pending()` is true, and `report.pending` names the head sha and the job. The earlier open_job commits are records only.",
+      "fails_without": "Without the detector and the head rule, `classify_commit` errors with 'changes governed content ... no verification covers it', so `passed()` is false.",
+      "seam": "Entry point `athena_core::pr_check::check_pr_head`. The fixture is the temp git repository from the existing `pr_repo`, `open_job` and `fixtures::{commit, plain, candidate}` in pr_check.rs and land.rs (they exist). The only new seam code is the test helper `candidate_head`, added in plan step 6. No double stands in for any logic."
+    },
+    {
+      "criterion": 2,
+      "method": "Binary integration test in history_pr_head.rs on `cutover_fixture`. It lands a job with `land_a_job` on branch `pr`. The new helper `pending_head(&fx, landing)` then makes a branch from the landing's parent, restores the landing's tree and `git rm`s the job's verification.json and outcome.json. This leaves governed work plus the candidate with no verification or outcome. It runs `athena check --history` through `history(&fx)` (the existing helper over `athena_check`).",
+      "command": "cargo test --locked -p athena-cli --test history_pr_head",
+      "observes": "The command exits 0, the output contains `0 violation(s)` and a `note:` line containing `pending`. The tip violation has been demoted.",
+      "fails_without": "Without `demote_pending_head`, the tip yields the JobRecords violation 'this commit is on the head but not on main, and changes governed content ...' and exit 2.",
+      "seam": "Entry point is the `athena check --history` process via `common::athena_check`, which exists. The fixture is `cutover_fixture` with main and the records branch present, and the existing `land_a_job`, `start_branch`, `commit_all` and `write`. New code is `pending_head`, added in plan step 7. The records are written by the real Athena `go`, so no logic sits in the fixture."
+    },
+    {
+      "criterion": 3,
+      "method": "Whole suite. Existing tests stay unchanged. New negative tests in pr_check.rs cover a pending commit followed by a hand edit, an intervention record, a records-only commit with no landing, and another job's landing. They also cover a failed verification and a governed change with no job records. In history_pr_head.rs, a pending commit followed by a hand edit of src/lib.rs fails naming the edit and the old text.",
+      "command": "cargo test --locked",
+      "observes": "Each offending commit is named by sha with its old reason ('no verification covers it', 'did not pass', 'a squash of it is not a valid landing until the cutover'), and the existing pr_check and history_pr_head tests pass.",
+      "fails_without": "If pending were accepted anywhere or for any governed change, the negative tests would pass the head and fail their assertions.",
+      "seam": "Entry points `check_pr_head` and the `athena check --history` binary, on the existing fixtures (exist). New negative helpers and cases are added in plan steps 6 and 7."
+    },
+    {
+      "criterion": 4,
+      "method": "pr_check.rs unit tests. `candidate_head` is followed by the new helper `close_candidate(git, base, verdict, claimed_fingerprint)`, which commits verification.json and outcome.json (landed) on top, with the verified fingerprint set to the real `fingerprint(git, candidate_sha, base)`, as the existing `land_verifying` does. Cases: (a) correct fingerprint, (b) claimed fingerprint of 64 `e`, (c) `Verdict::Fail`. Each calls `check_pr_head` on the whole range.",
+      "command": "cargo test --locked",
+      "observes": "(a) passes, `is_pending()` is false, and the candidate commit is not an offence. (b) fails with an offence on the landing sha containing 'differs from the content this job landing verified'. (c) fails with 'did not pass'.",
+      "fails_without": "If the pending acceptance bypassed the landing judgment, or skipped the fingerprint check whenever a pending commit exists, (b) and (c) would pass.",
+      "seam": "Entry point `check_pr_head` over a real git fixture. The verification record is a real record file built with the existing record helpers. `close_candidate` is a test helper added in plan step 6. No double."
+    },
+    {
+      "criterion": 5,
+      "method": "A unit test in display.rs builds a `PrReport` literal (public fields) and checks the pass, pending and FAIL lines of `display::pr_head_report`. The history_pr_head or pr-head binary test greps stdout of `athena check --pr-head <base> <head>` on a pending-shaped range and checks the JSON `pending` field. Grep display.rs for `pr-head pending`.",
+      "command": "cargo test --locked -p athena-cli",
+      "observes": "stdout contains `pr-head pending` and not `pr-head pass`. JSON has `\"pending\": true` with `\"passed\": true`, and the exit code is 0. The history output has a `note:` pending line.",
+      "fails_without": "Without the display branch a pending report prints `pr-head pass`, so the test fails.",
+      "seam": "Entry point `display::pr_head_report` called with a `PrReport` literal, and the `athena` binary through `common::athena_check`-style invocation (`athena_check` exists in tests/common). The new test code is added in plan steps 5 and 7."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of the three documents. records-history.md §5.1 gains a 'pending head' paragraph and §10 item 4 a sentence. CHANGELOG.md [Unreleased] gains a Changed entry. decisions.md gains D154 (the last present is D153, which the producer confirms by Grep).",
+      "command": "git diff -- docs/design/records-history.md CHANGELOG.md docs/decisions.md",
+      "observes": "The text says a first-run candidate-shaped head is pending (pass with a visible note). It says the landing head, with verification and outcome on top, is still fully judged before merge, and that no landing record is written for pending work. D154 names the root cause (the shared pre-merge rule sees the early candidate as an uncovered governed change), the rejected options, and that the rule is applied above the gate in athena-core. The docs and ontology tests in `cargo test --locked` stay green.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the formatter and linter exactly as Athena runs them over the whole workspace, including the new test code.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Both exit 0. A formatting difference or a clippy warning in the new detector, the demotion function or the tests would make one fail.",
+      "fails_without": "Unformatted code or a warning (for example an unused import or a needless borrow in the new helpers) fails the command.",
+      "seam": "The entry points are `cargo fmt` and `cargo clippy` on the workspace at `Cargo.toml`. The fixture is the producer's final tree, with no injection and no double. This seam exists today, and plan step 10 runs it."
+    },
+    {
+      "criterion": 8,
+      "method": "Inspect the diff for the named governance files; none is in the file list.",
+      "command": "git diff --stat -- rust-toolchain.toml setup.sh athena.toml defaults.toml .github/workflows/ci.yml",
+      "observes": "No output: the files are unchanged.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: The pending rule is applied in athena-core (pr_check.rs and main.rs) above the unchanged shared gate rule `classify_pre_merge`, because the brief's deliverables name no athena-gate or land.rs file. Do you prefer the root-cause site (an `Uncovered::Pending` variant in athena-gate invariant.rs, handled in history.rs and land.rs), which would add those files to the deliverables?",
+    "User: Is the real early-push head one commit holding governed work together with the job's `candidate.json` or `candidate2.json`? The code read here (pr_check.rs, land.rs, gate history.rs) does not show how gh/early.rs builds it. If the candidate record sits in a separate commit, the pending rule would also need to cover a records-only commit whose parent holds uncovered work."
+  ],
+  "producer_section_sha256": "25d6ce2d2f66a3a03ebfb8665f35a71c686deeab128b60d29aa2e31e67dcd298"
+}
