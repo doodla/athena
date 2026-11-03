@@ -164,6 +164,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A batch no longer stops as a repeated failure when an item's second failure paused its line. The drain asked
+  whether the line was paused only before each attempt, so the failure that did the pausing went unchecked, the
+  item ended as failed, and the batch stopped with money and job slots left. It now asks once more after the
+  last failed attempt: the item is passed over with the pause reason (one `passed over` line, no failure
+  counted) and the next queued item runs; items that depend on it are held back. An unpaused item that fails
+  twice still stops the batch.
 - A verifier stopped at its deadline is now its own outcome, `unjudged`, and is rerun once. A first timeout
   reruns the verifier on a fresh snapshot, and the second run's verdict decides; a second timeout leaves the
   criteria unjudged, with the reason "the verifier timed out, so the criteria are unjudged: ..." and evidence

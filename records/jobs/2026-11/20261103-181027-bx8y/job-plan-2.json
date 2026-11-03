@@ -1,0 +1,234 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261103-181027-bx8y",
+  "round": 2,
+  "at": "2026-11-03T18:16:26.700857475Z",
+  "invocation_seq": 4,
+  "approach": "In Drain::attempts (crates/athena-cli/src/drain.rs), factor the existing \"is this item's line paused?\" lookup (1745-1752) into a helper `paused_reason`, and call it again where the loop gives up (`failures >= ATTEMPTS`, 1812) so a pause caused by the last failure returns ItemEnd::Paused(reason) instead of ItemEnd::Failed. Drain::finish already turns Paused into pass_over (one \"plan <id> passed over: <reason>\" line, no stop), and the per-wave re-plan in drain_with (2832-2837) then holds back dependents of the paused item. Unpaused items still reach ItemEnd::Failed and Stop::RepeatedFailure. No cause classification, no key masking, no change to ATTEMPTS, the unread rule or finish. Update the module docs, the Stop::RepeatedFailure doc comment and meaning(). Tests use a small Stub extension `pause_on_retry` and plan entries (planned(...)): one with items a, b, and one where c depends on a.",
+  "decisions": [
+    {
+      "choice": "Re-check Steps::paused in attempts just before returning ItemEnd::Failed, reusing ItemEnd::Paused.",
+      "reason": "The loop already checks the pause at the top of each iteration (drain.rs 1745-1752), so a pause caused by a first failure is caught before the retry. Only the pause caused by the last (second) failure goes unchecked because the loop returns Failed first (1811-1814). One check at that exit closes the gap where it starts. ItemEnd::Paused is already handled in finish (2413) as a passed-over line with no stop and no failed_item. The check also covers the not-landed path, where `passed` stays Some and the top-of-loop check is skipped.",
+      "rejected": [
+        {
+          "option": "Check Steps::paused in Drain::finish for ItemEnd::Failed",
+          "why": "finish has no mid-item context, it splits the pause logic across two functions, and attempts would still return Failed for an item that is not failed."
+        },
+        {
+          "option": "Classify failures by cause (shared versus per-item) or mask failure keys",
+          "why": "Out of scope; that was the dropped job 20261103-162416-m9th."
+        },
+        {
+          "option": "Add a new ItemEnd variant or a new Stop",
+          "why": "Not needed: ItemEnd::Paused already records a passed-over line and stops nothing; a new variant grows the diff."
+        }
+      ]
+    },
+    {
+      "choice": "Factor the pause lookup into `paused_reason(&self, item: &Item) -> Option<String>`, used at both sites.",
+      "reason": "The same lookup would otherwise be written twice.",
+      "rejected": [
+        {
+          "option": "Copy the lookup inline at line 1812",
+          "why": "Duplicates logic; a later change to one copy would miss the other."
+        }
+      ]
+    },
+    {
+      "choice": "Leave crates/athena-cli/src/display.rs unchanged although the brief lists it as a deliverable.",
+      "reason": "display::drain (display.rs 617-623) renders Stop::RepeatedFailure only with failed_item = Some. A paused item sets neither, so the render path is correct as is. The wording change goes in Stop::meaning() in drain.rs. A producer who finds a real need in display.rs may touch it.",
+      "rejected": [
+        {
+          "option": "Edit display.rs to print an extra line for paused items",
+          "why": "The passed-over line already comes from Drain::pass_over via the Ui, and the existing paused-line tests assert display::drain does not repeat it (tests/drain.rs 624)."
+        }
+      ]
+    },
+    {
+      "choice": "Test the pause with a new Stub field `pause_on_retry: Option<(&'static str, &'static str)>` that pushes (item, reason) into paused_now when `run` is called with job `<item>-retry`.",
+      "reason": "The existing pause_on_run matches the first run's job id, so it pauses after attempt one (tests/drain.rs 206-212, 681-711). The scenario needs the pause to begin with the second failure. Stub::read names a retry job `<id>-retry` (186) and Steps::paused is asked with the item id, so the entry is keyed by the item id. The Stub only supplies state; the drain logic under test is production drain::drain.",
+      "rejected": [
+        {
+          "option": "Use pause_on_run with the retry job id",
+          "why": "Its entry would be keyed `a-retry`, and Steps::paused is asked about `a`, so it would never match."
+        },
+        {
+          "option": "Make Stub::paused return a pause only after N runs",
+          "why": "A bigger change to a shared double used by many tests."
+        }
+      ]
+    },
+    {
+      "choice": "Give both new tests plan entries (planned(...)), and add a second test where c depends on a.",
+      "reason": "Without entries, batches_for (2701-2711) works items one at a time and the planned path is not covered. The existing paused-line tests (596-743) use planned entries. With a Paused end the run goes on, and drain_with calls prepare again before the next wave (2832-2837). prepare holds back every item that depends on a paused id (2041-2064), and pass_over_paused prints c's line (2115-2123). This re-plan is now the only thing that keeps c from running after a, so it needs a test.",
+      "rejected": [
+        {
+          "option": "Test only the independent a/b case",
+          "why": "Leaves the per-wave re-plan, which now carries the dependency hold, unproven."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add the `paused_reason` helper; use it at the job boundary (replacing 1745-1752) and before `return ItemEnd::Failed` (1812-1814) to return ItemEnd::Paused. Update the module-docs bullet (about 26-32), the Stop::RepeatedFailure doc comment (about 942-944) and meaning() (about 1001).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the Stub field `pause_on_retry` with its handling in Stub::run, and two new tests (independent next item; dependent held back), both with plan entries. Existing tests are not edited.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under Unreleased / Fixed naming the root cause and the change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-cli/src/drain.rs lines 1725-1816 (attempts), 2041-2064 and 2115-2123 (prepare hold, pass_over_paused), and 2348-2422 (finish).",
+    "In drain.rs add `fn paused_reason(&self, item: &Item) -> Option<String>` next to `attempts`, wrapping `self.steps.paused(std::slice::from_ref(&item.job)).into_iter().next().map(|(_, reason)| reason)`. Replace the inline lookup at 1745-1752 with `if let Some(reason) = self.paused_reason(item) { return ItemEnd::Paused(reason); }`.",
+    "At the loop's give-up (`failures >= ATTEMPTS`, 1812), return `ItemEnd::Paused(reason)` when `self.paused_reason(item)` is Some (comment: the last failure may itself have paused the line, and that is not a repeated failure), else `ItemEnd::Failed`. Do not touch ATTEMPTS, the unread rule or finish.",
+    "Update the docs in drain.rs: in the module bullet (about 26-32) say the same question is asked after the last failed attempt, so an item whose second failure paused its line is passed over and the batch goes on. In the Stop::RepeatedFailure doc comment and meaning() say that a failure of an item whose line is paused does not stop the batch; keep the label and the `the same item failed twice` / `the item is named` wording.",
+    "In tests/drain.rs add `pause_on_retry: Option<(&'static str, &'static str)>` to Stub (near pause_on_run, line 94) and in Stub::run (near 206) push (item, reason) into `paused_now` when `job == format!(\"{item}-retry\")`. After the test ending at line 711, add the two new tests (independent next item; c depends on a) with planned(...) entries, as set out in demonstrations 1 and 5.",
+    "Add the CHANGELOG.md entry under Unreleased / Fixed: a batch no longer stops as a repeated failure when the item's second failure paused its line; the item is passed over with the pause reason and the next item runs. Root cause: attempts returned Failed after the last failure without asking whether it had paused the line, and finish stopped the batch. Unpaused repeated failures still stop the batch.",
+    "Run `cargo fmt --all`, then `cargo test -p athena-cli --test drain`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "The pause may come from an item whose line was paused earlier for another reason, so an item that really failed twice is passed over, not stopped on.",
+      "mitigation": "That is the requested behavior: the pause is the scope guard's own record for the item's line, and the passed-over line carries its reason, so nothing is hidden. Unpaused items still stop the batch (criterion 2)."
+    },
+    {
+      "risk": "A passed-over item also appears in Report.jobs with two failed job lines and in report.queued, so a report reader may think it failed.",
+      "mitigation": "This matches the existing paused-by-own-attempt path (tests/drain.rs 681-711). The new test asserts the job lines and the passed-over line; display::drain still shows each failed job's outcome."
+    },
+    {
+      "risk": "The Stub extension changes a shared double used by many tests.",
+      "mitigation": "The new field is an Option that defaults to None, and existing Stub literals use `..Stub::default()` (for example tests/drain.rs 597-607), so they compile unchanged."
+    },
+    {
+      "risk": "Items that depend on the passed-over item could run if the per-wave re-plan failed to hold them, since Failed no longer stops the run.",
+      "mitigation": "The held-back rule lives in prepare (2041-2064), the same one that holds dependents of a line paused before the run. The new dependency test (c depends on a) proves it for the pause-after-second-failure case."
+    },
+    {
+      "risk": "CHANGELOG.md is 300 KB, and the entry might land under the wrong release heading.",
+      "mitigation": "Step 6 tells the producer to read the top of the file (`## [Unreleased]` near line 8, first `### Fixed` near 165) and place the entry inside Unreleased."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Drain::attempts return value (ItemEnd::Failed versus ItemEnd::Paused after the last failure)",
+      "dependent": "crates/athena-cli/src/drain.rs Drain::work (about 1713) and take_until_done (about 2436), the callers of attempts, reached by drain::drain (2663) and drain_concurrent (2674) through drain_with",
+      "kind": "code",
+      "test": "drain_passes_over_an_item_whose_second_failure_pauses_its_line_and_runs_the_next_item (new) for the paused case; the_same_item_failing_twice_is_a_repeated_failure_naming_the_item for the unpaused case. Both modes share Drain::work, and Steps::paused is read the same way in each.",
+      "reason": null
+    },
+    {
+      "name": "ItemEnd::Paused and ItemEnd::Failed handling",
+      "dependent": "Drain::finish (drain.rs 2348-2422): the Paused arm calls pass_over; Failed calls set_stop(Stop::RepeatedFailure)",
+      "kind": "code",
+      "test": null,
+      "reason": "finish is not edited. Paused already passes the item over without a stop, and the passed_over set keeps it to one line per item per run (pass_over, 1368-1376)."
+    },
+    {
+      "name": "Per-wave re-plan after a passed-over item (what holds back items that depend on it)",
+      "dependent": "drain_with (drain.rs 2832-2837) calls prepare (1925) and pass_over_paused (2115) before each wave; prepare holds every item that depends on a paused id (2041-2064); batches_for (2695-2711) skips what plan.refused holds. Before this change Failed stopped the run (finish 2379) so a dependent never ran; now the loop goes on and this re-plan is the only guard.",
+      "kind": "code",
+      "test": "drain_passes_over_an_item_whose_second_failure_pauses_its_line_and_holds_back_what_depends_on_it (new): c depends on a; c is not read or run, gets one `depends on a, which is held back: its line is paused` line, b lands, stop is not RepeatedFailure. Existing drain_holds_the_items_that_depend_on_an_item_of_a_paused_line (714) covers the same hold for a line paused before the run.",
+      "reason": null
+    },
+    {
+      "name": "Stop::RepeatedFailure rendering and Report.failed_item",
+      "dependent": "crates/athena-cli/src/display.rs display::drain (617-623)",
+      "kind": "code",
+      "test": null,
+      "reason": "A paused item sets neither the stop nor failed_item (set_stop is only called from the Failed arm), so the renderer is unaffected. The unpaused case keeps its text, which the repeated-failure tests assert."
+    },
+    {
+      "name": "Stop::RepeatedFailure label and meaning text",
+      "dependent": "crates/athena-cli/src/main.rs (line about 254, help text `repeated failure  the same item failed twice; it is named`) and tests/drain.rs (about 1657, help lists every Stop::label; drain.rs about 4191 checks meaning is non-empty)",
+      "kind": "code",
+      "test": null,
+      "reason": "The label is unchanged. The help text is a separate literal that is not edited. meaning() gains a clause only; those tests check labels and non-emptiness."
+    },
+    {
+      "name": "Steps::paused read one more time per item at the last failure",
+      "dependent": "Real Steps::paused (scope guard) used by tests/drain.rs `drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_reading_it` (about 4377); Stub::paused (156-165)",
+      "kind": "code",
+      "test": "drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_reading_it passes unchanged.",
+      "reason": "The call is the same read-only one already made at each job boundary. The trait, the scope guard and the Stub::paused body are unchanged. An unpaused item returns an empty list."
+    },
+    {
+      "name": "Stop::RepeatedFailure for unpaused items",
+      "dependent": "Other tests naming Stop::RepeatedFailure in tests/drain.rs (for example 939, 1272, 4293, 6435, 6864, 7194), tests/steward.rs and tests/job_plan.rs",
+      "kind": "code",
+      "test": "cargo test --locked runs them all.",
+      "reason": "None of them sets Stub.paused, pause_on_run or pause_on_retry, so the new check returns None and the stop is unchanged. job_plan.rs and steward.rs are not edited."
+    },
+    {
+      "name": "Config keys, check names and host settings",
+      "dependent": "docs/system-facts.md, athena.toml, defaults.toml, workflows",
+      "kind": "rule",
+      "test": null,
+      "reason": "No config key, check name, host setting or record is added or changed. ATTEMPTS and the reader's skip-after-two-unread rule are untouched, and nothing outside drain.rs reads the item's end except through the drain's Report."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two new tests in tests/drain.rs, both driving drain::drain with the Stub and plan entries. (1) `drain_passes_over_an_item_whose_second_failure_pauses_its_line_and_runs_the_next_item`: items [\"a\",\"b\"], plan [planned(\"a\",Ladder::Implementation,&[\"src/a.rs\"],&[]), planned(\"b\",Ladder::Implementation,&[\"src/b.rs\"],&[])], outcomes [Rejected, Rejected, Landed], ratings [1], pause_on_retry Some((\"a\", pause_text(\"a\"))), limits(9.0), Stamped Ui. It asserts stub.log() == [\"read a\",\"run a\",\"reread a\",\"run a-retry\",\"read b\",\"run b\",\"land b\",\"rate\"], report.stop == Stop::QueueEmpty (so not RepeatedFailure), report.failed_item == None, report.landed == 1. (2) `drain_passes_over_an_item_whose_second_failure_pauses_its_line_and_holds_back_what_depends_on_it`: items [\"a\",\"b\",\"c\"], plan a, b, and c with depends_on [\"a\"], same outcomes and pause_on_retry. It asserts the log is the same as in (1) (c is never read or run), c has exactly one passed-over line containing `depends on a, which is held back: its line is paused`, b lands, stop is not RepeatedFailure, and failed_item is None.",
+      "command": "cargo test -p athena-cli --test drain drain_passes_over_an_item_whose_second_failure_pauses_its_line",
+      "observes": "Both tests pass: after a's second failure, b is read, run and landed, the batch ends QueueEmpty with no failed item, and in the dependency test c is held back by the per-wave re-plan and never read or run.",
+      "fails_without": "Without the re-check before `return ItemEnd::Failed`, attempts returns Failed for a, finish sets Stop::RepeatedFailure naming a, the log ends at `run a-retry`, and b is neither read nor run, so the log, stop, failed_item and landed assertions fail in both tests.",
+      "seam": "Production entry point drain::drain (drain.rs 2663), which reaches Drain::work, attempts and finish (serial) and drain_concurrent (2674) through the same drain_with. The seam is the Steps trait with the existing Stub in tests/drain.rs injected as `&stub`; Stub::paused (156-165) already reads `paused_now`. The new `pause_on_retry` field and its few lines in Stub::run are added by plan step 5. The Stub only records state; no drain logic is in it. The planned() and pause_text() helpers exist."
+    },
+    {
+      "criterion": 2,
+      "method": "Run the existing, unmodified repeated-failure tests: the_same_item_failing_twice_is_a_repeated_failure_naming_the_item (tests/drain.rs 1047) and a_job_that_does_not_land_twice_still_ends_as_repeated_failure_when_the_config_is_readable (1073, not-landed variant), plus the other tests with `repeated_failure` in the name. Their Stub has no paused, pause_on_run or pause_on_retry entry, so the new check finds nothing.",
+      "command": "cargo test -p athena-cli --test drain repeated_failure",
+      "observes": "The tests pass unchanged: Stop::RepeatedFailure naming a, report.jobs.len() == 2, and the text `repeated failure: item a failed twice`.",
+      "fails_without": "If the re-check passed over every failure, not only a paused one, these tests would fail on the stop reason and failed_item.",
+      "seam": "drain::drain with the existing Stub (exists); the tests are not edited."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the three checks Athena runs on the result.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass. Also run `cargo clippy --all-targets --locked -- -D warnings` (clean) and `cargo fmt --all --check` (no diff).",
+      "fails_without": "A compile error, a lint (for example an unused Stub field), or a changed existing test would show here.",
+      "seam": "The whole workspace test suite; nothing injected."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the drain.rs diff: the helper, one re-check before `return ItemEnd::Failed`, and the doc and meaning() text. Look for cause classification or key masking (none expected).",
+      "command": "git diff -- crates/athena-cli/src/drain.rs",
+      "observes": "A diff of a few dozen lines. The module-docs bullet on a paused line being passed over (lines 26-32) says the check is also made after the last failed attempt. The Stop::RepeatedFailure doc comment (942-944) and meaning() (about 1001) say that a failure of an item whose line is paused does not stop the batch. The Stop::ALL test (drain.rs about 4191) still sees a non-empty meaning.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "The first new test also asserts the passed-over line with the Stamped Ui: `ui.lift_lines(\"a\")` has exactly one entry; it starts with `plan       a passed over: line a is paused`, contains `To lift it: narrow the request`, and its runs-before count is 2 (printed after a's two runs, before b ran). It asserts display::drain(&report) does not repeat it (lift_mentions(&text, \"a\") == 0) and report.jobs holds two lines for item a. The second test asserts c's single passed-over line as in criterion 1.",
+      "command": "cargo test -p athena-cli --test drain drain_passes_over_an_item_whose_second_failure_pauses_its_line",
+      "observes": "One passed-over line with the pause reason, printed once, after a's two runs and before b ran.",
+      "fails_without": "Without the fix no passed-over line is printed for a, because finish sets the stop instead, so the one-line assertion fails.",
+      "seam": "Same drain::drain entry point and the existing `Stamped` Ui (tests/drain.rs about 552) injected as `&ui`; it exists today."
+    },
+    {
+      "criterion": 6,
+      "method": "List the changed files and confirm none is athena.toml, defaults.toml, a workflow or the scope guard, and that `const ATTEMPTS: u32 = 2;` (drain.rs about 243) and the reader's `unread >= 2` rule (1770) are untouched.",
+      "command": "git diff --stat",
+      "observes": "Only crates/athena-cli/src/drain.rs, crates/athena-cli/tests/drain.rs and CHANGELOG.md are changed, and `git diff -- crates/athena-cli/src/drain.rs` shows no edit to ATTEMPTS or the unread branch.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "e4cacff6cfe73438966e630efc267bd46ebdc682e0391c59857680138aa82d51"
+}
