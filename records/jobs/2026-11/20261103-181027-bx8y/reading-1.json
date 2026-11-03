@@ -1,0 +1,144 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261103-181027-bx8y",
+  "n": 1,
+  "at": "2026-11-03T18:12:05.543253529Z",
+  "invocation_seq": 1,
+  "base_commit": "84645909e97af3ddcd89a66343446362f1892c34",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Don't stop a batch on repeated failure of an item already paused",
+  "summary": "In the drain, when an item reaches its second failure (ATTEMPTS) and the scope guard has paused its line, end it as a passed-over paused item and go on to the next queued item, instead of Stop::RepeatedFailure. Unpaused items keep the existing stop. Job 20261103-162416-m9th (cause classification, key masking) is dropped; this is its smallest version. Audience: operators running batches.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New test plus existing tests; cargo test and clippy pass."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the drain, with no cause classification."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The criteria run the drain through Stub and check the stop reason and the next item's run."
+    },
+    {
+      "id": "root-cause",
+      "how": "The unconditional RepeatedFailure stop in finish/attempts is fixed, not one instance."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test for the drain tests."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/drain.rs. Drain::attempts (about line 1725) counts failures and returns ItemEnd::Failed at ATTEMPTS (1811-1814). It already checks Steps::paused before each read (1745-1752) and returns ItemEnd::Paused. Drain::finish (2348) turns ItemEnd::Failed into set_stop(Stop::RepeatedFailure) unconditionally (2379). The gap: an item's second failure can itself pause its line, and no check follows the last failure. The fix is one re-check of Steps::paused before returning Failed (or in finish); no failure classification. Tests: crates/athena-cli/tests/drain.rs, with the existing paused-line test at line 644, repeated-failure tests at 1047 and 1073, and the Stub steps with a `paused` field. No record or data file is added.",
+    "Job 20261103-162416-m9th: its four findings (Err classed as shared, invented stub text, missing id-wrapping unit test, round-3 planning stop) concern the cause classification and failure_key masking. The request tells us not to reclassify by cause, so they no longer apply and that plan is dropped. It left no candidate, so there are no changed files to keep or drop.",
+    "A paused item is recorded through the existing ItemEnd::Paused path (a 'passed over' line), and not counted as a failure.",
+    "The test Stub needs a paused list that changes after the item's runs fail; this may need a small Stub extension in tests/drain.rs.",
+    "CHANGELOG.md gets a one-line entry if the repo convention requires it."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/tests/drain.rs: item a fails twice, the scope guard then reports its line paused, and drain::drain runs the next queued item. It asserts the next item is read, run and landed, report.stop is not Stop::RepeatedFailure, and report.failed_item is None. Check with `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The existing repeated-failure tests for an unpaused item (the_same_item_failing_twice_is_a_repeated_failure_naming_the_item and the not-landed variant) still pass unchanged: Stop::RepeatedFailure naming the item. Check with `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo test` passes, `cargo clippy --all-targets` is clean and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The diff to crates/athena-cli/src/drain.rs is small and has no failure-cause classification or key masking. The module docs and the Stop::RepeatedFailure description say that a failure of an item whose line is paused does not stop the batch. Verifiable with `git diff`.",
+      "kind": "content"
+    },
+    {
+      "text": "The paused item's second failure is recorded in the run output (a passed-over line with the pause reason) and not silently dropped. The new test asserts that line.",
+      "kind": "content"
+    },
+    {
+      "text": "No change to athena.toml, defaults.toml, workflows, the scope guard itself, ATTEMPTS, or the reader's skip-after-two-unread rule.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.05
+    }
+  ],
+  "out_of_scope": [
+    "Reclassifying failures by cause, shared vs per-item, or failure_key masking (job 20261103-162416-m9th's plan)",
+    "Changing the scope guard or how it pauses lines",
+    "Changing ATTEMPTS or the reader's skip-after-two-unread rule",
+    "Changes to athena.toml, defaults.toml, or workflows",
+    "Changing environment stops such as rebuild failure, budget, job limit, or reinstall",
+    "Changes to docs/ beyond doc comments in drain.rs, and to crates/athena-cli/tests/job_plan.rs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.78,
+      "p_verification_passes": 0.72,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 400.0,
+        "p50": 1500.0,
+        "p90": 3600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.718961038961039,
+      "p_verification_passes": 0.6746031746031746,
+      "p_user_intervenes": 0.091725768321513,
+      "cost_usd": {
+        "p10": 0.5582334999999999,
+        "p50": 1.3349033000000003,
+        "p90": 3.6205314
+      },
+      "wall_time_s": {
+        "p10": 535.8751759928582,
+        "p50": 1930.4523788498045,
+        "p90": 4196.314673179986
+      }
+    }
+  },
+  "departures": "Small, well-located change with a clear seam, so slightly higher pass probability and lower cost than the reference.",
+  "urgent_reason": "Batches stopped twice today with money and job slots left; this removes the wasted stops.",
+  "hard_reason": "This changes a rule that can stop or hold a batch: the repeated-failure stop in the drain.",
+  "producer_effort": "high"
+}
