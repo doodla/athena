@@ -2354,6 +2354,7 @@ pub(crate) mod planning_cost_tests {
             files: vec![],
             steps: vec![],
             risks: vec![],
+            dependents: vec![],
             demonstrations: vec![],
             open_questions: vec![],
             producer_section_sha256: "0".repeat(64),

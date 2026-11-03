@@ -376,6 +376,13 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 "files": [{ "path": FAKE_DELIVERABLE, "action": "create", "purpose": "Hold the request." }],
                 "steps": [format!("Create {FAKE_DELIVERABLE}.")],
                 "risks": [],
+                "dependents": [{
+                    "name": FAKE_DELIVERABLE,
+                    "dependent": "nothing reads the new file",
+                    "kind": "code",
+                    "test": null,
+                    "reason": "The fake planner creates a new file that no code reads."
+                }],
                 "demonstrations": demonstrations,
                 "open_questions": []
             }))

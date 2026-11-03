@@ -2458,6 +2458,10 @@ fn plan_with(approach: &str) -> serde_json::Value {
         "files": [{ "path": "README.md", "action": "modify", "purpose": "Hold the greeting." }],
         "steps": ["Edit README.md."],
         "risks": [],
+        "dependents": [{
+            "name": "README.md", "dependent": "nothing reads the README", "kind": "code",
+            "test": null, "reason": "The README is documentation only."
+        }],
         "demonstrations": [demo(1), demo(2)],
         "open_questions": []
     })
