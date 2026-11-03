@@ -547,6 +547,35 @@ impl PriorityRecord {
     }
 }
 
+/// `athena.focus/1`: what the user wants worked on now, at `records/focus/focus-<n>.json`.
+/// Records are never rewritten; the latest one (highest `n`) is the current focus.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FocusRecord {
+    /// 1 for the first focus record, then counting up.
+    pub n: u32,
+    pub at: Timestamp,
+    /// The focus, in the user's words.
+    pub text: String,
+    /// Who set it (the git user name).
+    pub set_by: String,
+}
+
+impl FocusRecord {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.n == 0 {
+            return Err("a focus record is numbered from 1".into());
+        }
+        if self.text.trim().is_empty() {
+            return Err("a focus record has text".into());
+        }
+        if self.set_by.trim().is_empty() {
+            return Err("a focus record says who set it".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Owner {
@@ -2629,6 +2658,8 @@ pub enum AnyRecord {
     Correction(Correction),
     #[serde(rename = "athena.priority/1")]
     Priority(PriorityRecord),
+    #[serde(rename = "athena.focus/1")]
+    Focus(FocusRecord),
     #[serde(rename = "athena.job/1")]
     Job(Box<Job>),
     #[serde(rename = "athena.invocation/1")]
@@ -2718,6 +2749,7 @@ impl AnyRecord {
         match &record {
             AnyRecord::Reading(r) => r.validate().map_err(invalid)?,
             AnyRecord::Priority(p) => p.validate().map_err(invalid)?,
+            AnyRecord::Focus(f) => f.validate().map_err(invalid)?,
             AnyRecord::Candidate(c) if c.base_fingerprint.is_some() || c.previous_job.is_some() => {
                 return Err(invalid(
                     "athena.candidate/1 has no base_fingerprint or previous_job; use athena.candidate/2"
@@ -2802,6 +2834,7 @@ impl AnyRecord {
             AnyRecord::Reading(r) => format!("{}/reading-{}.json", r.job.dir(), r.n),
             AnyRecord::Correction(r) => format!("{}/correction-{}.json", r.job.dir(), r.n),
             AnyRecord::Priority(r) => format!("{}/priority-{}.json", r.job.dir(), r.n),
+            AnyRecord::Focus(r) => format!("records/focus/focus-{}.json", r.n),
             AnyRecord::Job(r) => format!("{}/job.json", r.id.dir()),
             AnyRecord::Invocation(r) => {
                 format!(
@@ -2895,6 +2928,7 @@ impl AnyRecord {
             AnyRecord::Reading(_) => "athena.reading/1",
             AnyRecord::Correction(_) => "athena.correction/1",
             AnyRecord::Priority(_) => "athena.priority/1",
+            AnyRecord::Focus(_) => "athena.focus/1",
             AnyRecord::Job(_) => "athena.job/1",
             AnyRecord::Invocation(_) => "athena.invocation/1",
             AnyRecord::Candidate(_) => "athena.candidate/1",
@@ -3091,6 +3125,46 @@ mod tests {
         assert!(text.contains("\"schema\": \"athena.reading/1\""));
         let back = AnyRecord::parse("x", text.as_bytes()).unwrap();
         assert_eq!(back, record);
+    }
+
+    fn focus(n: u32, text: &str, set_by: &str) -> FocusRecord {
+        FocusRecord {
+            n,
+            at: ts(),
+            text: text.into(),
+            set_by: set_by.into(),
+        }
+    }
+
+    #[test]
+    fn a_focus_record_has_a_path_a_schema_and_round_trips() {
+        let record = AnyRecord::Focus(focus(1, "speed first", "Ada"));
+        assert_eq!(record.schema(), "athena.focus/1");
+        assert_eq!(record.canonical_path(), "records/focus/focus-1.json");
+        let text = record.to_json();
+        assert!(text.contains("\"schema\": \"athena.focus/1\""));
+        assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), record);
+        let checked = check_record_file("records/focus/focus-1.json", text.as_bytes()).unwrap();
+        assert_eq!(checked, Some(record));
+        assert!(matches!(
+            check_record_file("records/focus/focus-2.json", text.as_bytes()),
+            Err(RecordError::Misplaced { .. })
+        ));
+    }
+
+    #[test]
+    fn a_focus_record_with_no_text_no_author_or_no_number_is_refused() {
+        for bad in [
+            focus(1, "  ", "Ada"),
+            focus(1, "speed first", ""),
+            focus(0, "speed first", "Ada"),
+        ] {
+            let record = AnyRecord::Focus(bad);
+            assert!(matches!(
+                check_record_file(&record.canonical_path(), record.to_json().as_bytes()),
+                Err(RecordError::Invalid { .. })
+            ));
+        }
     }
 
     fn sample_candidate() -> Candidate {

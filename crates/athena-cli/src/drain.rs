@@ -114,6 +114,13 @@
 //!   [`Report::restart`] holds what is left of the budget and job limit; [`follow_restart`] hands those to the
 //!   new binary (`athena drain` again, see [`reexec_args`]), which carries on with the queue. A stop asked for
 //!   meanwhile wins, and a run with no budget or no job limit left ends as such instead of restarting.
+//! - **A landed config the running build cannot read is not a failure.** Right after a landing the drain asks
+//!   [`Steps::config_after_landing`]. The config was readable when the run started, so if it is not now, the
+//!   landing added something only a newer build understands (a new key, for instance). The job stays
+//!   `landed`, no failure is counted, and the run ends with [`Stop::NeedsReinstall`] before another item
+//!   starts; a note carries the read error and says to reinstall Athena and run the drain again. If the same
+//!   landing also rebuilt and installed Athena, the new binary reads the config and the stop is
+//!   [`Stop::Rebuilt`].
 //!
 //! The loop ([`drain`]) holds every rule and calls the world through [`Steps`], so tests drive it with a
 //! stub and no model, no GitHub and no network:
@@ -518,6 +525,13 @@ pub trait Steps {
     /// do not hold the disk. The default removes nothing, as for steps that have no state directory.
     fn reclaim_interrupted(&self) {}
     fn land(&self, job: &str) -> Landing;
+    /// Why the configuration at the branch head cannot be read, asked only right after a [`Landing::Landed`].
+    /// The configuration was readable when the run started, so a landing that makes it unreadable has brought
+    /// in something this build does not understand (a key or section from a newer Athena). The default is
+    /// that it can be read, as for steps with no configuration.
+    fn config_after_landing(&self) -> Option<String> {
+        None
+    }
     fn rate(&self) -> Rate;
     /// Checks every text input of the page against the pinned source, with a model call per study. It is asked
     /// only when a rating reaches the target after a landing that changed the outcome, and the target is met
@@ -542,6 +556,16 @@ pub trait Steps {
     /// holds the item unless a landed job is linked to it as its retry. The default is no history, so every
     /// dependency outside the queue counts as done.
     fn job_history(&self) -> Vec<JobEnd> {
+        Vec::new()
+    }
+    /// How many items the plan keeps at urgent and at high (`[priority_caps]`); items over a cap are demoted one
+    /// tier in memory when the plan is built. The default is no cap, so the plan follows the items' own tiers.
+    fn priority_caps(&self) -> athena_core::plan::TierCaps {
+        athena_core::plan::TierCaps::UNLIMITED
+    }
+    /// The queued jobs whose priority a person set with a priority record. A plan never demotes them. The
+    /// default is none.
+    fn person_set(&self) -> Vec<String> {
         Vec::new()
     }
     /// Whether the user asked the loop to stop. It is asked only between jobs, never during one, so a job
@@ -924,10 +948,14 @@ pub enum Stop {
     /// A landing changed Athena's own code and the rebuild failed. Nothing more starts, and
     /// [`Report::rebuild_output`] holds the build output.
     RebuildFailed,
+    /// A job landed and its `athena.toml` can no longer be read by the running build, because the landing
+    /// added something only a newer build understands. The job stays landed and no failure is counted; nothing
+    /// more starts, and the user reinstalls Athena and runs the drain again.
+    NeedsReinstall,
 }
 
 impl Stop {
-    pub const ALL: [Stop; 8] = [
+    pub const ALL: [Stop; 9] = [
         Stop::TargetMet,
         Stop::BudgetSpent,
         Stop::RepeatedFailure,
@@ -936,6 +964,7 @@ impl Stop {
         Stop::Requested,
         Stop::Rebuilt,
         Stop::RebuildFailed,
+        Stop::NeedsReinstall,
     ];
 
     pub fn label(self) -> &'static str {
@@ -948,6 +977,7 @@ impl Stop {
             Stop::Requested => "stop requested",
             Stop::Rebuilt => "rebuilt",
             Stop::RebuildFailed => "rebuild failed",
+            Stop::NeedsReinstall => "reinstall needed",
         }
     }
 
@@ -970,6 +1000,9 @@ impl Stop {
             }
             Stop::RebuildFailed => {
                 "a landing changed Athena's own code and rebuilding it failed; the build output follows and the rest stays queued"
+            }
+            Stop::NeedsReinstall => {
+                "a job landed and its athena.toml needs a newer Athena than the one running; the job is landed and not a failure, so reinstall Athena (./setup.sh) and run the drain again"
             }
         }
     }
@@ -1067,6 +1100,9 @@ struct State {
     rebuild_due: bool,
     /// The build output of a failed rebuild.
     rebuild_output: Option<String>,
+    /// Why the configuration could not be read after a landing ([`Steps::config_after_landing`]); set together
+    /// with [`Stop::NeedsReinstall`].
+    unreadable_config: Option<String>,
     /// What the planning pass spent reading an item, charged to that item's job line when it runs.
     read_cost: std::collections::BTreeMap<String, f64>,
     /// Why the run is ending, once any worker has found a reason (the first reason found stands), and the
@@ -1622,6 +1658,17 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     }
                     st.landings.push(changed);
                 }
+                // The configuration was readable when the run started, so if it is not now, the landing is
+                // what changed it. A newer schema cannot be told cheaply from other damage, so any read
+                // error here is taken as "the landed config is newer than this build". The stop is set
+                // under the landing lock, before another worker can start an item that would read it.
+                if let Some(why) = self.steps.config_after_landing() {
+                    self.ui.line(&format!(
+                        "drain      {job} landed, but its athena.toml cannot be read by this build; stopping, reinstall Athena"
+                    ));
+                    self.st().unreadable_config = Some(why);
+                    self.set_stop(Stop::NeedsReinstall, None);
+                }
                 self.wake.notify_all();
                 if !outcome {
                     self.ui.line(&format!(
@@ -2005,9 +2052,30 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             .filter(|e| !forced.iter().any(|f| f.id == e.id) && !held.contains_key(&e.id))
             .cloned()
             .collect();
-        let mut plan = Plan::build_with(&entries, &self.steps.job_history());
+        // Items over a priority cap are demoted one tier in memory; the order is judged against the tiers it
+        // was built from, so a demotion is not reported as a contradiction.
+        let (mut plan, entries) = Plan::build_capped(
+            &entries,
+            &self.steps.job_history(),
+            self.steps.priority_caps(),
+            &self.steps.person_set(),
+        );
         for contradiction in plan.priority_violations(&entries) {
             self.note_once(format!("plan order contradicts priority: {contradiction}"));
+        }
+        for d in &plan.demoted {
+            let title = entries
+                .iter()
+                .find(|e| e.id == d.id)
+                .map_or("", |e| e.title.as_str());
+            self.note_once(format!(
+                "demoted {} · {title} from {} to {}: over the {} cap of {}",
+                d.id,
+                d.from.as_str(),
+                d.to.as_str(),
+                d.from.as_str(),
+                d.cap
+            ));
         }
         plan.refused.extend(forced);
         // In queue order, so the list does not depend on the map.
@@ -2204,6 +2272,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 notes: Vec::new(),
                 rebuild_due: false,
                 rebuild_output: None,
+                unreadable_config: None,
                 read_cost: Default::default(),
                 stop: None,
                 ahead: BTreeMap::new(),
@@ -2266,6 +2335,18 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 let Some(rebuilt) = self.rebuild_if_due() else {
                     return;
                 };
+                let unreadable = matches!(self.st().stop, Some((Stop::NeedsReinstall, _)));
+                if unreadable {
+                    // Rating reads the config this running build cannot parse, so it is skipped.
+                    if rebuilt {
+                        // The installed binary is now the newer build, which reads the landed config: the
+                        // restart carries on, so the reinstall advice no longer applies.
+                        let mut st = self.st();
+                        st.stop = Some((Stop::Rebuilt, None));
+                        st.unreadable_config = None;
+                    }
+                    return;
+                }
                 if let Some(reason) = self.rate() {
                     self.set_stop(reason, None);
                 }
@@ -2760,6 +2841,12 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         st.notes.push(line);
     }
     let (mut stop, failed_item) = st.stop.clone().unwrap_or((Stop::QueueEmpty, None));
+    if stop == Stop::NeedsReinstall {
+        let why = st.unreadable_config.clone().unwrap_or_default();
+        st.notes.push(format!(
+            "the landed athena.toml could not be read by this build ({why}); the job is landed and no failure is counted. Reinstall Athena (./setup.sh in the checkout) and run `athena drain` again"
+        ));
+    }
     // A rebuilt Athena carries on with what is left, unless there is nothing left or a stop was asked for.
     let mut restart = None;
     if stop == Stop::Rebuilt {
@@ -3294,6 +3381,32 @@ impl Steps for RealSteps<'_> {
             .unwrap_or_default()
     }
 
+    fn priority_caps(&self) -> athena_core::plan::TierCaps {
+        let caps = self
+            .athena
+            .head()
+            .and_then(|head| athena_core::capability::JobConfig::at(&self.athena.git, &head))
+            .map(|jc| jc.config.priority_caps())
+            .unwrap_or_default();
+        athena_core::plan::TierCaps {
+            urgent: caps.urgent as usize,
+            high: caps.high as usize,
+        }
+    }
+
+    fn person_set(&self) -> Vec<String> {
+        self.records()
+            .map(|records| {
+                records
+                    .jobs
+                    .iter()
+                    .filter(|(_, job)| !job.priorities.is_empty())
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn approve(&self, proposal: &str) -> Approval {
         match self.athena.approve_in_limit(proposal, self.ui) {
             Ok(p) => Approval {
@@ -3458,6 +3571,19 @@ impl Steps for RealSteps<'_> {
         // attempt, which sets the row again.
         self.table_result(self.table().remove(job));
         landing
+    }
+
+    fn config_after_landing(&self) -> Option<String> {
+        // Any read error here is taken as "the landed config is newer than this build": the config was
+        // readable before the landing (`caps` parsed it at the start), so the landing is what changed it.
+        // The error text is kept so damage of another kind stays visible in the report.
+        let head = match self.athena.head() {
+            Ok(head) => head,
+            Err(error) => return Some(format!("{error:#}")),
+        };
+        athena_core::capability::JobConfig::at(&self.athena.git, &head)
+            .err()
+            .map(|error| format!("{error:#}"))
     }
 
     fn in_flight(&self) -> Vec<String> {
@@ -3713,6 +3839,111 @@ mod tests {
         }
     }
 
+    /// Steps that only list a queue of `(id, priority)` entries, oldest first, with urgent capped at 3.
+    struct Capped {
+        queue: Vec<(&'static str, athena_core::plan::Priority)>,
+        person_set: Vec<String>,
+    }
+
+    impl Steps for Capped {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Ok(Caps {
+                read: 0.5,
+                run: 1.0,
+                rate: 0.5,
+            })
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            Ok(QueueView {
+                items: self
+                    .queue
+                    .iter()
+                    .map(|(id, _)| Item::queued(id, id))
+                    .collect(),
+                plan: self
+                    .queue
+                    .iter()
+                    .map(|(id, priority)| PlanEntry {
+                        goal: format!("goal of {id}"),
+                        rung: Some(athena_data::roles::Ladder::Implementation),
+                        acceptance: vec![format!("{id} works")],
+                        touches: vec![format!("src/{id}.rs")],
+                        priority: *priority,
+                        ..PlanEntry::bare(id, id)
+                    })
+                    .collect(),
+                ..QueueView::default()
+            })
+        }
+        fn priority_caps(&self) -> athena_core::plan::TierCaps {
+            athena_core::plan::TierCaps {
+                urgent: 3,
+                high: 10,
+            }
+        }
+        fn person_set(&self) -> Vec<String> {
+            self.person_set.clone()
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn read(&self, _: ReadOf<'_>) -> Read {
+            panic!("every entry is complete, so nothing is read");
+        }
+        fn run(&self, _: &str) -> Run {
+            panic!("planning runs nothing");
+        }
+        fn land(&self, _: &str) -> Landing {
+            panic!("planning lands nothing");
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("stub")
+        }
+        fn check_cap(&self) -> f64 {
+            0.5
+        }
+        fn rate(&self) -> Rate {
+            panic!("planning rates nothing");
+        }
+    }
+
+    #[test]
+    fn a_plan_demotes_over_the_cap_with_one_note_each_and_no_false_contradiction() {
+        use athena_core::plan::Priority::{High, Urgent};
+        let steps = Capped {
+            queue: vec![
+                ("h0", High),
+                ("u1", Urgent),
+                ("u2", Urgent),
+                ("u3", Urgent),
+                ("u4", Urgent),
+                ("u5", Urgent),
+            ],
+            person_set: vec!["u5".into()],
+        };
+        let report = plan(&steps, 1.0, &Quiet).unwrap();
+        // The person-set item keeps its tier; the two newest others drop. They are planned after the older
+        // high item, which would read as a contradiction if the order were judged by their original tier.
+        assert_eq!(report.plan.order[..3], ["u1", "u2", "u5"]);
+        let demoted: Vec<&str> = report.plan.demoted.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(demoted, ["u3", "u4"]);
+        let lines: Vec<&String> = report
+            .notes
+            .iter()
+            .filter(|n| n.starts_with("demoted "))
+            .collect();
+        assert_eq!(lines.len(), 2, "{:?}", report.notes);
+        assert!(lines[0].starts_with("demoted u3 · u3 from urgent to high"));
+        assert!(
+            !report.notes.iter().any(|n| n.contains("contradicts")),
+            "{:?}",
+            report.notes
+        );
+    }
+
     fn limits(budget: f64) -> Limits {
         Limits {
             budget_usd: budget,
@@ -3924,6 +4155,7 @@ mod tests {
             assert!(!stop.label().is_empty() && !stop.meaning().is_empty());
         }
         assert!(Stop::QueueEmpty.meaning().contains("not success"));
+        assert!(Stop::NeedsReinstall.meaning().contains("reinstall"));
     }
 }
 

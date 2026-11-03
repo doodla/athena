@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-015346-82n3",
+  "round": 2,
+  "at": "2026-11-03T02:01:21.38156277Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The plan does not say which items count toward a cap, and it does not pin how dependency raising interacts with demotion.",
+      "evidence": "The plan ranks the non-person-set items using `plan.order` from the uncapped build. Refused, cyclic and held items are not in `order`, and the plan never says they are left out of the cap count. `effective_priorities` (plan.rs:465) can also lift a demoted item back to urgent when an urgent item depends on it. Open question 5 mentions this, but no test pins it. Fix: State that only items in the uncapped `plan.order` count toward a cap. Add one unit test where a demoted urgent item is a prerequisite of a kept urgent item, and assert what `demoted` and the order show, so the one-line-per-demotion rule holds in that case too.",
+      "location": "Decision 2 / step 5 (build_capped urgent and high passes)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new `priority_caps` name sits close to the existing `Steps::caps`.",
+      "evidence": "`Steps` already has a `caps()` method (drain.rs:2856, `let caps = steps.caps()?;`), and `drain::plan` binds the result to a local named `caps`. A new `priority_caps` default method, plus a local with a similar name in `Drain::prepare`, invites confusion with the existing caps. Fix: Keep the method name `priority_caps`, and call the local `tier_caps` or something similar so it does not shadow or look like the existing `caps` binding.",
+      "location": "Decision 8 / step 8 (Steps::priority_caps naming)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The criterion 7 check runs a git command, but readers have no git.",
+      "evidence": "`git diff -- CHANGELOG.md` assumes a git repository, but readers get a plain copy with no git (system facts). Fix: Phrase the check as reading the Unreleased section of CHANGELOG.md, or Grep for `athena focus` and `priority_caps` in it.",
+      "location": "Demonstration for criterion 7",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code, using Read and Grep only. The functions and lines it names exist: `priority_violations` at plan.rs:490, `build`/`build_with` at 520 and 532, `Plan` derives Default (plan.rs:409), `Drain::prepare` calls `build_with` then `priority_violations(&entries)` at drain.rs:2008-2010, `note_once` at 1313, `RealSteps::live` at 3108, `Git::config_get` at athena-git lib.rs:586, and notes print as `note        {note}` at display.rs:605 and 719. The change starts where the fault is: capping sits in a pure function on Plan, and `Drain::prepare`, which both `athena plan` and `drain` use, calls it. Checking violations against the capped entries avoids false contradiction notes. \"Person-set\" means any job with a priority record, which matches `Job::priority()`; reading.rs:2413 already treats such a record as the user's word. Every demonstration runs the real thing: the binary on a Fixture repo, `Plan::build_capped` on plain entries, or `drain::plan` with `RealSteps`. Each would fail if the behavior were missing. The one test-only Steps double returns only fixed caps, and the capping logic runs in production code. The new athena.toml table ships with its config.rs schema field as an Option, so reading digests do not change. The work fits one producer run. The findings are minor: what counts toward a cap, and how dependency raising interacts with demotion; a name that sits close to the existing `Steps::caps`; and a git command in a demonstration where readers have no git."
+}

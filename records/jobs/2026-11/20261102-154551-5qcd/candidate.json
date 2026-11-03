@@ -1,0 +1,128 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261102-154551-5qcd",
+  "base_commit": "6726f7de66afe15fb5c67e303c971f843511914c",
+  "base_fingerprint": "sha256:04d1581642cc23571c8173d4de9279a6a34f447b94a2c1865d9504b0b0ccb956",
+  "previous_job": "20261031-215030-b0nv",
+  "candidate_commit": "2459a2426afe2880b8181eda57191f8e2b03127a",
+  "candidate_tree": "572f98a431127cade22af813a49f9ef724e04e66",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 290876
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 3075
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 35451
+    },
+    {
+      "path": "xtask/src/shard.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28198
+    },
+    {
+      "path": "xtask/tests/ci_shards.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31033
+    },
+    {
+      "path": "xtask/tests/shard_parts.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 3264
+    }
+  ],
+  "fingerprint": "sha256:10133d1d05d88edf215bae4f2f57c120b29b29baa5731dcaa86e36e27d302f48",
+  "violations": [],
+  "producer_report": {
+    "summary": "`xtask test-shard` can now split one test binary into parts by test-name prefix, and athena-core's `--lib` is split into five parts. They are `gh::`, `reading::`, `run::` plus `run_pin_tests::`, `hestia::` plus `status::` plus `steward::`, and a catch-all that skips all of those, so a new module still runs exactly once. Each part is its own unit in the balancer. Its `--dry-run` line is `athena-core --lib -- <filter>` and it runs as `cargo test --locked -p athena-core --lib -- <filter>`.\\n\\nI replaced the single athena-core line in `xtask/shard-timings.txt` with five estimated part lines summing to 255s, and put the measured times for lifecycle, drain, retry and job_plan on their own lines. I added a CHANGELOG entry with the before numbers.\\n\\nThe new ci_shards tests cover every name from the live `--list` against the parts. Dropped, duplicated and leaky-catch-all mutations are rejected. `shard_parts.rs` checks that the parts are in at least two shards, that the part estimates sum to about 255s, and that no shard exceeds the mean plus the largest non-part unit.\\n\\nThe ci_shards and shard_parts tests and the policy scan passed after the last edit. fmt and clippy on xtask were clean. The new shard.rs unit tests passed in the first full xtask run. I did not re-run the full xtask suite after the timing fix.\\n\\nThe part times are estimates, not measurements. A real `cargo run -p xtask -- shard-timings` run would replace them.\"",
+    "files": [
+      "xtask/src/shard.rs",
+      "xtask/src/main.rs",
+      "xtask/shard-timings.txt",
+      "xtask/tests/ci_shards.rs",
+      "xtask/tests/shard_parts.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p xtask --locked",
+        "result": "fail",
+        "note": "first run: all passed except checked_in_timings (new shard_parts test file had no timing line); fixed"
+      },
+      {
+        "command": "cargo test -p xtask --locked --test ci_shards --test shard_parts --test policy",
+        "result": "pass",
+        "note": "23 + 2 + 17 pass, run after the timing fix and the CHANGELOG edit's sibling files; the shard.rs unit tests passed in the first run"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy -p xtask --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "xtask/src/shard.rs lets a Unit carry a test-name filter (module prefixes, plus a skip-based catch-all), prints it in the `--dry-run` line, and runs it as `cargo test --locked -p athena-core --lib -- ...`; Grep shows athena-core `--lib` is no longer a single unit in xtask/shard-timings.txt but at least two part lines.",
+        "status": "met",
+        "evidence": "Unit.filter, line() and cargo_args() added in shard.rs; SPLIT_PARTS plus a --skip catch-all. shard-timings.txt has five `athena-core --lib -- ...` lines and no bare `athena-core --lib`. shard_parts.rs asserts the whole-binary line is absent."
+      },
+      {
+        "criterion": "Run `cargo run -p xtask -- test-shard K 6 --dry-run` for K=0..5: athena-core's unit-test parts appear in at least two different shards, no part appears twice, and no other target is lost or duplicated (cargo test -p xtask --test ci_shards passes).",
+        "status": "met",
+        "evidence": "shard_parts.rs runs test-shard 0..5 6 --dry-run and asserts parts are in at least 2 shards and none repeats; ci_shards (23 tests) passes, including the partition and cover tests."
+      },
+      {
+        "criterion": "A test in xtask/tests shows that every name from `cargo test -p athena-core --lib -- --list` matches the filters of exactly one part (union covers all, no overlap); run `cargo test -p xtask --test ci_shards` and it passes, and a mutated part list (dropped or duplicated prefix) is rejected by a negative test there.",
+        "status": "met",
+        "evidence": "ci_shards.rs: the_parts_of_the_core_unit_tests_run_every_test_exactly_once reads live --list names and the parts from the dry-run output; a_dropped_or_duplicated_prefix_in_the_parts_is_rejected covers a dropped prefix, a duplicated prefix and a leaky catch-all. Both pass."
+      },
+      {
+        "criterion": "xtask/shard-timings.txt lists the athena-core parts with estimated seconds summing to about 255s, notes they are estimates derived from run 41469096430, and no shard's estimated total exceeds roughly the mean plus the largest remaining single unit (lifecycle, 143.22s).",
+        "status": "met",
+        "evidence": "Parts are 60+55+35+45+60 = 255; the header notes they are estimates from run 41469096430. shard_parts.rs asserts the sum is within 5s of 255.11 and that no shard exceeds the mean plus the largest non-part unit; it passes."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for this change that states the before numbers: athena-core --lib one binary of 821 tests at 255.11s (97% of shard 0's test time), shard 0 test step 5m45s vs shard 4 1m45s, and the next slowest binaries (lifecycle 143.22s, drain 79.32s, retry 49.45s, job_plan 46.35s).",
+        "status": "met",
+        "evidence": "New first entry under Unreleased/Changed states 821 tests, 255.11s, 97%, 5m45s vs 1m45s, and lifecycle/drain/retry/job_plan times. Read back by me."
+      },
+      {
+        "criterion": "Unit tests in xtask/src/shard.rs for filtered units (assignment keeps every part exactly once, parts sort deterministically, timings round-trip with a filtered selector) pass under `cargo test -p xtask`.",
+        "status": "met",
+        "evidence": "New shard.rs tests assignment_keeps_every_part_exactly_once_for_any_n, parts_sort_deterministically_and_land_in_more_than_one_shard, timings_round_trip_with_a_filtered_selector, a_part_runs_its_filter_after_the_double_dash and a_split_package_lists_its_parts_and_no_whole_lib_unit all passed in the `cargo test -p xtask --locked` run."
+      }
+    ],
+    "open_issues": [
+      "Part times are estimates (60/55/35/45/60 s) and are not measured. Refresh them with `cargo run -p xtask -- shard-timings`.",
+      "I did not run `cargo run -p xtask -- test-shard K 6 --dry-run` by hand. The same output is checked by shard_parts.rs and ci_shards.rs.",
+      "The other timings lines still carry the old rough guesses.",
+      "The shard.rs unit tests were only run in the first full `cargo test -p xtask` run, before the timing fix."
+    ],
+    "mistakes": [
+      "The first full xtask test run failed because the new xtask/tests/shard_parts.rs target had no line in shard-timings.txt. I added one."
+    ],
+    "learnings": [
+      "ci_shards.rs compares --dry-run lines with a target oracle, so part lines had to be reduced to their target with a ` -- ` split.",
+      "Test names in athena-core are matched as substrings by libtest, so each prefix ends in `::`. The live --list check found no overlap."
+    ],
+    "desires": []
+  }
+}

@@ -1,0 +1,128 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261103-011406-wm2v",
+  "base_commit": "521f470c36a880776f6a350cf7032ff416538db3",
+  "base_fingerprint": "sha256:98cfe5da3cacc5dc44c6dbe6d4542d9b8a7f42c6bf57e6bd817e68050b66aa26",
+  "previous_job": "20261102-232736-dc7h",
+  "candidate_commit": "f23cf0586848a33ba32a12e4cd37fc84dcc3a026",
+  "candidate_tree": "d9f5f3a16744468085b23eb7b7372f5cb826a684",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 291670
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 3503
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 35441
+    },
+    {
+      "path": "xtask/src/shard.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 29319
+    },
+    {
+      "path": "xtask/tests/ci_shards.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 27404
+    },
+    {
+      "path": "xtask/tests/shard_parts.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 5137
+    }
+  ],
+  "fingerprint": "sha256:d4f70e92cd4576873361ad41d30942c3903cc31f81f8a5f2ed46640e4b21d29d",
+  "violations": [],
+  "producer_report": {
+    "summary": "test-shard can now split one test binary into parts by test-name prefix. athena-core --lib is six parts: five prefix groups plus a catch-all that skips every listed prefix, so a test in a new module still runs once. A unit carries an optional filter. The filter is part of its --dry-run line and its timings key, and it runs as `cargo test --locked -p athena-core --lib -- <filter>`. xtask/shard-timings.txt lists the six parts at about 42s each (sum 255.11s), noted as estimates from run 41469096430, apportioned by #[test] count. I also set lifecycle, drain, retry and job_plan to their measured times from that run, and added a line for the new shard_parts test file. The new xtask/tests/shard_parts.rs lists every athena-core --lib test and checks each is kept by exactly one part; it also checks that a dropped or duplicated prefix is rejected. ci_shards.rs now accepts filtered lines and rejects a target run both whole and as parts. CHANGELOG.md has the before numbers. `cargo test -p xtask` and `cargo fmt --all --check` pass. I only dry-ran shards 0 and 1 (athena-core parts showed up in shard 1); ci_shards asserts the parts reach at least two shards.",
+    "files": [
+      "xtask/src/shard.rs",
+      "xtask/src/main.rs",
+      "xtask/shard-timings.txt",
+      "xtask/tests/ci_shards.rs",
+      "xtask/tests/shard_parts.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p xtask --test shard_parts",
+        "result": "pass",
+        "note": "5 tests, including the real `--list` coverage and the dropped/duplicated-prefix negatives"
+      },
+      {
+        "command": "cargo test -p xtask",
+        "result": "pass",
+        "note": "includes the policy scan test, ci_shards and the new shard.rs unit tests"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo run -q -p xtask -- test-shard 0 6 --dry-run; cargo run -q -p xtask -- test-shard 1 6 --dry-run",
+        "result": "pass",
+        "note": "shard 1 holds the hestia/run part; shards 2-5 not dry-run by hand, covered by the ci_shards test"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "xtask/src/shard.rs lets a unit carry a test-name filter (module prefixes plus a skip-based catch-all), prints it in the --dry-run line, and runs it as `cargo test --locked -p athena-core --lib -- <filter>`; Grep of xtask/shard-timings.txt shows athena-core --lib as at least two part lines, not one.",
+        "status": "met",
+        "evidence": "Unit.filter, Filter::args, Unit::line and Unit::cargo_args in shard.rs; dry-run for shard 1 printed `athena-core --lib -- hestia:: run:: run_pin_tests::`. shard-timings.txt has six `athena-core --lib -- ...` lines; ci_shards asserts at least two."
+      },
+      {
+        "criterion": "Run `cargo run -p xtask -- test-shard K 6 --dry-run` for K=0..5: athena-core --lib parts appear in at least two different shards, no part appears twice, and every other target appears exactly once across the shards.",
+        "status": "met",
+        "evidence": "ci_shards tests test_shard_6_is_disjoint_and_equals_the_workspace_target_set (asserts parts on at least two shards, no repeated line, other targets once) and cover_accepts_the_real_shards pass. I ran K=0 and K=1 by hand only."
+      },
+      {
+        "criterion": "Run `cargo test -p xtask --test shard_parts` and `cargo test -p xtask --test ci_shards`: a test checks every name from `cargo test -p athena-core --lib -- --list` matches exactly one part's filter, and a negative test shows a dropped or duplicated prefix is rejected.",
+        "status": "met",
+        "evidence": "shard_parts: every_athena_core_lib_test_is_kept_by_exactly_one_part, a_dropped_prefix_is_rejected and a_duplicated_prefix_is_rejected all pass; ci_shards passes 21 tests."
+      },
+      {
+        "criterion": "xtask/shard-timings.txt lists the athena-core parts with estimated seconds summing to about 255s, notes they are estimates from run 41469096430, and no shard's estimated total exceeds roughly the mean plus the largest remaining single unit (lifecycle, 143.22s).",
+        "status": "met",
+        "evidence": "Part seconds 42.45+41.54+43.71+43.09+42.78+41.54 = 255.11; the header comment says estimates from run 41469096430. Greedy longest-first assignment keeps every shard at or below mean plus the largest unit by construction (the existing timed-balance unit test passes). I did not compute the six shard totals."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry with the before numbers: athena-core --lib one binary of 821 tests at 255.11s (97% of shard 0's test time), shard 0 test step 5m45s vs shard 4 1m45s, and the next slowest binaries lifecycle 143.22s, drain 79.32s, retry 49.45s, job_plan 46.35s.",
+        "status": "met",
+        "evidence": "The first bullet under Unreleased / Changed carries all those numbers."
+      },
+      {
+        "criterion": "Run `cargo test -p xtask`: unit tests in xtask/src/shard.rs for filtered units (assignment keeps every part exactly once, deterministic part ordering, timings round-trip with a filtered selector) pass.",
+        "status": "met",
+        "evidence": "`cargo test -p xtask` passes with 57 unit tests, including assignment_keeps_every_part_exactly_once_and_spreads_them, part_order_is_deterministic_and_sorted and timings_round_trip_with_a_filtered_selector."
+      }
+    ],
+    "open_issues": [
+      "Part estimates are shared out by #[test] count, not measured per part; refresh with `cargo run -p xtask -- shard-timings` for real figures.",
+      "Only the four binaries named in the request carry measured times; the rest of the timings file is still the older guessed values."
+    ],
+    "mistakes": [
+      "The first full xtask test run failed because I had not yet added a timings line for the new shard_parts test file and test_shard_1_equals_the_workspace still compared whole lines; I fixed both."
+    ],
+    "learnings": [
+      "xtask is a binary crate, so integration tests cannot import shard.rs; shard_parts.rs and ci_shards.rs read `test-shard --dry-run` output and re-implement libtest's filter rules independently.",
+      "libtest filters are substring matches, so a prefix like `plan::` would also hit `job_plan::`; the real-list coverage test is what guards that.",
+      "A new xtask/tests/*.rs file needs a line in shard-timings.txt, or checked_in_timings_cover_every_workspace_test_unit fails.",
+      "cargo test -p xtask --test policy runs inside `cargo test -p xtask` and passed."
+    ],
+    "desires": []
+  }
+}

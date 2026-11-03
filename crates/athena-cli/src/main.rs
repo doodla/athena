@@ -201,6 +201,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Set what to work on now, or print the current focus. With text, appends a focus record (the latest one
+    /// is the current focus) and prints it; with no text, prints the current focus. `athena status` shows it.
+    Focus {
+        /// What to focus on, in a few words. Leave it out to print the current focus.
+        text: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Run a proposed job to its end, read a queued one, or retry the landing of a blocked one.
     Go {
         job: String,
@@ -251,6 +259,8 @@ and the page text passed the source check
 and installed (the steps of ./setup.sh); the new binary carries on with the remaining --budget and --job-limit, \
 so a run is not seen to end here
   rebuild failed    that rebuild failed; the build output is shown and the rest stays queued
+  reinstall needed  a job landed and its athena.toml needs a newer Athena than the one running (a new key, for \
+instance); the job is landed and not a failure; reinstall Athena (./setup.sh) and run the drain again
 
 Order: planning comes first. Every open request is fleshed out (goal, requirements-ladder rung, acceptance, \
 open questions, dependencies, the paths it touches) and all of them are planned together. Drain works the \
@@ -286,7 +296,9 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
     /// paths, then the items held back, each with its reason. The planning pass is deterministic code, not a
     /// model call. It does read unread requests whose own words leave the plan incomplete (a reading is a model
     /// call, capped by `[budget] reader_usd` each and by --budget in all, with no run reserved); `--budget 0` reads
-    /// nothing. A request it reads stays queued for `athena drain`.
+    /// nothing. A request it reads stays queued for `athena drain`. At most `[priority_caps]` items (default 3
+    /// urgent, 10 high) keep their tier: the rest are demoted one tier for this plan only, each reported on a
+    /// `note` line, and an item whose priority a person set with `athena priority` is never demoted.
     Plan {
         /// The most to spend reading unread requests, in US dollars.
         #[arg(long, value_name = "USD", default_value_t = 2.0, value_parser = parse_read_budget)]
@@ -1096,6 +1108,20 @@ fn run(cli: Cli) -> Result<u8> {
                 print_json(&serde_json::json!({ "job": id.as_str(), "priority": priority }))?;
             } else {
                 println!("{id} is now {} priority", priority.as_str());
+            }
+            Ok(0)
+        }
+        Command::Focus { text, json } => {
+            let athena = open(true)?;
+            let current = match text {
+                Some(text) => Some(athena.set_focus(&text)?),
+                None => athena.focus()?,
+            };
+            match (current, json) {
+                (Some(focus), true) => print_json(&focus)?,
+                (Some(focus), false) => println!("{}", focus.text),
+                (None, true) => print_json(&serde_json::Value::Null)?,
+                (None, false) => println!("no focus is set; set one with: athena focus \"<text>\""),
             }
             Ok(0)
         }

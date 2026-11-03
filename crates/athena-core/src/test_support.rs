@@ -655,24 +655,132 @@ pub fn land_through_pr(
     })
 }
 
+/// What a [`CiReplies`] fake says about the push run on a job's CI branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiAnswer {
+    /// A finished run for the commit asked about, whose jobs all passed.
+    Green,
+    /// No run on the branch.
+    NoRun,
+}
+
+/// A `gh` runner for tests that give a repository a GitHub origin: it answers the two reads of the CI source
+/// (the runs of a branch and the jobs of a run) from the request path, as the host's filters would, and keeps
+/// every path it was asked for. Nothing reaches a network. Install it with [`install_github_fakes`].
+#[derive(Debug)]
+pub struct CiReplies {
+    answer: CiAnswer,
+    /// The `repos/...` paths asked for, in order.
+    pub asked: RefCell<Vec<String>>,
+}
+
+impl CiReplies {
+    pub fn new(answer: CiAnswer) -> std::rc::Rc<CiReplies> {
+        std::rc::Rc::new(CiReplies {
+            answer,
+            asked: RefCell::new(Vec::new()),
+        })
+    }
+}
+
+impl crate::gh::Runner for CiReplies {
+    fn gh(&self, args: &[String]) -> Result<String> {
+        let path = args
+            .iter()
+            .find(|a| a.starts_with("repos/"))
+            .context("a repos path")?;
+        self.asked.borrow_mut().push(path.clone());
+        let job = |name: &str| serde_json::json!({ "name": name, "status": "completed", "conclusion": "success" });
+        if path.contains("/jobs") {
+            let jobs = match self.answer {
+                CiAnswer::Green => vec![
+                    job("fmt"),
+                    job("clippy"),
+                    job("test (linux)"),
+                    job("fmt, clippy, tests"),
+                ],
+                CiAnswer::NoRun => Vec::new(),
+            };
+            return Ok(serde_json::json!({ "jobs": jobs }).to_string());
+        }
+        if self.answer == CiAnswer::NoRun {
+            return Ok(serde_json::json!({ "workflow_runs": [] }).to_string());
+        }
+        let query = path.split_once('?').map_or("", |(_, query)| query);
+        let param = |key: &str| {
+            query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix(format!("{key}=").as_str()))
+                .with_context(|| format!("no {key} in {path}"))
+        };
+        Ok(serde_json::json!({ "workflow_runs": [{
+            "id": 4242, "name": "ci", "event": "push", "head_branch": param("branch")?,
+            "head_sha": param("head_sha")?, "status": "completed", "conclusion": "success",
+            "html_url": "https://github.com/owner/repo/actions/runs/4242",
+            "created_at": "2026-11-01T06:00:00Z", "updated_at": "2026-11-01T06:05:00Z"
+        }] })
+        .to_string())
+    }
+}
+
+/// Keeps the fakes of [`install_github_fakes`] installed; dropping it clears them.
+pub struct GithubFakes {
+    _early: crate::gh::early_seam::Guard,
+    _ci: crate::run::ci_seam::Guard,
+}
+
+impl std::fmt::Debug for GithubFakes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GithubFakes").finish_non_exhaustive()
+    }
+}
+
+/// Puts `early` in place of the remote and the pull-request host, and `ci` in place of `gh` for the CI read,
+/// for `Athena::go` on this thread, with a sleeper that spends no time. A test that gives its repository a
+/// GitHub origin installs these first and keeps the result for the whole run, so nothing reaches github.com.
+pub fn install_github_fakes(
+    early: std::rc::Rc<EarlyFake>,
+    ci: std::rc::Rc<CiReplies>,
+) -> GithubFakes {
+    GithubFakes {
+        _early: crate::gh::early_seam::install(early.clone(), early),
+        _ci: crate::run::ci_seam::install(ci, std::rc::Rc::new(|_| {})),
+    }
+}
+
 /// A free-space reader that reports a very large disk, so a test does not depend on the host's free space.
 /// Install it with [`StateDir::with_free_space`].
 pub fn plenty_of_space(_: &Path) -> std::io::Result<u64> {
     Ok(1_000_000_000_000_000)
 }
 
+/// Whether some job in the state root `state` has passed its checks: its resume mark (`kept/<id>/resume.json`)
+/// is at the verifier stage, which Athena writes once every check passed and just before the gate that
+/// measures the disk for the verifier. The verifier's snapshot (`jobs/<id>/verify`) cannot tell this, since it
+/// is made before the checks run. A mark that does not parse counts as not reached.
+pub fn verifier_stage_reached(state: &Path) -> bool {
+    let dir = StateDir::new(state.to_path_buf());
+    std::fs::read_dir(state.join("kept"))
+        .map(|dirs| {
+            dirs.flatten()
+                .filter_map(|e| JobId::parse(e.file_name().to_str()?).ok())
+                .any(|id| {
+                    dir.read_resume(&id)
+                        .is_some_and(|mark| mark.stage == crate::state::ResumeStage::Verifier)
+                })
+        })
+        .unwrap_or(false)
+}
+
 /// A free-space reader for a job that clears the gate before its checks and stops at the gate before its
-/// verifier: plenty of space until a job's `verify` directory exists (the verifier's snapshot, made after the
-/// checks), 3 GB then, unless a file named `freed` lies in the state root. Install it with
-/// [`StateDir::with_free_space`]; create `<state root>/freed` to let a retry through.
+/// verifier: plenty of space until a job's checks have passed ([`verifier_stage_reached`]), 3 GB then, unless
+/// a file named `freed` lies in the state root. Install it with [`StateDir::with_free_space`]; create
+/// `<state root>/freed` to let a retry through.
 pub fn low_once_verifying(state: &Path) -> std::io::Result<u64> {
     if state.join("freed").exists() {
         return plenty_of_space(state);
     }
-    let verifying = std::fs::read_dir(state.join("jobs"))
-        .map(|dirs| dirs.flatten().any(|e| e.path().join("verify").exists()))
-        .unwrap_or(false);
-    if verifying {
+    if verifier_stage_reached(state) {
         Ok(3_000_000_000)
     } else {
         plenty_of_space(state)
@@ -700,9 +808,11 @@ pub fn low_once_baselined(state: &Path) -> std::io::Result<u64> {
     }
 }
 
-/// A free-space reader for a job that clears the gate at dispatch and stops at the gate before its checks:
-/// plenty of space until a job's producer has left a build directory (`target/produce`), 3 GB then, unless a
-/// file named `freed` lies in the state root. Pair it with a script whose producer leaves that directory.
+/// A free-space reader for a job whose own writer build takes the space: plenty until a job's producer has
+/// left a build directory (`target/produce`), 3 GB while it exists, unless a file named `freed` lies in the
+/// state root. Pair it with a script whose producer leaves that directory. The job's own build is removed
+/// before the free-disk check of its checks, so that check finds plenty; only a build that something else
+/// holds keeps the space low.
 pub fn low_once_built(state: &Path) -> std::io::Result<u64> {
     if state.join("freed").exists() {
         return plenty_of_space(state);
@@ -723,7 +833,7 @@ pub fn low_once_built(state: &Path) -> std::io::Result<u64> {
 /// What a [`recording_plenty_space`] call saw in the state root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpaceProbe {
-    /// Some job has a `verify` directory: the checks ran, and the verifier's snapshot exists.
+    /// Some job has a `verify` directory: the verifier's snapshot exists, which is made before the checks run.
     pub verifying: bool,
     /// Some job has a `target/produce` directory.
     pub produce_present: bool,

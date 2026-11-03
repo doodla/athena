@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-015346-82n3",
+  "round": 1,
+  "at": "2026-11-03T01:58:57.796911421Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "After capping, `priority_violations` is still run against the original uncapped entries, so each demotion produces a false 'plan order contradicts priority' note.",
+      "evidence": "drain.rs:2008-2011 builds the plan from `entries` and then calls `plan.priority_violations(&entries)`, noting each result. plan.rs:614-617 orders ready items by effective priority, then `(rung, age)`. A demoted urgent item, now high, can be placed after a native high item with an earlier rung or age. `priority_violations` (plan.rs:490-513) reads the urgent priority from the unmodified entries and reports '<id> (urgent) is planned after <id> (high)'. The plan changes only the `build_with` call and does not mention this check. Fix: Have `build_capped` return the capped entries it built from, or check violations against them, and pass those to `priority_violations` in `Drain::prepare`. Add a test: 5 urgent items plus one older native high item, run through `Drain::prepare`, with no contradiction note.",
+      "location": "Plan step 8 / Decision 2; crates/athena-cli/src/drain.rs lines 2008-2011",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Person-set items can themselves be demoted when there are more of them than the cap. This breaks the reading's rule that a person's priority record always keeps its item at that tier.",
+      "evidence": "The accepted reading says: 'A person's priority record always keeps its item at that tier.' Decision 1 ranks person-set items first and then keeps only the first `cap`. With 4 person-set urgent items and a cap of 3, one of them drops to high. The plan rejects 'demote person-set first' because it 'contradicts ... the rule that a person's record wins', but its own design breaks that rule in this case. The criterion 3 and 4 tests use only one person-set item, so they cannot show this. Fix: Never demote person-set items. They count toward the cap first, and only non-person-set items fill or drop from what remains. If person-set items alone exceed the cap, the tier holds more than the cap and nothing is demoted from them. Add a unit test with cap+1 person-set items at a tier and assert that none of them appear in `plan.demoted`.",
+      "location": "Decision 1 / Step 5 (ranking keeps the first `cap`, the rest drop)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say what `set_focus` does when git user.name is unset. In that case `set_by` is empty and record validation fails with an unclear error.",
+      "evidence": "Criterion 6 requires a non-empty `set_by`. The plan leaves open how user.name is read and does not define the behavior when it is missing. Fix: State that `athena focus` fails with a clear message naming the missing git user.name before it writes anything. Optionally add a test for this.",
+      "location": "Step 6 / Open question on git user.name",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Whether `drain` reports demotions is left undecided.",
+      "evidence": "Step 8 says 'note a demotion with `note_once` or leave it to the plan lines.' `display::plan` covers `athena plan`, but a `drain` run would show nothing unless one option is chosen. Fix: Pick one option, for example one `note_once` per demotion in `Drain::prepare`, so that `drain` output also explains why the order changed.",
+      "location": "Step 8 (`note_once` or leave it to the plan lines)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read drain.rs (`Drain::prepare` at line 1862, `Steps` at line 507), plan.rs (`Plan`, `build_with`, `priority_violations`, `effective_priorities`), store.rs (`Records::load` and its job-owned fallback that panics at line 363), the `PriorityRecord` struct in records.rs, reading.rs around `set_priority`, and commits.rs. The plan reads the request correctly and places the change where the behavior starts. It works around the struct literals and fake `Steps` in tests it cannot edit, keeps reading digests unchanged, and handles the panic risk in `Records::load`. Its demonstrations go through the real binary, `Plan::build_capped` and `drain::plan` with `RealSteps`, not stand-ins. Two design faults remain. First, `Drain::prepare` would check the capped plan's order against the uncapped entries, so every real demotion triggers a false \"plan order contradicts priority\" note. Second, the keep-order ranking demotes a person-set item whenever more person-set items share a tier than the cap allows. That breaks the reading's rule that a person's priority record always keeps its item at its tier, and no planned test would catch it. Both can be fixed inside the plan, so the verdict is revise."
+}

@@ -1,0 +1,197 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261102-205332-qv3s",
+  "n": 1,
+  "at": "2026-11-03T01:53:26.329560784Z",
+  "invocation_seq": 5,
+  "base_commit": "aefd4e5f05066f0d98d170eaf2cf1f31a70dff7b",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Hand verifier failing tests and log tail from a red reused CI run",
+  "summary": "When the checks stage reuses a red GitHub CI run, Athena reads the failing shard job's log via the gh client and records the cargo 'failures:' test names and the log tail on the failed CheckRun (failed_tests, output_tail). The verifier brief then shows them and tells the verifier to run only those tests (cargo test -p <crate> <name>) unless it has reason to run more. The audience is the verifier, which today runs out of budget.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes and tests are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests cover the red-run record and the brief; existing tests stay green."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check names and tail appearing in the record and brief, not that wiring exists."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and CHANGELOG written for an outside reader."
+    },
+    {
+      "id": "small",
+      "how": "One focused change inside the named crates."
+    },
+    {
+      "id": "public",
+      "how": "Log text is redacted before recording."
+    },
+    {
+      "id": "root-cause",
+      "how": "The verifier gets the data at the source (the reused red run) instead of a longer budget."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier exercises the new tests with cargo test."
+    },
+    {
+      "id": "mechanism",
+      "how": "Behavior is enforced by tests."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/ci_result.rs (CiRecord/Step/CiRun carry only fixed fields, no log), crates/athena-core/src/routing.rs (run_routed_with_record: resolve() then runs_from_record for a Source::Ci record, so reuse happens before any local fallback; red CI gives Outcome::Failed), crates/athena-core/src/checks.rs (runs_from_record at ~306 builds CheckRun with empty failed_tests and output_tail; failed_tests/output_tail extraction for local runs at ~480-512), crates/athena-core/src/gh/client.rs (failing_test_name(log) at ~154, already used at ~559; CiBranchSource/ci_source ~750-800; parse_ci_run), crates/athena-core/src/run/checks.rs (SnapExec), crates/athena-core/src/run/mod.rs (CheckRun construction ~1537), crates/athena-core/src/verify.rs (failed_tests used for baseline comparison at ~138-160 and ~335), and crates/athena-context/src/briefs.rs (verifier brief, uses output_tail/check_runs).",
+    "Existing: CheckRun in crates/athena-data/src/records.rs already has failed_tests: Vec<String> and output_tail: String, so no new record field or data file is expected; the records validation allow-list and AnyRecord round trip should be unaffected. If a field is added, the producer must cover it with the existing round-trip test.",
+    "Setting failed_tests on a reused red check also feeds verify.rs baseline logic (failing tests that also failed on base), status.rs, reading.rs carried-check output, introspect.rs and run/send_back.rs; each needs a test or a stated reason it is unaffected. This list goes in the CHANGELOG or the producer's plan before planning.",
+    "The shard log is fetched through the existing gh Runner/GhClient (a fake Runner in tests); a failure to fetch or parse the log degrades to today's behavior (failed record without names), never a crash or a pass.",
+    "Log text is data: names and tail are redacted and clipped like local output tails before being recorded."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in crates/athena-core using a fake gh Runner that returns a red run for the SHA and a failing shard job log containing a cargo 'failures:' list shows the failed CheckRun (via run_routed_with_record) has passed=false, failed_tests equal to the listed names, and a non-empty output_tail holding the last lines of the log. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test builds the verifier input/brief from that failed check record and asserts the brief text contains the failing test names and the log tail, and the instruction to run only the failing tests with cargo test -p <crate> <name> unless there is a reason to run more. Run: cargo test -p athena-context -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that when the shard log cannot be read or has no 'failures:' list, the reused red check is still recorded as failed with empty failed_tests, and a green reused run is unchanged (no log fetch, no names).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Changes are confined to crates/athena-core (ci_result, gh, run/checks, routing/checks, verification brief) and crates/athena-context briefs, plus CHANGELOG.md; git diff --stat shows no other paths.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing that reused red CI runs now give the verifier failing test names and the log tail.",
+      "kind": "content"
+    },
+    {
+      "text": "The producer's change lists every other reader of the check record and the verifier brief (verify.rs baseline comparison, status.rs, reading.rs carried output, introspect.rs, run/send_back.rs, athena-context outputs.rs/lib.rs, athena-cli tests) each with a test that covers it or a one-line reason it is unaffected; Grep for each of those readers confirms the claimed handling.",
+      "kind": "content"
+    },
+    {
+      "text": "Existing tests for local check output tails and for failed_tests baseline comparison in verify.rs still pass, showing the new data does not change verdict logic for local runs. Run: cargo test -p athena-core verify.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/gh/mod.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    }
+  ],
+  "out_of_scope": [
+    "Fetching logs for green runs or for non-test failures such as fmt and clippy beyond recording their log tail where trivial",
+    "Changing the verifier's time budget or the verdict rules",
+    "Changing the CI workflow files or athena.toml",
+    "Adding a new record type or data file"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2100.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7201044386422977,
+      "p_verification_passes": 0.674863387978142,
+      "p_user_intervenes": 0.09333333333333332,
+      "cost_usd": {
+        "p10": 0.5539095930409164,
+        "p50": 1.3035242,
+        "p90": 3.616462410896199
+      },
+      "wall_time_s": {
+        "p10": 544.4413564344393,
+        "p50": 1897.4230370624894,
+        "p90": 4118.501743612438
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass odds than reference: the change spans two crates, a gh log fetch, and the verifier brief, plus an inventory of other readers.",
+  "urgent_reason": "Cuts verifier timeouts that end with no verdict, caused by rerunning the whole suite to find the failing test.",
+  "hard_reason": "Changes the run pipeline's checks stage and the verifier's brief, which decide what the verifier checks and how a job closes.",
+  "producer_effort": "high"
+}

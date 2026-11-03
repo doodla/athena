@@ -32,6 +32,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// A stub world: a scripted queue, outcomes, landings and ratings, and a log of every call in order.
@@ -93,6 +94,9 @@ struct Stub {
     pause_on_run: Option<(&'static str, &'static str)>,
     /// Pauses that began during the drain.
     paused_now: RefCell<Vec<(String, String)>>,
+    /// When set, the configuration cannot be read once a landing has happened, with this read error: the
+    /// landing added something only a newer build understands.
+    config_unreadable_after_landing: Option<&'static str>,
 }
 
 impl Stub {
@@ -250,6 +254,10 @@ impl Steps for Stub {
                 changed: paths.into_iter().map(String::from).collect(),
             }
         }
+    }
+    fn config_after_landing(&self) -> Option<String> {
+        // Asked only after a landing, so the stub need not check that it was.
+        self.config_unreadable_after_landing.map(String::from)
     }
     fn check_page(&self) -> Check {
         self.log.borrow_mut().push("check".into());
@@ -1059,6 +1067,87 @@ fn the_same_item_failing_twice_is_a_repeated_failure_naming_the_item() {
         "{text}"
     );
     assert!(text.contains("rejected"), "{text}");
+}
+
+#[test]
+fn a_job_that_does_not_land_twice_still_ends_as_repeated_failure_when_the_config_is_readable() {
+    let stub = Stub {
+        items: vec!["a", "b"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![5]),
+        unlandable: vec!["a"],
+        config_unreadable_after_landing: None,
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::RepeatedFailure);
+    assert_eq!(report.failed_item.as_deref(), Some("a"));
+    assert_eq!(report.landed, 0);
+    let text = display::drain(&report);
+    assert!(
+        text.contains("repeated failure: item a failed twice"),
+        "{text}"
+    );
+    assert!(!text.contains("reinstall"), "{text}");
+}
+
+/// What the stub's read error says when the landed config holds something this build does not know.
+const NEWER_CONFIG: &str = "athena.toml: unknown field `brand_new_key`";
+
+#[test]
+fn a_landing_whose_config_the_running_build_cannot_read_ends_the_run_with_a_reinstall_note_not_a_failure()
+ {
+    let stub = Stub {
+        items: vec!["a", "b"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1, 1]),
+        config_unreadable_after_landing: Some(NEWER_CONFIG),
+        ..Stub::default()
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    let text = display::drain(&report);
+    assert_eq!(report.stop, Stop::NeedsReinstall, "{text}");
+    assert_ne!(report.stop, Stop::RepeatedFailure);
+    assert_eq!(report.failed_item, None, "{text}");
+    assert_eq!(report.landed, 1, "{text}");
+    // The job is recorded as landed, and no job line is a failure.
+    assert_eq!(report.jobs.len(), 1, "{text}");
+    assert_eq!(report.jobs[0].outcome, "passed", "{text}");
+    assert_eq!(report.jobs[0].landing, "landed", "{text}");
+    // Nothing more started and the page was not rated (rating reads the unreadable config).
+    assert_eq!(stub.log(), ["read a", "run a", "land a"]);
+    // What the user sees says to reinstall, and carries the read error.
+    assert!(text.contains("stopped     reinstall needed"), "{text}");
+    assert!(
+        report.notes.iter().any(|n| n.contains(NEWER_CONFIG)
+            && n.contains("Reinstall Athena")
+            && n.contains("athena drain")),
+        "{:?}",
+        report.notes
+    );
+    assert!(!text.contains("repeated failure"), "{text}");
+    assert!(!text.contains("failed twice"), "{text}");
+}
+
+#[test]
+fn a_landing_with_an_unreadable_config_that_also_rebuilt_athena_ends_as_rebuilt_not_reinstall() {
+    let stub = Stub {
+        config_unreadable_after_landing: Some(NEWER_CONFIG),
+        ..rebuilding(Ok(()))
+    };
+    let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+    let text = display::drain(&report);
+    // The installed binary is the newer build now, so the reinstall advice would be wrong.
+    assert_eq!(report.stop, Stop::Rebuilt, "{text}");
+    assert_eq!(rebuilds(&stub), 1);
+    assert!(report.restart.is_some(), "{text}");
+    assert!(!text.contains("Reinstall Athena"), "{text}");
+    assert_eq!(report.jobs[0].landing, "landed", "{text}");
+    assert!(
+        !stub.log().contains(&"rate".to_string()),
+        "{:?}",
+        stub.log()
+    );
 }
 
 #[test]
@@ -1932,18 +2021,17 @@ fn low_disk_before_the_checks_holds_the_job_and_a_retry_with_space_runs_the_chec
     );
 }
 
-/// Free space that drops once verification has started: plenty until a job has a verifier snapshot
-/// (`jobs/<id>/verify`), which exists only after the pre-checks gate, so the checks have run when it turns low.
-/// This is what a build filling the disk during the checks looks like to the gate.
+/// Free space that drops once the checks have passed: plenty until a job's resume mark is at the verifier
+/// stage (`athena_core::test_support::verifier_stage_reached`), which is written after the checks. This is what
+/// a build filling the disk during the checks looks like to the gate before the verifier.
 fn low_once_verifying(state: &Path) -> std::io::Result<u64> {
-    let verifying = std::fs::read_dir(state.join("jobs"))
-        .map(|dirs| dirs.flatten().any(|e| e.path().join("verify").exists()))
-        .unwrap_or(false);
-    Ok(if verifying {
-        3_000_000_000
-    } else {
-        500_000_000_000
-    })
+    Ok(
+        if athena_core::test_support::verifier_stage_reached(state) {
+            3_000_000_000
+        } else {
+            500_000_000_000
+        },
+    )
 }
 
 #[test]
@@ -2004,6 +2092,244 @@ fn low_disk_after_the_checks_holds_the_job_before_the_verifier_runs() {
         athena_core::disk::read_hold(&athena.state, &job),
         Some(*low)
     );
+}
+
+// --- the free-disk check of the checks stage: after the job's own build is removed, and only before a
+// check runs here ---
+
+/// A free-space reader for the checks-gate tests. Only 3 GB are free while some job still has its producer's
+/// build directory (`target/produce`), or has made its verifier snapshot (`verify`) and its checks have not
+/// passed yet (`verifier_stage_reached`); plenty otherwise, and always plenty once `<state>/freed` exists.
+/// So space is low through the writer build and the checks stage, then recovers.
+fn low_while_built_or_checking(state: &Path) -> std::io::Result<u64> {
+    const LOW: u64 = 3_000_000_000;
+    const PLENTY: u64 = 500_000_000_000;
+    if state.join("freed").exists() {
+        return Ok(PLENTY);
+    }
+    let any_job_has = |inside: &str| {
+        std::fs::read_dir(state.join("jobs"))
+            .map(|dirs| dirs.flatten().any(|e| e.path().join(inside).exists()))
+            .unwrap_or(false)
+    };
+    let checking =
+        any_job_has("verify") && !athena_core::test_support::verifier_stage_reached(state);
+    Ok(if any_job_has("target/produce") || checking {
+        LOW
+    } else {
+        PLENTY
+    })
+}
+
+/// A script whose producer leaves a build directory (`jobs/<job>/target/produce/debug/big`) behind, as a real
+/// writer build does, under the state directory `state`.
+fn script_leaving_a_build(state: std::path::PathBuf) -> Script {
+    let inner = Scenario::default().script();
+    Box::new(move |spec| {
+        if spec.role == Role::Producer {
+            let build = state
+                .join("jobs")
+                .join(&spec.job)
+                .join("target/produce/debug");
+            std::fs::create_dir_all(&build).unwrap();
+            std::fs::write(build.join("big"), vec![7u8; 100_000]).unwrap();
+        }
+        inner(spec)
+    })
+}
+
+#[test]
+fn low_disk_from_the_writer_build_is_cleared_before_the_checks_gate_so_the_job_is_not_held() {
+    let fx = disk_fixture();
+    let mut athena = fx.athena(script_leaving_a_build(fx.state.path().join("repo")));
+    athena.state = athena
+        .state
+        .clone()
+        .with_free_space(athena_core::test_support::low_once_built);
+    let lines = Lines::default();
+    let job = athena
+        .ask("add a greeting to the readme", &lines)
+        .unwrap()
+        .job;
+
+    // The writer build alone takes the free space under the 10 GB minimum. With the build removed first the
+    // gate finds enough, so the job is not held and the checks run to a verdict.
+    let result = athena
+        .go(job.as_str(), AcceptedBy::User, &lines)
+        .expect("the job is not held for the disk");
+    let GoResult::Finished(finished) = result else {
+        panic!("expected the job to finish");
+    };
+    assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+    assert!(
+        !athena.state.produce_dir(&job).exists(),
+        "the build is gone"
+    );
+    let said = lines_of(&lines);
+    let removed = position(&said, "disk       removed the producer's build directory");
+    let checks = position(&said, "checks     ");
+    assert!(removed < checks, "{said:#?}");
+    assert!(
+        !said.iter().any(|l| l.starts_with("held       ")),
+        "{said:#?}"
+    );
+}
+
+const GITHUB: &str = "https://github.com/owner/repo";
+
+/// One `go` of a job whose repository checks with the three names of the CI workflow (so the route reads the
+/// CI result first), under [`low_while_built_or_checking`], with the writer build left behind. `origin` is the
+/// repository's `origin` remote (none when `None`). With one, the fake remote and host and a fake `gh`
+/// answering `answer` are installed for the whole run, so nothing reaches a network.
+struct GateRun {
+    fx: Fixture,
+    athena: Athena,
+    job: athena_data::JobId,
+    lines: Lines,
+    result: anyhow::Result<GoResult>,
+    early: Rc<athena_core::test_support::EarlyFake>,
+    replies: Rc<athena_core::test_support::CiReplies>,
+}
+
+fn gate_run(origin: Option<&str>, answer: athena_core::test_support::CiAnswer) -> GateRun {
+    let ok = "echo 'test result: ok. 1 passed; 0 failed; 0 ignored'";
+    let config = with_min_free_gb(
+        &config_with_change_checks(&[
+            ("fmt", &["sh", "-c", "true"]),
+            ("clippy", &["sh", "-c", "true"]),
+            ("test", &["sh", "-c", ok]),
+        ]),
+        10,
+    );
+    let fx = Fixture::with_config(&config);
+    if let Some(url) = origin {
+        fx.git.run(["remote", "add", "origin", url]).unwrap();
+    }
+    let mut athena = fx.athena(script_leaving_a_build(fx.state.path().join("repo")));
+    athena.state = athena
+        .state
+        .clone()
+        .with_free_space(low_while_built_or_checking);
+    let lines = Lines::default();
+    let job = athena
+        .ask("add a greeting to the readme", &lines)
+        .unwrap()
+        .job;
+    let early = athena_core::test_support::EarlyFake::new(|| 0);
+    let replies = athena_core::test_support::CiReplies::new(answer);
+    let _fakes = athena_core::test_support::install_github_fakes(early.clone(), replies.clone());
+    let result = athena.go(job.as_str(), AcceptedBy::User, &lines);
+    GateRun {
+        fx,
+        athena,
+        job,
+        lines,
+        result,
+        early,
+        replies,
+    }
+}
+
+impl GateRun {
+    /// The error of a job held for the disk, with the same state checks for each hold: the job is dispatched
+    /// with no outcome, the hold is recorded, no check ran, and the verifier's snapshot is gone.
+    fn assert_held_before_the_local_run(&self) {
+        let error = self.result.as_ref().expect_err("held for the disk");
+        let low = error
+            .downcast_ref::<athena_core::disk::LowDisk>()
+            .expect("a low-disk hold, not another error");
+        assert_eq!((low.free, low.required), (3_000_000_000, 10_000_000_000));
+        let said = lines_of(&self.lines);
+        assert!(
+            !said.iter().any(|l| l.starts_with("checks     ")),
+            "no check ran: {said:#?}"
+        );
+        // The writer build went first, then the gate looked and held.
+        let removed = position(&said, "disk       removed the producer's build directory");
+        let held = position(&said, "held       ");
+        assert!(removed < held, "{said:#?}");
+        assert!(!self.athena.state.produce_dir(&self.job).exists());
+        assert!(!self.athena.state.job_dir(&self.job).join("verify").exists());
+        assert_eq!(
+            athena_core::disk::read_hold(&self.athena.state, &self.job),
+            Some(*low)
+        );
+        let records = Records::load(&self.fx.git, &self.fx.head()).unwrap();
+        let held = &records.jobs[self.job.as_str()];
+        assert_eq!(held.state(), JobState::Dispatched, "held, not failed");
+        assert!(held.outcome.is_none() && held.latest_score().is_none());
+    }
+
+    /// Space comes back: `athena retry` reads the job again and its run goes on to the checks and lands.
+    fn assert_a_retry_with_space_runs_the_checks(&self) {
+        std::fs::write(self.athena.state.root().join("freed"), "").unwrap();
+        let lines = Lines::default();
+        let (proposal, _) = self.athena.retry(self.job.as_str(), &lines).unwrap();
+        assert_ne!(proposal.job, self.job);
+        let _fakes = athena_core::test_support::install_github_fakes(
+            self.early.clone(),
+            self.replies.clone(),
+        );
+        let result = self
+            .athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &lines)
+            .unwrap();
+        let GoResult::Finished(finished) = result else {
+            panic!("expected the retried job to finish");
+        };
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        assert!(
+            lines_of(&lines)
+                .iter()
+                .any(|l| l.starts_with("checks     ")),
+            "the checks ran"
+        );
+    }
+}
+
+#[test]
+fn low_disk_with_a_green_ci_run_does_not_hold_the_checks_stage() {
+    let run = gate_run(Some(GITHUB), athena_core::test_support::CiAnswer::Green);
+    let GoResult::Finished(finished) = run.result.as_ref().expect("not held for the disk") else {
+        panic!("expected the job to finish");
+    };
+    assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+    let said = lines_of(&run.lines);
+    // The CI result stands in for the checks: no check ran here, so the free-disk check never applied.
+    position(&said, "ci         checks reused from");
+    position(&said, "checks     ");
+    assert!(
+        !said.iter().any(|l| l.starts_with("held       ")),
+        "{said:#?}"
+    );
+    assert!(
+        !run.replies.asked.borrow().is_empty(),
+        "the CI source read the fake gh"
+    );
+    assert_eq!(run.early.ci_of("push").len(), 1, "{:?}", run.early);
+    assert!(!run.athena.state.produce_dir(&run.job).exists());
+}
+
+#[test]
+fn low_disk_with_no_ci_result_holds_before_the_local_run_and_a_retry_with_space_runs_the_checks() {
+    let run = gate_run(None, athena_core::test_support::CiAnswer::NoRun);
+    run.assert_held_before_the_local_run();
+    assert!(
+        run.replies.asked.borrow().is_empty(),
+        "no origin, no CI read"
+    );
+    run.assert_a_retry_with_space_runs_the_checks();
+}
+
+#[test]
+fn low_disk_with_a_github_origin_and_no_ci_run_holds_before_the_local_run() {
+    let run = gate_run(Some(GITHUB), athena_core::test_support::CiAnswer::NoRun);
+    run.assert_held_before_the_local_run();
+    assert!(
+        !run.replies.asked.borrow().is_empty(),
+        "the CI source was read and found no run"
+    );
+    run.assert_a_retry_with_space_runs_the_checks();
 }
 
 /// Sets the simulated free space to `bytes`.
@@ -2308,6 +2634,85 @@ fn commit_config(fx: &Fixture, config: &str) {
     fx.git
         .run(["commit", "-q", "-m", "Change athena.toml"])
         .unwrap();
+}
+
+/// A land step that lands by committing `config` as the repository's `athena.toml`, as a job whose diff
+/// changes the configuration does.
+struct ConfigLander(String);
+
+impl Lander for ConfigLander {
+    fn land(&self, athena: &Athena, _: &str, _: &dyn athena_core::Ui) -> Landing {
+        write(athena.git.dir(), &[("athena.toml", self.0.as_str())]);
+        athena.git.run(["add", "-A"]).unwrap();
+        athena
+            .git
+            .run(["commit", "-q", "-m", "Land a change to athena.toml"])
+            .unwrap();
+        Landing::Landed {
+            changed: vec!["athena.toml".into()],
+        }
+    }
+}
+
+#[test]
+fn a_landing_whose_config_the_running_build_cannot_read_is_recorded_landed_and_ends_with_reinstall()
+{
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let athena = fx.athena(scenario.script());
+    let first = queue_steward_request(&athena, "Add a greeting to the README.");
+    let second = queue_steward_request(&athena, "Add a farewell to the README.");
+    // The landed job adds a section this build's strict schema does not know.
+    let landed = format!("{}\n[brand_new_section]\nnew_key = 1\n", test_config());
+    let lander = ConfigLander(landed);
+    let steps = RealSteps {
+        athena: &athena,
+        ui: &Quiet,
+        page: &StubPage,
+        lander: &lander,
+    };
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&report);
+
+    assert_eq!(report.stop, Stop::NeedsReinstall, "{text}");
+    assert_eq!(report.failed_item, None, "{text}");
+    assert_eq!(report.landed, 1, "{text}");
+    assert_eq!(report.jobs.len(), 1, "only one item was started: {text}");
+    assert_eq!(report.jobs[0].outcome, "passed", "{text}");
+    assert_eq!(report.jobs[0].landing, "landed", "{text}");
+    assert!(text.contains("stopped     reinstall needed"), "{text}");
+    assert!(text.to_lowercase().contains("reinstall"), "{text}");
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("Reinstall Athena") && n.contains("athena drain")),
+        "{:?}",
+        report.notes
+    );
+    for line in &report.jobs {
+        assert!(
+            !["failed", "rejected", "no outcome"].contains(&line.outcome.as_str()),
+            "{text}"
+        );
+    }
+
+    // The landed config really is one this build rejects: the drain did not stop for nothing.
+    let head = fx.head();
+    assert!(
+        athena_core::capability::JobConfig::at(&fx.git, &head).is_err(),
+        "the landed config must be one the running build rejects"
+    );
+    // The job's own record says landed.
+    let ran = report.jobs[0].item.clone();
+    assert!(ran == first || ran == second, "{ran}");
+    let records = Records::load(&fx.git, &head).unwrap();
+    let record = records.jobs.get(&report.jobs[0].job).expect("job record");
+    assert_eq!(
+        record.state(),
+        JobState::Closed(OutcomeState::Landed),
+        "{text}"
+    );
 }
 
 /// A script that answers the first reading with `first` and every later one with `later`; every other role

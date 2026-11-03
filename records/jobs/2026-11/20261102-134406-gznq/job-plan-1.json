@@ -1,0 +1,196 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261102-134406-gznq",
+  "round": 1,
+  "at": "2026-11-02T19:31:04.098230429Z",
+  "invocation_seq": 2,
+  "approach": "The athena-bin hashFiles-vs-compiled-in check already exists in xtask/tests/policy.rs (job kq9v), but it only checks ci.yml against xtask's BUILD_INPUT_GLOBS. A second declared list, BUILD_PATHS in crates/athena-core/src/status.rs, is checked against nothing. It lacks athena.toml (BUILTIN_CONFIG in athena-gate is include_str!'d), docs/system-facts.md (SYSTEM_FACTS in briefs.rs) and rust-toolchain.toml, so a landing that changes only those leaves a stale installed binary unnoticed. Fix: add crates/athena-core/tests/build_inputs.rs, a test that derives the real input set (production include_str!/include_bytes! targets under crates/*/src, plus the manifests and setup.sh) and checks it against both the real BUILD_PATHS (through `touches_build`) and every athena-bin hashFiles key read from the real ci.yml. Extend BUILD_PATHS to mirror xtask's list so the test passes on the real repo, and keep the stale-build message in step. Pure checking functions take the yml text and the path set as arguments, so negative fixtures run the same code as the real-repository test. Record the root cause in CHANGELOG.md and a new decision D154. In ci.yml only the header comment changes, to name the new test. Nothing else in the build or key changes.",
+  "decisions": [
+    {
+      "choice": "Put the new check in crates/athena-core/tests/build_inputs.rs. It calls the production `athena_core::status::BUILD_PATHS` and `touches_build`, and reads ci.yml from the workspace root (CARGO_MANIFEST_DIR/../..).",
+      "reason": "The brief names this deliverable. It runs under `cargo test --workspace`, and cargo test --locked, so it runs before verification. It tests the real BUILD_PATHS, not a copy.",
+      "rejected": [
+        {
+          "option": "Extend xtask/tests/policy.rs",
+          "why": "The brief puts xtask tests out of scope. That test also cannot see athena-core's BUILD_PATHS without a new dependency."
+        },
+        {
+          "option": "Derive BUILD_PATHS from xtask's BUILD_INPUT_GLOBS to make one list",
+          "why": "athena-core cannot depend on xtask, and BUILD_PATHS is a git pathspec list ('crates/' prefix) while xtask's is a glob list. A shared source would be a larger refactor, and xtask is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Extend BUILD_PATHS to include athena.toml, defaults.toml, rust-toolchain.toml and docs/system-facts.md, and update the stale-build message and the drain.rs doc comment line 109 wording. Leave the drain.rs test list as is.",
+      "reason": "These files are compiled in or pin the build, and the new test would fail on the real repository without them. Both lists then name the same set. A landing that changes only the embedded config or the system facts now marks the binary stale, which is correct behavior.",
+      "rejected": [
+        {
+          "option": "Exempt athena.toml and system-facts.md in the test",
+          "why": "That repeats the defect: a declared list that disagrees with its real source, excused by hand."
+        },
+        {
+          "option": "Leave BUILD_PATHS alone and test only ci.yml",
+          "why": "That duplicates the existing xtask test and leaves the second hand-kept list unchecked."
+        }
+      ]
+    },
+    {
+      "choice": "Scan production includes as the policy.rs scan does: files under a src/ directory, not tests.rs or *_tests.rs, text before the first `#[cfg(test)]`. Resolve each target relative to the source file and normalise `..`. Use plain string scanning, with no new dependency.",
+      "reason": "Test-only includes (README, CHANGELOG, design docs, athena.toml inside tests) never reach the binary, and counting them would force the key to hash files that change often. This is the same independent derivation the existing test uses, so the two agree. status.rs has a `#[cfg(test)]` module with includes after its production code, so those are correctly excluded. The scan must assert it finds known targets (the six context prompts, cap-change and cap-study prompts, docs/system-facts.md, athena.toml), or it checks nothing.",
+      "rejected": [
+        {
+          "option": "Count every include_str! target, tests included",
+          "why": "It would add README.md, CHANGELOG.md and docs/design files to the required set and fail the real ci.yml, which deliberately leaves them out."
+        },
+        {
+          "option": "Parse the code with syn or run cargo to list inputs",
+          "why": "New dependency and a larger change. A string scan with its stated limit matches the existing test."
+        }
+      ]
+    },
+    {
+      "choice": "The glob matcher supports exact paths, `dir/**`, and `dir/**/*.ext`. Any other glob returns an Err that names the pattern, so the test fails loudly.",
+      "reason": "This is the refusal rule from the reading: an unparseable pattern must not pass. Supporting `dir/**/*.ext` lets the pre-fix key from job kq9v (`crates/**/*.rs`, `Cargo.toml`) be a real negative fixture that fails by naming a missing prompt .md path, rather than by a parse error.",
+      "rejected": [
+        {
+          "option": "Treat an unknown glob as covering nothing",
+          "why": "The failure would be silent and unnamed. A new valid pattern form would look like a missing path."
+        }
+      ]
+    },
+    {
+      "choice": "The check lives in pure functions inside build_inputs.rs, taking the yml text and the required set as arguments: `check_keys(yml, required)` and `check_build_paths(required)`. The real-repository test passes the real ci.yml and the scanned set. Negative tests pass edited text.",
+      "reason": "The negative and positive paths run the same function, so no logic sits in the fixture. Edits to the real ci.yml text (replacen) mean the fixtures track the real key shape.",
+      "rejected": [
+        {
+          "option": "Write fixture ci.yml files to temp dirs",
+          "why": "More machinery for no extra coverage. The function takes text."
+        }
+      ]
+    },
+    {
+      "choice": "Do not add refusal_corpus cases. The check refuses repository files, not requests or readings.",
+      "reason": "Criterion 5 and the brief say no reading is affected. The refusal corpus holds request and reading shapes, and I did not read its cases for this plan. A producer run of the corpus test is cheap insurance only.",
+      "rejected": [
+        {
+          "option": "Add corpus cases for glob forms",
+          "why": "The corpus is for reading and request parsers, and these inputs are not that."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/tests/build_inputs.rs",
+      "action": "create",
+      "purpose": "The root-cause test: it scans production include_str!/include_bytes! targets plus manifests, checks them against the real BUILD_PATHS (touches_build) and every athena-bin hashFiles key in the real ci.yml, and has negative fixtures. It includes the pre-fix kq9v key, a missing system-facts.md, an unsupported glob, and a changelog-cause test.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "BUILD_PATHS gains athena.toml, defaults.toml, rust-toolchain.toml and docs/system-facts.md (array length 5 to 9). The doc comment says the test checks it, and the stale_build_line text lists the added paths. Only production code lines 18 to 58 change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry naming the root cause and citing kq9v, 0wtc and y179 with how each is addressed or why it is out of scope.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Add D154 for the shared cause, the check, the BUILD_PATHS extension, alternatives, tradeoff (string scan limits), reversal cost and provenance.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "action": "modify",
+      "purpose": "Header comment only (about lines 33 to 37): name the new test crates/athena-core/tests/build_inputs.rs next to the existing policy test. No key, step or glob changes.",
+      "governance": true,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-core/src/status.rs lines 18 to 58, xtask/tests/policy.rs lines 780 to 1007 (the existing scan and key checker) and the first lines of crates/athena-core/tests/external_calls_guard.rs for the test layout. Do not edit xtask.",
+    "Create crates/athena-core/tests/build_inputs.rs with: `root()` from CARGO_MANIFEST_DIR; `production_includes()` scanning crates/*/src for include_str!/include_bytes! (production files only, text before the first `#[cfg(test)]`, targets normalised relative to the repo root); `compiled_in_files()` adding the manifests, rust-toolchain.toml, setup.sh and each crates/*/Cargo.toml; `glob_covers(glob, path) -> Result<bool, String>` for exact, `dir/**` and `dir/**/*.ext`, and Err for anything else; `hash_files_globs(line)`; `check_keys(yml, required) -> Result<(), String>` over every `key: athena-bin-` line, with an error if there are none; `check_build_paths(required)` using `athena_core::status::touches_build`.",
+    "Add the tests: real repository (scan floor of known targets, every path exists, real ci.yml passes, nine key lines, BUILD_PATHS passes); the negative fixtures A to E from the demonstrations, each with the full list passing; and the changelog test for the Unreleased section naming the three job ids.",
+    "Run `cargo test -p athena-core --test build_inputs`. It should fail on BUILD_PATHS (athena.toml, docs/system-facts.md, rust-toolchain.toml missing), which shows the cause before the fix.",
+    "Modify status.rs: extend BUILD_PATHS to nine entries (keep the 'crates/' and 'xtask/' prefix form and the exact files), update its doc comment to say crates/athena-core/tests/build_inputs.rs checks it, and update the stale_build_line message to list the added paths while keeping the leading `stale build` text the drain test filters on. Update the drain.rs line-109 doc comment only if it lists paths.",
+    "Edit the ci.yml header comment to mention the new test. Add the CHANGELOG.md Unreleased entry (root cause, three jobs, how each is addressed or out of scope, alternatives, the stated limit). Add D154 to docs/decisions.md in the D153 format.",
+    "Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, then `cargo test -p xtask --test policy`, `cargo test -p athena-cli --test drain` and `cargo test -p athena-core --test refusal_corpus`. Also check that the new text in the changelog and decisions passes the boundary scan and has no email-like text."
+  ],
+  "risks": [
+    {
+      "risk": "Extending BUILD_PATHS makes drain rebuild after landings that touch only athena.toml, defaults.toml or docs/system-facts.md. A drain test or a status test may assume the old list.",
+      "mitigation": "This is intended behavior: athena.toml is compiled into the binary via BUILTIN_CONFIG, so a stale binary should be flagged. The drain test does not list athena.toml as a 'no' path. The producer runs `cargo test -p athena-cli --test drain` and the status tests."
+    },
+    {
+      "risk": "The string scan misses an include after an early #[cfg(test)] line or one built with concat!, so a compiled-in file could escape both checks.",
+      "mitigation": "Copy the same limits the policy test states and document them in the test and D154. The test asserts a floor of known targets, so a scan that finds nothing fails. xtask's directory-wide `crates/**` glob still covers the paths under crates/."
+    },
+    {
+      "risk": "Editing ci.yml comments could break xtask/tests/policy.rs, which parses the workflow, or the governance rule that limits workflow changes.",
+      "mitigation": "Edit only comment lines 31 to 39, adding no line that starts `key: athena-bin-`. Run `cargo test -p xtask --test policy`."
+    },
+    {
+      "risk": "Two near-identical scanners (policy.rs and the new test) can drift.",
+      "mitigation": "State the overlap in the test's doc comment and D154: the new test owns BUILD_PATHS and asserts the same keys. Keep one shared definition of the scan only if it is cheap; otherwise accept the duplication, since the crates test cannot import from xtask tests."
+    },
+    {
+      "risk": "The glob matcher differs from GitHub's hashFiles semantics for patterns beyond exact, `dir/**` and `dir/**/*.ext`.",
+      "mitigation": "Only one hash glob form is used by the real key. The negative test C proves an unsupported form fails loudly, so a future form is caught at the time it is added, not silently."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the new Unreleased entry in CHANGELOG.md. Inspect it by Read or Grep; the verifier checks it for content. A test in build_inputs.rs also reads CHANGELOG.md, takes the Unreleased section, and asserts it contains the three job ids and the phrase `real compiled-in inputs`.",
+      "command": "cargo test -p athena-core --test build_inputs && grep -n \"20261031-172040-kq9v\\|20261017-173508-0wtc\\|20261025-214509-y179\" CHANGELOG.md",
+      "observes": "The entry names the root cause (declared input lists checked for structure, not against the real compiled-in inputs). It cites all three jobs and says how each is addressed: kq9v by adding the BUILD_PATHS check on top of the existing ci.yml key check, 0wtc by the shared mechanism only with the ontology unchanged, and y179 as kept and out of scope. The git diff shows CHANGELOG.md changed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "The real-repository test `declared_inputs_cover_the_real_compiled_in_inputs` calls the scan, `check_build_paths` and `check_keys`, and prints the covered set when it fails. Content check: a test also asserts the scan contains the known targets, and that every scanned path exists on disk.",
+      "command": "cargo test -p athena-core --test build_inputs",
+      "observes": "The scan returns crates/athena-context/prompts/*.md, crates/athena-cap-change/prompts/*.md, crates/athena-cap-study/prompts/*.md, docs/system-facts.md and athena.toml. It checks each against BUILD_PATHS through `touches_build` and against every `key: athena-bin-` line of the real .github/workflows/ci.yml. The count of key lines equals the six setup jobs plus three save steps, nine in all, the same count the existing policy test asserts.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Negative tests build yml text by editing the real ci.yml string. Fixture A removes `, 'docs/system-facts.md'` from the key. Fixture B swaps the key's globs for the pre-fix kq9v key (`crates/**/*.rs`, `Cargo.toml` only). Fixture C uses a glob form the matcher does not support. Fixture D passes a required set with an extra `crates/x/prompts/new.md` and an extra `docs/new-compiled-in.md`. Fixture E passes a short BUILD_PATHS-like list to the underlying matcher. Each is paired with the unmodified yml passing.",
+      "command": "cargo test -p athena-core --test build_inputs",
+      "observes": "A returns Err naming docs/system-facts.md. B returns Err naming crates/athena-context/prompts/producer.md and docs/system-facts.md. C returns Err naming the unsupported pattern. D names docs/new-compiled-in.md only, and the crates/ path is covered by `crates/**`. The full real text returns Ok in every pairing.",
+      "fails_without": "Without the check functions, the file does not compile. Without the BUILD_PATHS extension, `check_build_paths` fails on athena.toml and docs/system-facts.md. Without the matcher's `dir/**/*.ext` handling, the old-key fixture would fail on the wrong error (unsupported glob) and the test asserting the named prompt path would fail. If the check ignored a missing path, the `unwrap_err` assertions would fail.",
+      "seam": "Production entry points: `athena_core::status::{BUILD_PATHS, touches_build}` (exist today, read in status.rs lines 20 to 29). The check functions `check_keys(yml: &str, required: &BTreeSet<String>) -> Result<(), String>` and `check_build_paths(required)` are added by step 2. The fixture is the real ci.yml string, edited with replacen in the test; there is no double. The `Result` is returned by the code under test, so the fixtures contain no logic."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three commands on the real repository. The new test reads the real ci.yml, so a pass means the current workflow satisfies the check. Also run `cargo test -p xtask --test policy` and `cargo test -p athena-cli --test drain` for the files this change touches indirectly.",
+      "command": "cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check",
+      "observes": "All three commands exit 0. `xtask/tests/policy.rs` still passes after the ci.yml header comment edit, because the edit adds no line starting `key: athena-bin-`.",
+      "fails_without": "Without the BUILD_PATHS extension, `cargo test --workspace` fails in build_inputs because BUILD_PATHS does not cover athena.toml and docs/system-facts.md. Without the other edits, the Unreleased changelog test fails. The drain.rs test `only_changes_to_code_and_the_files_that_build_it_touch_the_build` and xtask/tests/policy.rs must still pass, since no code they read changes.",
+      "seam": "Entry point: the real repository tree. Today's seam: `Command::new(env!(\"CARGO_BIN_EXE_xtask\"))` in the policy test is unaffected. No injection."
+    },
+    {
+      "criterion": 5,
+      "method": "Show that the change touches no reading or request parser: the diff is limited to build_inputs.rs, status.rs, CHANGELOG.md, docs/decisions.md and the ci.yml comment. The refusal corpus test is run as insurance. I did not read its case ids for this plan, so none are cited. D154 states that the check refuses repository files and that no replay of past readings is affected.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "The corpus test is unchanged and passes. `git diff --stat` shows no change under crates/athena-core/src/reading.rs or the corpus file.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "I did not read crates/athena-core/tests/refusal_corpus.rs for this plan, since no reading or request rule changes. The producer need not add cases.",
+    "Whether the verifier's snapshot runs tests from the workspace root. The test finds the root from CARGO_MANIFEST_DIR (../..), as policy.rs does with its own root(), so it should not depend on the current directory. I read policy.rs's use but not its root() body.",
+    "The reading's assumption that no check of ci.yml exists is wrong: xtask/tests/policy.rs (athena_bin_keys_cover_every_compiled_in_file) already does it. The new test overlaps with it on the ci.yml half by design, since criterion 2 requires it. The new coverage is BUILD_PATHS. Whether the user wants the overlap removed is not settled.",
+    "Whether `defaults.toml` should stay in BUILD_PATHS. No production include of it was found; it is in xtask's list, and only parity argues for it."
+  ],
+  "producer_section_sha256": "e399d07dbd73f772ab4f650370d55b9d86eecf3d7fe21423614226bfd68e02f0"
+}

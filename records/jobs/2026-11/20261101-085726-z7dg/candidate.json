@@ -1,0 +1,131 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261101-085726-z7dg",
+  "base_commit": "7206e8cc70636b0b9e792f5a961e19385464b0d3",
+  "base_fingerprint": "sha256:8d50de7fe3e83dc5e05ecda3d9bbab10dfa35727201fd16a0c776680e02b2834",
+  "previous_job": "20261103-015346-82n3",
+  "candidate_commit": "806666120f7df80f3aca1c9c480ee8ce1572fe54",
+  "candidate_tree": "d25942a992ee22734c660566d14ea55859eb7cf8",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 292857
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 223845
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 71776
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 266721
+    }
+  ],
+  "fingerprint": "sha256:5f9eecf6971d5b04472b6eb39b2c846b02ed0cac4a47799d8999c89ccc5dc01a",
+  "violations": [],
+  "producer_report": {
+    "summary": "The drain now ends cleanly when a landing leaves `athena.toml` unreadable by the running build. Before, the next item's read failed on the landed file and was counted as that item's failure, so the run stopped as 'repeated failure'. I reproduced it first with the real-steps test, with the new check disabled. Now `Steps::config_after_landing` (default None; `RealSteps` re-reads the config at the new head) is asked right after `Landing::Landed`, still under the landing lock. If the read fails, the job stays landed, `Stop::NeedsReinstall` ('reinstall needed') is set before any other item starts, and rating is skipped because it needs the same config. The report gets a note with the parse error. It says to reinstall Athena (`./setup.sh`) and run `athena drain` again. If the same landing also rebuilt Athena, the stop is `Rebuilt` instead. The root-cause fix is the classification in the drain, not a special case for one key. The new stop is in `Stop::ALL` and in the `drain --help` stop list. CHANGELOG has an entry under Unreleased/Fixed. Tests added: a stub test, a real-steps test with a lander that commits an unknown section and checks the job record is Closed(Landed), a rebuild-wins test, and a genuine-failure regression.",
+    "files": [
+      "CHANGELOG.md",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/tests/drain.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test drain reinstall",
+        "result": "pass",
+        "note": "the three new reinstall tests pass"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain is_recorded_landed_and_ends_with_reinstall (with the real check temporarily disabled)",
+        "result": "fail",
+        "note": "Fails with 'repeated failure: item ... failed twice' on the next item's 'not read' parse error. Confirms the new test fails without the fix. Hack reverted afterwards."
+      },
+      {
+        "command": "cargo test -p athena-cli",
+        "result": "pass",
+        "note": "whole crate: unit, integration and help tests, run after the final edits; command exited 0"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed; boundary scan clean"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "exit 0"
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting; run before the final test and clippy runs"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-cli/tests/drain.rs (or the drain.rs unit tests) lands a job whose diff adds an unknown key to athena.toml; `cargo test -p athena-cli` passes, the test asserts the job's recorded outcome is landed (not failed), and the report's stop is not Stop::RepeatedFailure.",
+        "status": "met",
+        "evidence": "The test `a_landing_whose_config_the_running_build_cannot_read_is_recorded_landed_and_ends_with_reinstall` in tests/drain.rs drives RealSteps with a lander that commits athena.toml plus an unknown section. It asserts stop == NeedsReinstall, job line passed/landed, `JobConfig::at` on the head errors, and the job record state is Closed(Landed). The stub test `..._ends_the_run_with_a_reinstall_note_not_a_failure` also asserts stop != RepeatedFailure. Both pass in `cargo test -p athena-cli`. With the check disabled, the real test failed with RepeatedFailure."
+      },
+      {
+        "criterion": "In that test the run's final report/output contains a note telling the user to reinstall, and the run ends cleanly (no failure counted for the item); checked by `cargo test -p athena-cli`.",
+        "status": "met",
+        "evidence": "Both tests assert `display::drain(&report)` contains 'stopped     reinstall needed' and report.notes has a note with 'Reinstall Athena' and 'athena drain' (stub test also checks the read error text). They assert failed_item is None, no job line is failed, rejected or no outcome, only one item started, and the stub log is exactly ['read a','run a','land a'] (no rating, no second item)."
+      },
+      {
+        "criterion": "A regression test shows a genuine failure (job that does not land twice) still ends with Stop::RepeatedFailure; `cargo test -p athena-cli` passes.",
+        "status": "met",
+        "evidence": "`a_job_that_does_not_land_twice_still_ends_as_repeated_failure_when_the_config_is_readable` uses unlandable ['a'] and asserts RepeatedFailure, failed_item 'a', landed 0, the 'repeated failure: item a failed twice' text and no 'reinstall'. It passes. The existing repeated-failure tests also pass."
+      },
+      {
+        "criterion": "The change touches only files under crates/athena-core/src/run/, crates/athena-cli/src/drain.rs, its stop display text, and their tests (git diff --stat), plus CHANGELOG.md.",
+        "status": "met",
+        "evidence": "`git status --short` shows only CHANGELOG.md, crates/athena-cli/src/drain.rs, crates/athena-cli/src/main.rs (the drain --help stop list) and crates/athena-cli/tests/drain.rs. Nothing under run/ or display.rs changed."
+      },
+      {
+        "criterion": "CHANGELOG.md has a new entry describing that a landed config the running build cannot parse ends the run cleanly with a reinstall note instead of a false repeated failure.",
+        "status": "met",
+        "evidence": "New first bullet under `## [Unreleased]` / `### Fixed` in CHANGELOG.md. It describes the false repeated failure, the new `reinstall needed` stop, the note to reinstall and run `athena drain` again, the rebuilt case, and the root cause."
+      },
+      {
+        "criterion": "`cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` all pass (tested default).",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo test -p athena-cli` (exit 0), `cargo clippy --all-targets --locked -- -D warnings` (exit 0), `cargo test -p xtask --test policy` (17 passed) and `cargo fmt --all`. I did not run the full-workspace `cargo test`."
+      },
+      {
+        "criterion": "The new stop reason (if added) has a label and meaning and is listed wherever stops are enumerated (Stop::ALL, help text in crates/athena-cli/src/main.rs, display), verified by the existing test that every Stop has a meaning.",
+        "status": "met",
+        "evidence": "Stop::NeedsReinstall has label 'reinstall needed' and a meaning naming reinstall. It is in Stop::ALL (now 9 entries) and in the 'Stop reasons' block of `drain --help` in main.rs. display::drain prints label and meaning for every stop, so display.rs needs no change. `every_stop_reason_has_a_label_and_a_meaning` (extended with a reinstall assertion) and `drain_help_documents_the_flags_and_lists_every_stop_reason` pass in `cargo test -p athena-cli`."
+      }
+    ],
+    "open_issues": [
+      "Any read error of athena.toml at the new head after a successful landing is treated as 'newer build needed', since a newer schema cannot be told cheaply from other damage. A code comment states this, and the report note includes the parse error text.",
+      "I did not test the concurrent drain path (`drain_concurrent`) with max_concurrency above 1. The stop is set under the landing lock, so no new item should start, but an item already past `run_job`'s stop check finishes under the old rules.",
+      "I ran `cargo test -p athena-cli`, not the full-workspace `cargo test`; that is left to Athena's checks."
+    ],
+    "mistakes": [
+      "My first version of the real-steps test used `Config::parse` and `Records::load_unchecked` in the test, neither of which exists with that shape. I switched to `JobConfig::at` and `Records::load`, and the tests passed afterwards.",
+      "I briefly pushed a 'config' entry into the Stub log, which would have broken existing log assertions. I removed it before running any test."
+    ],
+    "learnings": [
+      "The false 'repeated failure' comes from the item after the landing, not from the landed job. Its read fails on `JobConfig::at(head)` and the job line says 'not read ... athena.toml does not parse'. The landed job's own record stays Closed(Landed). Nothing in crates/athena-core/src/run/ needs to change.",
+      "`display::drain` prints 'stopped <label>: <meaning>' and every note, so a new Stop needs no display.rs change.",
+      "Adding a log entry to the test Stub changes the exact-log assertions of many existing tests, so the new Stub method pushes nothing to the log.",
+      "The `Lander` trait must be Sync, so a test lander cannot hold the Fixture. It writes and commits through the `athena` argument instead (`athena.git.dir()`)."
+    ],
+    "desires": []
+  }
+}
