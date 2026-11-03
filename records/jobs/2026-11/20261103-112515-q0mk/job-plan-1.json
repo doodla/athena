@@ -1,0 +1,233 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261103-112515-q0mk",
+  "round": 1,
+  "at": "2026-11-03T11:29:11.106358627Z",
+  "invocation_seq": 4,
+  "approach": "Fix the fault where it starts. `verification_stage` stores every verifier problem as a plain `Option<String>`, and `judge` turns any of them into 'the verifier did not complete' plus a failed verdict. Add `pub enum VerifierFailure { Incomplete(String), TimedOut(String) }` in verify.rs and change `VerdictInputs.verifier_failure` to `Option<VerifierFailure>`. `judge` words `TimedOut` as 'the verifier timed out, so the criteria are unjudged: <detail>', with each unassessed criterion's evidence saying 'unjudged'. That is separate from the existing 'the verifier did not complete: ..' text and never yields a pass. The 'returned no verdict' reason stays suppressed, as it is today whenever a failure is set. In `verification_stage`, classify a verifier whose `voutput.outcome == InvocationOutcome::TimedOut` as `TimedOut(detail)`. Every other failure point (budget, snapshot lock, could-not-run, other non-Success outcome, no valid verdict, snapshot changed on both runs) becomes `Incomplete`. Fold a one-time rerun into the existing loop. After the snapshot-unchanged check, if the failure is `TimedOut` and `verifier_runs < 2`, clear the run's results, build a fresh snapshot with the existing `verifier_snapshot` call, and `continue`. The rerun's verdict then decides. A second timeout stays `TimedOut` and is unjudged. The outcome state stays `Rejected` (non-passing); only the text changes. A small display.rs change stops the CLI telling the operator to 'ask again with the findings in mind' for an unjudged result. Behavior tests go through the existing fake-agent seam in run_pin_tests.rs, plus `judge` unit tests. CHANGELOG and the two docs are updated. Test names share filterable substrings (`times_out`, `non_timeout`) so each demonstration's `cargo test` filter matches the tests it names. Criterion 5 is shown by three separate plain cargo commands (fmt, clippy, test), each run on its own with no chaining.",
+  "decisions": [
+    {
+      "choice": "A typed enum `VerifierFailure { Incomplete(String), TimedOut(String) }` replaces `Option<String>` in `VerdictInputs`, and `judge` matches on it.",
+      "reason": "The root cause is that a timeout and a real failure share one string-typed path. A type forces every producer of the failure to choose, and `judge` cannot treat them alike by accident. It matches the candidate of job 20261027-054228-k9ex.",
+      "rejected": [
+        {
+          "option": "Keep the string and test for 'deadline' in `judge`.",
+          "why": "Fragile text matching, and the value that records the timeout still cannot tell it apart."
+        },
+        {
+          "option": "Add a separate `verifier_timed_out: bool` field beside the string.",
+          "why": "Allows contradictory states (a timeout with no failure), and every VerdictInputs constructor needs it."
+        }
+      ]
+    },
+    {
+      "choice": "Detect a timeout from `voutput.outcome == InvocationOutcome::TimedOut` in `verification_stage`, using the recorded detail as the text.",
+      "reason": "The driver already reports `TimedOut` and the fake can script it. It is a typed signal, not parsed text.",
+      "rejected": [
+        {
+          "option": "Read the invocation record detail string.",
+          "why": "Free text; the outcome enum is the reliable signal."
+        }
+      ]
+    },
+    {
+      "choice": "Rerun once inside the existing verifier loop, sharing `verifier_runs` and the fresh-snapshot code with the system-fault rerun.",
+      "reason": "One cap of two verifier runs in total. The loop-top budget check still applies, and the timed-out invocation record is kept in `new_invocations`.",
+      "rejected": [
+        {
+          "option": "Retry up to N times, or make the count configurable.",
+          "why": "The request says once. A config key would touch governance files that are out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "The outcome state stays `Rejected` when unjudged; only the reason and criterion evidence say 'unjudged'.",
+      "reason": "The verdict stays non-passing. A new `OutcomeState` would reach the gate and record schemas, which are out of scope.",
+      "rejected": [
+        {
+          "option": "Add an `OutcomeState::Unjudged`.",
+          "why": "Changes record formats and the gate's reading of records; out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Criterion 5 is demonstrated by three separate plain cargo commands run one at a time on the final tree: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`. The demonstration's command field holds `cargo test --locked`, and the method names the other two as separate runs the verifier makes.",
+      "reason": "The verifier may run only one plain simple command at a time; chaining or grouping is denied. Each command fails on a distinct fault the change could introduce: formatting, a lint or unused import, a broken constructor or test.",
+      "rejected": [
+        {
+          "option": "One chained command joining the three checks.",
+          "why": "Denied by the verifier's command rules (grouping cannot be checked), and a chain hides which check failed."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add `VerifierFailure { Incomplete, TimedOut }` with a doc-comment naming the root cause. Change `VerdictInputs.verifier_failure` to `Option<VerifierFailure>`. In `judge`, give `TimedOut` its own 'unjudged' reason and unassessed-criterion evidence, keep 'did not complete' for `Incomplete`, and keep `pass` requiring no failure. Add unit tests and update test constructors.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Classify failures: `TimedOut(detail)` when `voutput.outcome == TimedOut`, otherwise `Incomplete`. Rerun once on a timeout in the existing loop with a fresh snapshot, and print a ui line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Import `VerifierFailure` where the run module's `use` list needs it for `use super::*`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Keep the `verifier_failure: None` test constructor (about line 270) compiling after the type change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add `timing_out_verifier` and the timeout-once, timeout-twice and non_timeout error tests beside the faulty-verifier tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Fix any `VerdictInputs` or reason expectations the type change touches; add a verification-stage test only if it fits the harness there.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "In the rejected-outcome summary (about line 812), when the reasons say the criteria are unjudged, say the verifier timed out and nothing was judged, instead of 'ask again with the findings in mind'.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an [Unreleased] 'Fixed' entry for the unjudged timeout outcome, naming the root cause and the single rerun.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "Where the verification record's reasons are described (about line 96), say a timed-out verifier is rerun once and a second timeout is recorded as unjudged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "purpose": "At the verification rows (about lines 611 and 787), describe the verifier timeout: one rerun, then 'unjudged', never a pass.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read verify.rs `judge` (about lines 344 to 572) and the six test constructors of `VerdictInputs`. Grep for `VerifierFailure` to confirm the name is free.",
+    "In verify.rs add the `VerifierFailure` enum with a doc-comment on the root cause and change the field type. Update `judge`: `Incomplete` keeps 'the verifier did not complete: {detail}'; `TimedOut` pushes 'the verifier timed out, so the criteria are unjudged: {detail}'. Use an 'unjudged' evidence text instead of 'did not assess' when the failure is `TimedOut`, and leave `pass` requiring no failure. Update the existing test constructors.",
+    "In the verify.rs tests add `a_verifier_that_times_out_is_unjudged_never_a_pass` (with a passing `output`), `non_timeout_incomplete_failure_keeps_the_did_not_complete_reason` and `non_timeout_failing_check_and_judged_fail_keep_their_reasons`.",
+    "In run/verification.rs make `verifier_failure` an `Option<VerifierFailure>`. Wrap the budget, lock, could-not-run, non-Success, no-valid-verdict and snapshot-changed-twice points in `Incomplete`, and use `TimedOut(detail)` when `voutput.outcome == InvocationOutcome::TimedOut`. If the snapshot is unchanged and the failure is `TimedOut` with `verifier_runs < 2`, clear `verdict_output`, `commands_run`, `verifier_invocation` and the failure, print a ui line, rebuild the snapshot with `verifier_snapshot` (bail if the tree differs), and `continue`. Otherwise keep the existing break or system-fault path. Fix the `use` lists in run/mod.rs and the constructor in run/send_back.rs.",
+    "In run_pin_tests.rs add `timing_out_verifier(runs, n)` and the tests `a_verifier_that_times_out_once_is_rerun_and_the_second_verdict_decides`, `a_verifier_that_times_out_twice_is_unjudged_not_rejected_as_judged` and `non_timeout_verifier_error_is_not_rerun`. Fix any expectation in run/tests.rs the type change touches.",
+    "In display.rs make the Rejected summary say the verifier timed out and nothing was judged when the reasons are unjudged. A pub const prefix exported from verify.rs avoids duplicated text. Add a small test if the file has a test module.",
+    "Add the CHANGELOG [Unreleased] 'Fixed' entry and the sentences in docs/records.md and docs/design/athena-v0.md.",
+    "Run `cargo fmt --all`, then, as separate plain commands one at a time, `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-core` and `cargo test --locked`. Fix what they show."
+  ],
+  "risks": [
+    {
+      "risk": "The timeout rerun interacts with the snapshot-changed rerun and could allow a third run.",
+      "mitigation": "The timeout check runs only when the snapshot is unchanged. A changed snapshot goes through the existing system-fault path, which shares `verifier_runs`, so the total stays at two runs. Tests assert runs.len()==2."
+    },
+    {
+      "risk": "A timed-out run's cost uses up the budget, so the rerun cannot start.",
+      "mitigation": "The loop-top `check_budget` still runs before the rerun and sets `Incomplete(budget message)`. The existing test `when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget` stays green."
+    },
+    {
+      "risk": "Changing the field type breaks a constructor or a consumer of reason text.",
+      "mitigation": "Only `judge` and `verification_stage` read the failure (grep: verification.rs 10, verify.rs 10, send_back.rs 1 matches). Compile, clippy and the full test run cover it. Record formats and the gate are not touched."
+    },
+    {
+      "risk": "A timed-out verifier leaves a locked or partly changed snapshot.",
+      "mitigation": "The rerun rebuilds the verifier snapshot with the existing `verifier_snapshot` and compares `fresh_tree != prepared`, as the fault path does."
+    },
+    {
+      "risk": "A test filter in a demonstration matches no test, so the command passes with zero tests run.",
+      "mitigation": "The test names share the substrings `times_out` and `non_timeout`, which the demonstrations use as filters. The verifier should check that the output lists the named tests, not '0 tests'."
+    },
+    {
+      "risk": "Criterion 5's three checks are run as a chain or a grouped command, which the verifier's command rules deny.",
+      "mitigation": "The plan names three separate plain commands, each run on its own; the demonstration's command field holds one plain command and the method lists the other two."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the change description (the CHANGELOG [Unreleased] 'Fixed' entry and the doc-comment on `VerifierFailure`) in the diff.",
+      "command": "git diff -- crates/athena-core/src/verify.rs crates/athena-core/src/run/verification.rs crates/athena-core/src/run/mod.rs CHANGELOG.md",
+      "observes": "The CHANGELOG entry and the enum's doc-comment name verification.rs, verify.rs, the generic `verifier_failure`, and the fact that criteria were rejected unjudged like a judged failure.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the diff and `judge`. Look for `VerifierFailure::TimedOut`, the word 'unjudged', and the separate 'the verifier did not complete' text for `Incomplete`. The unit test `a_verifier_that_times_out_is_unjudged_never_a_pass` in verify.rs gives `judge` a passing `output` together with `TimedOut` and asserts a Fail verdict.",
+      "command": "git diff -- crates/athena-core/src/verify.rs crates/athena-core/src/run/verification.rs",
+      "observes": "A distinct `TimedOut` variant whose reason says 'unjudged' and not 'did not complete'. `pass` still requires `verifier_failure.is_none()`, so no failure value yields a pass.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Run two new tests in run_pin_tests.rs beside `faulty_verifier`. The tweak `timing_out_verifier(runs, n)` sets `turn.outcome = InvocationOutcome::TimedOut`, `turn.structured = None` and `turn.detail = Some(\"deadline of 1s reached\")` on the first `n` verifier invocations. Test A, `a_verifier_that_times_out_once_is_rerun_and_the_second_verdict_decides` (n=1), asserts runs.len()==2, finished.state==Landed, verification.summary==Some(\"Fine.\"), empty verification.reasons, and that `verifier_invocation` is the second run's seq. Test B, `a_verifier_that_times_out_twice_is_unjudged_not_rejected_as_judged` (n=2), asserts runs.len()==2 (no third run), state Rejected, `agent_verdict` None, reasons containing 'unjudged' and neither 'did not complete' nor 'returned no verdict', each criterion's evidence containing 'unjudged', and finished.reason containing 'unjudged'. The verifier checks the output lists both named tests, not '0 tests'.",
+      "command": "cargo test -p athena-core a_verifier_that_times_out",
+      "observes": "The recorded state, summary, reasons, evidence and invocation seq after a timed-out first run and a good second run, and after two timed-out runs.",
+      "fails_without": "On the base commit the stage runs the verifier once and records 'the verifier did not complete: ..'. Test A fails (runs.len() is 1 and the state is Rejected, not Landed). Test B fails on the reason ('unjudged' is absent, 'did not complete' is present).",
+      "seam": "Production entry point: `Athena::go`, which reaches `verification_stage` in run/verification.rs. The tests call it through the existing `run_with` helper in run_pin_tests.rs. Guards and preconditions: a study job with a pinned `CountingPinner`, and the fake agent driver (athena-agent/src/fake.rs). Fixture: a scripted `Tweak` closure passed to `athena_with` that makes the fake return a `FakeTurn` with `outcome = TimedOut`. `run_with`, `Tweak` and the fake's TimedOut support exist (read in run_pin_tests.rs and fake.rs). Step 5 adds `timing_out_verifier`. The verdict logic is not in the double: it only sets the outcome."
+    },
+    {
+      "criterion": 4,
+      "method": "Three tests share the substring `non_timeout`. In verify.rs, `non_timeout_incomplete_failure_keeps_the_did_not_complete_reason` passes `VerifierFailure::Incomplete(\"x\")` to `judge` and expects Fail, reason 'the verifier did not complete: x', and no 'unjudged'. In verify.rs, `non_timeout_failing_check_and_judged_fail_keep_their_reasons` expects a failing `check(false)` and an `output` with verdict fail each to fail the verdict with the existing reason text and not say 'unjudged'. In run_pin_tests.rs, `non_timeout_verifier_error_is_not_rerun` scripts `InvocationOutcome::Error` with a detail and expects runs.len()==1, Rejected, a reason containing 'did not complete' and not 'unjudged'. The existing test `a_verifier_write_is_refused_by_the_lock_and_does_not_reach_the_work` keeps its 'could not run' reason. The verifier checks that all three named tests appear in the output.",
+      "command": "cargo test -p athena-core non_timeout",
+      "observes": "The existing reasons and the Fail verdict are kept for a non-timeout verifier failure, a failing check and a judged fail verdict, with no rerun for an error.",
+      "fails_without": "If the timeout branch swallowed other failures, `Incomplete` would lose 'the verifier did not complete: ..'. A failing check or judged fail would stop failing the verdict, or an error would be rerun (runs.len()==2). These tests would then fail.",
+      "seam": "Production entry points: `crate::verify::judge` for the two unit tests, with inputs built from the existing `criteria()`, `check()` and `output()` helpers in the verify.rs test module (they exist); and `Athena::go` via `run_with` plus a `faulty_verifier`-style `Tweak` for the Error case (the Tweak pattern exists). The only fixture is a scripted fake turn that sets the outcome. Step 3 adds the unit tests and step 5 adds the pin test."
+    },
+    {
+      "criterion": 5,
+      "method": "The verifier runs three plain commands, one at a time, each on its own on the final tree, with no chaining or grouping: (a) `cargo fmt --all --check`; (b) `cargo clippy --all-targets --locked -- -D warnings`; (c) `cargo test --locked` (the command listed here). Clippy runs with `-D warnings`, so any warning is a failure.",
+      "command": "cargo test --locked",
+      "observes": "(a) exits 0 with no diff output; (b) exits 0 with no warnings; (c) exits 0 and reports no failed tests across the workspace, including the new ones.",
+      "fails_without": "fmt fails if the new code or tests are unformatted. clippy fails on an unused `VerifierFailure` import in run/mod.rs, a match that does not cover both variants, or any other warning. Both clippy and test fail to compile if a `VerdictInputs` constructor (send_back.rs line 270 or the verify.rs test constructors) still holds the old `Option<String>`. test fails if any new or existing test breaks.",
+      "seam": "Production entry points are the cargo commands themselves, run over the workspace in the working tree. No fake or fixture is used and nothing is injected. The checks are fixed by Athena's own check configuration and exist today. The workspace compiles the changed `VerdictInputs` constructors, the new `VerifierFailure` imports in run/mod.rs, the display.rs change and the new tests. Step 8 runs each command separately and fixes what it shows."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the new tests from criterion 3 and run them with the broader filter `times_out`. They must assert recorded values (`finished.state`, `verification.reasons`, `criteria[].evidence`, `summary`, `agent_verdict`, and the Fail verdict from `judge`), not only that the enum or wiring exists.",
+      "command": "cargo test -p athena-core times_out",
+      "observes": "Each assertion reads the Finished or Verification record or the Judgment. No test only constructs the enum. The filter matches both the run_pin_tests.rs tests and the verify.rs unit test `a_verifier_that_times_out_is_unjudged_never_a_pass`.",
+      "fails_without": "A test that only built `VerifierFailure::TimedOut` would still pass on a build without the rerun or the 'unjudged' wording. These tests fail on the base commit because the recorded state and reasons differ.",
+      "seam": "Same as criterion 3: `Athena::go` through `run_with` with a scripted fake `TimedOut` turn (`run_with` exists; `timing_out_verifier` added in step 5), plus `judge` called directly in verify.rs (exists; unit test added in step 3)."
+    },
+    {
+      "criterion": 7,
+      "method": "Check the diff for a CHANGELOG [Unreleased] 'Fixed' entry, a sentence in docs/records.md at the verification record description (about line 96), and sentences in docs/design/athena-v0.md at the 'verifier judges exactly what will land' row (about line 787) and the verification.json row (about line 611). Each says a verifier that hits its deadline is rerun once and, if it times out again, the criteria are unjudged and the verdict does not pass.",
+      "command": "git diff -- CHANGELOG.md docs/records.md docs/design/athena-v0.md",
+      "observes": "The three files contain the new outcome and wording ('unjudged', rerun once).",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Several `VerdictInputs` constructors exist (verify.rs tests at about lines 919, 947, 970, 988, 1393 and 1567; send_back.rs line 270). `run/mod.rs` and `display.rs` showed no `verifier_failure` matches, so their edits depend on the import list and on the reason-text check. The producer should confirm with a compile.",
+    "The CHANGELOG, docs/records.md line 96 and athena-v0.md do not state the verifier-failure reason today. The doc edits add a sentence at the nearest verification description; the exact anchor is the producer's call.",
+    "`display.rs` has no existing test seam seen in this read. If it has no test module for the rejected summary, the producer may add a small one or keep that change to a one-line condition."
+  ],
+  "producer_section_sha256": "5cefcc94f79d9846a7f55a8a3b7bf7cb4e32f4df626e7f04f8cd401575deea17"
+}

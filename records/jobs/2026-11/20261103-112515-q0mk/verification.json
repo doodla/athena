@@ -1,0 +1,188 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261103-112515-q0mk",
+  "candidate_commit": "5fe66d86c1ee28f56361cf1543f6701c975ba3bc",
+  "verified_fingerprint": "sha256:62caff17fbbda8436760917652796587f2db3f274affde7b03c5ee02eb341824",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41633934663 for 5fe66d86c1ee28f56361cf1543f6701c975ba3bc",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41633934663 for 5fe66d86c1ee28f56361cf1543f6701c975ba3bc",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41633934663 for 5fe66d86c1ee28f56361cf1543f6701c975ba3bc",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 7,
+  "criteria": [
+    {
+      "criterion": "The change description names the root cause: a verifier timeout was recorded as the generic `verifier_failure` in crates/athena-core/src/run/verification.rs and failed the verdict in crates/athena-core/src/verify.rs exactly like a judged failure, so criteria were rejected unjudged.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read in the diff. The CHANGELOG [Unreleased] Fixed entry says: \"Root cause: `verification_stage` (`crates/athena-core/src/run/verification.rs`) recorded a timeout as the generic `verifier_failure` string, and `judge` (`crates/athena-core/src/verify.rs`) failed the verdict on it exactly as for a judged failure, so criteria were rejected that nobody had judged\". It names the three jobs. The doc-comment on `VerifierFailure` in verify.rs says the same.",
+      "commands": [
+        "git diff HEAD~1 --stat"
+      ],
+      "commands_verified": false
+    },
+    {
+      "criterion": "A Grep of the diff in crates/athena-core/src/verify.rs and crates/athena-core/src/run/verification.rs shows a distinct timeout variant whose reason says 'unjudged' and is separate from 'the verifier did not complete'; it never yields a pass.",
+      "kind": "content",
+      "met": true,
+      "evidence": "verify.rs:145 adds `TimedOut(String)`. At verify.rs:410-418, `judge` matches `Incomplete` to \"the verifier did not complete: ..\" and `TimedOut` to `UNJUDGED_REASON_PREFIX` (\"the verifier timed out, so the criteria are unjudged\"). verification.rs:233 sets TimedOut when `voutput.outcome == InvocationOutcome::TimedOut`. `pass` still requires `inputs.verifier_failure.is_none()` (verify.rs:593), so neither variant can pass. The unit test `a_verifier_that_times_out_is_unjudged_never_a_pass` gives judge a passing verdict together with TimedOut and gets Fail.",
+      "commands": [
+        "cargo test -p athena-core a_verifier_that_times_out"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test -p athena-core`. A new test where the verifier times out on the first run and succeeds on the second ends with the second run's verdict. A second test where it times out twice ends with the unjudged reason, not as a judged rejection. Both fail on the base commit and pass on the change.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Ran it: `a_verifier_that_times_out_once_is_rerun_and_the_second_verdict_decides` and `a_verifier_that_times_out_twice_is_unjudged_not_rejected_as_judged` both pass, 3 passed in total. Test A asserts 2 runs, the Landed state, summary \"Fine.\", empty reasons, and that the recorded invocation is the second run's seq. Test B asserts 2 runs, the Rejected state, agent_verdict None, reasons exactly [\"<UNJUDGED_REASON_PREFIX>: deadline of 1s reached\"], 'unjudged' in each criterion's evidence and in finished.reason, and no 'did not complete'. I did not run them on base, because that would change git state. From reading the code: base has no `VerifierFailure` or `UNJUDGED_REASON_PREFIX`, so the tests would not compile there, and base's logic never reruns on a timeout (Test A would see 1 run and a Rejected state).",
+      "commands": [
+        "cargo test -p athena-core a_verifier_that_times_out"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test -p athena-core`. A new test shows that a non-timeout verifier failure, a failing check, or a judged fail verdict still fails the verdict with its existing reason.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Ran it: `non_timeout_incomplete_failure_keeps_the_did_not_complete_reason`, `non_timeout_failing_check_and_judged_fail_keep_their_reasons` and `non_timeout_verifier_error_is_not_rerun` all pass. They assert Fail with the reasons 'the verifier did not complete: x' and \"the verifier's verdict is fail\", a failing-check reason without 'unjudged', and 1 run with reason 'the verifier did not complete: the model errored' for an Error outcome.",
+      "commands": [
+        "cargo test -p athena-core non_timeout"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test --locked`; all pass with no warnings.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded checks for 5fe66d86c1ee (CI run 41633934663): fmt passed, clippy with -D warnings passed, and cargo test --locked passed.",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "outcome-check: the tests assert the verdict and reason recorded for a timed-out verifier, not only that types or wiring exist.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The new pin tests read the Finished record: state, verification.reasons, summary, agent_verdict, criteria[].evidence, verifier_invocation and finished.reason. The verify.rs unit test asserts final_verdict, reasons and per-criterion evidence from `judge`. No test only constructs the enum. The broader filter ran 3 tests, all passing.",
+      "commands": [
+        "cargo test -p athena-core times_out"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "CHANGELOG.md has an entry for the new outcome, and docs/records.md and docs/design/athena-v0.md are updated where they describe the verifier-failure reason.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read in the diff. The CHANGELOG has an [Unreleased] Fixed entry. In docs/records.md, the athena.verification/1 `reasons` field now describes the rerun and the unjudged reason. In docs/design/athena-v0.md, the verification.json row and the 'verifier judges exactly what will land' guarantee row both describe the one rerun and the unjudged, never-pass outcome. The quoted wording matches UNJUDGED_REASON_PREFIX in the code.",
+      "commands": [
+        "git diff HEAD~1 --stat"
+      ],
+      "commands_verified": false
+    }
+  ],
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The new CLI 'next' line for an unjudged verdict has no test.",
+      "evidence": "display.rs adds a branch that prints 'the verifier timed out and nothing was judged; ask again...'. A Grep finds no test that asserts this text or the old 'ask again with the findings in mind' line for this case.",
+      "location": "crates/athena-cli/src/display.rs:823-839",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "The CLI detects an unjudged verdict by matching the start of the reason text, not from a typed field.",
+      "evidence": "display.rs uses `v.reasons.iter().any(|r| r.starts_with(UNJUDGED_REASON_PREFIX))`. The shared constant keeps the producer and the reader in step, but the record does not store the outcome as data. A typed flag or outcome field in the verification record would be sturdier. This works today and only affects display.",
+      "location": "crates/athena-cli/src/display.rs:823",
+      "source": "verifier"
+    },
+    {
+      "severity": "nit",
+      "summary": "Two planned files were not changed.",
+      "evidence": "`git diff HEAD~1 --stat` shows no change to crates/athena-core/src/run/tests.rs or run/send_back.rs. send_back.rs keeps `verifier_failure: None`, which still type-checks. No criterion is left unshown.",
+      "location": null,
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "pass",
+  "final_verdict": "pass",
+  "reasons": [],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results",
+    "planned demonstrations and files"
+  ],
+  "summary": "The change does what the retry asked. A verifier stopped at its deadline now gets its own failure value, `VerifierFailure::TimedOut`, which is set from the driver's `InvocationOutcome::TimedOut`. claude.rs:431 really produces that outcome when the deadline is hit. The first timeout reruns the verifier once on a fresh snapshot, and that second run's verdict decides. A second timeout records the reason \"the verifier timed out, so the criteria are unjudged: ...\" with \"unjudged\" evidence on each criterion. The verdict is still not a pass, and the reason does not say \"did not complete\" or \"returned no verdict\". Other verifier failures, failing checks and judged fail verdicts keep their existing reasons, and an error is not rerun. I ran the six new tests with targeted cargo commands and all pass. CI recorded fmt, clippy and the full test suite as passing for this candidate. CHANGELOG.md, docs/records.md and docs/design/athena-v0.md describe the new outcome. Every changed file is on the deliverables list. Two planned files did not change: run/tests.rs and send_back.rs (send_back.rs passes `None` and still compiles). That leaves no criterion unshown. Two minor issues: the new CLI \"next\" line has no test, and it detects the timeout by matching the start of the reason text. I could not run the tests on the base commit, because that would change git state. My judgment that they would fail there comes from reading the code."
+}
