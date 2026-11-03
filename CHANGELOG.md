@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A required `dependents` section in every job plan (`PlanOutput`, the stored `JobPlan` record, the planner
+  prompt and brief). For each behavior, record, config key, check name or host setting the plan changes, the
+  planner lists the code, rules and host settings that read or rely on it, each with a test or a reason it is
+  unaffected. Root cause: a plan had to say what it changed but not who relies on it, so four earlier jobs broke
+  a reader of a changed behavior that nobody had looked for. `plan_findings` now gives a major finding, so the
+  plan goes back to the planner with no critic call, when the section is missing, an entry has a blank name or
+  dependent, or an entry has neither a test nor a reason. The critic gains its own question, what else this
+  change breaks, and checks the list against a repository search. The CI-reuse case is a replay test: a search
+  for `exit_code` in the sources turns up the seen-commands filter in `verify.rs`, and the section is
+  incomplete unless it names that rule (the search itself is the planner's and the critic's, a prompt rule,
+  not a production check). A plan record stored before the field existed still parses and is not re-checked.
+  This refuses more plans than before, every plan without the section: expected 15% of newly refused readings,
+  and the higher refusal rate is intended.
 - An owner decision briefs page, `decisions.html`, built beside `index.html` by `cargo run -p xtask -- site`
   (`xtask/src/decisions.rs`; style in `docs/conventions/owner-style.md`). It lists the Steward's open
   proposals from the `athena/records` branch, read with `check_record_file`, as short briefs: title, rung,

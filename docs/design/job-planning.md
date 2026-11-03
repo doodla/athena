@@ -56,6 +56,14 @@ read-only snapshot of the prediction commit with the reader's grant (Read, Grep,
 - files, each with its action and purpose; Athena marks each as governance or not, and whether it exists;
 - ordered steps;
 - risks, each with a mitigation;
+- dependents (required): for each behavior, record, config key, check name or host setting the plan changes,
+  the code, rules (decisions, verdict rules, admission and gate checks) and host settings that read or rely on
+  it, found by searching the repository and `docs/system-facts.md`. Each entry has a `name` (what changes), a
+  `dependent`, a `kind` (`code`, `rule` or `host_setting`), and a `test` that covers it or a `reason` it is
+  unaffected. Root cause: a plan named what it changed but nobody had to say who relied on it, so four earlier
+  jobs broke a reader of a changed behavior (one is the CI-reuse rule in `verify.rs`: `judge` counts a passing
+  check with no exit code as run when it is marked `reused`, so a change to how exit codes are recorded
+  breaks it unless the plan names that rule);
 - one demonstration per acceptance criterion: the method, the command or test, what it observes, and
   `fails_without` (what would fail if the behavior were missing);
 - open questions.
@@ -64,15 +72,24 @@ read-only snapshot of the prediction commit with the reader's grant (Read, Grep,
 every criterion has exactly one demonstration; every behavior demonstration has `fails_without` and a command
 the verifier's grant allows (`athena_agent::policy::evaluate`); files to modify exist and files to create do
 not; a governance path (`admission::is_governance`) must pass `governance_change_is_listed`, else a major
-finding; any other path outside the deliverables is a minor finding. A major finding sends the plan back to the
+finding; any other path outside the deliverables is a minor finding; a plan with no `dependents`, an entry
+with a blank `name` or `dependent`, or an entry with neither a `test` nor a `reason` (a blank string is
+absent) is a major finding at location `dependents` (`admission::plan_findings`). Admission checks the shape
+of the section only. The search that finds the dependents is the planner's and the critic's: the check that
+the list covers what a search turns up is a replay test for the CI-reuse case
+(`ci_reuse_replay_the_seen_commands_filter_turns_up_in_a_search_and_must_be_named` in `admission.rs`, with the
+pure helper `dependents_unnamed`) and a prompt rule, not a production check. A plan record written before the
+field existed has no `dependents`; it still parses and is not re-checked. The refusal is intended to refuse
+more plans than before, every plan without the section. A major finding sends the plan back to the
 planner with no critic call and without using a round, up to two times per round (the revisions that follow
 are the planner's, the critic sees only the plan that passes). A plan that still breaks a rule after the
 second revision stops the job with those findings.
 
 **The critic (design)** works in the same snapshot with the same grant. It checks the plan against the request
 and the reading, that the code the plan names exists, that the change is made where the fault starts, that each
-demonstration would fail without the behavior, that a new `athena.toml` field ships with its schema field, and
-that the work fits one producer run. It returns accept, revise or reject, findings (severity, location,
+demonstration would fail without the behavior, that a new `athena.toml` field ships with its schema field,
+that the work fits one producer run, and, as its own question, what else the change breaks: it searches the
+repository for the readers of each changed thing and checks the plan's dependents list against the result. It returns accept, revise or reject, findings (severity, location,
 evidence, fix), and whether the reading misread the request. Athena decides the verdict as `verify::judge` does:
 accept only when neither source has a blocker or major finding. Reject, or a misread reading, stops the job.
 

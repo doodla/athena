@@ -23,7 +23,7 @@ use athena_agent::policy::{Decision, Policy, evaluate};
 use athena_data::config::PersonalData;
 use athena_data::records::{
     ChangeStatus, CriterionKind, DeliverableAction, Demonstration, Finding, FindingSource, JobPlan,
-    PolicyViolation, Reading, Severity,
+    PlanDependent, PolicyViolation, Reading, Severity,
 };
 use athena_data::{Config, DefaultsModel};
 use athena_gate::content::disallowed_emails;
@@ -157,7 +157,11 @@ fn athena_finding(
 /// - a file to modify or delete exists in the base, and a file to create does not;
 /// - a governance file must be listed by the reading and named in a criterion (`governance_change_is_listed`);
 ///   that is a major finding otherwise;
-/// - any other path outside the reading's deliverables is a minor finding.
+/// - any other path outside the reading's deliverables is a minor finding;
+/// - the plan has a `dependents` section: a major finding when it is empty, when an entry has a blank name or
+///   dependent, or when an entry has neither a test nor a reason it is unaffected (a blank string is absent).
+///   Admission checks the section's shape; the search that finds the dependents is the planner's, and the
+///   critic checks the list against its own search.
 ///
 /// - every planned path is a plain relative file path: not empty, not absolute, no `..`, no trailing `/`, and
 ///   not a directory in the base (`is_directory` says whether a path is one); a major finding otherwise.
@@ -301,7 +305,80 @@ pub fn plan_findings(
             ));
         }
     }
+    findings.extend(dependents_findings(&plan.dependents));
     findings
+}
+
+/// The dependents rule: a plan lists who relies on what it changes, and every entry names what changes, names
+/// the dependent and has a test or a reason it is unaffected. A blank string counts as absent.
+fn dependents_findings(dependents: &[PlanDependent]) -> Vec<Finding> {
+    let blank = |s: &str| s.trim().is_empty();
+    let present = |s: &Option<String>| s.as_deref().is_some_and(|s| !blank(s));
+    if dependents.is_empty() {
+        return vec![athena_finding(
+            Severity::Major,
+            "dependents".into(),
+            "The plan has no dependents section".into(),
+            "A plan must list, for each behavior, record, config key, check name or host setting it changes, the code, rules and host settings that read or rely on it, found by searching the repository and docs/system-facts.md, each with a test or a reason it is unaffected.".into(),
+        )];
+    }
+    let mut findings = Vec::new();
+    for (i, d) in dependents.iter().enumerate() {
+        let number = i + 1;
+        let location = format!("dependents, dependent {number}");
+        if blank(&d.name) || blank(&d.dependent) {
+            let missing = if blank(&d.name) { "name" } else { "dependent" };
+            findings.push(athena_finding(
+                Severity::Major,
+                location,
+                format!("Dependent {number} has a blank {missing}"),
+                format!(
+                    "Each entry names what the plan changes (`name`) and what relies on it (`dependent`). This entry: name {:?}, dependent {:?}.",
+                    d.name.trim(),
+                    d.dependent.trim()
+                ),
+            ));
+        } else if !present(&d.test) && !present(&d.reason) {
+            findings.push(athena_finding(
+                Severity::Major,
+                location,
+                format!(
+                    "Dependent {number} ({}) has neither a test nor a reason it is unaffected",
+                    d.name.trim()
+                ),
+                format!(
+                    "Set `test` to the test that covers {} after the change, or `reason` to why it is unaffected.",
+                    d.dependent.trim()
+                ),
+            ));
+        }
+    }
+    findings
+}
+
+/// The search hits (repository-relative or absolute paths) that no dependents entry names. A path is named
+/// when an entry's `name`, `dependent`, `test` or `reason` contains the path or its file name. A planner
+/// searches the repository for what it changes; this tells which hits its dependents section leaves out.
+/// Production does not run the search: a replay test does, for the CI-reuse breakage.
+pub fn dependents_unnamed(dependents: &[PlanDependent], hit_paths: &[String]) -> Vec<String> {
+    hit_paths
+        .iter()
+        .filter(|path| {
+            let file = file_name(path);
+            !dependents.iter().any(|d| {
+                [
+                    Some(&d.name),
+                    Some(&d.dependent),
+                    d.test.as_ref(),
+                    d.reason.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|text| text.contains(path.as_str()) || text.contains(file))
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// Why `path` cannot be a planned file, or `None` if it is a plain relative file path. The shape checks need
@@ -510,7 +587,8 @@ mod tests {
     use super::*;
     use athena_data::JobId;
     use athena_data::records::{
-        Criterion, CriterionKind, Deliverable, DeliverableAction, Forecast, Forecasts, Quantiles,
+        Criterion, CriterionKind, Deliverable, DeliverableAction, DependentKind, Forecast,
+        Forecasts, Quantiles,
     };
 
     /// Athena's findings on a plan that lists only `path` (to create), where `dirs` are directories in the base.
@@ -532,6 +610,7 @@ mod tests {
             }],
             steps: vec![],
             risks: vec![],
+            dependents: vec![],
             demonstrations: vec![],
             open_questions: vec![],
             producer_section_sha256: "0".repeat(64),
@@ -653,6 +732,7 @@ mod tests {
             files: vec![],
             steps: vec![],
             risks: vec![],
+            dependents: vec![complete_dependent()],
             demonstrations: vec![Demonstration {
                 criterion: 1,
                 method: "test".into(),
@@ -672,6 +752,241 @@ mod tests {
             writes: false,
         };
         plan_findings(&plan, &r, &verifier, &|_| false)
+    }
+
+    fn dependent(
+        name: &str,
+        dependent: &str,
+        test: Option<&str>,
+        reason: Option<&str>,
+    ) -> PlanDependent {
+        PlanDependent {
+            name: name.into(),
+            dependent: dependent.into(),
+            kind: DependentKind::Code,
+            test: test.map(str::to_string),
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    fn complete_dependent() -> PlanDependent {
+        dependent(
+            "the planner's output",
+            "run/planning.rs plan_record",
+            Some("cargo test -p athena-core planning"),
+            None,
+        )
+    }
+
+    /// Athena's findings on a plan whose only variable part is `dependents`. Its reading has one content
+    /// criterion and its demonstration needs no seam, so only the dependents rule can fire.
+    fn dependents_findings_for(dependents: Vec<PlanDependent>) -> Vec<Finding> {
+        use athena_data::records::Role;
+        let mut r = reading();
+        r.acceptance_criteria = vec![Criterion {
+            text: "the plan lists its dependents".into(),
+            kind: CriterionKind::Content,
+        }];
+        let plan = JobPlan {
+            job: JobId::parse("20261012-084936-n1p0").unwrap(),
+            round: 1,
+            at: jiff::Timestamp::UNIX_EPOCH,
+            invocation_seq: 2,
+            approach: "Approach.".into(),
+            decisions: vec![],
+            files: vec![],
+            steps: vec![],
+            risks: vec![],
+            dependents,
+            demonstrations: vec![Demonstration {
+                criterion: 1,
+                method: "read".into(),
+                command: "cargo test".into(),
+                observes: "it lists them".into(),
+                fails_without: None,
+                seam: None,
+            }],
+            open_questions: vec![],
+            producer_section_sha256: "0".repeat(64),
+            resumed_from: None,
+        };
+        let verifier = Policy {
+            role: Role::Verifier,
+            root: std::path::PathBuf::from("."),
+            commands: Default::default(),
+            writes: false,
+        };
+        plan_findings(&plan, &r, &verifier, &|_| false)
+    }
+
+    #[test]
+    fn a_plan_with_no_dependents_is_a_major_finding_naming_the_missing_section() {
+        let found = dependents_findings_for(vec![]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].severity, Severity::Major);
+        assert_eq!(found[0].source, FindingSource::Athena);
+        assert_eq!(found[0].location.as_deref(), Some("dependents"));
+        assert!(
+            found[0].summary.contains("no dependents section"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_dependent_with_a_blank_name_or_neither_test_nor_reason_is_a_major_finding_naming_it() {
+        // A blank name (or dependent) names the entry by position.
+        for blank in [
+            dependent("", "run/planning.rs", Some("a test"), None),
+            dependent("  \n", "run/planning.rs", None, Some("unaffected")),
+            dependent("the output", "", Some("a test"), None),
+        ] {
+            let found = dependents_findings_for(vec![complete_dependent(), blank]);
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].severity, Severity::Major);
+            assert_eq!(found[0].source, FindingSource::Athena);
+            assert_eq!(
+                found[0].location.as_deref(),
+                Some("dependents, dependent 2")
+            );
+            assert!(found[0].summary.contains("Dependent 2"), "{found:?}");
+            assert!(found[0].summary.contains("blank"), "{found:?}");
+        }
+        // Neither a test nor a reason (blank strings count as absent) names the entry by its `name`.
+        for (test, reason) in [
+            (None, None),
+            (Some(""), None),
+            (None, Some("   ")),
+            (Some(" "), Some("\n")),
+        ] {
+            let lacking = dependent("exit code of a check", "verify.rs judge", test, reason);
+            let found = dependents_findings_for(vec![lacking]);
+            assert_eq!(found.len(), 1, "{test:?} {reason:?}: {found:?}");
+            assert_eq!(found[0].severity, Severity::Major);
+            assert_eq!(
+                found[0].location.as_deref(),
+                Some("dependents, dependent 1")
+            );
+            assert!(
+                found[0].summary.contains("exit code of a check"),
+                "{found:?}"
+            );
+            assert!(found[0].summary.contains("neither a test nor a reason"));
+        }
+        // Every bad entry gets its own finding.
+        let two = dependents_findings_for(vec![
+            dependent("a", "x", None, None),
+            dependent("b", "y", None, None),
+        ]);
+        assert_eq!(two.len(), 2, "{two:?}");
+    }
+
+    #[test]
+    fn a_complete_dependents_section_adds_no_finding() {
+        for entry in [
+            dependent("the output", "plan_record", Some("a test"), None),
+            dependent("the output", "plan_record", None, Some("it never reads it")),
+            dependent(
+                "the output",
+                "plan_record",
+                Some("a test"),
+                Some("and a reason"),
+            ),
+            dependent("the output", "plan_record", Some(""), Some("only a reason")),
+        ] {
+            let found = dependents_findings_for(vec![entry.clone()]);
+            assert!(found.is_empty(), "{entry:?}: {found:?}");
+        }
+    }
+
+    /// Every `.rs` file under `dir` (repository-relative to the workspace) whose text contains `needle`.
+    fn source_hits(dir: &std::path::Path, needle: &str, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                source_hits(&path, needle, out);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && std::fs::read_to_string(&path).is_ok_and(|t| t.contains(needle))
+            {
+                let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .unwrap();
+                let relative = path.strip_prefix(root).unwrap();
+                out.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+
+    /// The CI-reuse breakage: a change made to how a check's exit code is recorded broke the rule in
+    /// `verify.rs` that counts a passing check reused from CI (no exit code, marked `reused`) as a command
+    /// that ran. A search of the sources for the changed behavior turns that rule up, and a dependents
+    /// section that does not name it is incomplete.
+    #[test]
+    fn ci_reuse_replay_the_seen_commands_filter_turns_up_in_a_search_and_must_be_named() {
+        // The needle is built so that this file does not match it by its own text.
+        let needle = ["exit", "code"].join("_");
+        let mut hits = Vec::new();
+        source_hits(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &needle,
+            &mut hits,
+        );
+        hits.sort();
+        let verify = "crates/athena-core/src/verify.rs".to_string();
+        assert!(
+            hits.contains(&verify),
+            "the search missed verify.rs: {hits:?}"
+        );
+        // The rule is still there to be found.
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/verify.rs"),
+        )
+        .unwrap();
+        let filter = format!("c.reused && c.{needle}.is_none()");
+        assert!(
+            source.contains(&filter),
+            "verify.rs no longer holds {filter}"
+        );
+
+        // A section that names the other code and the `reused` record, but not the seen-commands rule.
+        let incomplete = vec![
+            dependent(
+                &needle,
+                "crates/athena-core/src/checks.rs records the code",
+                Some("cargo test -p athena-core checks"),
+                None,
+            ),
+            dependent(
+                "reused",
+                "the CheckRun record",
+                None,
+                Some("only the field's meaning is read"),
+            ),
+        ];
+        assert!(
+            dependents_findings_for(incomplete.clone()).is_empty(),
+            "the section is well formed; only the search shows it is incomplete"
+        );
+        let unnamed = dependents_unnamed(&incomplete, &hits);
+        assert!(
+            unnamed.contains(&verify),
+            "the requirement is unmet unless verify.rs is named: {unnamed:?}"
+        );
+
+        // A section that names the rule is complete as to verify.rs.
+        let mut complete = incomplete;
+        complete.push(dependent(
+            &needle,
+            "crates/athena-core/src/verify.rs judge: the seen-commands filter counts a reused passing check",
+            Some("cargo test -p athena-core verify"),
+            None,
+        ));
+        assert!(!dependents_unnamed(&complete, &hits).contains(&verify));
+        // Naming only the file's name also counts.
+        let by_file = vec![dependent("x", "verify.rs", Some("t"), None)];
+        assert!(!dependents_unnamed(&by_file, &hits).contains(&verify));
+        // With no dependents every hit is unnamed.
+        assert_eq!(dependents_unnamed(&[], &hits), hits);
     }
 
     #[test]

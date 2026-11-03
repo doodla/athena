@@ -399,7 +399,9 @@ mod tests {
         ] {
             let composed = compose(&[CONTRACT.into(), frame.into()]);
             assert!(check_budget(set, &composed).is_ok(), "{}", frame.id);
-            assert!(estimate_tokens(frame.text) < 500, "{} is short", frame.id);
+            // The planner frame gained the required dependents rule and the critic frame its "what else does
+            // this break" question; each stays well inside the 1300-token budget checked above.
+            assert!(estimate_tokens(frame.text) < 700, "{} is short", frame.id);
         }
     }
 

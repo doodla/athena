@@ -734,6 +734,10 @@ fn a_job_that_failed_in_planning_is_marked_and_carries_the_context_field() {
         "files": [{ "path": "README.md", "action": "modify", "purpose": "Hold the greeting." }],
         "steps": ["Edit README.md."],
         "risks": [],
+        "dependents": [{
+            "name": "README.md", "dependent": "nothing reads the README", "kind": "code",
+            "test": null, "reason": "The README is documentation only."
+        }],
         "demonstrations": [
             { "criterion": 1, "method": "run the tests", "command": "cargo test --locked",
               "observes": "criterion 1 holds", "fails_without": "the greeting test fails",

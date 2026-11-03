@@ -372,9 +372,42 @@ pub struct PlanOutput {
     /// In the order the producer should do them.
     pub steps: Vec<String>,
     pub risks: Vec<PlanRiskOutput>,
+    /// Required: who else relies on what the plan changes. One entry per code, rule or host setting that
+    /// reads or relies on a changed behavior, record, config key, check name or host setting, found by
+    /// searching the repository and `docs/system-facts.md`, each with a test or a reason it is unaffected.
+    /// Athena refuses a plan whose list is empty or whose entry has neither; a plan that omits the key is
+    /// read as an empty list and refused with a finding, so the planner can revise it.
+    #[serde(default)]
+    pub dependents: Vec<PlanDependentOutput>,
     /// Exactly one per acceptance criterion.
     pub demonstrations: Vec<DemonstrationOutput>,
     pub open_questions: Vec<String>,
+}
+
+// What kind of thing relies on a changed behavior: code that reads or calls it; a rule (a decision, a
+// verdict rule, an admission check or a gate check); or a host setting (a workflow, a config key, a budget).
+// The variants carry no doc comments so that the schema stays a plain string enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DependentKindOutput {
+    Code,
+    Rule,
+    HostSetting,
+}
+
+/// Something that reads or relies on what the plan changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDependentOutput {
+    /// What the plan changes: a behavior, record, config key, check name or host setting.
+    pub name: String,
+    /// The code, rule or host setting that reads or relies on it, with its path.
+    pub dependent: String,
+    pub kind: DependentKindOutput,
+    /// The test that covers the dependent after the change; give this or a reason.
+    pub test: Option<String>,
+    /// Why the dependent is unaffected; give this or a test.
+    pub reason: Option<String>,
 }
 
 /// One design choice.
@@ -592,6 +625,8 @@ mod tests {
                 "rejected": [{ "option": "o", "why": "w" }] }],
             "files": [{ "path": "p", "action": "modify", "purpose": "x" }],
             "risks": [{ "risk": "r", "mitigation": "m" }],
+            "dependents": [{ "name": "n", "dependent": "d", "kind": "code",
+                "test": "t", "reason": null }],
             "demonstrations": [{ "criterion": 1, "method": "m", "command": "c",
                 "observes": "o", "fails_without": null, "seam": null }]
         })
@@ -666,7 +701,8 @@ mod tests {
     #[test]
     fn the_plan_and_critic_schemas_forbid_extra_properties_at_every_level() {
         for (schema, nested) in [
-            (plan_schema(), 5), // top, decisions, rejected, files, risks, demonstrations: 6 objects
+            // top, decisions, rejected, files, risks, dependents, demonstrations: 7 objects
+            (plan_schema(), 6),
             (critic_schema(), 1), // top, findings: 2 objects
         ] {
             let mut found = Vec::new();
@@ -692,6 +728,7 @@ mod tests {
             ("decisions", 0),
             ("files", 0),
             ("risks", 0),
+            ("dependents", 0),
             ("demonstrations", 0),
         ] {
             let mut nested = plan.clone();
@@ -713,6 +750,41 @@ mod tests {
         let mut nested = critique;
         nested["findings"][0]["extra"] = json!(1);
         assert!(serde_json::from_value::<CriticOutput>(nested).is_err());
+    }
+
+    #[test]
+    fn the_plan_schema_requires_dependents_and_a_plan_without_the_key_reads_as_empty() {
+        let schema = plan_schema();
+        let item = &schema["properties"]["dependents"]["items"];
+        assert_eq!(item["additionalProperties"], json!(false));
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(required.contains(&"dependents"), "{required:?}");
+        let fields: Vec<&str> = item["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for field in ["name", "dependent", "kind", "test", "reason"] {
+            assert!(fields.contains(&field), "{field} missing from {fields:?}");
+        }
+        assert_eq!(
+            item["properties"]["kind"]["enum"],
+            json!(["code", "rule", "host_setting"])
+        );
+
+        let parsed: PlanOutput = serde_json::from_value(sample_plan()).unwrap();
+        assert_eq!(parsed.dependents.len(), 1);
+        assert_eq!(parsed.dependents[0].kind, DependentKindOutput::Code);
+        let mut bare = sample_plan();
+        bare.as_object_mut().unwrap().remove("dependents");
+        let parsed: PlanOutput = serde_json::from_value(bare).unwrap();
+        assert!(parsed.dependents.is_empty());
     }
 
     #[test]

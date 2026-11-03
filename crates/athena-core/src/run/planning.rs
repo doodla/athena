@@ -544,6 +544,21 @@ fn plan_record(
                 mitigation: r.mitigation,
             })
             .collect(),
+        dependents: out
+            .dependents
+            .into_iter()
+            .map(|d| PlanDependent {
+                name: d.name,
+                dependent: d.dependent,
+                kind: match d.kind {
+                    DependentKindOutput::Code => DependentKind::Code,
+                    DependentKindOutput::Rule => DependentKind::Rule,
+                    DependentKindOutput::HostSetting => DependentKind::HostSetting,
+                },
+                test: d.test,
+                reason: d.reason,
+            })
+            .collect(),
         demonstrations: out
             .demonstrations
             .into_iter()
