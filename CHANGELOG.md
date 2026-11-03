@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The homepage header and the README opening now say who Athena is for (people who want a lazy request
+  turned into a traceable commit) and the problem it solves (unreviewed, unaccountable AI edits). The
+  homepage Next steps now give a `git clone` command, the prerequisites, and what `athena ask` does.
 - An open-questions rule in Athena's own plan checks. Root cause: `plan_findings` let open questions that
   reading the code settles through to the critic (for example whether the `[parallel] max_concurrency` path
   reaches landing, or what old job records look like on the landing branch), and the planner brief did not

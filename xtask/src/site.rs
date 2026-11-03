@@ -509,8 +509,12 @@ pub fn render(study: &Study) -> Result<String> {
         body,
         "<section id=\"next-steps\"><h2>Next steps</h2><ul>\
          <li>Learn about Athena, and how to install and try it: <a href=\"{a}\">{a}</a>.</li>\
-         <li>Install Athena from a checkout of its repository: <code>./setup.sh</code></li>\
-         <li>Try it with a one-line request: <code>athena ask \"add a changelog\"</code></li>\
+         <li>Get the code: <code>git clone {a}.git</code></li>\
+         <li>Before installing, have git 2.40 or later, a C linker, curl, and either Claude Code or npm \
+         (to install Claude Code).</li>\
+         <li>Install Athena from the checkout: <code>./setup.sh</code></li>\
+         <li>Try it with a one-line request: <code>athena ask \"add a changelog\"</code>. It shows how it \
+         read the request and its predictions; press Enter to run it on your repository.</li>\
          <li>Learn about {sys}, the project studied here, and see how to use it: {firstmate_link}.</li>\
          <li>Check a statement: follow a bracketed claim id to the claim, then its source link to the \
          file and lines in {sys} at the pinned commit.</li></ul></section>",

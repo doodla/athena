@@ -189,6 +189,13 @@ fn the_rendered_page_has_the_newcomer_fixes() {
     // Next steps carry the install command and an example request from the README.
     let next = &html[at("<h2>Next steps</h2>")..at("<h2>Claims and sources</h2>")];
     assert!(next.contains("<code>./setup.sh</code>"));
+    assert!(next.contains("<code>git clone https://github.com/doodla/athena.git</code>"));
+    assert!(next.contains("git 2.40 or later, a C linker, curl"));
+    assert!(next.contains("press Enter to run it on your repository"));
+    // The header says who Athena is for and what problem it solves, before "Start here".
+    let header = &html[..at("Start here")];
+    assert!(header.contains("It is for people who want to give a lazy"));
+    assert!(header.contains("unreviewed and unaccountable"));
     assert!(next.contains("<code>athena ask \"add a changelog\"</code>"));
     let readme = std::fs::read_to_string(root().join("README.md")).unwrap();
     assert!(readme.contains("./setup.sh") && readme.contains("athena ask \"add a changelog\""));
