@@ -15,6 +15,8 @@ use std::path::{Component, Path, PathBuf};
 
 /// The study the page explains, relative to the repository root.
 pub const STUDY_DIR: &str = "studies/firstmate-work-handling";
+/// The owner decision briefs page, written beside `index.html` (see `decisions.rs`).
+pub const DECISIONS_PAGE: &str = "decisions.html";
 /// The default output directory, relative to the cargo target directory.
 pub const DEFAULT_OUT: &str = "site";
 
@@ -172,7 +174,7 @@ fn cites(value: &Value, what: &str, known: &BTreeSet<String>) -> Result<String> 
 }
 
 /// Athena's own repository, linked from the next-steps section.
-const ATHENA_URL: &str = "https://github.com/doodla/athena";
+pub(crate) const ATHENA_URL: &str = "https://github.com/doodla/athena";
 
 /// The web address of a GitHub repository given its clone URL (`https://github.com/<owner>/<name>[.git]`),
 /// or `None` when the repository is not on GitHub.
@@ -190,7 +192,7 @@ fn github_base(repo: &str) -> Option<String> {
 
 /// A link to a file and lines of the pinned commit on GitHub. Characters that would end the path early are
 /// percent-encoded. A start line of 0 means the claim names no line, so no anchor is added.
-fn source_url(base: &str, sha: &str, path: &str, start: u64, end: u64) -> String {
+pub(crate) fn source_url(base: &str, sha: &str, path: &str, start: u64, end: u64) -> String {
     let path: String = path
         .chars()
         .map(|c| match c {
@@ -265,7 +267,8 @@ pub fn render(study: &Study) -> Result<String> {
          Each statement below ends with the id of the claim that supports it; the claims, with links to \
          their sources, are listed at the end.</p>\
          <p class=\"pin\">Pinned {sys} commit: <code>{sha}</code> in {repo_link}</p>\
-         <p class=\"lede\">Next step: <a href=\"#next-steps\">install Athena or read {sys} itself</a>.</p></header>",
+         <p class=\"lede\">Next step: <a href=\"#next-steps\">install Athena or read {sys} itself</a>.</p>\
+         <p class=\"lede\">Owner view: <a href=\"{DECISIONS_PAGE}\">proposals waiting for your decision</a>.</p></header>",
         sys = escape(system),
         athena = escape(str_of(about, "athena", "intro.json about")?),
         study_text = escape(str_of(about, "study", "intro.json about")?),
@@ -624,17 +627,18 @@ fn array_of_value<'a>(value: &'a Value, file: &str) -> Result<&'a Vec<Value>> {
         .ok_or_else(|| anyhow!("{file} is not a list"))
 }
 
-/// Builds the site: reads the study under `root` and writes `index.html` into `out`.
+/// Builds the site: reads the study under `root` and writes `index.html` into `out`, then writes the owner
+/// decision briefs page `decisions.html` beside it from the records branch of the repository at `root`.
 pub fn build(root: &Path, out: &Path) -> Result<()> {
     let html = render(&load(&root.join(STUDY_DIR))?)?;
     std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
     let index = out.join("index.html");
     std::fs::write(&index, html).with_context(|| format!("cannot write {}", index.display()))?;
     println!("wrote {}", index.display());
-    Ok(())
+    crate::decisions::write(root, out)
 }
 
-const CSS: &str = "\
+pub(crate) const CSS: &str = "\
 :root{color-scheme:light dark;--bg:#fff;--fg:#1b1f24;--muted:#59636e;--card:#f6f8fa;--line:#d0d7de;--accent:#0b5cad}\
 @media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#9198a1;--card:#161b22;--line:#30363d;--accent:#58a6ff}}\
 *{box-sizing:border-box}\
@@ -1229,10 +1233,13 @@ mod tests {
         }
         let out = root.path().join("site");
         build(root.path(), &out).unwrap();
-        assert!(
-            std::fs::read_to_string(out.join("index.html"))
-                .unwrap()
-                .starts_with("<!doctype html>")
-        );
+        let index = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(index.starts_with("<!doctype html>"));
+        // The index links to the decisions page, which is written beside it. This root is not a git
+        // repository, so the page says the records branch is missing.
+        assert!(index.contains("<a href=\"decisions.html\">"));
+        let decisions = std::fs::read_to_string(out.join("decisions.html")).unwrap();
+        assert!(decisions.starts_with("<!doctype html>"));
+        assert!(decisions.contains("No proposals listed"));
     }
 }
