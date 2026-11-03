@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-030153-mcr4",
+  "round": 1,
+  "at": "2026-11-03T07:57:51.808185567Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The `athena land` reinstall check reads `athena.head()`, which need not be the merged commit, so it can read the config from before the merge and miss the new key.",
+      "evidence": "main.rs:1148-1156 runs its own post-landing check (the checkpoint) on `report.link.merged_commit`, guarded by `athena.git.commit_exists(merged)`. It does not use head. land_pr (gh/landing.rs:690 onward) reads `self.head()` before landing, and a grep of landing.rs for a fast-forward or ref update after the merge found none. The planned helper `reinstall_note_after_landing(git, landed: bool)` reads head implicitly. Its tempdir test commits a bad athena.toml to head, so the test passes even if production reads the wrong commit. Fix: Have the helper take the commit to read, e.g. `fn reinstall_note_after_landing(git: &Git, merged: Option<&str>) -> Option<String>`. Call it inside the existing `LinkState::Landed && merged_commit && commit_exists` guard, with the merged commit. In the unit test, put the bad config on a commit that is not HEAD and assert the note comes from that commit. Alternatively, drop the main.rs change and name it as a follow-up.",
+      "location": "Plan step 7 / Files: crates/athena-cli/src/main.rs (Command::Land ~1133)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Most rows already pass on the base tree, and the test fails there mainly because `unreadable_at` and the new Shared fields do not exist yet. A compile error does not show the behavior.",
+      "evidence": "Job 20261101-085726-z7dg already made the serial Stub and RealSteps+ConfigLander paths end in NeedsReinstall when no earlier stop is set (drain.rs:1665-1670, 2338-2349, 2844-2848; stub field config_unreadable_after_landing at tests/drain.rs:99). The plan's own 'fails without' text names only a vague 'Shared bound 2 case with a prior stop', and the table as described does not list rows with an earlier stop already set. Fix: Add a second dimension to the table: the stop already stored before the unreadable landing (none, RepeatedFailure, Requested, BudgetSpent, JobLimit, Rebuilt). Seed it through Shared's existing failing/stop_at fields or a new seeding field. Then each row with an earlier stop fails on the base tree because of behavior, not compilation.",
+      "location": "Demonstration for criterion 3 (`every_landing_path_ends_in_reinstall_for_any_unreadable_config`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say what happens when another worker's Rebuilt is already stored and unreadable_config is then set without a later rebuild.",
+      "evidence": "In finish (drain.rs:2354-2355) a rebuild can store Stop::Rebuilt before a later unreadable landing. Step 4 would then replace Rebuilt with NeedsReinstall and skip the restart block (2852-2867). That is probably right, because the binary was rebuilt before the config change landed, but neither the plan nor its tests state it. Fix: State the rule (a stored Rebuilt without a later clear of unreadable_config becomes NeedsReinstall and does not restart) and add that ordering as one row of the class table.",
+      "location": "Plan step 4 (report assembly) and open question on Requested/Rebuilt",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The step numbers in the demonstrations do not match the step list.",
+      "evidence": "The criterion 2 demonstration says the Shared fields are added in 'step 4', and criterion 3 says main.rs is 'step 6'. In the step list they are steps 5 and 7. Fix: Correct the cross-references.",
+      "location": "Plan step 5 vs Demonstration text",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read drain.rs (set_stop at 1390, State::land at 1643, finish at 2332, report assembly at 2843, RealSteps::config_after_landing at 3576), main.rs (Command::Land at 1133), capability.rs (JobConfig::at at 33), gh/landing.rs (land_pr) and the stubs in tests/drain.rs (Shared at 6157, config_unreadable_after_landing at 99). The plan's diagnosis is right. When another worker has already set a stop, set_stop (first reason wins) drops NeedsReinstall. finish at line 2338 decides by the stop reason, so it still rates, and report assembly at 2844 skips the reinstall note. Keying all three on State.unreadable_config fixes the fault at the one place the fact is stored, and the concurrent test exercises the real Drain::land, finish and report-assembly code. One design fault is major. The new `athena land` path reads the local head, but nothing I found shows land_pr moving the local head to the merged commit. The existing checkpoint code next to it reads report.link.merged_commit for this reason. So in production the check would read the config from before the merge and miss the new key. The plan's unit test commits the bad config straight to head, so it would pass anyway and hide this. The class test's \"fails without the change\" claim is also weak: most of its rows already pass on the base tree, and its failure there is mainly a compile error."
+}

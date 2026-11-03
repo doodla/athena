@@ -713,6 +713,14 @@ fn checkpoint_after_landing(
     )?)
 }
 
+/// After a landing record: the reinstall note when this build cannot read the `athena.toml` of the merged
+/// commit `merged`, else None. It reads the merged commit and not head, because head may predate the merge.
+/// The job is landed either way; the note only tells the user the running build is older than what it landed.
+fn reinstall_note_after_landing(git: &athena_git::Git, merged: &str) -> Option<String> {
+    athena_core::capability::JobConfig::unreadable_at(git, merged)
+        .map(|why| drain::reinstall_note(&why))
+}
+
 /// One note for `athena land` about the checkpoint after a landing.
 fn checkpoint_note(run: &athena_gate::attribution::RunReport) -> String {
     match (&run.checkpoint_written, &run.checkpoint_error) {
@@ -1146,13 +1154,20 @@ fn run(cli: Cli) -> Result<u8> {
             // After a landing record, the attribution check; a pass writes a checkpoint. The note goes to
             // stderr so `--json` output stays whole, and nothing here changes the exit code.
             if report.link.state == athena_core::pr::LinkState::Landed
-                && !ci_is_set()
                 && let Some(merged) = &report.link.merged_commit
-                && athena.git.commit_exists(merged)?
+                && matches!(athena.git.commit_exists(merged), Ok(true))
             {
-                match checkpoint_after_landing(&athena.git, merged, jiff::Timestamp::now()) {
-                    Ok(run) => eprint!("{}", checkpoint_note(&run)),
-                    Err(error) => eprintln!("checkpoint not written: {error}"),
+                // A landing never checked that the running build can read the config it lands, so a new
+                // field in the merged athena.toml surfaced later as a failed job. The merged commit is read,
+                // not head, which may predate the merge.
+                if let Some(note) = reinstall_note_after_landing(&athena.git, merged) {
+                    eprintln!("{note}");
+                }
+                if !ci_is_set() {
+                    match checkpoint_after_landing(&athena.git, merged, jiff::Timestamp::now()) {
+                        Ok(run) => eprint!("{}", checkpoint_note(&run)),
+                        Err(error) => eprintln!("checkpoint not written: {error}"),
+                    }
                 }
             }
             Ok(land_pr_code(&report))
@@ -1670,6 +1685,40 @@ mod tests {
         assert!(no_write_reason(false, false, Some("topic")).is_some());
         assert!(no_write_reason(false, false, None).is_some());
         assert_eq!(no_write_reason(false, false, Some("main")), None);
+    }
+
+    #[test]
+    fn the_reinstall_note_after_a_landing_reads_the_merged_commit_not_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::isolated(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        let config = include_str!("../../../athena.toml");
+        let write_and_commit = |config: &str, message: &str| {
+            std::fs::write(dir.path().join("athena.toml"), config).unwrap();
+            std::fs::write(
+                dir.path().join("defaults.toml"),
+                include_str!("../../../defaults.toml"),
+            )
+            .unwrap();
+            git.run(["add", "-A"]).unwrap();
+            git.run(["commit", "-q", "-m", message]).unwrap();
+            git.head().unwrap().unwrap()
+        };
+        let good = write_and_commit(config, "readable");
+        let bad = write_and_commit(
+            &format!("brand_new_key = 1\n{config}"),
+            "adds a field this build does not know",
+        );
+        // Head is a later commit that reads fine, as when the merged commit is not head.
+        let head = write_and_commit(config, "later, readable");
+        assert_eq!(git.head().unwrap().unwrap(), head);
+
+        let note =
+            reinstall_note_after_landing(&git, &bad).expect("the merged commit is unreadable");
+        assert!(note.contains("Reinstall Athena"), "{note}");
+        assert!(note.contains("brand_new_key"), "{note}");
+        assert_eq!(reinstall_note_after_landing(&git, &good), None);
+        assert_eq!(reinstall_note_after_landing(&git, &head), None);
     }
 
     #[test]

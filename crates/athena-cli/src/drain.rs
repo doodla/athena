@@ -118,9 +118,16 @@
 //!   [`Steps::config_after_landing`]. The config was readable when the run started, so if it is not now, the
 //!   landing added something only a newer build understands (a new key, for instance). The job stays
 //!   `landed`, no failure is counted, and the run ends with [`Stop::NeedsReinstall`] before another item
-//!   starts; a note carries the read error and says to reinstall Athena and run the drain again. If the same
-//!   landing also rebuilt and installed Athena, the new binary reads the config and the stop is
-//!   [`Stop::Rebuilt`].
+//!   starts; a note carries the read error and says to reinstall Athena and run the drain again. If a rebuild
+//!   runs after that landing, the new binary reads the config and the stop is [`Stop::Rebuilt`].
+//!   The root cause was that a landing never checked that the running build can read the config it lands, and
+//!   the first fix stored the fact only as the stop reason, which keeps the first reason found: another
+//!   worker's earlier stop hid it, the page was rated against the unreadable config, and the run could end as
+//!   a repeated failure. The fact is now kept in the state: while it is set, no rating is taken, and the
+//!   report ends with [`Stop::NeedsReinstall`] and the note whatever stop was stored first (only a failed
+//!   rebuild keeps its own stop). A stored [`Stop::Rebuilt`] becomes a reinstall too, because that rebuild ran
+//!   before the landing. `athena land` asks the same question (`JobConfig::unreadable_at`) of the merged
+//!   commit.
 //!
 //! The loop ([`drain`]) holds every rule and calls the world through [`Steps`], so tests drive it with a
 //! stub and no model, no GitHub and no network:
@@ -950,7 +957,9 @@ pub enum Stop {
     RebuildFailed,
     /// A job landed and its `athena.toml` can no longer be read by the running build, because the landing
     /// added something only a newer build understands. The job stays landed and no failure is counted; nothing
-    /// more starts, and the user reinstalls Athena and runs the drain again.
+    /// more starts, and the user reinstalls Athena and runs the drain again. It is reported whenever the
+    /// landed config was unreadable and no rebuild followed, even when another worker stopped the run first
+    /// (only [`Stop::RebuildFailed`] keeps its own place).
     NeedsReinstall,
 }
 
@@ -1100,8 +1109,10 @@ struct State {
     rebuild_due: bool,
     /// The build output of a failed rebuild.
     rebuild_output: Option<String>,
-    /// Why the configuration could not be read after a landing ([`Steps::config_after_landing`]); set together
-    /// with [`Stop::NeedsReinstall`].
+    /// Why the configuration could not be read after a landing ([`Steps::config_after_landing`]). This is the
+    /// one fact the rating and the report key on, whatever the stored stop reason is (the stop keeps only the
+    /// first reason, so another worker's earlier stop must not hide it). Cleared by a rebuild that runs after
+    /// the landing, because the installed build then reads the landed config.
     unreadable_config: Option<String>,
     /// What the planning pass spent reading an item, charged to that item's job line when it runs.
     read_cost: std::collections::BTreeMap<String, f64>,
@@ -1658,10 +1669,15 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     }
                     st.landings.push(changed);
                 }
-                // The configuration was readable when the run started, so if it is not now, the landing is
-                // what changed it. A newer schema cannot be told cheaply from other damage, so any read
-                // error here is taken as "the landed config is newer than this build". The stop is set
-                // under the landing lock, before another worker can start an item that would read it.
+                // Root cause of a landed job being recorded as failed: a landing never checked that the
+                // running build can read the config it lands. A job can add a config field with the code
+                // that reads it, and the build that keeps running is the older one. Every `Steps::land`
+                // funnels through here under the landing lock, so this is the one place the landed head is
+                // read. The configuration was readable when the run started, so if it is not now, the
+                // landing is what changed it. A newer schema cannot be told cheaply from other damage, so
+                // any read error is taken as "the landed config is newer than this build". The fact is kept
+                // in `unreadable_config`, which the rating and the report read; the stop reason is only the
+                // signal that ends the run, and it keeps the first reason found, so it cannot carry the fact.
                 if let Some(why) = self.steps.config_after_landing() {
                     self.ui.line(&format!(
                         "drain      {job} landed, but its athena.toml cannot be read by this build; stopping, reinstall Athena"
@@ -2335,15 +2351,20 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 let Some(rebuilt) = self.rebuild_if_due() else {
                     return;
                 };
-                let unreadable = matches!(self.st().stop, Some((Stop::NeedsReinstall, _)));
+                // Keyed on the fact that the landed config is unreadable, not on the stop reason: the stop
+                // keeps the first reason found, so another worker's earlier stop must not hide this.
+                let unreadable = self.st().unreadable_config.is_some();
                 if unreadable {
                     // Rating reads the config this running build cannot parse, so it is skipped.
                     if rebuilt {
                         // The installed binary is now the newer build, which reads the landed config: the
-                        // restart carries on, so the reinstall advice no longer applies.
+                        // reinstall advice no longer applies. Only a reinstall stop becomes the restart;
+                        // another worker's earlier reason stands.
                         let mut st = self.st();
-                        st.stop = Some((Stop::Rebuilt, None));
                         st.unreadable_config = None;
+                        if matches!(st.stop, Some((Stop::NeedsReinstall, _))) {
+                            st.stop = Some((Stop::Rebuilt, None));
+                        }
                     }
                     return;
                 }
@@ -2840,12 +2861,21 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         );
         st.notes.push(line);
     }
-    let (mut stop, failed_item) = st.stop.clone().unwrap_or((Stop::QueueEmpty, None));
-    if stop == Stop::NeedsReinstall {
-        let why = st.unreadable_config.clone().unwrap_or_default();
-        st.notes.push(format!(
-            "the landed athena.toml could not be read by this build ({why}); the job is landed and no failure is counted. Reinstall Athena (./setup.sh in the checkout) and run `athena drain` again"
-        ));
+    let (mut stop, mut failed_item) = st.stop.clone().unwrap_or((Stop::QueueEmpty, None));
+    // The landed config being unreadable is a fact of its own, and the stop keeps only the first reason, so
+    // it is read here from the state and not from the stop. Whatever else ended the run, the user's first
+    // action is to reinstall: a stored `Rebuilt` was built before that landing, so it would restart onto the
+    // old schema. A failed rebuild keeps its own stop, because its build output is what the user needs.
+    if let Some(why) = st.unreadable_config.clone()
+        && stop != Stop::RebuildFailed
+    {
+        if let Some(item) = failed_item.take() {
+            st.notes.push(format!(
+                "item {item} did not pass twice in this run (see the job lines); the run ends for the reinstall below, not for that"
+            ));
+        }
+        stop = Stop::NeedsReinstall;
+        st.notes.push(reinstall_note(&why));
     }
     // A rebuilt Athena carries on with what is left, unless there is nothing left or a stop was asked for.
     let mut restart = None;
@@ -2904,6 +2934,15 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         restart,
         rebases: st.rebases.clone(),
     })
+}
+
+/// What to tell the user when a landing made the configuration unreadable for the running build: the job is
+/// landed, no failure is counted, and the user reinstalls Athena. `why` is the read error. Shared by the drain
+/// and by `athena land`.
+pub fn reinstall_note(why: &str) -> String {
+    format!(
+        "the landed athena.toml could not be read by this build ({why}); the job is landed and no failure is counted. Reinstall Athena (./setup.sh in the checkout) and run `athena drain` again"
+    )
 }
 
 /// Carries a drain across a rebuild: when `report` ended in [`Stop::Rebuilt`], `restart` is called with what is
@@ -3581,9 +3620,7 @@ impl Steps for RealSteps<'_> {
             Ok(head) => head,
             Err(error) => return Some(format!("{error:#}")),
         };
-        athena_core::capability::JobConfig::at(&self.athena.git, &head)
-            .err()
-            .map(|error| format!("{error:#}"))
+        athena_core::capability::JobConfig::unreadable_at(&self.athena.git, &head)
     }
 
     fn in_flight(&self) -> Vec<String> {

@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-030153-mcr4",
+  "round": 2,
+  "at": "2026-11-03T08:00:10.428607138Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Earlier-stop rows cannot be seeded in serial or bound-1 runs, because a stop prevents the next item from starting.",
+      "evidence": "drain.rs:2404-2406 (take_until_done) and 2491 (run_batches) start no new item once stopped() is true. In a serial run, an earlier stop of RepeatedFailure, Requested or Rebuilt means the later item never starts, so it never lands. With bound 1, a `wait_for` on another job's log entry would spin the full 5 s and then fall through. Fix: Say in the plan that the earlier-stop rows apply only to bound ≥ 2. Mark the serial and bound-1 earlier-stop cells as explicitly not applicable, and do not give them a wait_for. Keep run_ms small so the table runs quickly. Then the 'two dimensions' claim is accurate, and no row passes by timing out.",
+      "location": "Plan step 6 / Criterion 3 (A) class table: Stub serial and Shared bound 1 × earlier stop",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No row covers a rebuild that clears the flag after another worker's earlier stop.",
+      "evidence": "In finish() (drain.rs:2338-2348), a rebuild that runs after the unreadable landing clears unreadable_config. The plan replaces the stored stop with Rebuilt only when that stop is NeedsReinstall. If RepeatedFailure was stored first, the run then ends as RepeatedFailure with no rating and no note. That outcome is correct, but no table row covers it. Fix: Add a row with an earlier RepeatedFailure, then the unreadable landing, then a rebuild that clears the flag. Assert that the stop stays RepeatedFailure, that there is no reinstall note, and that no restart happens.",
+      "location": "Decision 2 / Step 3 (rebuild clears the flag while another worker's stop is stored)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan leaves the `!ci_is_set()` clause for the reinstall note to the producer.",
+      "evidence": "main.rs:1148-1151 includes `!ci_is_set()` because the checkpoint writes a file. The reinstall note only prints to stderr, so that reason does not apply to it. Fix: Decide in the plan: call reinstall_note_after_landing in its own guard (Landed, merged commit exists) without the ci clause.",
+      "location": "Decision 4 / Step 7 (main.rs guard)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "When the reinstall overrides a user-requested stop, the report no longer shows that a stop was requested.",
+      "evidence": "The report-assembly rule in step 4 overrides every stop except RebuildFailed, so a Requested stop loses its label. Fix: Keep the override, and push a note saying a stop was also requested.",
+      "location": "Open question 1 (NeedsReinstall overrides Requested)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Verdict: accept. The plan fixes the cause at the point where it was introduced. I checked the code it names, using Read and Grep on the snapshot:\n- Drain::land at drain.rs:1665-1671 stores only `set_stop(NeedsReinstall)`.\n- set_stop at drain.rs:1390 keeps the first reason, so a stop from another worker hides the reinstall.\n- finish() at drain.rs:2338 and report assembly at drain.rs:2844 are keyed on that stop reason. So when another worker stops first, the run rates a config this build cannot read and ends as repeated failure.\n\nKeying skip-rating, the reinstall note and the final stop on State.unreadable_config fixes every worker ordering at the one place the fact is stored. That is the general fix, not a special case.\n\nThe seams the plan names exist:\n- Steps::config_after_landing and Steps::rebuild are trait methods with defaults, so the Shared stub can override them.\n- The Shared stub is at tests/drain.rs:6157.\n- ConfigLander is at tests/drain.rs:2641.\n- JobConfig::at is at capability.rs:33.\n- The Command::Land guard with the merged commit is at main.rs:1148-1151.\n\nThe criterion-2 test would fail on the base tree: Drain::land is not gated on stopped(), so the in-flight `new` job still lands, its NeedsReinstall stop is dropped, and finish() rates the unreadable config. The plan also uses the merged commit, not head, in `athena land`, and it handles a stored Rebuilt and a stored RebuildFailed soundly. The five files stay within scope, the work fits one producer run, and no external service is called.\n\nAll four findings are minor or nit:\n- (minor) In serial and bound-1 runs, a stop prevents the next item from starting, so those cells of the class table cannot be seeded and should be marked not applicable.\n- (minor) One more row should cover a rebuild that clears the flag after another worker has already stopped the run.\n- (nit) The plan should decide whether the reinstall note in `athena land` keeps the `!ci_is_set()` clause, rather than leaving it to the producer.\n- (nit) When the reinstall overrides a user-requested stop, a note should still say the stop was requested."
+}

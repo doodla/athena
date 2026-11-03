@@ -6165,6 +6165,20 @@ mod parallel {
         run_ms: u64,
         /// Asks for a stop as soon as this job is running, after it has met its sibling.
         stop_at: Option<&'static str>,
+        /// Jobs whose landing makes the configuration unreadable for the running build, once they have landed.
+        unreadable_for: Vec<&'static str>,
+        /// The read error given for it; `NEWER_CONFIG` when empty.
+        unreadable_error: &'static str,
+        /// Jobs whose landing changes a path that needs Athena rebuilt.
+        build_jobs: Vec<&'static str>,
+        /// Whether a rebuild installs a new build (logged as `rebuild`); otherwise nothing is rebuilt.
+        rebuild: bool,
+        /// A run of the job waits, for up to five seconds, until the log holds the entry, then a little
+        /// longer, so the worker that wrote it has stored its stop before this job lands.
+        wait_for: Vec<(&'static str, &'static str)>,
+        /// How many ratings were taken while the landed config was unreadable (kept out of `log`, which other
+        /// tests compare whole). A rating reads the config, so it must be none.
+        rated_unreadable: AtomicUsize,
         stop: AtomicBool,
         active: AtomicUsize,
         peak: AtomicUsize,
@@ -6239,6 +6253,13 @@ mod parallel {
             if self.stop_at == Some(job) {
                 self.stop.store(true, Ordering::SeqCst);
             }
+            if let Some((_, entry)) = self.wait_for.iter().find(|(j, _)| *j == job) {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !self.log().iter().any(|e| e == entry) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                std::thread::sleep(Duration::from_millis(150));
+            }
             std::thread::sleep(Duration::from_millis(self.run_ms));
             self.log.lock().unwrap().push(format!("end {job}"));
             self.active.fetch_sub(1, Ordering::SeqCst);
@@ -6258,9 +6279,29 @@ mod parallel {
             // Landings go one at a time: none starts while another is in progress.
             let mut log = self.log.lock().unwrap();
             log.push(format!("land {job}"));
-            Landing::Landed {
-                changed: vec!["README.md".into()],
+            let mut changed = vec!["README.md".to_string()];
+            if self.build_jobs.contains(&job) {
+                changed.push("Cargo.toml".into());
             }
+            Landing::Landed { changed }
+        }
+        fn config_after_landing(&self) -> Option<String> {
+            // Asked under the landing lock, right after a landing: unreadable once any such job has landed.
+            let landed = self.log();
+            self.unreadable_for
+                .iter()
+                .any(|j| landed.contains(&format!("land {j}")))
+                .then(|| match self.unreadable_error {
+                    "" => NEWER_CONFIG.to_string(),
+                    error => error.to_string(),
+                })
+        }
+        fn rebuild(&self) -> Result<Rebuild, String> {
+            if !self.rebuild {
+                return Ok(Rebuild::NotApplicable);
+            }
+            self.log.lock().unwrap().push("rebuild".into());
+            Ok(Rebuild::Installed)
         }
         fn check_page(&self) -> Check {
             Check::pass("stub")
@@ -6269,6 +6310,9 @@ mod parallel {
             0.0
         }
         fn rate(&self) -> Rate {
+            if self.config_after_landing().is_some() {
+                self.rated_unreadable.fetch_add(1, Ordering::SeqCst);
+            }
             Rate {
                 rating: Some(2),
                 cost: 0.2,
@@ -6449,6 +6493,410 @@ mod parallel {
         assert_eq!(report.stop, Stop::BudgetSpent);
         assert!(report.spent_usd <= 2.0, "{}", report.spent_usd);
         assert_eq!(landed_jobs(&report).len(), 1);
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // A landed config the running build cannot read. Root cause: a landing never checked that the running
+    // build can read the config it lands, and the first fix stored the fact only as the stop reason, which
+    // keeps the first reason found. These tests hold the fact, not one job or one ordering.
+
+    #[test]
+    fn a_landing_with_an_unreadable_config_after_another_workers_stop_is_landed_and_ends_with_reinstall()
+     {
+        // Worker one's item `bad` is rejected twice, which stores a repeated failure. Worker two's item
+        // `new` waits for that, then lands a config this build cannot read.
+        let shared = Shared {
+            items: vec!["bad", "new"],
+            plan: independent(&["bad", "new"]),
+            failing: vec!["bad"],
+            unreadable_for: vec!["new"],
+            unreadable_error: NEWER_CONFIG,
+            wait_for: vec![("new", "end bad-retry")],
+            run_ms: 5,
+            ..Shared::default()
+        };
+        let report = run_with(&shared, 2, 9.0);
+        let text = display::drain(&report);
+        let log = shared.log();
+        assert!(log.contains(&"end bad-retry".to_string()), "{log:?}");
+        assert!(
+            log.iter().position(|e| e == "end bad-retry")
+                < log.iter().position(|e| e == "land new"),
+            "the other worker's failure came first: {log:?}"
+        );
+
+        assert_eq!(report.stop, Stop::NeedsReinstall, "{text}");
+        assert_ne!(report.stop, Stop::RepeatedFailure, "{text}");
+        assert_eq!(report.failed_item, None, "{text}");
+        let new = report.jobs.iter().find(|j| j.item == "new").expect("new");
+        assert_eq!(
+            (new.outcome.as_str(), new.landing.as_str()),
+            ("passed", "landed"),
+            "{text}"
+        );
+        assert_eq!(landed_jobs(&report), ["new"]);
+        assert_eq!(shared.rated_unreadable.load(Ordering::SeqCst), 0, "{text}");
+        assert!(
+            report.notes.iter().any(|n| n.contains(NEWER_CONFIG)
+                && n.contains("Reinstall Athena")
+                && n.contains("athena drain")),
+            "{:?}",
+            report.notes
+        );
+        // The failure is still visible: in the job lines and in a note naming the item.
+        assert!(
+            report
+                .jobs
+                .iter()
+                .any(|j| j.item == "bad" && j.outcome == "rejected"),
+            "{text}"
+        );
+        assert!(
+            report.notes.iter().any(|n| n.contains("bad")),
+            "{:?}",
+            report.notes
+        );
+        assert!(!text.contains("repeated failure"), "{text}");
+    }
+
+    /// What was stored before the unreadable landing.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Before {
+        Nothing,
+        RepeatedFailure,
+        Requested,
+        Rebuilt,
+    }
+
+    /// The ways a landing reaches the drain, each ending in `Drain::land`.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Path {
+        /// The serial stub, through `drain::drain`.
+        Stub,
+        /// The thread-safe stub, through `drain_concurrent` with this bound.
+        Shared(u32),
+        /// `RealSteps` with a lander that commits a real `athena.toml`, through `drain::drain`.
+        Real,
+    }
+
+    /// Why a row cannot be set up, or None when it can. A skipped row is named, not left out.
+    fn cannot_seed(path: Path, before: Before) -> Option<&'static str> {
+        match (path, before) {
+            (_, Before::Nothing) | (Path::Shared(2), _) => None,
+            (Path::Stub | Path::Shared(_), _) => {
+                Some("a serial drain ends the run at its first stop, so no landing follows one")
+            }
+            (Path::Real, _) => {
+                Some("the real steps run one job at a time here, so no landing follows a stop")
+            }
+        }
+    }
+
+    /// The read errors a build that does not know the landed config gives, by cause.
+    const BAD_CONFIGS: [(&str, &str); 3] = [
+        (
+            "an unknown key",
+            "athena.toml: unknown field `brand_new_key`",
+        ),
+        (
+            "an unknown section",
+            "athena.toml: unknown field `brand_new_section`",
+        ),
+        (
+            "a value of the wrong type",
+            "athena.toml: invalid type: string \"many\", expected usize",
+        ),
+    ];
+
+    /// A shared stub whose item `new` lands an unreadable config (or a readable one when `error` is None)
+    /// after the stop named by `before` was stored by another worker.
+    fn seeded(before: Before, error: Option<&'static str>) -> Shared {
+        let unreadable_for = if error.is_some() { vec!["new"] } else { vec![] };
+        let unreadable_error = error.unwrap_or("");
+        let shared = Shared {
+            unreadable_for,
+            unreadable_error,
+            run_ms: 5,
+            ..Shared::default()
+        };
+        match before {
+            Before::Nothing => Shared {
+                items: vec!["new"],
+                plan: independent(&["new"]),
+                ..shared
+            },
+            Before::RepeatedFailure => Shared {
+                items: vec!["bad", "new"],
+                plan: independent(&["bad", "new"]),
+                failing: vec!["bad"],
+                wait_for: vec![("new", "end bad-retry")],
+                ..shared
+            },
+            Before::Requested => Shared {
+                items: vec!["first", "new", "third"],
+                plan: independent(&["first", "new", "third"]),
+                meet: vec!["first", "new"],
+                stop_at: Some("first"),
+                wait_for: vec![("new", "end first")],
+                ..shared
+            },
+            Before::Rebuilt => Shared {
+                items: vec!["built", "new"],
+                plan: independent(&["built", "new"]),
+                build_jobs: vec!["built"],
+                rebuild: true,
+                wait_for: vec![("new", "rebuild")],
+                ..shared
+            },
+        }
+    }
+
+    /// The one outcome every path must give for an unreadable landed config.
+    fn assert_reinstall(
+        what: &str,
+        report: &drain::Report,
+        landed_item: &str,
+        error_part: &str,
+        rated_unreadable: usize,
+    ) {
+        let text = display::drain(report);
+        assert_eq!(report.stop, Stop::NeedsReinstall, "{what}: {text}");
+        assert_eq!(report.failed_item, None, "{what}: {text}");
+        assert!(report.restart.is_none(), "{what}: no restart: {text}");
+        let line = report
+            .jobs
+            .iter()
+            .find(|j| j.item == landed_item)
+            .unwrap_or_else(|| panic!("{what}: no job line for {landed_item}: {text}"));
+        assert_eq!(
+            (line.outcome.as_str(), line.landing.as_str()),
+            ("passed", "landed"),
+            "{what}: {text}"
+        );
+        assert_eq!(rated_unreadable, 0, "{what}: rated an unreadable config");
+        assert!(
+            report.notes.iter().any(|n| n.contains(error_part)
+                && n.contains("Reinstall Athena")
+                && n.contains("athena drain")),
+            "{what}: {:?}",
+            report.notes
+        );
+        assert!(
+            text.contains("stopped     reinstall needed"),
+            "{what}: {text}"
+        );
+        assert!(!text.contains("repeated failure"), "{what}: {text}");
+    }
+
+    /// What a readable landed config must still do: carry on, with a rating taken.
+    fn assert_continues(what: &str, report: &drain::Report) {
+        let text = display::drain(report);
+        assert_ne!(report.stop, Stop::NeedsReinstall, "{what}: {text}");
+        assert!(report.rating.is_some(), "{what}: rated: {text}");
+        assert!(
+            !report.notes.iter().any(|n| n.contains("Reinstall Athena")),
+            "{what}: {:?}",
+            report.notes
+        );
+        assert!(report.landed >= 1, "{what}: {text}");
+    }
+
+    /// Drains one path and checks the outcome. `error` is the read error the stubs report (the real steps
+    /// read their own); None is a readable landed config.
+    fn check_row(path: Path, before: Before, cause: &str, error: Option<&'static str>) {
+        let what = format!("{path:?} after {before:?}, {cause}");
+        match path {
+            Path::Stub => {
+                let stub = Stub {
+                    items: vec!["a", "b"],
+                    outcomes: passing(),
+                    ratings: RefCell::new(vec![1, 1]),
+                    config_unreadable_after_landing: error,
+                    ..Stub::default()
+                };
+                let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
+                match error {
+                    Some(error) => {
+                        let rated = stub.log().iter().filter(|e| *e == "rate").count();
+                        assert_reinstall(&what, &report, "a", error, rated);
+                        assert_eq!(stub.log(), ["read a", "run a", "land a"], "{what}");
+                    }
+                    None => {
+                        assert_eq!(report.landed, 2, "{what}");
+                        assert!(report.rating.is_some(), "{what}");
+                        assert_ne!(report.stop, Stop::NeedsReinstall, "{what}");
+                    }
+                }
+            }
+            Path::Shared(bound) => {
+                let shared = seeded(before, error);
+                let report = run_with(&shared, bound, 9.0);
+                match error {
+                    Some(error) => assert_reinstall(
+                        &what,
+                        &report,
+                        "new",
+                        error,
+                        shared.rated_unreadable.load(Ordering::SeqCst),
+                    ),
+                    None => assert_continues(&what, &report),
+                }
+            }
+            Path::Real => {
+                let fx = Fixture::new();
+                let scenario = rated_scenario();
+                let athena = fx.athena(scenario.script());
+                queue_steward_request(&athena, "Add a greeting to the README.");
+                queue_steward_request(&athena, "Add a farewell to the README.");
+                let current = test_config();
+                let landed = match (error, cause) {
+                    (None, _) => format!("{current}\n# a comment, which every build reads\n"),
+                    (_, "an unknown key") => format!("brand_new_key = 1\n{current}"),
+                    (_, "an unknown section") => {
+                        format!("{current}\n[brand_new_section]\nnew_key = 1\n")
+                    }
+                    _ => current.replace("max_concurrency = 1", "max_concurrency = \"many\""),
+                };
+                assert_ne!(landed, current, "{what}: the landed config must differ");
+                let lander = ConfigLander(landed);
+                let steps = RealSteps {
+                    athena: &athena,
+                    ui: &Quiet,
+                    page: &StubPage,
+                    lander: &lander,
+                };
+                let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+                match error {
+                    Some(_) => {
+                        let item = report.jobs[0].item.clone();
+                        // The error text is the running build's own; its field name is what to look for.
+                        let field = match cause {
+                            "an unknown key" => "brand_new_key",
+                            "an unknown section" => "brand_new_section",
+                            _ => "max_concurrency",
+                        };
+                        assert_reinstall(&what, &report, &item, field, 0);
+                        assert_eq!(report.jobs.len(), 1, "{what}");
+                        // The landed config really is one this build rejects.
+                        assert!(
+                            athena_core::capability::JobConfig::at(&fx.git, &fx.head()).is_err(),
+                            "{what}"
+                        );
+                    }
+                    None => assert_continues(&what, &report),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_landing_path_ends_in_reinstall_for_any_unreadable_config() {
+        let paths = [Path::Stub, Path::Shared(1), Path::Shared(2), Path::Real];
+        let befores = [
+            Before::Nothing,
+            Before::RepeatedFailure,
+            Before::Requested,
+            Before::Rebuilt,
+        ];
+        let mut ran = 0;
+        let mut skipped = Vec::new();
+        for path in paths {
+            for before in befores {
+                if let Some(why) = cannot_seed(path, before) {
+                    skipped.push((path, before, why));
+                    continue;
+                }
+                for (cause, error) in BAD_CONFIGS {
+                    check_row(path, before, cause, Some(error));
+                    ran += 1;
+                }
+                // A readable landed config still carries on.
+                check_row(path, before, "a readable config", None);
+                ran += 1;
+            }
+        }
+        // 4 paths with no earlier stop and the two-worker path with all four, 4 rows each; the rest are named.
+        assert_eq!(ran, 7 * 4);
+        assert_eq!(skipped.len(), 9, "{skipped:?}");
+        assert!(
+            skipped
+                .iter()
+                .all(|(p, b, _)| *b != Before::Nothing && *p != Path::Shared(2)),
+            "{skipped:?}"
+        );
+    }
+
+    #[test]
+    fn a_rebuild_after_the_unreadable_landing_restarts_and_leaves_another_workers_stop_alone() {
+        for bound in [1, 2] {
+            // The landing that made the config unreadable also changed Athena's code, and the rebuild that
+            // follows installs a build that reads it: no reinstall advice, the pass restarts.
+            let shared = Shared {
+                items: vec!["new"],
+                plan: independent(&["new"]),
+                unreadable_for: vec!["new"],
+                build_jobs: vec!["new"],
+                rebuild: true,
+                run_ms: 5,
+                ..Shared::default()
+            };
+            let report = run_with(&shared, bound, 9.0);
+            let text = display::drain(&report);
+            assert_eq!(report.stop, Stop::Rebuilt, "bound {bound}: {text}");
+            assert!(report.restart.is_some(), "bound {bound}: {text}");
+            assert!(!text.contains("Reinstall Athena"), "bound {bound}: {text}");
+            assert_eq!(shared.rated_unreadable.load(Ordering::SeqCst), 0);
+        }
+        // Another worker's earlier reason stands: the item `bad` still failed twice, and nothing restarts.
+        let shared = Shared {
+            items: vec!["bad", "new"],
+            plan: independent(&["bad", "new"]),
+            failing: vec!["bad"],
+            unreadable_for: vec!["new"],
+            build_jobs: vec!["new"],
+            rebuild: true,
+            wait_for: vec![("new", "end bad-retry")],
+            run_ms: 5,
+            ..Shared::default()
+        };
+        let report = run_with(&shared, 2, 9.0);
+        let text = display::drain(&report);
+        assert_eq!(report.stop, Stop::RepeatedFailure, "{text}");
+        assert_eq!(report.failed_item.as_deref(), Some("bad"), "{text}");
+        assert!(report.restart.is_none(), "{text}");
+        assert!(!text.contains("Reinstall Athena"), "{text}");
+    }
+}
+
+#[test]
+fn unreadable_at_reports_what_the_running_schema_rejects() {
+    let fx = Fixture::new();
+    let current = test_config();
+    let readable = |fx: &Fixture| {
+        assert_eq!(
+            athena_core::capability::JobConfig::unreadable_at(&fx.git, &fx.head()),
+            None
+        );
+    };
+    readable(&fx);
+    let bad = [
+        ("brand_new_key", format!("brand_new_key = 1\n{current}")),
+        (
+            "brand_new_section",
+            format!("{current}\n[brand_new_section]\nnew_key = 1\n"),
+        ),
+        (
+            "max_concurrency",
+            current.replace("max_concurrency = 1", "max_concurrency = \"many\""),
+        ),
+    ];
+    for (field, config) in bad {
+        commit_config(&fx, &config);
+        let why = athena_core::capability::JobConfig::unreadable_at(&fx.git, &fx.head())
+            .unwrap_or_else(|| panic!("{field} must be unreadable"));
+        assert!(why.contains(field), "{why}");
+        commit_config(&fx, &current);
+        readable(&fx);
     }
 }
 

@@ -51,6 +51,20 @@ impl JobConfig {
             defaults_sha256: sha256_hex(&defaults_bytes),
         })
     }
+
+    /// Why the running build cannot read the configuration at `commit`, or None when it can. This is the one
+    /// definition of that question, asked wherever a landing moves the branch.
+    ///
+    /// Root cause it answers: a job can land a new `athena.toml` field together with the code that reads it,
+    /// while the build that keeps running is the older one, which rejects the field. A landing never checked
+    /// that the running build can read the config it lands, so the next read failed and the job was recorded
+    /// as failed. The check belongs where the landed commit is read, not in one job. Any read error is taken
+    /// as "the landed config is newer than this build"; the error text is kept so other damage stays visible.
+    pub fn unreadable_at(git: &Git, commit: &str) -> Option<String> {
+        JobConfig::at(git, commit)
+            .err()
+            .map(|error| format!("{error:#}"))
+    }
 }
 
 /// Tools and permissions for one executing role.
