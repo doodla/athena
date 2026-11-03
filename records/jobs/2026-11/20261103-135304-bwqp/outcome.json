@@ -1,0 +1,49 @@
+{
+  "schema": "athena.outcome/1",
+  "job": "20261103-135304-bwqp",
+  "state": "failed",
+  "reason": "planning stopped before any code was written: the critic judged that the reading misread the request: The reading's assumption that 'the item stays queued ... a later run tries the item again' does not hold in the code: the drain's work list (queued_work and interrupted_work) leaves out jobs closed as failed. The reading still matches the request, but this assumption needs extra work (listing environment-stopped jobs as work) or the user's confirmation. (round 1 of 3). The plan puts the fix where the fault starts: in run_job's last match arm, the only place the run's reason is known. It reuses athena_core::disk::is_environment_reason with no second list, ends the item the way the existing Held, Waiting and Paused cases do, and avoids a pointless retry in the same run. Its claims that the criterion 1 and 3 tests would fail without the change are correct: today an environment stop is marked retry: true (OutcomeState::Failed), so the re-read attempt is counted. But the plan's central claim, taken from the reading, that the item \"stays queued\" and \"a later run tries the item again\" is false in production. The drain builds its list of work from approved_work, queued_work (only Queued or Proposed jobs, steward.rs 353-378) and interrupted_work (only dispatched jobs), at drain.rs 3370-3391. A job closed as rejected or failed is in none of them, so after the change an environment-stopped item silently leaves the drain for good. The planned assertion that report.queued holds a passes only because the test double's queue never changes, so that part of the demonstration tests only the double. A login expiry or usage limit is also global, so the run now goes through every queued item, each failing the same way. Combined with the first problem, one run could drop the whole queue out of the drain. Revise: make \"stays queued\" true where the work list is built (that touches steward.rs, already a listed deliverable) and prove it with a test on real records. Findings: major: In production the item does not stay queued: an environment-stopped job leaves the drain's list of work, and the planned test cannot see this because the test double's queue is fixed. (Plan Approach / Demonstrations criterion 1 ('report.queued holds a'); crates/athena-cli/src/drain.rs 3370-3391; crates/athena-core/src/steward.rs 353-378); minor: Expired logins and usage limits affect every item, so 'go on to the next item' will fail through the whole queue, each item spending a read and closing its job as failed. (Plan Decision 1 / Risks (first bullet)); minor: The second half of the criterion 3 test is unclear and checks nothing the criterion asks for. (Demonstrations criterion 3 (second drain::drain call)); nit: The demonstrations say the stub is added by plan step 4, but step 5 adds it. (Demonstrations criterion 1 and 3, 'Test seam'); nit: The plan says criterion 4 forbids a second list; it actually requires the classifier and no new list. The meaning is the same, but the wording is off. (Plan Decision 1, Rejected option 'Add a second list')",
+  "at": "2026-11-03T13:57:28.144166136Z",
+  "totals": {
+    "cost_all": {
+      "value": 1.0041755,
+      "unit": "usd",
+      "provenance": "reported",
+      "basis": "sum of the reported costs of every invocation of the job"
+    },
+    "cost_execution": {
+      "value": 0.8669751,
+      "unit": "usd",
+      "provenance": "reported",
+      "basis": "sum of the reported costs of the producer and verifier invocations"
+    },
+    "wall_time_execution": {
+      "value": 208.760188166,
+      "unit": "seconds",
+      "provenance": "measured",
+      "basis": "athena clock, from dispatch to the final verdict"
+    },
+    "tokens": {
+      "claude-opus-5-5": {
+        "input": 22,
+        "output": 8753,
+        "cache_read": 277762,
+        "cache_write": 38796,
+        "cost_usd": 0.5410684
+      },
+      "claude-sonnet-5-5": {
+        "input": 32,
+        "output": 16819,
+        "cache_read": 299651,
+        "cache_write": 66222,
+        "cost_usd": 0.4631071
+      }
+    },
+    "invocations": 3
+  },
+  "branch": "operator/next5",
+  "base_commit": "c5ee1f124d032152fec658c68c94193bf1f23b97",
+  "candidate_commit": null,
+  "after_blocked": false,
+  "through_commit": null
+}

@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-135304-bwqp",
+  "round": 1,
+  "at": "2026-11-03T13:57:26.062317763Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "In production the item does not stay queued: an environment-stopped job leaves the drain's list of work, and the planned test cannot see this because the test double's queue is fixed.",
+      "evidence": "The real list of work is approved_work + queued_work + interrupted_work (drain.rs 3370-3391). queued_work keeps only JobState::Queued or Proposed (steward.rs 359). interrupted_work keeps only dispatched jobs. Once item a's job closes as rejected and its retry closes failed with 'environment: producer login expired', neither job is listed by any of them, so the next drain never sees a. Report.queued comes from the work list (drain.rs 2919). In the planned test that list is the double's fixed queue, so the check that report.queued holds a passes with or without the change. The drain's own module docs (drain.rs 75) say a request stays queued until it is run or closed. The plan's dependents list names 'Report::queued' but not the work-list builders (queued_work and interrupted_work), which are the real readers of this outcome. Fix: Make the item stay queued where the work list is built. For example, add a steward function (next to interrupted_work) that lists drained-channel jobs closed Failed whose reason passes is_environment_reason and that no later request already retries (reuse the `retried` set in interrupted_work). Add them as Item { interrupted: true, .. } so their first attempt is `athena retry`, which resumes them under resumable_stop. Add a test on real records: either a unit test of the new function, or a drain on the real Athena-backed Steps with a fake producer that returns a 401, checking that the item is in the work list on the next drain. Add queued_work, interrupted_work and the new function to the dependents list. If the planner prefers not to do this, the reading's 'item stays queued / a later run tries it again' must be taken back to the user, not asserted against a double.",
+      "location": "Plan Approach / Demonstrations criterion 1 ('report.queued holds a'); crates/athena-cli/src/drain.rs 3370-3391; crates/athena-core/src/steward.rs 353-378",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Expired logins and usage limits affect every item, so 'go on to the next item' will fail through the whole queue, each item spending a read and closing its job as failed.",
+      "evidence": "StopCause::of (disk.rs 388-410) groups ProducerAuth and UsageLimit with LowDisk and CheckTimeout. LowDisk at dispatch is already handled by the run.held path (drain.rs 1545-1560), which spends nothing. A 401 or 429 recurs on every later job in the same run. The first risk's mitigation text talks about the classifier's contract and does not address this. Fix: Keep going to the next item as the reading asks, but bound it. For example, after an environment stop of kind ProducerAuth or UsageLimit, stop the run with a clear note (or a distinct stop) instead of starting further items. Or at least name this as a risk with its cost, and send it to the user as an open question.",
+      "location": "Plan Decision 1 / Risks (first bullet)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The second half of the criterion 3 test is unclear and checks nothing the criterion asks for.",
+      "evidence": "'calls drain::drain again on a fresh stub whose a run is rejected ... on the stub's second scripted run, ends' does not say what is asserted. One rejection never ended a run as RepeatedFailure, so this would pass without the change. Fix: Drop the second drain call, or replace it with a check on real records that the item is still listed for the next drain (see the major finding).",
+      "location": "Demonstrations criterion 3 (second drain::drain call)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The demonstrations say the stub is added by plan step 4, but step 5 adds it.",
+      "evidence": "Step 4 updates the module docs; step 5 adds the `Scripted` stub. Fix: Point the demonstrations to step 5.",
+      "location": "Demonstrations criterion 1 and 3, 'Test seam'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan says criterion 4 forbids a second list; it actually requires the classifier and no new list. The meaning is the same, but the wording is off.",
+      "evidence": "Criterion 4 text. Fix: Reword to 'Criterion 4 requires the one classifier.'",
+      "location": "Plan Decision 1, Rejected option 'Add a second list'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The reading's assumption that 'the item stays queued ... a later run tries the item again' does not hold in the code: the drain's work list (queued_work and interrupted_work) leaves out jobs closed as failed. The reading still matches the request, but this assumption needs extra work (listing environment-stopped jobs as work) or the user's confirmation.",
+  "summary": "The plan puts the fix where the fault starts: in run_job's last match arm, the only place the run's reason is known. It reuses athena_core::disk::is_environment_reason with no second list, ends the item the way the existing Held, Waiting and Paused cases do, and avoids a pointless retry in the same run. Its claims that the criterion 1 and 3 tests would fail without the change are correct: today an environment stop is marked retry: true (OutcomeState::Failed), so the re-read attempt is counted. But the plan's central claim, taken from the reading, that the item \"stays queued\" and \"a later run tries the item again\" is false in production. The drain builds its list of work from approved_work, queued_work (only Queued or Proposed jobs, steward.rs 353-378) and interrupted_work (only dispatched jobs), at drain.rs 3370-3391. A job closed as rejected or failed is in none of them, so after the change an environment-stopped item silently leaves the drain for good. The planned assertion that report.queued holds a passes only because the test double's queue never changes, so that part of the demonstration tests only the double. A login expiry or usage limit is also global, so the run now goes through every queued item, each failing the same way. Combined with the first problem, one run could drop the whole queue out of the drain. Revise: make \"stays queued\" true where the work list is built (that touches steward.rs, already a listed deliverable) and prove it with a test on real records."
+}
