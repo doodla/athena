@@ -253,7 +253,7 @@ and the page text passed the source check
   budget spent      spend plus the next call's cap would exceed --budget; the rest stays queued
   repeated failure  the same item failed twice; it is named
   queue empty       nothing was left to work; this is not success
-  job limit         --job-limit jobs were started
+  job limit         --job-limit jobs were started (a re-read that only needs accepting does not count)
   stop requested    `athena drain-stop` was run; the job in progress was finished and no further job was started
   rebuilt           a landing changed crates/, xtask/, Cargo.toml, Cargo.lock or setup.sh, so Athena was rebuilt \
 and installed (the steps of ./setup.sh); the new binary carries on with the remaining --budget and --job-limit, \
@@ -285,7 +285,8 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         /// The audience rating, 1 to 5, at or above which the target is met.
         #[arg(long, value_name = "N", default_value_t = drain::DEFAULT_TARGET_RATING, value_parser = clap::value_parser!(u8).range(1..=5))]
         rating_threshold: u8,
-        /// The most jobs to start; a retry of an item is a job.
+        /// The most jobs to start; a retry of an item is a job. A re-read that only needs accepting does not
+        /// count toward it.
         #[arg(long, value_name = "N", default_value_t = drain::DEFAULT_MAX_JOBS, value_parser = clap::value_parser!(u32).range(1..))]
         job_limit: u32,
         #[arg(long)]

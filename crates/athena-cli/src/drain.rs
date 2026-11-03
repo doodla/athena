@@ -178,7 +178,8 @@
 //!   makes `athena go` read the job again, drain accepts the new reading if its scope (capability, class
 //!   of work, deliverables) is unchanged and runs it in the same drain. If the scope changed, the item is
 //!   left queued with the reason (outcome `needs accepting`, plus a note); that is not a failure and stops
-//!   nothing.
+//!   nothing. Such a re-read does not count toward `--job-limit` (its cost still counts toward the budget),
+//!   so the next item still runs.
 //! - **Interrupted jobs give up their build directories.** At the start of a drain and before each run, drain
 //!   removes `target/` of every job that is dispatched with no closing record, has no process in the registry
 //!   and whose job lock is free ([`athena_core::disk::reclaim_interrupted_targets`]). Work trees, kept
@@ -250,7 +251,8 @@ pub struct Limits {
     pub budget_usd: f64,
     /// The rating, from 1 to 5, at or above which the target is met.
     pub target_rating: u8,
-    /// The most jobs to start. A retry of an item is a job.
+    /// The most jobs to start. A retry of an item is a job. A re-read that only ends as needs accepting
+    /// does not count toward it.
     pub max_jobs: u32,
 }
 
@@ -1544,6 +1546,12 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                         .unwrap_or("its reading needs accepting")
                 ));
                 self.push(line);
+                // A reading that only needs accepting leaves the item queued: it spent money (already in the
+                // budget) but no job slot, so the next item can still start.
+                {
+                    let mut st = self.st();
+                    st.started = st.started.saturating_sub(1);
+                }
                 RunStep::NeedsAccepting
             }
             _ if run.held => {

@@ -167,6 +167,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A re-read that ends as `needs accepting` no longer uses one of the `--job-limit` slots. The drain took the
+  slot before the read and never gave it back, so a batch with money left could spend all its slots on old
+  requests that were read again after a settings change and came back needing acceptance, and land nothing.
+  The slot is now given back when a run ends that way, so the batch goes on to the next item. The cost of the
+  attempt still counts against `--budget`; failed, held and passed attempts keep counting toward the limit.
 - A batch no longer stops as a repeated failure when an item's second failure paused its line. The drain asked
   whether the line was paused only before each attempt, so the failure that did the pausing went unchecked, the
   item ended as failed, and the batch stopped with money and job slots left. It now asks once more after the
