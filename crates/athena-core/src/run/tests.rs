@@ -1484,24 +1484,25 @@ mod produce_and_verify_order_tests {
                     .unwrap(),
             );
 
-            // Every read of the free space saw the job directories as they were at that moment. The first read
-            // with the verifier's snapshot present is the gate before the verifier; the one before it is the
-            // gate before the checks.
+            // Every read of the free space saw the job directories as they were at that moment. The verifier's
+            // snapshot is made before the free-disk check of the checks, so the first read with it present is
+            // that check, and the one after it is the gate before the verifier.
             let probes = crate::test_support::probes_of(&root);
             let gate = probes
                 .iter()
                 .position(|p| p.verifying)
-                .expect("the gate before the verifier read the free space");
-            assert!(gate > 0, "{probes:?}");
+                .expect("the free-disk check of the checks read the free space");
+            // The checks build in their own directory, so the producer's build goes before the free-disk
+            // check of the checks and before they start, whether they then pass or fail.
             assert!(
-                probes[gate - 1].produce_present,
-                "the producer's build directory existed when the checks started: {probes:?}"
+                probes.iter().skip(gate).all(|p| !p.produce_present),
+                "target/produce is gone at every read from the checks on, pass or fail: {probes:?}"
             );
-            // The checks build in their own directory, so the producer's build goes before they start,
-            // whether they then pass or fail.
+            let said = ui.0.lock().unwrap().clone();
             assert!(
-                !probes[gate].produce_present,
-                "target/produce is gone before the verifier gate, pass or fail: {probes:?}"
+                said.iter()
+                    .any(|l| l.starts_with("disk       removed the producer's build directory")),
+                "the producer's build existed and was removed: {said:#?}"
             );
             if passes {
                 assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
@@ -1912,6 +1913,23 @@ mod produce_and_verify_order_tests {
         assert_eq!(line.hold.as_deref(), Some(low.text().as_str()));
     }
 
+    /// Free space that is short once the verifier's snapshot exists and the checks have not passed: what the
+    /// free-disk check of the checks finds, since it runs after the snapshot is made and after the job's own
+    /// build is removed. Plenty before that, and always once `<state>/freed` exists.
+    fn low_while_checking(state: &std::path::Path) -> std::io::Result<u64> {
+        let snapshot = std::fs::read_dir(state.join("jobs"))
+            .map(|dirs| dirs.flatten().any(|e| e.path().join("verify").exists()))
+            .unwrap_or(false);
+        let low = snapshot
+            && !state.join("freed").exists()
+            && !crate::test_support::verifier_stage_reached(state);
+        if low {
+            Ok(3_000_000_000)
+        } else {
+            crate::test_support::plenty_of_space(state)
+        }
+    }
+
     #[test]
     fn low_disk_before_the_checks_holds_after_the_idle_sweep_and_a_retry_resumes_at_the_checks() {
         let repo = repo();
@@ -1922,7 +1940,7 @@ mod produce_and_verify_order_tests {
             &repo,
             &state,
             PASSES,
-            crate::test_support::low_once_built,
+            low_while_checking,
             counting(counts.clone(), Some(root.clone())),
         );
         // An idle job's build directory is Athena's to remove; a directory that is not a job's, and the

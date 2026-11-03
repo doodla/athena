@@ -1,0 +1,175 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261102-232736-dc7h",
+  "candidate_commit": "472309a3eadbd336a4767a37d9a17300a4e8185c",
+  "verified_fingerprint": "sha256:98cfe5da3cacc5dc44c6dbe6d4542d9b8a7f42c6bf57e6bd817e68050b66aa26",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41553579164 for 472309a3eadbd336a4767a37d9a17300a4e8185c",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41553579164 for 472309a3eadbd336a4767a37d9a17300a4e8185c",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41553579164 for 472309a3eadbd336a4767a37d9a17300a4e8185c",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 7,
+  "criteria": [
+    {
+      "criterion": "A new test in crates/athena-cli/tests/drain.rs (using with_free_space and simulated_free) has a writer build whose size takes simulated free disk below min_free_gb. The job is not held for disk, the build directory is removed first, and the checks run to a verdict. Run `cargo test -p athena-cli --test drain` and check that it passes.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "The new test `low_disk_from_the_writer_build_is_cleared_before_the_checks_gate_so_the_job_is_not_held` uses `with_free_space(low_once_built)`, which reports 3 GB while `target/produce` exists, and a Producer script that plants `target/produce/debug/big`. It asserts the job finishes as Landed, the build directory is gone, the 'disk       removed the producer's build directory' line comes before the 'checks     ' line, and no 'held       ' line appears. My run of `cargo test -p athena-cli --test drain` printed 'ok' for it (151 passed, 0 failed). Reading the code, on the base the up-front gate would run while `target/produce` still exists, find 3 GB, and hold the job, so the test would fail there.",
+      "commands": [
+        "cargo test -p athena-cli --test drain"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A new test with a GitHub origin and a green CI run for the candidate, with free disk below min_free_gb, shows the checks stage does not hold for low disk and prints the 'ci   checks reused' line. A companion case with no usable CI result shows the disk gate still holds the job before the local check run. Run `cargo test -p athena-cli --test drain` and check that both pass.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "`low_disk_with_a_green_ci_run_does_not_hold_the_checks_stage` sets a GitHub origin and installs a fake gh (`CiReplies::Green`) plus `EarlyFake`. It asserts the job lands, a 'ci         checks reused from' line appears, no 'held       ' line appears, the fake gh was asked, and one CI-branch push was recorded. There are two companion tests. `low_disk_with_no_ci_result_holds_before_the_local_run_and_a_retry_with_space_runs_the_checks` has no origin. `low_disk_with_a_github_origin_and_no_ci_run_holds_before_the_local_run` has an origin and a gh answer of `workflow_runs: []`. Both assert a LowDisk hold (3 GB free, 10 GB required), no 'checks     ' line, the build removed before the 'held' line, the hold recorded, and the job Dispatched with no outcome. Both then check that a retry with space lands. All three passed in my run.",
+      "commands": [
+        "cargo test -p athena-cli --test drain"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "In crates/athena-core/src/run/mod.rs check_and_verify, the up-front disk_gate call before the checks is gone. free_producer_build runs before any disk_gate in the checks stage, and the gate is called only on the local-run path. Check by reading the diff.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The diff removes the `if recorded_checks.is_none() && let Some(low) = self.disk_gate(...)` block before `push_ci_branch`. `free_producer_build` is still called at mod.rs:1458 when the Checks stage starts. Grep for `disk_gate(` shows the only new call at checks.rs:34, inside `SnapExec::exec` behind a `gated` once-flag. Per routing.rs:180, `exec` is called only for a check that actually runs, after skips and CI reuse. A LowDisk error is downcast in `check_and_verify`, the verify snapshot is removed, and `hold_for_disk` is called.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "CHANGELOG.md has a new entry saying the writer build is removed before the checks free-disk check and the requirement applies only before a local check run.",
+      "kind": "content",
+      "met": true,
+      "evidence": "There is one new bullet under [Unreleased] / Changed: 'The writer build is removed before the checks free-disk check, and that check applies only just before a local check run.' It also names the root cause. No other CHANGELOG line changed.",
+      "commands": [
+        "git diff HEAD~1 -- docs/architecture.md CHANGELOG.md crates/athena-core/src/disk.rs"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The verifier-stage gate (verifier_environment_problem) and the dispatch and producer gates are unchanged in the diff, and the existing disk-hold tests in crates/athena-cli/tests/drain.rs still pass (`cargo test -p athena-cli --test drain`).",
+      "kind": "content",
+      "met": true,
+      "evidence": "`git diff HEAD~1 -- crates/athena-core/src/run/verification.rs` printed nothing. The dispatch (mod.rs:782) and producer (mod.rs:1344) `disk_gate` calls are not in the diff. disk.rs has doc-comment changes only. In my run, all pre-existing disk tests passed: every low_disk_* test, low_disk_after_the_checks_holds_the_job_before_the_verifier_runs, low_disk_after_the_build_holds_the_job_and_does_not_fail_it, low_disk_before_the_checks_holds_the_job_and_a_retry_with_space_runs_the_checks, the_real_steps_hold_a_job_on_low_disk_without_a_failure_and_a_later_drain_runs_the_same_job, and space_that_stays_short_leaves_the_job_held_and_uses_no_attempt.",
+      "commands": [
+        "git diff HEAD~1 -- crates/athena-core/src/run/verification.rs",
+        "cargo test -p athena-cli --test drain"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "docs/architecture.md, if it describes the checks-stage disk check, states the new order; no other claim there changes.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Only the 'before the checks' clause changed. It now says the gate runs after the producer's build directory is removed, only just before a local check run, and that a CI result standing in for the checks is never held. The rest of the paragraph is unchanged, including its existing wording about failed jobs and `athena retry`.",
+      "commands": [
+        "git diff HEAD~1 -- docs/architecture.md CHANGELOG.md crates/athena-core/src/disk.rs"
+      ],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Two changed files are not on the expected deliverables list: gh/mod.rs and gh/early.rs.",
+      "evidence": "The diff changes `#[cfg(test)]` to `#[cfg(any(test, feature = \"test-support\"))]` on `early_seam` and its two uses, so the new drain tests can install fakes. Both files were in the critic-accepted planned file list, and `test-support` is enabled only through athena-cli's [dev-dependencies] (Cargo.toml line 31), so production builds are unaffected. routing.rs was on the list and did not change, which is harmless.",
+      "location": "crates/athena-core/src/gh/mod.rs, crates/athena-core/src/gh/early.rs",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "A job held at the checks gate now pushes its CI branch and opens its early PR before the hold. The old gate ran before both.",
+      "evidence": "The gate now runs inside the routed checks, after `push_ci_branch`, `early_pr` and `verifier_snapshot`. The hold path removes the verify snapshot. `finish_dispatched` deletes the CI branch on any result (mod.rs:992-995), but the early PR stays open while the job is held. This follows from narrowing the gate to the local-run path, which the reading asks for, so it is not a defect. It is worth knowing about.",
+      "location": "crates/athena-core/src/run/mod.rs:1417-1427, 1515-1522",
+      "source": "verifier"
+    },
+    {
+      "severity": "nit",
+      "summary": "Two edited doc lines are not rewrapped and run well past the surrounding width.",
+      "evidence": "'is never held for it), and immediately before the verifier runs (D142), where it also writes...' and 'never holds two full builds while the checks run, and its own build never holds that gate. A failed check keeps...' are both much longer than the lines around them. fmt passed per Athena's record, and rustfmt does not wrap doc comments.",
+      "location": "docs/architecture.md:42; crates/athena-core/src/disk.rs:63",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "pass",
+  "final_verdict": "pass",
+  "reasons": [],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results",
+    "planned demonstrations and files"
+  ],
+  "summary": "I recommend a pass. The change fixes the false disk hold where the request said it starts. The old code checked free disk in `check_and_verify` before the job's own writer build was removed and before the CI result was read. The new code removes that check and runs the existing `disk_gate` once inside `SnapExec::exec`, just before the first check that runs locally. `free_producer_build` already runs earlier in the Checks stage, so the job's own build is gone by then. A CI result that stands in for the checks never reaches the gate. I ran `cargo test -p athena-cli --test drain` in this snapshot and all 151 tests passed. Four are new: the writer-build case, a green-CI case, and two cases with no usable CI result. The existing low-disk hold tests also passed. Reading the code, the new tests would fail on the base, because the old early gate saw the planted `target/produce` directory, found 3 GB free and held the job. The dispatch gate (mod.rs:782), the producer gate (mod.rs:1344) and verification.rs are unchanged. The CHANGELOG and docs/architecture.md entries match the code. There are three minor findings and no blockers: two test-seam files outside the deliverables list, a held job now pushes its CI branch and opens its early PR before the hold, and two doc lines are left unwrapped."
+}
