@@ -1,0 +1,139 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261103-030153-mcr4",
+  "n": 1,
+  "at": "2026-11-03T07:53:44.956354916Z",
+  "invocation_seq": 1,
+  "base_commit": "00b6e5c00abfb1dd0784798796c0a513a54a5f98",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Check landed athena.toml against the installed build, in every drain",
+  "summary": "Root cause: a job can land a new athena.toml field while the installed build (which keeps running) cannot parse it, and nothing checks that at the landing. Job 20261101-085726-z7dg added a drain-only post-landing check; this change moves the check into the landing outcome and fixes that job's open finding so the whole class ends the run cleanly with a reinstall note.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "outcome-check",
+      "how": "Criteria check the run ending cleanly with job landed, via tests."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus fmt, clippy, test pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "Fix keyed on the unreadable-config state, not the stop reason or one job."
+    },
+    {
+      "id": "public",
+      "how": "No email addresses or personal data written."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/drain.rs (State::land at ~1643, Steps::config_after_landing at ~528 and ~3576, Stop::NeedsReinstall at ~954, finish/rate at ~2338, set_stop keeps only the first reason), crates/athena-core/src/capability.rs (JobConfig::at parses athena.toml at a commit), crates/athena-cli/tests/drain.rs (real-steps tests). The entry is the drain's land step under the landing lock; the config is read with the running build's schema directly via JobConfig::at at the new head, not a stand-in. No record or data file is added under crates/, so check_record_file/AnyRecord/round-trip tests are not involved.",
+    "Job 20261101-085726-z7dg (landed, pass): its Stop::NeedsReinstall and post-landing config read are KEPT. Its findings: (1) set_stop keeps only the first reason, so under drain_concurrent an earlier stop hides the reinstall note and rating still reads the unreadable config - FIXED by keying skip-rating and the note on State.unreadable_config.is_some(), not on the stop reason; (2) any parse error counts as 'newer schema' - kept, the error text stays in the note; (3) the real-steps test not shown to fail on base - addressed by a test that fails without the change.",
+    "Job 20261101-061448-sdya (landed, pass): its work is kept unchanged. Its two minor findings (duplicate origin parser in gh/client.rs vs gh/early.rs; full CI wait when the CI-branch push fails) are unrelated to this failure class and are not addressed; its changed files are excluded in out_of_scope.",
+    "Goal and audience: the operator running athena drain; a landed job that adds a config key must never be recorded failed, and the run must end with a reinstall note. Also the failure of the same class when a non-first worker or a non-drain path reads the landed config.",
+    "Default applied: the check is enforced by mechanism (a test), not prose; no email addresses or personal data are written anywhere."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The CHANGELOG.md entry and code comments name the root cause: the landing never checks that the running build can read the config it lands, and the fix is where the landed head is read, not at one job.",
+      "kind": "content"
+    },
+    {
+      "text": "A test in crates/athena-cli/tests/drain.rs or drain.rs lands a job whose athena.toml diff adds a key the running schema rejects, while another worker has already set a stop reason: the job is recorded landed (not failed), rating is skipped, the reinstall note with the parse error is reported, and the run does not end as 'repeated failure'. It fails on the base tree and passes with the change. Run: cargo test -p athena-cli drain.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A second test covers the class, not one job: each Steps/lander path that reports Landed (stub and real steps) yields the same reinstall outcome for any unreadable landed config, and a readable landed config still continues normally. Run: cargo test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo fmt --check, cargo clippy --all-targets and cargo test all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Files from job 20261101-061448-sdya (CI wait, gh/client.rs, routing.rs, config.rs, athena.toml) are unchanged in the diff (git diff).",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/capability.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "All work of job 20261101-061448-sdya: crates/athena-core/src/gh/client.rs, routing.rs, run/mod.rs, run/tests.rs, run/verification.rs, crates/athena-data/src/config.rs, athena.toml (kept, not changed)",
+    "Making the config parser tolerant of unknown keys",
+    "Automatically reinstalling or rebuilding the binary",
+    "Changes to athena.toml, defaults.toml, admission rules, or .github/workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1800.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7208333333333333,
+      "p_verification_passes": 0.6738544474393531,
+      "p_user_intervenes": 0.09197080291970802,
+      "cost_usd": {
+        "p10": 0.5541424223878766,
+        "p50": 1.305657404515909,
+        "p90": 3.735370609948945
+      },
+      "wall_time_s": {
+        "p10": 543.5390783454237,
+        "p50": 1917.4853358421074,
+        "p90": 4171.998653385266
+      }
+    }
+  },
+  "departures": null,
+  "urgent_reason": "Cuts wasted work: a landed job is recorded failed and the run stops as 'repeated failure', forcing redo retries.",
+  "hard_reason": "Changes the drain's stop rules and the landing stage, which decide whether a run ends or a job is recorded as failed.",
+  "producer_effort": "high"
+}
