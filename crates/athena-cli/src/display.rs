@@ -820,11 +820,23 @@ pub fn finished(f: &Finished) -> String {
             )
             .map(|_| ());
         }
-        let _ = writeln!(
-            out,
-            "next   ask again with the findings in mind, or `athena status {}`",
-            f.job.as_str()
-        );
+        if v.reasons
+            .iter()
+            .any(|r| r.starts_with(athena_core::verify::UNJUDGED_REASON_PREFIX))
+        {
+            // The verifier timed out twice: nothing was judged, so there are no findings to keep in mind.
+            let _ = writeln!(
+                out,
+                "next   the verifier timed out and nothing was judged; ask again, or `athena status {}`",
+                f.job.as_str()
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "next   ask again with the findings in mind, or `athena status {}`",
+                f.job.as_str()
+            );
+        }
     }
     if f.state == OutcomeState::Stale {
         let _ = writeln!(

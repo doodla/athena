@@ -16,7 +16,9 @@ use crate::reading::{
 use crate::scoring::{self, Happened, score, totals};
 use crate::state::{NoStages, ResumeMark, ResumeStage, Stage, StageSink};
 use crate::store::{JobRecords, JobState, Records};
-use crate::verify::{MAP_PATH, VerdictInputs, Verified, judge, mark_pre_existing, verified};
+use crate::verify::{
+    MAP_PATH, VerdictInputs, Verified, VerifierFailure, judge, mark_pre_existing, verified,
+};
 use crate::{Athena, Ui};
 use anyhow::{Context, Result, bail};
 use athena_agent::env::{EnvSpec, Side};

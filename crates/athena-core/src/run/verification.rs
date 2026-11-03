@@ -174,7 +174,7 @@ impl Athena {
                 if let Err(e) =
                     self.check_budget(jc, spent, jc.config.budget.verifier_usd, "verifier")
                 {
-                    verifier_failure = Some(format!("{e}"));
+                    verifier_failure = Some(VerifierFailure::Incomplete(format!("{e}")));
                     break;
                 }
                 let vbrief = verifier_brief_with_plan(&inputs, verifier_plan.as_ref(), true);
@@ -206,34 +206,44 @@ impl Athena {
                 // deny stops its tools, and the lock stops everything else, such as a test it runs.
                 if let Err(e) = vsnap.lock() {
                     let _ = vsnap.unlock();
-                    verifier_failure =
-                        Some(format!("the verifier's snapshot could not be locked: {e}"));
+                    verifier_failure = Some(VerifierFailure::Incomplete(format!(
+                        "the verifier's snapshot could not be locked: {e}"
+                    )));
                     break;
                 }
                 let invoked = self.invoke_and_record(&vfacts, ctx.redactor);
                 vsnap.unlock()?;
                 match invoked? {
                     Err(error) => {
-                        verifier_failure = Some(format!("the verifier could not run: {error}"))
+                        verifier_failure = Some(VerifierFailure::Incomplete(format!(
+                            "the verifier could not run: {error}"
+                        )))
                     }
                     Ok((voutput, vrecord)) => {
                         verifier_invocation = Some(vrecord.seq);
                         commands_run = voutput.commands_run.clone();
                         if voutput.outcome != InvocationOutcome::Success {
-                            verifier_failure = Some(
-                                vrecord
-                                    .detail
-                                    .clone()
-                                    .unwrap_or_else(|| "the verifier did not complete".into()),
-                            );
+                            let detail = vrecord
+                                .detail
+                                .clone()
+                                .unwrap_or_else(|| "the verifier did not complete".into());
+                            // A verifier stopped at its deadline judged nothing: it is its own failure,
+                            // not a judged one, so it is rerun once and, if it times out again, unjudged.
+                            verifier_failure =
+                                Some(if voutput.outcome == InvocationOutcome::TimedOut {
+                                    VerifierFailure::TimedOut(detail)
+                                } else {
+                                    VerifierFailure::Incomplete(detail)
+                                });
                         }
                         verdict_output = voutput
                             .structured
                             .clone()
                             .and_then(|v| serde_json::from_value(v).ok());
                         if verdict_output.is_none() && verifier_failure.is_none() {
-                            verifier_failure =
-                                Some("the verifier returned no valid verdict".into());
+                            verifier_failure = Some(VerifierFailure::Incomplete(
+                                "the verifier returned no valid verdict".into(),
+                            ));
                         }
                         ctx.ui.line(&format!(
                             "verifier   {vmodel} · {:.0}s · {} · {}",
@@ -253,6 +263,26 @@ impl Athena {
                 let head_now = vsnap.git().head()?;
                 let tree_now = vsnap.work_tree_tree()?;
                 if head_now.as_deref() == vsnap.candidate() && tree_now == prepared {
+                    // A verifier that timed out is rerun once, on a fresh snapshot, sharing the cap of two
+                    // runs with the rerun below. The second run's result decides; a second timeout stays
+                    // `TimedOut`, so the criteria are unjudged.
+                    if matches!(verifier_failure, Some(VerifierFailure::TimedOut(_)))
+                        && verifier_runs < 2
+                    {
+                        verdict_output = None;
+                        verifier_failure = None;
+                        commands_run.clear();
+                        verifier_invocation = None;
+                        ctx.ui
+                            .line("timeout    the verifier timed out; it reruns once");
+                        let (fresh, _, fresh_tree) =
+                            self.verifier_snapshot(&verify_dir, &p, &c, ctx.pin_dir.as_deref())?;
+                        if fresh_tree != prepared {
+                            bail!("a fresh verifier snapshot differs from the first one");
+                        }
+                        vsnap = fresh;
+                        continue;
+                    }
                     break;
                 }
                 let change = format!(
@@ -267,9 +297,9 @@ impl Athena {
                 verifier_invocation = None;
                 system_fault = Some(change.clone());
                 if verifier_runs >= 2 {
-                    verifier_failure = Some(format!(
+                    verifier_failure = Some(VerifierFailure::Incomplete(format!(
                         "the verifier's snapshot changed on both runs, so no verdict could be trusted ({change})"
-                    ));
+                    )));
                     break;
                 }
                 ctx.ui.line("fault      the verifier's snapshot changed; its verdict is discarded and verification reruns once");

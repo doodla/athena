@@ -130,6 +130,24 @@ pub struct Judgment {
     pub reasons: Vec<String>,
 }
 
+/// Why the verifier gave no verdict.
+///
+/// The root cause this type guards against: a verifier killed at its deadline was recorded as the generic
+/// `verifier_failure` string in `run/verification.rs`, and `judge` failed the verdict on it exactly as it does
+/// for a judged failure, so criteria were rejected that nobody had judged. A timeout is its own variant: the
+/// core reruns it once, and a second timeout leaves the criteria unjudged. Neither variant ever yields a pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifierFailure {
+    /// The verifier could not run, errored, returned nothing usable, or the system could not keep its
+    /// snapshot still or its budget ran out. The detail is the cause.
+    Incomplete(String),
+    /// The verifier was stopped at its deadline. The criteria were not judged. The detail is the cause.
+    TimedOut(String),
+}
+
+/// The start of the reason `judge` records for a verifier that timed out; the CLI keys off it.
+pub const UNJUDGED_REASON_PREFIX: &str = "the verifier timed out, so the criteria are unjudged";
+
 /// What the verdict is computed from.
 #[derive(Debug)]
 pub struct VerdictInputs<'a> {
@@ -149,8 +167,8 @@ pub struct VerdictInputs<'a> {
     /// Set when the verifier changed its snapshot. The core discarded that verdict and reran verification;
     /// the fault is the system's, so it is recorded and never counted against the work.
     pub system_fault: Option<String>,
-    /// Set when the verifier did not complete.
-    pub verifier_failure: Option<String>,
+    /// Set when the verifier did not complete, or timed out and left the criteria unjudged.
+    pub verifier_failure: Option<VerifierFailure>,
     /// `docs/design/requirements-map.md` at the base, if the file exists there.
     pub map_base: Option<&'a str>,
     /// The same file at the candidate, if it exists there.
@@ -389,9 +407,16 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
             ));
         }
     }
-    if let Some(failure) = &inputs.verifier_failure {
-        reasons.push(format!("the verifier did not complete: {failure}"));
+    match &inputs.verifier_failure {
+        Some(VerifierFailure::Incomplete(failure)) => {
+            reasons.push(format!("the verifier did not complete: {failure}"));
+        }
+        Some(VerifierFailure::TimedOut(failure)) => {
+            reasons.push(format!("{UNJUDGED_REASON_PREFIX}: {failure}"));
+        }
+        None => {}
     }
+    let unjudged = matches!(inputs.verifier_failure, Some(VerifierFailure::TimedOut(_)));
     if let Some(change) = &inputs.system_fault {
         findings.push(athena_finding(
             Severity::Minor,
@@ -449,7 +474,11 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
                 criterion: criterion.text.clone(),
                 kind: criterion.kind,
                 met: false,
-                evidence: "the verifier did not assess this criterion".into(),
+                evidence: if unjudged {
+                    "unjudged: the verifier timed out before it assessed this criterion".into()
+                } else {
+                    "the verifier did not assess this criterion".into()
+                },
                 commands: Vec::new(),
                 commands_verified: false,
             });
@@ -991,6 +1020,107 @@ mod tests {
             baseline: None,
             replay,
         })
+    }
+
+    fn judge_failure(
+        failure: Option<VerifierFailure>,
+        out: Option<&VerdictOutput>,
+        checks: &[CheckRun],
+    ) -> Judgment {
+        let ran = ["cargo test".to_string()];
+        judge(&VerdictInputs {
+            criteria: &criteria(),
+            checks,
+            output: out,
+            commands_run: &ran,
+            candidate_tree: None,
+            checks_tree: None,
+            system_fault: None,
+            verifier_failure: failure,
+            map_base: None,
+            map_candidate: None,
+            baseline: None,
+            replay: None,
+        })
+    }
+
+    #[test]
+    fn a_verifier_that_times_out_is_unjudged_never_a_pass() {
+        let detail = "deadline of 1s reached";
+        // No verdict: every criterion is unjudged, and the reason is the unjudged one, not a judged failure.
+        let none = judge_failure(
+            Some(VerifierFailure::TimedOut(detail.into())),
+            None,
+            &[check(true)],
+        );
+        assert_eq!(none.final_verdict, Verdict::Fail);
+        assert_eq!(none.agent_verdict, None);
+        assert_eq!(
+            none.reasons,
+            vec![format!("{UNJUDGED_REASON_PREFIX}: {detail}")]
+        );
+        assert!(none.reasons[0].contains("unjudged"));
+        assert!(!none.reasons.iter().any(|r| r.contains("did not complete")));
+        assert!(
+            !none
+                .reasons
+                .iter()
+                .any(|r| r.contains("returned no verdict"))
+        );
+        assert_eq!(none.criteria.len(), 2);
+        for c in &none.criteria {
+            assert!(!c.met);
+            assert!(c.evidence.contains("unjudged"), "{}", c.evidence);
+            assert!(!c.evidence.contains("did not assess"), "{}", c.evidence);
+        }
+        // Even with a passing verdict in hand, a timeout never yields a pass.
+        let out = output(vec!["cargo test"], vec![]);
+        let with_pass = judge_failure(
+            Some(VerifierFailure::TimedOut(detail.into())),
+            Some(&out),
+            &[check(true)],
+        );
+        assert_eq!(with_pass.final_verdict, Verdict::Fail);
+        assert!(with_pass.reasons[0].contains("unjudged"));
+        // Without the timeout the same inputs pass.
+        let ok = judge_failure(None, Some(&out), &[check(true)]);
+        assert_eq!(ok.final_verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn non_timeout_incomplete_failure_keeps_the_did_not_complete_reason() {
+        let j = judge_failure(
+            Some(VerifierFailure::Incomplete("x".into())),
+            None,
+            &[check(true)],
+        );
+        assert_eq!(j.final_verdict, Verdict::Fail);
+        assert_eq!(j.reasons, vec!["the verifier did not complete: x"]);
+        for c in &j.criteria {
+            assert_eq!(c.evidence, "the verifier did not assess this criterion");
+            assert!(!c.evidence.contains("unjudged"));
+        }
+    }
+
+    #[test]
+    fn non_timeout_failing_check_and_judged_fail_keep_their_reasons() {
+        // A failing check fails an otherwise passing verdict, with its existing reason.
+        let out = output(vec!["cargo test"], vec![]);
+        let failing_check = judge_failure(None, Some(&out), &[check(false)]);
+        assert_eq!(failing_check.final_verdict, Verdict::Fail);
+        assert!(
+            failing_check.reasons.iter().any(|r| r.contains("failed")),
+            "{:?}",
+            failing_check.reasons
+        );
+        assert!(!failing_check.reasons.iter().any(|r| r.contains("unjudged")));
+        // A judged fail verdict keeps its reason.
+        let mut failed = output(vec!["cargo test"], vec![]);
+        failed.verdict = VerdictValue::Fail;
+        let judged = judge_failure(None, Some(&failed), &[check(true)]);
+        assert_eq!(judged.final_verdict, Verdict::Fail);
+        assert_eq!(judged.agent_verdict, Some(Verdict::Fail));
+        assert_eq!(judged.reasons, vec!["the verifier's verdict is fail"]);
     }
 
     #[test]

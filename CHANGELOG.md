@@ -136,6 +136,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A verifier stopped at its deadline is now its own outcome, `unjudged`, and is rerun once. A first timeout
+  reruns the verifier on a fresh snapshot, and the second run's verdict decides; a second timeout leaves the
+  criteria unjudged, with the reason "the verifier timed out, so the criteria are unjudged: ..." and evidence
+  "unjudged" on each criterion. The verdict is still not a pass, and `athena go` no longer says "ask again with
+  the findings in mind" for it. A verifier that errors, could not run or returned no verdict keeps "the
+  verifier did not complete" and is not rerun. Root cause: `verification_stage`
+  (`crates/athena-core/src/run/verification.rs`) recorded a timeout as the generic `verifier_failure` string,
+  and `judge` (`crates/athena-core/src/verify.rs`) failed the verdict on it exactly as for a judged failure,
+  so criteria were rejected that nobody had judged (jobs 20261010-154005-jsdj, 20261018-120736-90w3 and
+  20261018-133651-1ncn). `VerdictInputs.verifier_failure` is now a `VerifierFailure` with an `Incomplete` and
+  a `TimedOut` variant.
 - A landed job whose `athena.toml` change the running build cannot read now always ends the drain with the
   reinstall note, whichever other worker stopped the run first, and is never recorded as failed. Root cause:
   a landing never checked that the running build can read the config it lands (a job can add a field together
