@@ -4138,7 +4138,7 @@ fn the_default_plan_budget_affords_a_read_where_drain_would_need_a_read_and_a_ru
     let steps = real_steps(&athena, &lander);
     // With the repository's own caps (athena.toml) a read plus a run does not fit the default budget of 2.
     let caps = steps.caps().unwrap();
-    assert_eq!((caps.read, caps.run), (2.0, 50.0));
+    assert_eq!((caps.read, caps.run), (2.0, 60.0));
     assert!(caps.read + caps.run > 2.0 && caps.read <= 2.0);
 
     // Drain at that budget reads nothing: the run would not fit.

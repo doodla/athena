@@ -970,7 +970,7 @@ fn when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget() {
     // $2.60 for the job,$0.50 for the producer, and a verifier run that costs $1.00 against a $2.00 cap:
     // the first run is allowed, the rerun is not.
     let tight = config(true)
-        .replace("job_usd = 50.00", "job_usd = 2.60")
+        .replace("job_usd = 60.00", "job_usd = 2.60")
         .replace("producer_usd = 10.00", "producer_usd = 0.50")
         .replace("verifier_usd = 5.00", "verifier_usd = 2.00")
         .replace("reader_usd = 2.00", "reader_usd = 0.10");
@@ -997,7 +997,7 @@ fn admission_refuses_a_job_short_of_the_whole_planning_reserve() {
     // per-invocation check let the reader run at 20.00.
     let planned = format!(
         "{}\n[job_plan]\nenabled = true\nplanner_usd = 0.75\ncritic_usd = 0.75\nmax_rounds = 3\n",
-        config(true).replace("job_usd = 50.00", "job_usd = 20.00")
+        config(true).replace("job_usd = 60.00", "job_usd = 20.00")
     );
     let (dir, git) = repo(&planned);
     let state = tempfile::tempdir().unwrap();
@@ -1027,8 +1027,8 @@ fn admission_refuses_a_job_short_of_the_whole_planning_reserve() {
     assert_eq!(*invocations.lock().unwrap(), 0, "no agent was invoked");
     assert_eq!(git.head().unwrap(), head, "nothing was committed");
 
-    // The same caps at the shipped 50.00 are admitted: the driver is invoked.
-    let (dir, _git) = repo(&planned.replace("job_usd = 20.00", "job_usd = 50.00"));
+    // The same caps at the shipped 60.00 are admitted: the driver is invoked.
+    let (dir, _git) = repo(&planned.replace("job_usd = 20.00", "job_usd = 60.00"));
     let state = tempfile::tempdir().unwrap();
     let counter = Arc::new(Mutex::new(0u32));
     let again = counter.clone();

@@ -11,7 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - The agent caps in `athena.toml` are lifted: `reader_usd` 2.00, `producer_usd` 10.00, `verifier_usd` 5.00,
   `[job_plan]` `planner_usd` 3.00, `critic_usd` 3.00 and `max_rounds` 5, with `producer_timeout_s` 5400 and
-  `verifier_timeout_s` 3600. `job_usd` is raised to 50.00, so it covers the 47.00 that the caps require
+  `verifier_timeout_s` 3600. `job_usd` is raised to 60.00, so it covers the 47.00 that the caps require
   (reader + max_rounds × (planner + critic) + producer + verifier) and admission's budget check passes. The
   tests that pinned the old values are updated; the schema and the check are unchanged.
 
