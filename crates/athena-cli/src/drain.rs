@@ -29,14 +29,24 @@
 //!   one passed-over line, which names the line and how to lift the pause, is printed as soon as the plan is
 //!   made. [`Drain::attempts`] asks again before each attempt ([`ItemEnd::Paused`]), and once more after the
 //!   last failed attempt, for a line the item's own failed attempt has just paused. Neither is a failed
-//!   attempt, so neither counts toward the repeated-failure stop: an item whose second failure paused its line
-//!   is passed over with the pause reason, and the batch goes on to the next queued item.
+//!   attempt: an item whose second failure paused its line is passed over with the pause reason, and the
+//!   batch goes on to the next queued item.
 //! - **A flagged line is passed over after two failures.** A line the scope guard has only flagged (T1, T3 or
 //!   T5, not a pause) is still dispatched, so its item gets both attempts. [`Steps::flagged`] is asked only
 //!   after the last failed attempt, when no pause was found ([`ItemEnd::Flagged`]): the item is then passed
-//!   over for the rest of the batch with the flag signals as the reason, it is not a failed item, and the
-//!   batch goes on to the next queued item. Nothing is written. An item whose line is neither flagged nor
-//!   paused that fails twice still stops the batch as a repeated failure.
+//!   over for the rest of the batch with the flag signals as the reason, and the batch goes on to the next
+//!   queued item. Nothing is written.
+//! - **An item that fails twice is passed over, not a reason to stop.** An item whose line is neither flagged
+//!   nor paused and whose second attempt fails ([`ItemEnd::Failed`]) is passed over for the rest of the batch
+//!   with the reason `failed twice; left for the scope guard and Hestia: <last reason>`, and the batch goes
+//!   on to the next queued item. Both jobs stay in the records, so the scope guard (which pauses or flags a line that
+//!   keeps failing) and Hestia (which lists repeated failures) see the failure as before; the drain adds no
+//!   verdict of its own. The one exception is not about the item: when the closing reason of that second
+//!   failure says the environment is at fault ([`athena_core::disk::StopCause`]: the producer's login
+//!   expired, a usage limit was reached, or free disk space is low), every later item would fail the same
+//!   way, so the run also ends with [`Stop::Environment`]. Before this rule an item that failed twice with no
+//!   pause or flag ended the whole batch (a 4 Nov batch with $43 and 3 job slots left stopped on one such
+//!   item).
 //! - **Concurrency.** A group is worked by up to `max_concurrency` workers; the next group starts only when
 //!   the group before it is done, so an item that depends on another starts after it has finished. Landing
 //!   and rating go one at a time (a lock), and every model call's cap is held against the budget while it is
@@ -107,7 +117,7 @@
 //!   request head is queued or in progress. A pull request that is still open with its checks pending, such
 //!   as one whose merge the host refused for its repository rules before every check finished, is
 //!   [`Landing::Waiting`]: the job line says `waiting to merge`, the item is not tried again and does not
-//!   count toward [`Stop::RepeatedFailure`], and the run goes on to the next item. `athena land --pr` merges
+//!   count as a failure, and the run goes on to the next item. `athena land --pr` merges
 //!   it once the checks have finished.
 //! - **Stop at a job boundary.** [`Steps::stop_requested`] is asked before every job. A job that has started
 //!   is finished (landed and rated) and no further job starts: [`Stop::Requested`]. Nothing is killed.
@@ -129,8 +139,8 @@
 //!   runs after that landing, the new binary reads the config and the stop is [`Stop::Rebuilt`].
 //!   The root cause was that a landing never checked that the running build can read the config it lands, and
 //!   the first fix stored the fact only as the stop reason, which keeps the first reason found: another
-//!   worker's earlier stop hid it, the page was rated against the unreadable config, and the run could end as
-//!   a repeated failure. The fact is now kept in the state: while it is set, no rating is taken, and the
+//!   worker's earlier stop hid it, and the page was rated against the unreadable config. The fact is now kept
+//!   in the state: while it is set, no rating is taken, and the
 //!   report ends with [`Stop::NeedsReinstall`] and the note whatever stop was stored first (only a failed
 //!   rebuild keeps its own stop). A stored [`Stop::Rebuilt`] becomes a reinstall too, because that rebuild ran
 //!   before the landing. `athena land` asks the same question (`JobConfig::unreadable_at`) of the merged
@@ -225,6 +235,7 @@
 //!   one or to approve one that is not in limit.
 
 use athena_core::audience::{LivePage, Page, Target};
+use athena_core::disk::StopCause;
 use athena_core::gh::{Checks, GhCli, PrReport};
 use athena_core::plan::{JobEnd, Plan, PlanEntry, Refusal, shared_path};
 use athena_core::pr::LinkState;
@@ -954,12 +965,13 @@ pub enum Stop {
     TargetMet,
     /// The next call's cap did not fit what was left of the budget.
     BudgetSpent,
-    /// One item failed twice. An item whose reader gave no reading twice is not this: it is skipped, with its
-    /// reason, and the next item runs. Nor is an item whose line the scope guard has paused, even when its
-    /// second failure is what paused it: it is passed over, with the pause reason, and the batch goes on. The
-    /// same holds for an item whose line the guard has flagged: after two failures it is passed over, with the
-    /// flag reason, and the batch goes on.
-    RepeatedFailure,
+    /// The environment, not the item, is at fault: an item failed twice and the closing reason of its second
+    /// failure says the producer's login expired, a usage limit was reached, or free disk space is low
+    /// ([`athena_core::disk::StopCause`]). Every later item would fail the same way, so nothing more starts.
+    /// An item that fails twice for any other reason is not this: it is passed over and
+    /// the batch goes on, as it does for an item whose reader gave no reading twice, or whose line the
+    /// scope guard has paused or flagged.
+    Environment,
     /// Nothing is queued (or everything queued was worked). This is not success.
     QueueEmpty,
     /// The job limit was reached.
@@ -985,7 +997,7 @@ impl Stop {
     pub const ALL: [Stop; 9] = [
         Stop::TargetMet,
         Stop::BudgetSpent,
-        Stop::RepeatedFailure,
+        Stop::Environment,
         Stop::QueueEmpty,
         Stop::JobLimit,
         Stop::Requested,
@@ -998,7 +1010,7 @@ impl Stop {
         match self {
             Stop::TargetMet => "target met",
             Stop::BudgetSpent => "budget spent",
-            Stop::RepeatedFailure => "repeated failure",
+            Stop::Environment => "environment",
             Stop::QueueEmpty => "queue empty",
             Stop::JobLimit => "job limit",
             Stop::Requested => "stop requested",
@@ -1016,8 +1028,8 @@ impl Stop {
             Stop::BudgetSpent => {
                 "spend plus the next model call's cap would exceed the budget; the rest stays queued"
             }
-            Stop::RepeatedFailure => {
-                "the same item failed twice; the item is named (an item whose line is flagged or paused is passed over and does not stop the batch)"
+            Stop::Environment => {
+                "an item failed twice because the producer's login expired, a usage limit was reached or free disk space is low, so every later item would fail the same way; fix that and run the drain again (an item that fails twice for any other reason is passed over and does not stop the batch)"
             }
             Stop::QueueEmpty => "nothing was left to work; this is not success",
             Stop::JobLimit => "the job limit was reached",
@@ -1068,8 +1080,6 @@ pub struct RatingLine {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
     pub stop: Stop,
-    /// The item that failed twice, when `stop` is `repeated-failure`.
-    pub failed_item: Option<String>,
     pub jobs: Vec<JobLine>,
     pub spent_usd: f64,
     pub budget_usd: f64,
@@ -1136,10 +1146,9 @@ struct State {
     unreadable_config: Option<String>,
     /// What the planning pass spent reading an item, charged to that item's job line when it runs.
     read_cost: std::collections::BTreeMap<String, f64>,
-    /// Why the run is ending, once any worker has found a reason (the first reason found stands), and the
-    /// item that failed twice when that is the reason. No worker starts a job once this is set; jobs already
-    /// started are finished.
-    stop: Option<(Stop, Option<String>)>,
+    /// Why the run is ending, once any worker has found a reason (the first reason found stands). No worker
+    /// starts a job once this is set; jobs already started are finished.
+    stop: Option<Stop>,
     // Read-ahead. All of this stays empty unless more than one job runs at once and `Steps::read_ahead` is
     // above 0.
     /// Readings made ahead and not yet claimed by a job that starts.
@@ -1285,6 +1294,9 @@ struct Drain<'a, S: ?Sized, U: ?Sized> {
 
 enum ItemEnd {
     Landed,
+    /// The item failed twice on a line that is neither paused nor flagged. It is passed over for the rest of
+    /// the batch, left for the scope guard and Hestia, and the next item runs. Only an environment cause of
+    /// the failure also ends the run ([`Stop::Environment`]).
     Failed,
     Budget,
     JobLimit,
@@ -1304,10 +1316,10 @@ enum ItemEnd {
     /// retried and is not a failure: the next item runs, and the job merges on a later `athena land --pr`.
     Waiting,
     /// The item's line is paused by the scope guard, with the reason. It is passed over before it is read or
-    /// run: not a failed attempt, so it does not count toward the repeated-failure stop.
+    /// run: not a failed attempt. The batch goes on to the next item.
     Paused(String),
     /// The item failed twice on a line the scope guard has flagged but not paused, with the flag reason. It is
-    /// passed over for the rest of the batch: not a repeated failure, so the batch goes on to the next item.
+    /// passed over for the rest of the batch, and the batch goes on to the next item.
     Flagged(String),
 }
 
@@ -1409,6 +1421,18 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             .unwrap_or_else(|| "waiting to merge: its pull request waits on checks".to_string())
     }
 
+    /// The landing text of the last job line of `item` when that line's landing did not merge
+    /// (`not landed: <why>`), else none.
+    fn last_landing_failure(&self, item: &str) -> Option<String> {
+        let st = self.st();
+        st.jobs
+            .iter()
+            .rev()
+            .find(|l| l.item == item)
+            .filter(|l| l.landing.starts_with("not landed"))
+            .map(|l| l.landing.clone())
+    }
+
     /// The reason on the last job line of `item`, else `default`.
     fn last_reason(&self, item: &str, default: &str) -> String {
         let st = self.st();
@@ -1421,10 +1445,10 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
     }
 
     /// Ends the run for `stop`, unless another worker already found a reason.
-    fn set_stop(&self, stop: Stop, failed: Option<String>) {
+    fn set_stop(&self, stop: Stop) {
         let mut st = self.st();
         if st.stop.is_none() {
-            st.stop = Some((stop, failed));
+            st.stop = Some(stop);
         }
     }
 
@@ -1706,7 +1730,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                         "drain      {job} landed, but its athena.toml cannot be read by this build; stopping, reinstall Athena"
                     ));
                     self.st().unreadable_config = Some(why);
-                    self.set_stop(Stop::NeedsReinstall, None);
+                    self.set_stop(Stop::NeedsReinstall);
                 }
                 self.wake.notify_all();
                 if !outcome {
@@ -1828,11 +1852,11 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             }
             failures += 1;
             if failures >= ATTEMPTS {
-                // The last failure may itself have paused the line. That is the scope guard's doing, not a
-                // repeated failure of the item: pass it over and let the batch go on. A line the guard has
-                // only flagged (a flag still dispatches, so the item had both attempts) is passed over the
-                // same way, with the flag reason. Only an item whose line is neither paused nor flagged
-                // stops the batch as a repeated failure.
+                // The last failure may itself have paused the line. That is the scope guard's doing: pass
+                // the item over and let the batch go on. A line the guard has only flagged (a flag still
+                // dispatches, so the item had both attempts) is passed over the same way, with the flag
+                // reason. An item whose line is neither paused nor flagged is passed over too (see
+                // `ItemEnd::Failed`): one item's failures are not a reason to end the batch.
                 if let Some(reason) = self.paused_reason(item) {
                     return ItemEnd::Paused(reason);
                 }
@@ -2199,11 +2223,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 ),
             );
         }
-        let why = self
-            .st()
-            .stop
-            .as_ref()
-            .map_or(Stop::QueueEmpty.label(), |(stop, _)| stop.label());
+        let why = self.st().stop.map_or(Stop::QueueEmpty.label(), Stop::label);
         let not_started: Vec<&String> = {
             let st = self.st();
             wave.iter().filter(|id| !st.done.contains(*id)).collect()
@@ -2384,7 +2404,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 self.ui.line("drain      rebuild failed; stopping");
                 let mut st = self.st();
                 st.rebuild_output = Some(output);
-                st.stop = Some((Stop::RebuildFailed, None));
+                st.stop = Some(Stop::RebuildFailed);
                 None
             }
         }
@@ -2409,35 +2429,54 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                         // another worker's earlier reason stands.
                         let mut st = self.st();
                         st.unreadable_config = None;
-                        if matches!(st.stop, Some((Stop::NeedsReinstall, _))) {
-                            st.stop = Some((Stop::Rebuilt, None));
+                        if st.stop == Some(Stop::NeedsReinstall) {
+                            st.stop = Some(Stop::Rebuilt);
                         }
                     }
                     return;
                 }
                 if let Some(reason) = self.rate() {
-                    self.set_stop(reason, None);
+                    self.set_stop(reason);
                 }
                 // The first reason found stands; a run that is ending anyway has still been rebuilt.
                 if rebuilt {
-                    self.set_stop(Stop::Rebuilt, None);
+                    self.set_stop(Stop::Rebuilt);
                 }
             }
-            ItemEnd::Failed => self.set_stop(Stop::RepeatedFailure, Some(item.job.clone())),
+            ItemEnd::Failed => {
+                // One item's double failure is the scope guard's and Hestia's to judge: record it and go on.
+                // A cause in the environment (the login, the usage limit, the disk) is not about this item:
+                // the next item would fail the same way, so the run ends.
+                let reason = self.last_reason(&item.job, "its last attempt did not pass");
+                // An attempt that passed but did not land has its landing text on its line, not its run's.
+                let shown = self
+                    .last_landing_failure(&item.job)
+                    .unwrap_or_else(|| reason.clone());
+                self.pass_over(
+                    &item.job,
+                    &format!("failed twice; left for the scope guard and Hestia: {shown}"),
+                );
+                if matches!(
+                    StopCause::of(&reason),
+                    StopCause::ProducerAuth | StopCause::UsageLimit | StopCause::LowDisk
+                ) {
+                    self.set_stop(Stop::Environment);
+                }
+            }
             ItemEnd::Budget => {
                 self.pass_over(
                     &item.job,
                     &self.last_reason(&item.job, "the budget did not cover its read and run"),
                 );
-                self.set_stop(Stop::BudgetSpent, None);
+                self.set_stop(Stop::BudgetSpent);
             }
             ItemEnd::JobLimit => {
                 self.pass_over(&item.job, "over the job limit");
-                self.set_stop(Stop::JobLimit, None);
+                self.set_stop(Stop::JobLimit);
             }
             ItemEnd::Stop => {
                 self.pass_over(&item.job, "run ended first: stop requested");
-                self.set_stop(Stop::Requested, None);
+                self.set_stop(Stop::Requested);
             }
             ItemEnd::Idle => {
                 self.pass_over(&item.job, "run ended first: another job ended the run")
@@ -2910,7 +2949,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         );
         st.notes.push(line);
     }
-    let (mut stop, mut failed_item) = st.stop.clone().unwrap_or((Stop::QueueEmpty, None));
+    let mut stop = st.stop.unwrap_or(Stop::QueueEmpty);
     // The landed config being unreadable is a fact of its own, and the stop keeps only the first reason, so
     // it is read here from the state and not from the stop. Whatever else ended the run, the user's first
     // action is to reinstall: a stored `Rebuilt` was built before that landing, so it would restart onto the
@@ -2918,11 +2957,6 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     if let Some(why) = st.unreadable_config.clone()
         && stop != Stop::RebuildFailed
     {
-        if let Some(item) = failed_item.take() {
-            st.notes.push(format!(
-                "item {item} did not pass twice in this run (see the job lines); the run ends for the reinstall below, not for that"
-            ));
-        }
         stop = Stop::NeedsReinstall;
         st.notes.push(reinstall_note(&why));
     }
@@ -2956,7 +2990,6 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     });
     Ok(Report {
         stop,
-        failed_item,
         spent_usd: st.budget.spent(),
         budget_usd: limits.budget_usd,
         target_rating: limits.target_rating,
@@ -3386,7 +3419,7 @@ impl Steps for RealSteps<'_> {
 
     /// Asks [`Athena::line_flag`], which recomputes the line's level from the records, so a stored flag that
     /// no longer holds is not reported. Records that cannot be loaded report nothing flagged, so the item then
-    /// ends as a repeated failure.
+    /// ends as a plain double failure (`ItemEnd::Failed`), which is passed over too.
     fn flagged(&self, jobs: &[String]) -> Vec<(String, String)> {
         let Ok(records) = self.records() else {
             return Vec::new();
@@ -4655,7 +4688,6 @@ mod read_ahead_tests {
             World::new(0, &[("a", &["src/a.rs"], &[]), ("b", &["src/b.rs"], &[])]).waits("a");
         let report = concurrent(&world, 2);
         assert_eq!(report.stop, Stop::QueueEmpty, "{:?}", report.jobs);
-        assert!(report.failed_item.is_none());
         // a is landed once, not tried again; b was worked and landed.
         assert_eq!(world.count("land a"), 1);
         assert!(world.logged("land b"));

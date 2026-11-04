@@ -38,6 +38,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena drain` now passes over an item that fails twice instead of stopping the batch. The batch of
+  4 Nov 12:39pm UTC, with $43 and 3 job slots left, stopped on job 20261029-160024-80qj, which had failed
+  twice on a line the scope guard had neither paused nor flagged. Root cause: two earlier fixes passed over
+  an item that failed twice only when the guard had paused or flagged its line, and the drain's item-end
+  handler still stopped the whole batch (`repeated failure`) for any other item. After an item's second
+  failure the drain now records one `passed over: failed twice; left for the scope guard and Hestia: <last
+  reason>` line, leaves the item queued and runs the next item; both failed jobs stay in the job records, so
+  the guard and Hestia judge the line as before. The `repeated failure` stop and the report's `failed_item`
+  key (`--json`) are removed. A failure whose closing reason says the environment is at fault (the
+  producer's login expired, a usage limit was reached, or free disk space is low) still ends the batch,
+  because every later item would fail the same way; it is now the `environment` stop. The disk hold, budget,
+  job limit, stop request, rebuild and reinstall stops are unchanged.
 - Baseline reuse now finds the default branch's CI run. Root cause: the default-branch step asked for a run
   on the base's own content commit, but the default branch holds a different squash commit with the same
   governed content, so the host never had that commit and every job re-ran the baseline locally. The step
