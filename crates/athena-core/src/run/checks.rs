@@ -64,6 +64,55 @@ impl crate::routing::Exec for SnapExec<'_> {
     }
 }
 
+/// How many commits of records only the baseline lookup steps over to find the commit the host has.
+const MAX_RECORDS_ONLY_COMMITS: usize = 20;
+
+/// An executor that runs nothing. The baseline lookup uses the call the candidate's checks use, which runs
+/// the checks locally when no CI result is usable; here that must not happen, so the run fails and the
+/// caller reads the failure as "no result".
+struct RefuseExec;
+
+impl crate::routing::Exec for RefuseExec {
+    fn exec(&self, spec: &crate::capability::CheckSpec) -> Result<CheckRun> {
+        bail!("the baseline lookup does not run {}", spec.name)
+    }
+
+    fn redact(&self, _: &str) -> Result<String> {
+        bail!("the baseline lookup records no log text")
+    }
+}
+
+/// A CI source that forwards the run and never reads a failing job's log: a red run is not reused as a
+/// baseline, so its log is not needed.
+struct RunsOnly<'a>(&'a dyn crate::ci_result::CiSource);
+
+impl crate::ci_result::CiSource for RunsOnly<'_> {
+    fn fetch(&self, sha: &str) -> Result<Option<crate::ci_result::CiRun>> {
+        self.0.fetch(sha)
+    }
+}
+
+/// The job a base commit landed, as its closing `verification.json` says.
+struct LandedJob {
+    job: JobId,
+    /// The candidate commit the job verified: the commit its CI run was for.
+    candidate: String,
+    /// The fingerprint of that candidate's governed content, as verified.
+    fingerprint: String,
+    /// Every path the landing changed.
+    changed: Vec<String>,
+}
+
+/// The request job a path names when it is `<job dir>/verification.json`.
+fn verification_job(path: &str) -> Option<JobId> {
+    let (dir, name) = path.rsplit_once('/')?;
+    if name != "verification.json" {
+        return None;
+    }
+    let job = JobId::parse(dir.rsplit('/').next()?).ok()?;
+    (job.is_request() && dir == job.dir()).then_some(job)
+}
+
 /// The path of `relative` inside the scratch copy at `root`, refused when `root` or a directory between
 /// holds a symbolic link there (the candidate may contain one), and with a link at the file itself removed,
 /// so a write never lands outside the copy.
@@ -167,12 +216,19 @@ impl Athena {
         }
     }
 
-    /// Runs the capability's configured checks on a fresh snapshot of the base commit and returns the
-    /// baseline record. It never fails: a snapshot or environment error, or a nested run, gives a record
-    /// with no checks and a note saying why. `before_invocation` is the sequence number the first
-    /// producer invocation will get. Verification reads the result to mark pre-existing failures. The checks
-    /// run through `run_check`, as the candidate's do, so each failed run records the names of its failing
-    /// tests and verification compares test by test, not by check name alone.
+    /// Takes the baseline: the capability's configured checks on the base commit, as a record.
+    ///
+    /// When a green GitHub run exists for the base's governed content, that result stands in for the checks
+    /// and nothing runs here (see [`Athena::reused_baseline`]); the record then names the run in
+    /// `reused_from` and every check is marked reused. Otherwise the checks run on a fresh snapshot of the
+    /// base commit, as they always did, and a `ci         baseline runs locally: <reason>` line says why.
+    ///
+    /// It never fails: a snapshot or environment error, or a nested run, gives a record with no checks and a
+    /// note saying why, and a failed lookup of the CI result only means the local run. `before_invocation` is
+    /// the sequence number the first producer invocation will get. Verification reads the result to mark
+    /// pre-existing failures. The checks run through `run_check`, as the candidate's do, so each failed run
+    /// records the names of its failing tests and verification compares test by test, not by check name
+    /// alone.
     pub(super) fn take_baseline(
         &self,
         ctx: &RunContext<'_>,
@@ -185,11 +241,27 @@ impl Athena {
             before_invocation: seq,
             checks: Vec::new(),
             note: None,
+            reused_from: None,
         };
         if self.nested.is_some() {
             baseline.note =
                 Some("not run: a nested run skips checks; the outer job runs its own".into());
             return baseline;
+        }
+        match self.reused_baseline(ctx) {
+            Ok((checks, address)) => {
+                ctx.ui.line(&format!(
+                    "ci         baseline reused from {address} for {}",
+                    ctx.prediction
+                ));
+                baseline.checks = checks;
+                baseline.reused_from = Some(address);
+                return baseline;
+            }
+            Err(Some(reason)) => ctx
+                .ui
+                .line(&format!("ci         baseline runs locally: {reason}")),
+            Err(None) => {}
         }
         let dir = job_dir.join("baseline");
         let outcome = self.baseline_checks(ctx, job_dir, &dir);
@@ -361,6 +433,194 @@ impl Athena {
             stored.push(revert_record(g, &run));
         }
         Ok((records.into_iter().flatten().collect(), stored))
+    }
+
+    /// Looks for a green GitHub run that stands in for the baseline, so the base commit is not tested again
+    /// on this machine when its governed content was just tested there. `Ok` holds the reused checks and the
+    /// run's address. `Err` is why nothing was reused: `Some(reason)` for the output line, `None` when no
+    /// lookup was possible (no GitHub origin), which prints nothing. It reads the host at most twice, once
+    /// each, with no wait, and runs no check.
+    ///
+    /// Both lookups go through the call the candidate's checks use ([`crate::routing::run_routed_with_record`],
+    /// which calls [`crate::ci_result::resolve`]), so a run counts only when it is finished, green, covers
+    /// `fmt`, `clippy` and `test`, and is for the exact commit asked for:
+    ///
+    /// The commit looked up is the base's content commit ([`Athena::content_commit`]): the base, or the
+    /// commit under the job's own records commits, which is the one the host has.
+    ///
+    /// 1. The landed candidate's run. The content commit is the squash of a landed job, which carries that
+    ///    job's `verification.json`. When the fingerprint it recorded for the candidate equals the base's own
+    ///    ([`fingerprint`] of the base under its own rules, the value a candidate record keeps as
+    ///    `base_fingerprint`), the base has the governed content that run tested. The run is read on the
+    ///    job's CI branch for the candidate commit. The squash's changed paths go to `resolve`, so a landing
+    ///    that edited a workflow file, which controlled the checker, is not trusted.
+    /// 2. The push run for the content commit on the repository's default branch, read from the local
+    ///    `origin/HEAD`, when its governed content is the base's.
+    ///
+    /// The `config` route is used: it never skips a check by path, so a reused baseline holds the same
+    /// checks a local one does.
+    fn reused_baseline(
+        &self,
+        ctx: &RunContext<'_>,
+    ) -> std::result::Result<(Vec<CheckRun>, String), Option<String>> {
+        if !self.has_github_origin() {
+            return Err(None);
+        }
+        let route = crate::routing::route(Some("config"), ctx.capability.checks(ctx.jc), &[]);
+        if !route.reuse {
+            return Err(Some(
+                "the configured checks do not cover fmt, clippy and test".into(),
+            ));
+        }
+        let base = ctx.prediction.as_str();
+        let own = match fingerprint(&self.git, base, base) {
+            Ok(own) => own,
+            Err(e) => {
+                return Err(Some(format!(
+                    "the base's fingerprint could not be read: {e:#}"
+                )));
+            }
+        };
+        let content = match self.content_commit(base) {
+            Ok(content) => content,
+            Err(e) => {
+                return Err(Some(format!("the base's history could not be read: {e:#}")));
+            }
+        };
+        let mut why: Vec<String> = Vec::new();
+        match self.landed_job(&content) {
+            Ok(Some(landed)) if landed.fingerprint == own => {
+                let branch = crate::gh::ci_branch(&landed.job);
+                match self.green_run(&route, &landed.candidate, &landed.changed, &branch) {
+                    Ok(hit) => return Ok(hit),
+                    Err(reason) => why.push(format!("landed job {}: {reason}", landed.job)),
+                }
+            }
+            Ok(Some(landed)) => why.push(format!(
+                "landed job {}: the fingerprint it verified differs from the base's",
+                landed.job
+            )),
+            Ok(None) => why.push("the base is not the landing of one job".into()),
+            Err(e) => why.push(format!("the base's landing could not be read: {e:#}")),
+        }
+        match crate::reconcile::local_default_branch(&self.git, "origin") {
+            // The commit looked up is the base's own content: the base itself, or the commit under its
+            // records that the host has. Checked again here, so a run is never taken for other content.
+            Some(branch) if fingerprint(&self.git, &content, &content).ok() == Some(own) => {
+                match self.green_run(&route, &content, &[], &branch) {
+                    Ok(hit) => return Ok(hit),
+                    Err(reason) => why.push(format!("{branch}: {reason}")),
+                }
+            }
+            Some(branch) => why.push(format!(
+                "{branch}: the commit under the base's records has other governed content"
+            )),
+            None => why.push("origin/HEAD is not set, so the default branch is not read".into()),
+        }
+        Err(Some(why.join("; ")))
+    }
+
+    /// The commit that carries `base`'s governed content on the host: `base` itself, or the nearest ancestor
+    /// reached by stepping over commits that change only files under `records/`. A job's own commits of
+    /// records sit on the branch above the last landing (the base is one of them), and the host has never
+    /// seen them. The walk stops at a commit with other than one parent, and after
+    /// [`MAX_RECORDS_ONLY_COMMITS`] steps.
+    fn content_commit(&self, base: &str) -> Result<String> {
+        let mut commit = base.to_string();
+        for _ in 0..MAX_RECORDS_ONLY_COMMITS {
+            let parents = self.git.parents(&commit)?;
+            let [parent] = parents.as_slice() else {
+                break;
+            };
+            let diff = self.git.diff_tree(parent, &commit)?;
+            if !diff.iter().all(|e| e.path.starts_with("records/")) {
+                break;
+            }
+            commit = parent.clone();
+        }
+        Ok(commit)
+    }
+
+    /// The closing records of the job a base commit landed: the one `verification.json` the commit adds
+    /// under a request job's directory. `None` for a commit with other parents than one, or that adds no
+    /// such file or more than one, which is not the landing of a single job.
+    fn landed_job(&self, base: &str) -> Result<Option<LandedJob>> {
+        let parents = self.git.parents(base)?;
+        let [parent] = parents.as_slice() else {
+            return Ok(None);
+        };
+        let entries = self.git.diff_tree(parent, base)?;
+        let closing: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.status == 'A' && verification_job(&e.path).is_some())
+            .map(|e| e.path.as_str())
+            .collect();
+        let [path] = closing.as_slice() else {
+            return Ok(None);
+        };
+        let Some(job) = verification_job(path) else {
+            return Ok(None);
+        };
+        let Some(bytes) = self.git.show_file(base, path)? else {
+            return Ok(None);
+        };
+        let AnyRecord::Verification(v) = AnyRecord::parse(path, &bytes)? else {
+            return Ok(None);
+        };
+        Ok(Some(LandedJob {
+            job,
+            candidate: v.candidate_commit,
+            fingerprint: v.verified_fingerprint,
+            changed: entries.iter().map(|e| e.path.clone()).collect(),
+        }))
+    }
+
+    /// The checks from a green run for `sha` on `branch`, and the run's address; or why there is none. One
+    /// read, no wait, and a failing check executor in place of the local run, so a missing, unfinished,
+    /// red or untrusted result is an `Err` and nothing runs here.
+    fn green_run(
+        &self,
+        route: &crate::routing::Route,
+        sha: &str,
+        changed: &[String],
+        branch: &str,
+    ) -> std::result::Result<(Vec<CheckRun>, String), String> {
+        let routed = self.with_ci_source_on(branch, 0, |ci, wait| {
+            crate::routing::run_routed_with_record(
+                route,
+                sha,
+                changed,
+                &RunsOnly(ci),
+                &RefuseExec,
+                wait,
+            )
+        });
+        match routed {
+            Ok((runs, Some(record)))
+                if record.source == crate::ci_result::Source::Ci
+                    && record.all_passed()
+                    && runs.iter().all(|r| r.passed) =>
+            {
+                Ok((
+                    runs,
+                    record.run_address.unwrap_or_else(|| "the CI run".into()),
+                ))
+            }
+            Ok((_, Some(record))) => Err(format!(
+                "the CI run {} for {sha} did not pass",
+                record.run_address.as_deref().unwrap_or("")
+            )),
+            Ok((_, None)) | Err(_) => {
+                let workflow = changed
+                    .iter()
+                    .any(|p| p.starts_with(crate::ci_result::WORKFLOW_DIR));
+                Err(if workflow {
+                    format!("{sha} changed a workflow file, so its CI run is not trusted")
+                } else {
+                    format!("no usable CI result for {sha} on {branch}")
+                })
+            }
+        }
     }
 
     fn baseline_checks(

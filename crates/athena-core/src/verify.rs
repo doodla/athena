@@ -1659,6 +1659,7 @@ mod tests {
             before_invocation: 1,
             checks,
             note: note.map(String::from),
+            reused_from: None,
         }
     }
 

@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-103213-f1cw",
+  "round": 3,
+  "at": "2026-11-04T12:59:52.260989944Z",
+  "invocation_seq": 8,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/checks.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/checks.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reconcile.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reconcile.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Lookup A compares a recorded fingerprint, not the content itself, so it misses whenever the previous job changed the rules.",
+      "evidence": "The plan compares `Verification.verified_fingerprint`, which was computed as fingerprint(c, p) under the previous base's rules, with fingerprint(base, base). Its own Risks section admits that a rules change makes the two differ. The candidate commit was built in Athena's own repository, so its objects are normally present locally (the CI branch is deleted at close, but the objects remain until gc). Fix: When `candidate_commit` exists locally, compare `fingerprint(&git, candidate_commit, base)` with `fingerprint(&git, base, base)`. This is an exact content check under the base's rules. Fall back to the recorded value only when the object is missing.",
+      "location": "Decision 1 / Step 5, lookup A fingerprint guard",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Lookup A only looks at the base's own parent-to-base diff. Any records-only or intervention commit on top of the landing squash makes it miss, even though the governed content is the same.",
+      "evidence": "invariant.rs rule 4 (records-history.md:322) allows `records_only` commits on main that do not change the fingerprint. In that case the base's diff adds no verification.json, so lookup A is skipped although the landed candidate's run still covers the base's governed content. Fix: Walk main's first-parent line back from the base while `fingerprint(c, c)` equals the base's fingerprint. Stop at the first commit that adds exactly one verification.json, with a small bound such as 5 commits. Or state that this case is deliberately left to lookup B.",
+      "location": "Decision 1 / Risks: the base must be the landing squash itself",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Lookup A rests on a premise that the design doc and the code disagree on. The plan should name the conflict.",
+      "evidence": "docs/design/records-history.md:469 says that after job 7, \"records written since live only on the records branch\". Line 451 says `records/` on main is frozen. The code still reads a post-C0 job's records from main: gh/landing.rs:55-75 `landed_commit_from_records`, and run/close.rs:446-451 `introducing_commit(self, \"HEAD\", reading_path)`. The fallback keeps this safe either way, but if the doc is right, lookup A never fires live. Fix: Cite both sources in open question 3. Add a sentence to the CHANGELOG or the doc comment saying which lookup is expected to give the saving if closing records stop landing on main.",
+      "location": "Open question 3 (closing records on main after C0)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The fallback 'note' is a `ci` output line, not `Baseline.note`. This is a justified departure and the plan already says it.",
+      "evidence": "records.rs:2629-2644: `failed_before` returns nothing when `note` is set. Setting `note` would change verdict rules, which are out of scope. Fix: Keep the departure. Make sure the producer's report and the verifier both read criterion 2's 'note' as the `ci         baseline runs locally: <reason>` line.",
+      "location": "Decision 5 / criterion 2 wording",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's main claims against the code; I ran nothing. They hold. `routing::route(Some(\"config\"), ..)` skips no checks (routing.rs:48-106). In `resolve`, a fetch error counts as Missing and falls back to `LocalChecks`; with the plan's refusing `Exec`, that fallback becomes an error, which the stage reads as \"run locally\" (ci_result.rs:185-236). The workflow-changed guard there is live because lookup A passes the squash's changed paths. `local_default_branch` exists privately at reconcile.rs:370. `with_ci_source` (run/mod.rs:1318) can be split as described. The `CiReplies`/`CiReply` fakes the plan extends are local to run/tests.rs (line 2539), not test_support.rs. The drain disk-hold test asks and runs a single job with no `origin/HEAD` (drain.rs:2430-2466), so the new lookup does not change it. The demonstrations run the whole job through `Athena::go` with the real `ci_seam`. They observe the real `baseline-ran` marker and the stored record, and each would fail without the behavior. The fallback loop covers red, unfinished, unreachable, a fingerprint mismatch, a workflow edit, an ambiguous squash and no origin. The record change uses serde defaults, so old files still parse. The dependents list matches the readers I found. The plan touches two files outside the deliverable list (Athena's findings); each is a one-line change needed to compile or to reuse a function, and both are disclosed. My soundness concerns are all minor. Lookup A trusts the recorded fingerprint when it could compare content directly. It only fires when the base is the landing squash itself. It rests on closing records still landing on main after C0, which the design doc contradicts and the code supports; the plan already lists this as a Host question. Every miss falls back safely to today's local run. Verdict: accept."
+}

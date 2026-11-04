@@ -1226,6 +1226,7 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored
             before_invocation: 1,
             checks: names.iter().map(|n| real_failure(n)).collect(),
             note: None,
+            reused_from: None,
         }
     }
 
