@@ -1,0 +1,176 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261103-222737-zzsr",
+  "candidate_commit": "b3e381696a71f3b6020804a992a628242318b989",
+  "verified_fingerprint": "sha256:fb2f04933b958672d884946ceaf0f77e000c7a355091b8e67e91af384be6bcd0",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41735308199 for b3e381696a71f3b6020804a992a628242318b989",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41735308199 for b3e381696a71f3b6020804a992a628242318b989",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41735308199 for b3e381696a71f3b6020804a992a628242318b989",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 6,
+  "criteria": [
+    {
+      "criterion": "Run `cargo test -p athena-cli --test drain`. A new test with `max_jobs: 1` has item `a` end as needs accepting and item `b` runnable. It asserts `jobs[0].outcome == \"needs accepting\"`, `landed == 1` and `stop != Stop::JobLimit`, and it passes.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "The new test `a_re_read_that_needs_accepting_does_not_use_a_job_limit_slot` (tests/drain.rs:1443-1475) builds a Stub with items a and b, needs_accepting [a], and `max_jobs: 1`. It asserts `report.jobs[0].outcome == \"needs accepting\"`, `report.landed == 1` and `report.stop != Stop::JobLimit`. It also checks that the log has `run b` and `land b` and that `a` is still queued. I ran it alone: `1 passed; 0 failed`. I ran the whole binary: `162 passed; 0 failed`.",
+      "commands": [
+        "cargo test -p athena-cli --test drain a_re_read_that_needs_accepting_does_not_use_a_job_limit_slot",
+        "cargo test -p athena-cli --test drain"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Fails without the fix, with a command that ran: with the `st.started` decrement in the needs-accepting arm of `run_job` removed, `cargo test -p athena-cli --test drain` fails on the new test (b not run, Stop::JobLimit). The recorded check output shows that failing run and the passing run with the fix.",
+      "kind": "behavior",
+      "met": false,
+      "evidence": "I saw the passing run with the fix: I ran it and got 1 passed. I did not see the failing run without the fix. My brief contains no producer report, and the 'Checks Athena ran' section lists only fmt, clippy and test on the candidate. So no recorded output of a run with the decrement removed reached me. My role forbids changing files, so I could not remove the decrement and run the test myself. From reading the code: base `run_job` increments `st.started` at drain.rs:1441, checks `st.started >= max_jobs` at 1435, and has no decrement. The diff shows the decrement is the only code change. On base, then, `b` would get JobLimit and `landed` would be 0, and the test would fail. That conclusion comes from reading the code, not from a run, and this criterion requires a run that was seen.",
+      "commands": [
+        "cargo test -p athena-cli --test drain a_re_read_that_needs_accepting_does_not_use_a_job_limit_slot",
+        "git diff HEAD~1 -- crates/athena-cli/src/drain.rs crates/athena-cli/tests/drain.rs"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "`git diff` of crates/athena-cli/src/drain.rs shows the `_ if run.needs_accepting` arm of `run_job` returning the slot (`st.started` decremented under the state lock). The JobLimit check and the passed, held and failed outcomes are unchanged.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The only code hunk in drain.rs (@@ -1543 +1545) adds `{ let mut st = self.st(); st.started = st.started.saturating_sub(1); }` inside the `_ if run.needs_accepting` arm. `self.st()` is the state lock. No hunk touches the JobLimit check (1435), the increment (1441), the Landed arm, the held arm or the failed/other arms. The other hunks are doc comments.",
+      "commands": [
+        "git diff HEAD~1 -- crates/athena-cli/src/drain.rs crates/athena-cli/tests/drain.rs"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test -p athena-cli --test drain`: `the_job_limit_stops_the_loop`, the urgent-queued-request test and the two existing needs-accepting tests still pass. `git diff` shows no assertion removed or weakened.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "The whole-binary run reports ok for `the_job_limit_stops_the_loop`, `an_urgent_queued_request_is_worked_before_an_approved_in_limit_proposal`, `a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure`, `a_reread_whose_scope_changed_is_left_for_a_person_and_is_not_a_failure` and `an_approved_proposal_whose_job_is_urgent_is_worked_before_normal_requests_and_the_job_limit_holds`. Totals: 162 passed, 0 failed. The tests/drain.rs diff only adds lines; no `-` line was removed.",
+      "commands": [
+        "cargo test -p athena-cli --test drain",
+        "git diff HEAD~1 -- crates/athena-cli/src/drain.rs crates/athena-cli/tests/drain.rs"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --workspace`; all are clean.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded checks for b3e381696a71 (CI run 41735308199) show all three passed. The root Cargo.toml is a virtual workspace manifest listing all members, so `cargo test --locked` at the root covers the whole workspace.",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The drain module docs, the `Limits::max_jobs` doc and the `--job-limit` help in crates/athena-cli/src/main.rs say a re-read that only needs accepting does not count toward the job limit. Grep finds that wording. CHANGELOG.md has an entry.",
+      "kind": "content",
+      "met": true,
+      "evidence": "A search for 'only needs accepting' finds the wording in five places: drain.rs:49 and drain.rs:181 (module docs), drain.rs:254 (`Limits::max_jobs` doc), main.rs:256 (the `job limit` stop-reason line) and main.rs:288 (the `--job-limit` arg doc). CHANGELOG.md has a new entry under Fixed that names the root cause and says the re-read's cost still counts against `--budget`. The help test `drain_help_documents_the_flags_and_lists_every_stop_reason` passes.",
+      "commands": [],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Criterion 2's failing run without the fix is not shown in anything the verifier received.",
+      "evidence": "The brief has no producer report. The 'Checks Athena ran' section has only fmt, clippy and test on the candidate. The verifier is told to change nothing, so it cannot remove the decrement and run the test. The code reading supports the claim (base has no decrement, and the decrement is the only code change), but the criterion asks for a recorded run. Fix: pass the producer's recorded output of the old-counter run to the verifier, or let the verifier run that one-line removal as a planned demonstration. This is the same gap that sank job 20261103-193428-df2m.",
+      "location": "crates/athena-cli/src/drain.rs:1551-1554 (decrement under test)",
+      "source": "verifier"
+    },
+    {
+      "severity": "nit",
+      "summary": "With several workers the decrement can let one more job start than the limit after another worker reached it; the code comment says so.",
+      "evidence": "The comment at drain.rs:1549-1550 says a limit that another worker reached while this one was in flight is not undone. That is acceptable: the slot really was unused. No parallel test covers it.",
+      "location": "crates/athena-cli/src/drain.rs:1548-1554",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "1 of 6 criteria unmet",
+    "1 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results",
+    "planned demonstrations and files"
+  ],
+  "summary": "The change looks correct. In `run_job`, the needs-accepting outcome now gives back its --job-limit slot: `st.started` is decremented under the state lock. Nothing else in the counting logic changed, and the re-read's cost still counts against the budget. The docs, the help text and CHANGELOG.md say so. I ran the new test `a_re_read_that_needs_accepting_does_not_use_a_job_limit_slot` and it passes. The whole drain test binary passes, 162 of 162, including the job-limit, urgent and existing needs-accepting tests. No assertion was removed. Athena's recorded fmt, clippy and test checks all passed. Only the four expected files changed, and the approach is sound. The verdict is still fail, for one reason: criterion 2 needs a run with the fix removed that fails the new test, and no such run reached me. My brief has no producer report. My role forbids editing files, so I could not make that run myself. Reading the code, the base tree has no decrement, so the test would fail there. That is reading, not a run, and this missing evidence is what rejected the previous attempt too. To close the gap, Athena would need to pass the producer's record of the failing run to the verifier, or let the verifier make the one-line removal and run the test."
+}

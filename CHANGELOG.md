@@ -40,14 +40,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   not a production check). A plan record stored before the field existed still parses and is not re-checked.
   This refuses more plans than before, every plan without the section: expected 15% of newly refused readings,
   and the higher refusal rate is intended.
-- An owner decision briefs page, `decisions.html`, built beside `index.html` by `cargo run -p xtask -- site`
+- An owner decision cards page, `decisions.html`, built beside `index.html` by `cargo run -p xtask -- site`
   (`xtask/src/decisions.rs`; style in `docs/conventions/owner-style.md`). It lists the Steward's open
-  proposals from the `athena/records` branch, read with `check_record_file`, as short briefs: title, rung,
-  source, evidence (or "not recorded"), a recommendation from the raising role's recorded limit ("Decide
-  yourself" above it or when the role is not recorded), and a GitHub link to the record at the branch tip.
-  It shows no cost, risk or approval wording the proposal does not hold. A brief over 120 words of displayed
-  prose, or with no recommendation, is refused and listed as not shown; a checkout without the records branch
-  gets a page that says so. The index links to the page.
+  proposals from the `athena/records` branch, read with `check_record_file`. Each card leads with one yes/no
+  question, an "If yes" line, an "If no" line, a cost and risk line and a "Who decides" line; the rung, raising
+  role, source, evidence and GitHub link to the record sit in a collapsed "Evidence and record" block. Root
+  cause of the earlier cards being unclear: the proposal record holds only a title, rung, source and
+  evidence, and the card led with the title and the evidence. The text is now built from those fields: a title
+  that starts with a verb becomes the question and both outcomes, worded by what its rung changes; any other
+  title is shown as a problem, said plainly not to be a change. The cost and risk line says "not recorded"
+  and adds only what the rung reaches and how much evidence backs it. No card recommends, because no record
+  holds a recommendation; above the raising role's limit, or for a role with no recorded definition, the card
+  says "you must decide". `Brief::check` refuses a card over 170 words, without exactly one question, without
+  a "Who decides:" line, or with an internal word (rung or role names, job, work item, proposal, blind spot,
+  commit, path) above the details; titles are reworded to plain words first. A refused card is listed as not
+  shown; a checkout without the records branch gets a page that says so. The index links to the page. Still
+  open: a proposal that carried its own question, outcome, cost and risk would need new fields in the work
+  item record.
 - The Pages workflow now fetches the `athena/records` branch into `refs/heads/athena/records` before it renders
   the site, because its checkout holds only `main` and the decisions page would otherwise always say the branch
   is missing. A test fails if the fetch is absent or comes after the render step.

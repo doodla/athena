@@ -1,0 +1,27 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-222737-zzsr",
+  "round": 1,
+  "at": "2026-11-03T22:32:16.946385878Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Two other places describe the job limit and are not in the plan's docs step or dependents list.",
+      "evidence": "Grep for 'job-limit|job limit' finds main.rs:259 ('the new binary carries on with the remaining --budget and --job-limit'), which describes the restart path at drain.rs:2896 whose meaning this change alters, and README.md:86, which mentions --job-limit. Neither is listed in step 6 or the dependents. Fix: Read main.rs:259 and README.md:86 in step 6. Change the wording only if it states how jobs are counted, and list both under the docs dependent. Criterion 6 does not require README edits, so leaving README alone is fine if its wording stays true.",
+      "location": "Plan step 6 / Dependents 'documented meaning of the job limit'; crates/athena-cli/src/main.rs:259; README.md:86",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The new test could also assert that the ending stop is `Stop::QueueEmpty`, not only that it differs from JobLimit.",
+      "evidence": "With a passed over and b landed, the drain falls through to the default `(Stop::QueueEmpty, None)` at drain.rs:2877. `assert_ne!(stop, JobLimit)` would also pass on an unrelated stop. Fix: If the producer confirms the stop is QueueEmpty, add `assert_eq!(report.stop, Stop::QueueEmpty)` alongside the required `!= JobLimit` assertion. Keep the criterion's wording as it is.",
+      "location": "Plan step 3 / Criterion 1 demonstration",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read drain.rs `run_job` (lines 1420–1560), the post-loop restart code (2860–2930), every `st.started` reader (Grep finds 1433, 1439, 1889, 2008, 2555 and 2896, which matches the plan's dependents list), the test Stub's `needs_accepting` path (tests/drain.rs:223), `the_job_limit_stops_the_loop` (1422), the existing needs-accepting test (1305) and the passed-over test's job-limit case (5044–5059). The plan fixes the fault where it starts. The slot is taken at line 1439, and the `_ if run.needs_accepting` arm at 1537 never gives it back. Decrementing `st.started` under the state lock in that arm fixes every reader of the counter at once. It leaves the budget and the other outcome arms alone. I checked one risk the plan does not mention: the post-loop `jobs_left == 0 → Stop::JobLimit` at line 2900. It runs only when the stop is `Stop::Rebuilt`, so the new test's `stop != Stop::JobLimit` assertion is not undermined. The criterion 1 demonstration drives the production `drain::drain` through the existing Stub seam. The criterion 2 demonstration temporarily deletes the production line and records the failing run, which the reading asks for and which fixes why the previous job was rejected. The other criteria name real commands and seams. The plan calls no external service and adds no athena.toml field. Its dependents list matches what Grep finds, apart from two doc lines that mention the job limit and are not listed (minor). No soundness problem found."
+}
