@@ -3239,9 +3239,84 @@ fn a_reread_whose_scope_changed_is_left_for_a_person_and_is_not_a_failure() {
             .is_some_and(|r| r.contains("needs accepting") && r.contains("scope differs")),
         "{text}"
     );
-    assert_eq!(report.queued.len(), 1, "{text}");
+    // The job line and the note name `athena go`; the request is no longer in the queue the next batch
+    // works (see `a_reread_whose_scope_changed_still_waits_for_a_person_in_every_batch`).
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("is left queued") && n.contains("athena go")),
+        "{:?}",
+        report.notes
+    );
+    assert!(report.queued.is_empty(), "{text}");
     let records = Records::load(&fx.git, &fx.head()).unwrap();
     assert_eq!(records.jobs[&job].state(), JobState::Proposed);
+}
+
+#[test]
+fn a_reread_whose_scope_changed_still_waits_for_a_person_in_every_batch() {
+    let fx = Fixture::new();
+    let after = with_job_usd(&test_config(), "51.0");
+    let first = Scenario::default();
+    let invocations = first.invocations.clone();
+    let mut later = Scenario::default();
+    later.reading = reading(
+        &[("src/lib.rs", "modify")],
+        &[
+            ("content", "README.md ends with a greeting line"),
+            ("behavior", "the tests still pass"),
+        ],
+    );
+    let later_calls = later.invocations.clone();
+    let athena = fx.athena(readings_then(first, later));
+    let (job, _) = athena.queue("add a greeting to the readme").unwrap();
+    let job = job.as_str().to_string();
+    // Read under the first settings, then the settings change.
+    athena.go(&job, AcceptedBy::User, &Quiet).unwrap();
+    commit_config(&fx, &after);
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    // Batch 1 reads the request again; the new reading's scope differs, so it is left for a person.
+    let one = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&one);
+    assert_eq!(one.landed, 0, "{text}");
+    assert_eq!(one.jobs.len(), 1, "{text}");
+    assert_eq!(one.jobs[0].outcome, "needs accepting", "{text}");
+    let reads = readers(&invocations) + readers(&later_calls);
+    assert_eq!(reads, 2, "the first reading and the one after the change");
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].state(), JobState::Proposed);
+    assert_eq!(records.jobs[&job].readings.len(), 2);
+
+    // Batch 2 finds the new reading stored under the current settings. It must not run it: the scope still
+    // changed, and nobody has accepted it.
+    assert!(
+        queued_ids(&fx).is_empty(),
+        "the request is held for a person"
+    );
+    let two = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&two);
+    assert!(two.jobs.is_empty(), "{text}");
+    assert_eq!(two.landed, 0, "{text}");
+    assert!(lander.0.lock().unwrap().is_empty());
+    assert_eq!(
+        readers(&invocations) + readers(&later_calls),
+        reads,
+        "nothing was read again: {text}"
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].state(), JobState::Proposed);
+    assert!(records.jobs[&job].job.is_none(), "not dispatched");
+
+    // A person's `athena go` still runs it.
+    let _ = athena.go(&job, AcceptedBy::User, &Quiet);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert!(
+        records.jobs[&job].job.is_some(),
+        "a person's go dispatches the held request"
+    );
 }
 
 #[test]
@@ -3525,6 +3600,319 @@ fn a_re_read_that_succeeds_runs_the_item() {
         [first.as_str()]
     );
     assert!(report.notes.iter().all(|n| !n.contains("skipped")));
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// A deferred request in state proposed: the batch runs it when its latest reading passes the reading checks
+
+/// The request in the words of `UNREAD_FIRST` with no acceptance bullet: its own words give no acceptance, so
+/// the pass has to read it before it can be planned.
+const UNREAD_FIRST_NO_BULLET: &str = "Add the first demo study to the studies directory.";
+
+/// Queues `text` as `ask --later` does and lets a person's `athena go` try to read it. The script makes that
+/// first read fail, so the request is left in state proposed with a recorded reader call and no stored
+/// reading. Returns the job id.
+fn deferred_with_a_failed_first_read(fx: &Fixture, athena: &Athena, text: &str) -> String {
+    let (job, _) = athena.queue(text).unwrap();
+    let _ = athena.go(job.as_str(), AcceptedBy::User, &Quiet);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let record = &records.jobs[job.as_str()];
+    assert_eq!(record.state(), JobState::Proposed);
+    assert!(record.readings.is_empty(), "no reading was stored");
+    assert!(!record.invocations.is_empty(), "the reader was run");
+    job.as_str().to_string()
+}
+
+/// The jobs the lander was asked to land, in order.
+fn landed_jobs(lander: &RecordingLander) -> Vec<String> {
+    lander
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(job, _)| job.clone())
+        .collect()
+}
+
+/// The items of a report in the order they were first started.
+fn items_in_start_order(report: &drain::Report) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for line in &report.jobs {
+        if !seen.contains(&line.item) {
+            seen.push(line.item.clone());
+        }
+    }
+    seen
+}
+
+/// A deferred request whose first read failed is proposed with no stored reading. The batch reads it like a
+/// queued request and runs it: it lands, and the reader ran twice in all (the failed read, the batch's read).
+fn assert_the_batch_runs_a_deferred_request_whose_first_read_failed(request: &str) {
+    use std::sync::atomic::Ordering;
+    let fx = Fixture::new();
+    let (script, reads) = reader_fails_for_first_request(1);
+    let athena = fx.athena(script);
+    let job = deferred_with_a_failed_first_read(&fx, &athena, request);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = real_steps_with(&athena, &lander, &lines);
+
+    let report = drain::drain(&steps, work_everything(), &lines).unwrap();
+    let text = display::drain(&report);
+
+    assert_eq!(report.landed, 1, "{text}");
+    assert_eq!(landed_jobs(&lander), std::slice::from_ref(&job), "{text}");
+    let last = report
+        .jobs
+        .iter()
+        .rev()
+        .find(|j| j.item == job)
+        .unwrap_or_else(|| panic!("the batch did not start the request: {text}"));
+    assert_eq!(last.outcome, "passed", "{text}");
+    assert!(!text.contains("needs accepting"), "{text}");
+    assert!(report.refused.is_empty(), "{text}");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        2,
+        "the failed read, then the batch's read: {text}"
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].readings.len(), 1);
+    assert!(records.jobs[&job].job.is_some(), "dispatched");
+}
+
+#[test]
+fn a_proposed_deferred_request_with_no_stored_reading_is_read_and_run_by_the_batch() {
+    assert_the_batch_runs_a_deferred_request_whose_first_read_failed(UNREAD_FIRST);
+}
+
+#[test]
+fn a_proposed_deferred_request_without_acceptance_words_is_read_and_run_by_the_batch() {
+    assert_the_batch_runs_a_deferred_request_whose_first_read_failed(UNREAD_FIRST_NO_BULLET);
+}
+
+#[test]
+fn a_proposed_deferred_request_with_a_passing_stored_reading_runs_without_a_second_reading() {
+    // This case already ran in a batch before the selection was changed: it guards that the stored reading
+    // is run as it is and not read again.
+    use std::sync::atomic::Ordering;
+    let fx = Fixture::new();
+    let (script, reads) = reader_fails_for_first_request(0);
+    let athena = fx.athena(script);
+    let (job, _) = athena.queue(UNREAD_FIRST).unwrap();
+    // A person's `athena go` reads it; it waits, proposed, with its reading stored.
+    let first = athena.go(job.as_str(), AcceptedBy::User, &Quiet).unwrap();
+    assert!(matches!(first, GoResult::Reread(_)));
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[job.as_str()].state(), JobState::Proposed);
+    assert_eq!(records.jobs[job.as_str()].readings.len(), 1);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&report);
+
+    assert_eq!(report.landed, 1, "{text}");
+    assert_eq!(landed_jobs(&lander), [job.as_str().to_string()], "{text}");
+    assert_eq!(report.jobs[0].outcome, "passed", "{text}");
+    assert_eq!(reads.load(Ordering::SeqCst), 1, "not read again: {text}");
+}
+
+#[test]
+fn a_proposed_request_whose_reading_was_refused_twice_is_read_again_then_skipped_and_not_run() {
+    let fx = Fixture::new();
+    // The reading modifies a file the repository does not have, so the reading rules refuse it each time.
+    let absent = "docs/absent-note.md";
+    let tree = fx
+        .git
+        .run(["ls-tree", "-r", "--name-only", "HEAD"])
+        .unwrap();
+    assert!(!tree.lines().any(|l| l == absent), "{tree}");
+    let mut scenario = Scenario::default();
+    scenario.reading = reading(
+        &[(absent, "modify")],
+        &[
+            ("content", "the absent note gains a line"),
+            ("behavior", "the tests still pass"),
+        ],
+    );
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let (job, _) = athena.queue(UNREAD_FIRST).unwrap();
+    let job = job.as_str().to_string();
+    let _ = athena.go(&job, AcceptedBy::User, &Quiet);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].state(), JobState::Proposed);
+    assert!(records.jobs[&job].readings.is_empty(), "no reading stored");
+    // A refused reading is read once more at once, so the person's `go` made two reader calls.
+    let setup_reads = readers(&invocations);
+    assert_eq!(setup_reads, 2);
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = real_steps_with(&athena, &lander, &lines);
+
+    let report = drain::drain(&steps, work_everything(), &lines).unwrap();
+    let text = display::drain(&report);
+
+    // The batch reads it like a queued request: two reads of two reader calls each, then it is skipped.
+    assert_eq!(readers(&invocations) - setup_reads, 4, "{text}");
+    assert_eq!(report.landed, 0, "{text}");
+    assert!(landed_jobs(&lander).is_empty(), "{text}");
+    let line = report
+        .jobs
+        .iter()
+        .find(|j| j.item == job)
+        .unwrap_or_else(|| panic!("the batch did not try the request: {text}"));
+    assert_eq!(line.outcome, "not read", "{text}");
+    assert!(
+        line.reason
+            .as_deref()
+            .is_some_and(|r| r.contains("base commit")),
+        "{line:?}"
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("skipped") && n.contains(&job)),
+        "{:?}",
+        report.notes
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].state(), JobState::Proposed);
+    assert!(records.jobs[&job].job.is_none(), "not dispatched");
+}
+
+/// The stored reading `job` has, copied as reading number 2 with `criteria`, committed as a record.
+fn seed_second_reading(
+    fx: &Fixture,
+    job: &str,
+    criteria: Vec<athena_data::records::Criterion>,
+) -> athena_data::records::Reading {
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let mut copy = records.jobs[job].readings[0].clone();
+    copy.n = 2;
+    copy.acceptance_criteria = criteria;
+    commit_records_to(
+        fx,
+        &[AnyRecord::Reading(Box::new(copy.clone()))],
+        "Store a second reading",
+    );
+    copy
+}
+
+#[test]
+fn a_proposed_request_whose_latest_reading_fails_a_reading_check_is_not_run_by_the_batch() {
+    use athena_core::reading::{ReadingCheck, check_reading_text};
+    use athena_data::records::{Criterion, CriterionKind};
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let (held, _) = athena.queue(UNREAD_FIRST).unwrap();
+    let (control, _) = athena.queue(UNREAD_SECOND).unwrap();
+    for job in [&held, &control] {
+        athena.go(job.as_str(), AcceptedBy::User, &Quiet).unwrap();
+    }
+    // The latest reading of `held` has a behavior criterion that names no command to run. The reader's own
+    // read would have been refused for it, so it is stored by hand. `control` gets a second reading that
+    // passes.
+    let bad = seed_second_reading(
+        &fx,
+        held.as_str(),
+        vec![Criterion {
+            text: "the producer's report lists the caller-check Grep".into(),
+            kind: CriterionKind::Behavior,
+        }],
+    );
+    assert!(
+        matches!(
+            check_reading_text(&bad, UNREAD_FIRST),
+            ReadingCheck::Refuse(_)
+        ),
+        "the seeded reading must fail a reading check"
+    );
+    let good = seed_second_reading(
+        &fx,
+        control.as_str(),
+        vec![
+            Criterion {
+                text: "the demo study has a pin, claims and an intro".into(),
+                kind: CriterionKind::Content,
+            },
+            Criterion {
+                text: "the tests still pass".into(),
+                kind: CriterionKind::Behavior,
+            },
+        ],
+    );
+    assert_eq!(
+        check_reading_text(&good, UNREAD_SECOND),
+        ReadingCheck::Accept
+    );
+    let reads = readers(&invocations);
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&report);
+
+    assert_eq!(
+        landed_jobs(&lander),
+        [control.as_str().to_string()],
+        "{text}"
+    );
+    assert!(
+        report.jobs.iter().all(|j| j.item != held.as_str()),
+        "the request with the failing reading was not started: {text}"
+    );
+    assert_eq!(readers(&invocations), reads, "nothing was read again");
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[held.as_str()].state(), JobState::Proposed);
+    assert!(records.jobs[held.as_str()].job.is_none(), "not dispatched");
+    assert!(
+        records.jobs[control.as_str()].job.is_some(),
+        "the control ran"
+    );
+}
+
+#[test]
+fn proposed_and_queued_requests_are_run_in_priority_order() {
+    let fx = Fixture::new();
+    let (script, reads) = reader_fails_for_first_request(1);
+    let athena = fx.athena(script);
+    // Oldest first: a normal request that a person has read (proposed, reading stored), a low one nobody has
+    // read (queued), and last an urgent one whose first read failed (proposed, no reading). Age order alone
+    // would put the urgent one last.
+    let (normal, _) = athena.queue(UNREAD_SECOND).unwrap();
+    athena
+        .go(normal.as_str(), AcceptedBy::User, &Quiet)
+        .unwrap();
+    let low_text = "Add the third demo study to studies/demo/\n- the demo study has a pin, claims and an intro\nPriority: low";
+    let (low, _) = athena.queue(low_text).unwrap();
+    let urgent_text = format!("{UNREAD_FIRST}\nPriority: urgent");
+    let urgent = deferred_with_a_failed_first_read(&fx, &athena, &urgent_text);
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let ids = queued_ids(&fx);
+    assert_eq!(ids, [normal.as_str(), low.as_str(), urgent.as_str()]);
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&report);
+
+    assert_eq!(
+        items_in_start_order(&report),
+        [
+            urgent.clone(),
+            normal.as_str().to_string(),
+            low.as_str().to_string()
+        ],
+        "{text}"
+    );
+    assert_eq!(landed_jobs(&lander).first(), Some(&urgent), "{text}");
 }
 
 /// Commits two recorded introspections of one cause, in two jobs, so the error review backfill has a repeated

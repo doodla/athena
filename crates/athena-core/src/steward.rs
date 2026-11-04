@@ -17,7 +17,7 @@ use crate::Athena;
 use crate::capability::{JobConfig, ToolGrant};
 use crate::commits::{Committer, NewFile, message};
 use crate::state::StateDir;
-use crate::store::{JobState, Records};
+use crate::store::{JobRecords, JobState, Records};
 use anyhow::{Context, Result, bail};
 use athena_agent::env::Side;
 use athena_context::briefs::plain_boundary_text;
@@ -344,15 +344,42 @@ pub const DRAINED_CHANNELS: [&str; 2] = [REQUEST_CHANNEL, USER_QUEUE_CHANNEL];
 pub struct QueuedWork {
     pub job: JobId,
     pub title: String,
-    /// True when the job has been read (it waits in state proposed), so it is run without a second reading.
+    /// True when the job has a stored reading that passed the text-only reading checks (it waits in state
+    /// proposed), so it is run without a second reading. A request in state proposed that has no stored
+    /// reading (its reader failed, or both readings were refused) is not marked read: the drain reads it.
     pub read: bool,
+}
+
+/// Whether the latest reading of `job` is a re-read after a settings change that changed the scope: it was
+/// made under a different `athena.toml` or `defaults.toml` than the reading before it, it does not promise
+/// the same work ([`crate::reading::same_scope`]), and no correction answers the earlier reading. A person's
+/// `athena correct` stores a correction for the reading it replaces, so its new reading is not counted here;
+/// the re-read that follows a settings change stores none. Such a re-read needs a person to run `athena go`.
+fn reread_changed_scope(job: &JobRecords) -> bool {
+    let [.., previous, latest] = job.readings.as_slice() else {
+        return false;
+    };
+    let settings_changed = previous.config_sha256 != latest.config_sha256
+        || previous.defaults_sha256 != latest.defaults_sha256;
+    settings_changed
+        && previous.capability.is_some()
+        && !crate::reading::same_scope(previous, latest)
+        && !job.corrections.iter().any(|c| c.n == previous.n)
 }
 
 /// The open requests of the drained channels (the steward's and `ask --later`'s), oldest first, ties by job
 /// id. A request stays open until it is run or closed, so one that `athena plan` or a person has already read
-/// is listed too, marked [`QueuedWork::read`]: reading does not take it out of the queue. A request that no
-/// capability fits (declined), one that is running or has run (dispatched, blocked or closed), and one on any
-/// other channel are left out.
+/// is listed too: reading does not take it out of the queue. A request that no capability fits (declined),
+/// one that is running or has run (dispatched, blocked or closed), and one on any other channel are left out.
+///
+/// A request in state proposed is listed by what its latest reading shows:
+/// - a stored reading that passes the text-only reading checks ([`crate::reading::check_reading_text`]; the
+///   check of the deliverable paths against the repository is not repeated here) is marked
+///   [`QueuedWork::read`], so it runs without a second reading;
+/// - no stored reading (the reader gave none) is listed unread, so the drain reads it like a queued request;
+/// - a stored reading that fails a check is left out until a person runs `athena go`;
+/// - a re-read after a settings change that changed the scope is left out until a person runs `athena go`
+///   (a reading made by `athena correct` is not held back).
 pub fn queued_work(records: &Records) -> Vec<QueuedWork> {
     let mut found: Vec<(Timestamp, QueuedWork)> = records
         .jobs
@@ -366,12 +393,26 @@ pub fn queued_work(records: &Records) -> Vec<QueuedWork> {
                 .request
                 .as_ref()
                 .filter(|r| DRAINED_CHANNELS.contains(&r.channel.as_str()))?;
+            let mut read = false;
+            if state == JobState::Proposed {
+                if reread_changed_scope(j) {
+                    return None;
+                }
+                if let Some(latest) = j.latest_reading() {
+                    if crate::reading::check_reading_text(latest, &request.text)
+                        != crate::reading::ReadingCheck::Accept
+                    {
+                        return None;
+                    }
+                    read = true;
+                }
+            }
             Some((
                 request.received_at,
                 QueuedWork {
                     job: j.id().clone(),
                     title: j.title(),
-                    read: state == JobState::Proposed,
+                    read,
                 },
             ))
         })
@@ -2129,6 +2170,197 @@ mod tests {
             ]
         );
         assert_eq!(queued[2].title, "Do 20261015-120000-aaaa.");
+    }
+
+    const REREAD_JOB: &str = "20261016-120000-bbbb";
+    const REREAD_REQUEST: &str =
+        "Add a greeting.\n\nAcceptance:\n- the greeting prints\n\nFiles: src/a.rs";
+
+    /// A stored reading of `REREAD_JOB`, numbered `n`, made under the settings `hash` names, with one
+    /// deliverable at `path`.
+    fn stored_reading(n: u32, hash: &str, path: &str) -> athena_data::records::Reading {
+        use athena_data::records::{
+            Criterion, CriterionKind, Deliverable, DeliverableAction, Forecast, Forecasts,
+            Quantiles,
+        };
+        let forecast = Forecast {
+            p_reading_accepted: 0.8,
+            p_verification_passes: 0.7,
+            p_user_intervenes: 0.1,
+            cost_usd: Quantiles::new(0.2, 0.5, 1.5).unwrap(),
+            wall_time_s: Quantiles::new(100.0, 300.0, 900.0).unwrap(),
+        };
+        athena_data::records::Reading {
+            job: JobId::parse(REREAD_JOB).unwrap(),
+            n,
+            at: "2026-10-16T12:00:00Z".parse().unwrap(),
+            invocation_seq: n,
+            base_commit: "a".repeat(40),
+            config_sha256: hash.repeat(64),
+            defaults_sha256: "c".repeat(64),
+            defaults_version: 1,
+            title: "Add a greeting".into(),
+            summary: "Add a greeting.".into(),
+            class_of_work: "feature".into(),
+            capability: Some("change".into()),
+            decline_reason: None,
+            producer_model: "producer".into(),
+            verifier_model: "verifier".into(),
+            defaults_applied: vec![],
+            assumptions: vec![],
+            question: None,
+            acceptance_criteria: vec![Criterion {
+                text: "the greeting prints".into(),
+                kind: CriterionKind::Content,
+            }],
+            deliverables: vec![Deliverable {
+                path: path.into(),
+                action: DeliverableAction::Modify,
+                p: 0.9,
+            }],
+            out_of_scope: vec![],
+            forecasts: Forecasts {
+                reader: forecast.clone(),
+                reference: forecast,
+            },
+            departures: None,
+            urgent_reason: None,
+            hard_reason: None,
+            producer_effort: None,
+        }
+    }
+
+    /// Records holding `REREAD_JOB` in state proposed with `readings`, and a correction for each `n` in
+    /// `corrected`.
+    fn proposed_with(readings: Vec<athena_data::records::Reading>, corrected: &[u32]) -> Records {
+        let job = JobId::parse(REREAD_JOB).unwrap();
+        let mut records = Records::default();
+        records.jobs.insert(
+            REREAD_JOB.to_string(),
+            JobRecords {
+                id: Some(job.clone()),
+                request: Some(Request {
+                    job: job.clone(),
+                    text: REREAD_REQUEST.into(),
+                    received_at: "2026-10-16T12:00:00Z".parse().unwrap(),
+                    channel: USER_QUEUE_CHANNEL.into(),
+                }),
+                readings,
+                corrections: corrected
+                    .iter()
+                    .map(|n| athena_data::records::Correction {
+                        job: job.clone(),
+                        n: *n,
+                        at: "2026-10-16T12:30:00Z".parse().unwrap(),
+                        kind: athena_data::records::CorrectionKind::Correction,
+                        text: "use src/b.rs".into(),
+                        intervention: RecordId::parse("20261016-123000-1abc").unwrap(),
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        );
+        records
+    }
+
+    #[test]
+    fn a_proposed_request_with_a_passing_stored_reading_is_listed_read() {
+        let records = proposed_with(vec![stored_reading(1, "b", "src/a.rs")], &[]);
+        let queued = queued_work(&records);
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].read, "{queued:?}");
+    }
+
+    #[test]
+    fn a_proposed_request_with_no_stored_reading_is_listed_unread() {
+        // An invocation without a reading is what a reader failure leaves: state proposed, nothing stored.
+        let mut records = proposed_with(vec![], &[]);
+        records.jobs.get_mut(REREAD_JOB).unwrap().invocations.push(
+            crate::status::planning_cost_tests::invocation(
+                &JobId::parse(REREAD_JOB).unwrap(),
+                1,
+                athena_data::records::Role::Reader,
+                0.1,
+            ),
+        );
+        assert_eq!(records.jobs[REREAD_JOB].state(), JobState::Proposed);
+        let queued = queued_work(&records);
+        assert_eq!(queued.len(), 1);
+        assert!(!queued[0].read, "{queued:?}");
+    }
+
+    #[test]
+    fn a_reread_after_a_settings_change_with_a_changed_scope_is_left_for_a_person() {
+        let records = proposed_with(
+            vec![
+                stored_reading(1, "b", "src/a.rs"),
+                stored_reading(2, "d", "src/lib.rs"),
+            ],
+            &[],
+        );
+        assert!(queued_work(&records).is_empty());
+    }
+
+    #[test]
+    fn a_persons_correction_under_changed_settings_is_not_held_back() {
+        let records = proposed_with(
+            vec![
+                stored_reading(1, "b", "src/a.rs"),
+                stored_reading(2, "d", "src/lib.rs"),
+            ],
+            &[1],
+        );
+        let queued = queued_work(&records);
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].read, "{queued:?}");
+    }
+
+    #[test]
+    fn a_reread_after_a_settings_change_with_the_same_scope_is_listed_read() {
+        let records = proposed_with(
+            vec![
+                stored_reading(1, "b", "src/a.rs"),
+                stored_reading(2, "d", "src/a.rs"),
+            ],
+            &[],
+        );
+        let queued = queued_work(&records);
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].read, "{queued:?}");
+    }
+
+    #[test]
+    fn a_new_reading_with_a_different_scope_under_the_same_settings_is_listed_read() {
+        let records = proposed_with(
+            vec![
+                stored_reading(1, "b", "src/a.rs"),
+                stored_reading(2, "b", "src/lib.rs"),
+            ],
+            &[],
+        );
+        let queued = queued_work(&records);
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].read, "{queued:?}");
+    }
+
+    #[test]
+    fn a_stored_reading_that_fails_a_reading_check_is_left_for_a_person() {
+        let mut reading = stored_reading(1, "b", "src/a.rs");
+        // A behavior criterion with no command to run is refused by the evidence check.
+        reading.acceptance_criteria = vec![athena_data::records::Criterion {
+            text: "the producer's report lists the caller-check Grep".into(),
+            kind: athena_data::records::CriterionKind::Behavior,
+        }];
+        let request = REREAD_REQUEST;
+        assert!(
+            matches!(
+                crate::reading::check_reading_text(&reading, request),
+                crate::reading::ReadingCheck::Refuse(_)
+            ),
+            "the seeded reading must fail a check for this test to show anything"
+        );
+        let records = proposed_with(vec![reading], &[]);
+        assert!(queued_work(&records).is_empty());
     }
 
     #[test]

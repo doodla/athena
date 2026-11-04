@@ -90,10 +90,17 @@
 //!   its reading runs without a second reading. [`plan`] runs the same pass for `athena plan` and works
 //!   nothing, so its `--budget` only has to fit each read's cap, not a run after it.
 //! - **A read request stays queued.** A request is open until it is run or closed. One that `athena plan` (or
-//!   a person) has read waits in state proposed and is still in the queue, marked read: [`drain`] runs it
-//!   without reading it again, in plan order, and a second `athena plan` lists it again. Only a request
-//!   that was declined, is running, or has ended, and one on another channel, is left out
-//!   ([`athena_core::steward::queued_work`]).
+//!   a person) has read waits in state proposed and is still in the queue, marked read, when its latest
+//!   stored reading passes the text-only reading checks (`check_reading_text`; the check of the deliverable
+//!   paths against the repository is not repeated): [`drain`] runs it without reading it again, in plan
+//!   order, and a second `athena plan` lists it again. This holds for a request queued with `ask --later`
+//!   or by the steward or Hestia, as for any other. A proposed request with no stored reading (its reader
+//!   failed, or both its readings were refused) is queued unread: the drain reads it in plan order, runs it
+//!   when the reading is accepted, and skips it after two empty reads. Two kinds of proposed request wait
+//!   for a person to run `athena go` and are left out of the queue: one whose stored reading fails a
+//!   reading check, and one that was read again after a settings change with a changed scope (a reading
+//!   from `athena correct` is not held back). Only a request that was declined, is running, or has ended,
+//!   and one on another channel, is also left out ([`athena_core::steward::queued_work`]).
 //! - **An interrupted job is retried.** A job that was dispatched, has no closing record and has no process
 //!   working on it (a machine restart killed it) is listed as work like a queued request, on a drained
 //!   channel only ([`athena_core::steward::interrupted_work`]). Its first attempt is `athena retry`, which
@@ -328,8 +335,9 @@ impl Budget {
 pub struct Item {
     pub job: String,
     pub title: String,
-    /// True when the job was already read (an approved job waiting in state proposed), so it is run without a
-    /// reading. A retry after a failed run still reads again.
+    /// True when the job was already read (a job waiting in state proposed whose stored reading passes the
+    /// reading checks, or an approved job), so it is run without a reading. A proposed request with no stored
+    /// reading is not marked read: the drain reads it. A retry after a failed run still reads again.
     #[serde(skip)]
     pub read: bool,
     /// True when the job was interrupted (dispatched, no process, no closing record): its first attempt is
