@@ -1,0 +1,159 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261104-141009-hsg4",
+  "n": 1,
+  "at": "2026-11-04T20:23:28.264582754Z",
+  "invocation_seq": 1,
+  "base_commit": "28d5012c13620b5ad7b1d659f0ba023a296b0788",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Throughput review: flag median slowdowns and queue a request",
+  "summary": "Today the throughput review (crates/athena-core/src/hestia.rs) queues one model-proposed design request and does nothing while it is open, so the 25.4 to 60 minute rise went unflagged. I read it as: every review run compares the latest median with the previous review's and names the stages that grew, even with a design request open. When the median grew by more than 25%, it also queues a high-priority request naming the biggest-growing stage and its measured minutes.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests for the slowdown and flat cases, and cargo test and clippy stay clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check stage naming and queueing in tests with an open request, not only that the functions exist."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is a slowdown flagged and a request queued, not the review merely running."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in hestia.rs, with the previous stage medians derived from existing records and no schema change."
+    },
+    {
+      "id": "mechanism",
+      "how": "The 25% rule is enforced in code and tested, not left as prose."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments explain the rule for an outside reader."
+    },
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the operator reading throughput reviews and the queue wants a slowdown flagged and acted on, not hidden behind an open design request.",
+    "Code survey: read crates/athena-core/src/hestia.rs (throughput_due ~1236, throughput_review ~1438, open_throughput_request, throughput_request, throughput_followups, tests from ~3893), crates/athena-core/src/status.rs (Throughput::compute, landed_jobs, StageMinutes::named, median, THROUGHPUT_WINDOW) and crates/athena-data/src/records.rs (ThroughputReview, ThroughputTrigger, ThroughputProposal; AnyRecord::ThroughputReview validate and schema). The entry point is Athena::throughput_review, called from review_passes. It loads records, calls Throughput::compute, then throughput_due, then either notes that a request is open or asks the model. The median is measured directly from landed jobs' stage minutes, not through a stand-in.",
+    "The previous review stores only window_median_minutes and landings, not per-stage medians. Plan: recompute the previous per-stage medians from landed_jobs(records) cut to the first `previous.landings` jobs, using the newest THROUGHPUT_WINDOW of them, and compare with the current Throughput::median_stages. This needs no record schema change, so records.rs, its schema and the AnyRecord round-trip test stay unchanged. If a producer finds this unworkable and adds a record field, it must update the schema and the round-trip test (check_record_file/AnyRecord).",
+    "A new pure function (for example `stage_growth`) returns the stages whose median minutes grew, largest first. The deterministic slowdown request is queued by Athena code through the existing StewardRequest/self.queue path at Priority::High, without needing the model, and is queued regardless of an open Throughput design request. The review note and the review's CLI output line name the grown stages.",
+    "The 25% threshold is a new constant (for example SLOWDOWN_RATIO = 1.25). The existing 20% WORSEN_RATIO trigger stays, so a review still runs between 20% and 25%, names the stages, and queues nothing.",
+    "To avoid queuing a duplicate slowdown request on every run, a still-open request with a distinct title marker for slowdowns suppresses another one. Each comparison is against the previous review, so a persistent slowdown is flagged once per review."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Test (run `cargo test -p athena-core hestia`): the previous review recorded a median of 25 minutes, the current median is 60, and an open request whose text has a line starting 'Throughput design: ' exists. The review result or note names every stage whose minutes grew, and a new request is queued at Priority::High. The test asserts the stage names and the queued request text.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Test (run `cargo test -p athena-core hestia`): the median is flat against the previous review, so no request is queued and no stage is reported as grown. The test asserts that the queue holds no new request.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Test (run `cargo test -p athena-core hestia`): a rise above 20% but not above 25% names the grown stages and queues no slowdown request. A rise just over 25% queues one.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The queued slowdown request text, as built by the new code, names the stage that grew most and its measured median minutes (and the previous minutes) and carries priority high. Grep of the request builder in crates/athena-core/src/hestia.rs shows both values interpolated, and the test asserts them.",
+      "kind": "content"
+    },
+    {
+      "text": "Test: a review with an open design request still compares stage medians against the previous review and keeps the existing behavior of asking the model for no second proposal. Existing throughput tests still pass (`cargo test`).",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` pass. Changes are limited to the throughput review code and its tests, and no governance file changes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The module doc comment in hestia.rs, and docs/design/hestia.md if it describes the trigger, state the new comparison, the 25% rule and the stage naming. This matches outcome-check: the check is the slowdown being flagged, not the review merely running.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "docs/design/hestia.md",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Changing the model prompt or its proposal schema, or the code-health and error reviews.",
+    "Changing the throughput measurement itself (stage definitions, THROUGHPUT_WINDOW).",
+    "Tuning the review cadence (REVIEW_EVERY) or the 20% trigger.",
+    "Governance files (athena.toml, defaults.toml, workflows)."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.6
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 1900.0,
+        "p90": 4400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7083544303797469,
+      "p_verification_passes": 0.6683417085427136,
+      "p_user_intervenes": 0.08758465011286681,
+      "cost_usd": {
+        "p10": 0.5582334999999999,
+        "p50": 1.3407819,
+        "p90": 3.846220199999999
+      },
+      "wall_time_s": {
+        "p10": 543.9900303217952,
+        "p50": 1976.8653586148762,
+        "p90": 4209.656916398667
+      }
+    }
+  },
+  "departures": "Slightly higher cost than the reference: the change touches the review flow and needs fixtures for landed jobs with stage minutes and a prior review.",
+  "hard_reason": "It changes the throughput review's trigger and queueing rules (when it queues work and at what priority), which is a rule that holds or adds work, so mistakes are hard to see.",
+  "producer_effort": "high"
+}
