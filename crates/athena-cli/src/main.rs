@@ -251,7 +251,8 @@ Stop reasons:
   target met        a rating taken after a landing reached --rating-threshold, a landing changed the outcome, \
 and the page text passed the source check
   budget spent      spend plus the next call's cap would exceed --budget; the rest stays queued
-  repeated failure  the same item failed twice; it is named
+  repeated failure  the same item failed twice; it is named (an item on a flagged or paused line is passed over \
+instead and the batch goes on)
   queue empty       nothing was left to work; this is not success
   job limit         --job-limit jobs were started
   stop requested    `athena drain-stop` was run; the job in progress was finished and no further job was started

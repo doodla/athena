@@ -1,0 +1,138 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261103-231510-20z0",
+  "base_commit": "b91c2320aa14e69229c633110693cd4cf85c5986",
+  "base_fingerprint": "sha256:f1e3e24c6899cc9fedef551d089b03378c265eca21e0f58e0d340e746de7860f",
+  "previous_job": "20261103-202651-j4w5",
+  "candidate_commit": "26e596186a8130f3e9df38b9709d06fed998b5a6",
+  "candidate_tree": "ef8cc679827b33a82488896ab6d2d3376b7ef1d6",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 303686
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 230993
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 74442
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 297362
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 90001
+    }
+  ],
+  "fingerprint": "sha256:20a6fe940bd85aec7fac8fc3fd29c4bc098bb912da3d07c18c0cea03177c01a9",
+  "violations": [],
+  "producer_report": {
+    "summary": "The drain now passes over an item that fails twice on a flagged (not paused) line and runs the next item. Before, only a paused line was passed over. Root cause: after the last failed attempt, `Drain::attempts` asked only for a pause, and `Athena::line_pause` returns only pauses. A flagged line therefore ended the item as failed and stopped the batch. That is what happened to item 20261103-193428-df2m on 3 Nov. Changes: (1) `Athena::line_flag` and `Athena::flag_note` in scope_guard.rs. `line_flag` returns the stored flag only while the recomputed level still holds a flag, and ignores pause marks. (2) A defaulted `Steps::flagged` method, `ItemEnd::Flagged` and `Drain::flagged_reason` in drain.rs. The flag is asked only after the second failure and only when no pause was found, so a flagged line still gets both attempts. `finish` passes the item over with the flag reason (one `passed over` line, no failure counted). `RealSteps::flagged` is backed by `line_flag`. (3) Module docs, the `Stop::RepeatedFailure` doc, `Stop::meaning`, the `Drain::attempts` comment and the `athena drain --help` stop-reasons text now say that a flagged or paused line is passed over. (4) Tests: a Stub test for the new behavior with output assertions, an unflagged twin that still stops, a real-steps test, and a scope_guard unit test. Two existing tests that asserted the old flagged-line failure were updated: the real-steps stored-pause test, and `in_flight_row_goes_when_an_item_fails_twice`. (5) A CHANGELOG Fixed bullet. No pause file is written and no record changes.",
+    "files": [
+      "crates/athena-core/src/scope_guard.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core line_flag",
+        "result": "pass",
+        "note": "new scope_guard unit test"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain flag",
+        "result": "pass",
+        "note": "new flagged tests plus existing ones with 'flag' in the name"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain",
+        "result": "fail",
+        "note": "first run: in_flight_row_goes_when_an_item_fails_twice failed because it asserted the old behavior for a flagged line; updated it. Rerun is covered by the full-suite run."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "full suite after the fix; the command returned without an error exit status. I could not read its saved output file (outside the working directory), so I did not see per-test lines."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed, no banned words"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-cli/tests/drain.rs: an item fails twice on a line that is flagged (not paused), and the batch then runs the next item, which is recorded as run/landed, with no 'repeated failure' stop. Run `cargo test -p athena-cli --test drain` and see it pass.",
+        "status": "met",
+        "evidence": "Added drain_passes_over_an_item_that_fails_twice_on_a_flagged_line_and_runs_the_next_item (Stub with flagged: a). It asserts the log read a, run a, reread a, run a-retry, read b, run b, land b, rate; stop QueueEmpty and not RepeatedFailure; failed_item None; landed 1; b's JobLine outcome 'passed' and landing 'landed'. It passed in `cargo test -p athena-cli --test drain flag`. A real-steps twin, drain_real_steps_pass_over_the_item_of_a_line_that_is_flagged_after_two_failures, also passed."
+      },
+      {
+        "criterion": "A test shows an item that fails twice with no flag and no pause still ends the batch with the repeated-failure stop naming it. Run `cargo test -p athena-cli --test drain`.",
+        "status": "met",
+        "evidence": "Existing the_same_item_failing_twice_is_a_repeated_failure_naming_the_item passed in the full drain run. New drain_still_stops_on_repeated_failure_when_another_item_is_flagged_but_this_one_is_not asserts stop RepeatedFailure, failed_item Some(a), log ends at run a-retry (b not started), text 'repeated failure: item a failed twice', and no 'a passed over' line. It passed."
+      },
+      {
+        "criterion": "The passed-over flagged item is reported with a line naming it and its flag reason, and the batch summary does not count it as a failed item stopping the run. Checked by the new test's assertions on output under `cargo test -p athena-cli --test drain`.",
+        "status": "met",
+        "evidence": "The new Stub test asserts exactly one line starting 'plan       a passed over: line a is flagged (T1, T3, T5)' containing the flag reason, printed after 2 runs (before b ran). It asserts display::drain has neither 'repeated failure' nor 'failed twice', failed_item None, and a still in report.queued. The real-steps test checks the production wording (Athena::flag_note) in the printed line. Both passed."
+      },
+      {
+        "criterion": "Existing paused-line drain tests still pass; `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` are clean.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo test --locked` (returned without an error exit status), `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`; all clean. Paused-line tests are untouched. Two existing tests asserted the old flagged-line failure and were updated (real-steps stored-pause test; in_flight_row_goes_when_an_item_fails_twice)."
+      },
+      {
+        "criterion": "drain.rs (Drain::attempts, the stop-reasons text and the module docs near line 26 and 944) says a line that is flagged or paused is passed over after two failures; Grep for 'flagged' in crates/athena-cli/src/drain.rs shows the new rule documented where the old paused rule is.",
+        "status": "met",
+        "evidence": "drain.rs now says it in: the module docs (new bullet 'A flagged line is passed over after two failures' right after the paused bullet), the Stop::RepeatedFailure doc, Stop::meaning ('flagged or paused is passed over'), the comment in Drain::attempts, plus the Steps::flagged and ItemEnd::Flagged docs. The drain --help stop-reasons text in main.rs says the same; drain_help_documents_the_flags_and_lists_every_stop_reason passed."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry stating that a batch no longer stops on repeated failure of a flagged item, citing the 3 Nov incident with item 20261103-193428-df2m.",
+        "status": "met",
+        "evidence": "Added a Fixed bullet after the paused-line entry. It names the 3 Nov 11:13pm UTC incident, item 20261103-193428-df2m flagged (T1, T3, T5), the root cause (line_pause returns pauses only), the new rule, and that an unflagged unpaused item that fails twice still stops the batch."
+      }
+    ],
+    "open_issues": [
+      "A flagged item that keeps failing is tried (two attempts) again on every later drain run, because the flag is consulted only after the second failure and nothing is written. That spends money each run. This matches the request and the plan's accepted risk.",
+      "The final `cargo test --locked` run returned with no error status but I could not read its saved output, so I saw no per-test totals for the whole workspace; the drain test binary had passed all other tests in the earlier run, and the one failure there was fixed."
+    ],
+    "mistakes": [
+      "First draft of the new Stub test used JobLine fields that do not exist (outcome compared to an enum, a landed field); fixed after the compile error.",
+      "The unflagged twin first asserted no 'passed over' line at all and failed on b's 'run ended first' line; narrowed to a's line."
+    ],
+    "learnings": [
+      "Any two rejections of an item on one line flag the line (T1 fires at attempt 2), so every fixture that fails an item twice with different criteria is now a flagged line and is passed over. The plan named only one such test (tests/drain.rs real-steps stored-pause test); in_flight_row_goes_when_an_item_fails_twice also encoded the old behavior and was updated.",
+      "JobLine in the drain report has string fields outcome ('passed', 'rejected', ...) and landing ('landed', ...); it has no landed boolean.",
+      "In the unflagged twin test, the batch's other queued item is still reported as 'plan b passed over: run ended first: repeated failure', so a test that checks for no passed-over line must match the item id."
+    ],
+    "desires": [
+      "A way to read the saved output of a large command: the full cargo test output went to a file outside the working directory, which the Grep hook refused."
+    ]
+  }
+}

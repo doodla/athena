@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-231510-20z0",
+  "round": 1,
+  "at": "2026-11-04T00:34:59.756245841Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "`line_flag` only reads the flag file, so it misses a line that holds only a stale pause file but whose recomputed level is still a flag.",
+      "evidence": "When `try_watch_line` writes a pause it also deletes the flag file (scope_guard.rs:912-913). Later the rule can change so the line drops from Pause to Flag. Then `line_pause` returns None because the level is not Pause, and `line_flag` reads `flag_path(first)`, which no longer exists, so it also returns None. That item would still end as `ItemEnd::Failed` and stop the batch, even though its line is flagged under the current rule. `live_marks` has the same gap, but the drain decision is where it costs money and slots. Fix: In `line_flag`, when the flag file is absent, also accept the line's pause file as long as the recomputed level is Flag (not Pause), and report it as a flag. Another option is to decide on the recomputed `line_state(..).2.overall() >= Level::Flag` and use whichever stored mark exists for the note. Add this case to the `line_flag` unit test (stale pause, level now flag, gives Some).",
+      "location": "Plan Decision 1 / Step 1; crates/athena-core/src/scope_guard.rs:911-913 and 782-790",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The run command for criterion 2 filters to the existing test only, so it does not run the new twin test.",
+      "evidence": "The run is `cargo test -p athena-cli --test drain the_same_item_failing_twice_is_a_repeated_failure_naming_the_item`. That filter does not match `drain_still_stops_on_repeated_failure_when_another_item_is_flagged_but_this_one_is_not`, the twin that shows a flag on another item does not suppress the stop. Fix: Name both tests in the run, or run `cargo test -p athena-cli --test drain repeated_failure`, which matches both.",
+      "location": "Demonstrations, Criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The `Replay` wrapper does not forward `flagged`, so it silently drops flags if a later test wraps RealSteps with it.",
+      "evidence": "The plan says Replay is not asked to forward `flagged` because no current test needs it. Whether Replay forwards `paused` is the precedent to follow. Fix: If Replay forwards `paused`, forward `flagged` the same way so the two stay symmetric.",
+      "location": "Dependents: Steps trait gains a defaulted method (tests/drain.rs:4773)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code. It finds the fault where it starts: `Drain::attempts` at drain.rs:1811-1817 asks only `paused_reason`, and `Athena::line_pause` (scope_guard.rs:782-790) returns only pause marks, so a flagged line that fails twice ends as `ItemEnd::Failed`, and `finish` turns that into the repeated-failure stop (drain.rs:2392). The fix is sound. A sibling `line_flag` uses the same job-to-line lookup and the same recompute safeguard as `line_pause`. A defaulted `Steps::flagged` is asked only after the last failed attempt, so `prepare`'s plan hold for paused lines is unchanged and flagged lines still get both attempts. A new `ItemEnd::Flagged` goes through the existing `pass_over`. The demonstrations drive the real `drain::drain` with the existing `Stub` (it returns only configured data; the decision stays in production code). Each would fail under the old code: the stop would be RepeatedFailure and `b` would never run. A real-steps test uses the real watcher to write the flag file. The plan correctly finds that the existing test at tests/drain.rs:4534 asserts the old behaviour for a flagged line and updates it. I grepped the other readers of 'repeated failure' (display.rs:620, hestia, roles). They are text or unrelated and keep working. Adding the enum variant is checked by the compiler at the one `finish` match. There is no new athena.toml field, and the work fits one producer run. Remaining findings: one minor soundness gap (a stale pause file whose flag file was deleted, with the level now a flag) and one minor gap in the criterion 2 run filter. Neither blocks acceptance."
+}

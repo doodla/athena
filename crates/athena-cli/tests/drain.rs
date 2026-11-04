@@ -89,6 +89,8 @@ struct Stub {
     needs_accepting: Vec<&'static str>,
     /// Jobs on a line the scope guard has paused, each with the reason `pause_refusal` would give.
     paused: Vec<(&'static str, &'static str)>,
+    /// Jobs on a line the scope guard has only flagged, each with the reason `flag_note` would give.
+    flagged: Vec<(&'static str, &'static str)>,
     /// When set, the line of this job is paused with this reason as soon as the job has been run once, as the
     /// scope guard's watcher does after a rejection.
     pause_on_run: Option<(&'static str, &'static str)>,
@@ -163,6 +165,13 @@ impl Steps for Stub {
             .map(|(job, why)| (job.to_string(), why.to_string()));
         configured
             .chain(self.paused_now.borrow().iter().cloned())
+            .filter(|(job, _)| jobs.contains(job))
+            .collect()
+    }
+    fn flagged(&self, jobs: &[String]) -> Vec<(String, String)> {
+        self.flagged
+            .iter()
+            .map(|(job, why)| (job.to_string(), why.to_string()))
             .filter(|(job, _)| jobs.contains(job))
             .collect()
     }
@@ -558,6 +567,15 @@ fn pause_text(line: &str) -> &'static str {
     Box::leak(text.into_boxed_str())
 }
 
+/// What `flag_note` says for a flagged line: the line, the signals and the reason.
+fn flag_text(line: &str) -> &'static str {
+    let text = format!(
+        "line {line} is flagged (T1, T3, T5): attempt 3 of the line, spend over the forecast, 61 minutes \
+         of agent time with no accepted candidate"
+    );
+    Box::leak(text.into_boxed_str())
+}
+
 /// A Ui that keeps each line with the number of runs the stub had started when it was printed.
 struct Stamped<'a> {
     stub: &'a Stub,
@@ -820,6 +838,109 @@ fn drain_passes_over_an_item_whose_second_failure_pauses_its_line_and_holds_back
         c[0].1
             .contains("depends on a, which is held back: its line is paused"),
         "{c:?}"
+    );
+}
+
+#[test]
+fn drain_passes_over_an_item_that_fails_twice_on_a_flagged_line_and_runs_the_next_item() {
+    // a is rejected twice on a line that is flagged (T1, T3, T5) and not paused: the incident of
+    // item 20261103-193428-df2m. The flag still dispatches, so a gets both attempts; then the batch goes on.
+    let stub = Stub {
+        items: vec!["a", "b"],
+        outcomes: RefCell::new(vec![
+            OutcomeState::Rejected,
+            OutcomeState::Rejected,
+            OutcomeState::Landed,
+        ]),
+        ratings: RefCell::new(vec![1]),
+        plan: vec![
+            planned("a", Ladder::Implementation, &["src/a.rs"], &[]),
+            planned("b", Ladder::Implementation, &["src/b.rs"], &[]),
+        ],
+        flagged: vec![("a", flag_text("a"))],
+        ..Stub::default()
+    };
+    let ui = Stamped::new(&stub);
+    let report = drain::drain(&stub, limits(9.0), &ui).unwrap();
+    assert_eq!(
+        stub.log(),
+        [
+            "read a",
+            "run a",
+            "reread a",
+            "run a-retry",
+            "read b",
+            "run b",
+            "land b",
+            "rate"
+        ],
+        "a is tried twice, then b runs"
+    );
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_ne!(report.stop, Stop::RepeatedFailure);
+    assert_eq!(report.failed_item, None, "a is passed over, not failed");
+    assert_eq!(report.landed, 1);
+    let b: Vec<_> = report.jobs.iter().filter(|j| j.item == "b").collect();
+    assert_eq!(b.len(), 1, "{:?}", report.jobs);
+    assert_eq!(b[0].outcome, "passed");
+    assert_eq!(b[0].landing, "landed");
+    assert_eq!(report.jobs.iter().filter(|j| j.item == "a").count(), 2);
+
+    // The item is named once, with the flag reason, after its two runs and before b ran.
+    let printed: Vec<(usize, String)> = ui
+        .lines
+        .borrow()
+        .iter()
+        .filter(|(_, l)| l.starts_with("plan       a passed over:"))
+        .cloned()
+        .collect();
+    assert_eq!(printed.len(), 1, "{printed:?}");
+    let (runs_before, line) = &printed[0];
+    assert_eq!(*runs_before, 2, "printed after a's two runs, before b ran");
+    assert!(
+        line.starts_with("plan       a passed over: line a is flagged (T1, T3, T5)"),
+        "{line}"
+    );
+    assert!(line.contains("no accepted candidate"), "{line}");
+
+    // The summary does not count a as the failed item that stopped the run.
+    let text = display::drain(&report);
+    assert!(!text.contains("repeated failure"), "{text}");
+    assert!(!text.contains("failed twice"), "{text}");
+    let queued: Vec<&str> = report.queued.iter().map(|i| i.job.as_str()).collect();
+    assert_eq!(queued, ["a"], "it stays queued");
+}
+
+#[test]
+fn drain_still_stops_on_repeated_failure_when_another_item_is_flagged_but_this_one_is_not() {
+    // a fails twice on a line with no flag and no pause; only b's line is flagged. The batch stops at a.
+    let stub = Stub {
+        items: vec!["a", "b"],
+        ratings: RefCell::new(vec![5]),
+        flagged: vec![("b", flag_text("b"))],
+        ..Stub::default()
+    };
+    let ui = Stamped::new(&stub);
+    let report = drain::drain(&stub, limits(5.0), &ui).unwrap();
+    assert_eq!(
+        stub.log(),
+        ["read a", "run a", "reread a", "run a-retry"],
+        "the loop stops there; b is not started"
+    );
+    assert_eq!(report.stop, Stop::RepeatedFailure);
+    assert_eq!(report.failed_item.as_deref(), Some("a"));
+    let text = display::drain(&report);
+    assert!(
+        text.contains("repeated failure: item a failed twice"),
+        "{text}"
+    );
+    assert!(
+        ui.lines
+            .borrow()
+            .iter()
+            .all(|(_, l)| !l.starts_with("plan       a passed over")),
+        "{:?}",
+        ui.lines.borrow()
     );
 }
 
@@ -3825,15 +3946,23 @@ fn in_flight_row_goes_when_an_item_fails_twice() {
     let fx = Fixture::new();
     let mut first = Scenario::default();
     first.verdict = rejecting_verdict();
-    // A different criterion each time: two rejections of one criterion would pause the line, and a paused
-    // line is passed over, not failed.
+    // A different criterion each time: two rejections of one criterion would pause the line. The line is
+    // flagged, and a flagged or paused line is passed over after the second failure, not counted as failed.
     let mut second = Scenario::default();
     second.verdict = rejecting_second_criterion();
     let watched = drain_watched(&fx, phased(first, second), |_| {});
     assert_eq!(watched.report.landed, 0);
+    assert_eq!(watched.report.failed_item, None);
+    assert_ne!(watched.report.stop, Stop::RepeatedFailure);
     assert_eq!(
-        watched.report.failed_item.as_deref(),
-        Some(watched.job.as_str())
+        watched
+            .report
+            .jobs
+            .iter()
+            .filter(|j| j.item == watched.job)
+            .count(),
+        2,
+        "both attempts were made"
     );
     assert!(watched.landed.is_empty());
     assert!(watched.rows_left().is_empty());
@@ -4531,12 +4660,64 @@ fn drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_re
 }
 
 #[test]
+fn drain_real_steps_pass_over_the_item_of_a_line_that_is_flagged_after_two_failures() {
+    use athena_core::scope_guard::{LineMark, flag_path, pause_path};
+    // Two rejections of different criteria: the scope guard flags the line and writes no pause.
+    let fx = Fixture::new();
+    let mut first = Scenario::default();
+    first.verdict = rejecting_verdict();
+    let mut second = Scenario::default();
+    second.verdict = rejecting_second_criterion();
+    let athena = fx.athena(phased(first, second));
+    let job = queue_steward_request(&athena, "Add a greeting to the README.");
+    let lander = RecordingLander::default();
+    let ui = Lines::default();
+    let steps = real_steps_with(&athena, &lander, &ui);
+    let report = drain::drain(&steps, work_everything(), &ui).unwrap();
+
+    assert!(!pause_path(&athena.state, &job).exists(), "not paused");
+    let mark: LineMark =
+        serde_json::from_slice(&std::fs::read(flag_path(&athena.state, &job)).unwrap()).unwrap();
+    assert_eq!(mark.level, "flag");
+    // Both attempts were made; the item is then passed over and is not the failed item of the run.
+    assert_eq!(report.jobs.iter().filter(|j| j.item == job).count(), 2);
+    assert_eq!(report.failed_item, None);
+    assert_ne!(report.stop, Stop::RepeatedFailure);
+    assert!(!display::drain(&report).contains("failed twice"));
+    let note = athena.flag_note(&mark);
+    assert_eq!(
+        steps.flagged(&[job.clone(), "20260101-000000-zzzz".into()]),
+        [(job.clone(), note.clone())],
+        "the item of the flagged line is reported, an unknown job is not"
+    );
+    assert!(
+        note.starts_with(&format!("line {job} is flagged (T1)")),
+        "{note}"
+    );
+    let lines = ui.0.lock().unwrap().clone();
+    let passed: Vec<&String> = lines
+        .iter()
+        .filter(|l| {
+            l.starts_with(&format!(
+                "plan       {job} passed over: line {job} is flagged"
+            ))
+        })
+        .collect();
+    assert_eq!(passed.len(), 1, "{lines:?}");
+    assert!(passed[0].contains(&mark.reason), "{}", passed[0]);
+    // The flag is not a pause: the plan does not hold the item before a read.
+    assert_eq!(steps.paused(std::slice::from_ref(&job)), []);
+}
+
+#[test]
 fn drain_real_steps_do_not_hold_an_item_for_a_stored_pause_that_no_longer_holds() {
     use athena_core::scope_guard::{LineMark, flag_path, pause_path};
     // Two rejections of different criteria: the line is flagged, and the scope guard writes no pause.
     let (_fx, athena, job, first) =
         rejected_twice(rejecting_verdict(), rejecting_second_criterion());
-    assert_eq!(first.failed_item.as_deref(), Some(job.as_str()));
+    // The flagged line is passed over after its second failure, so the batch does not stop on the item.
+    assert_eq!(first.failed_item, None);
+    assert_ne!(first.stop, Stop::RepeatedFailure);
     assert!(!pause_path(&athena.state, &job).exists());
     let flag: LineMark =
         serde_json::from_slice(&std::fs::read(flag_path(&athena.state, &job)).unwrap()).unwrap();

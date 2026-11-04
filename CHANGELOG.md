@@ -173,6 +173,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   last failed attempt: the item is passed over with the pause reason (one `passed over` line, no failure
   counted) and the next queued item runs; items that depend on it are held back. An unpaused item that fails
   twice still stops the batch.
+- A batch no longer stops as a repeated failure when the failed item's line is flagged and not paused. On 3 Nov
+  at 11:13pm UTC a batch stopped with money and job slots left because item 20261103-193428-df2m was flagged
+  (T1, T3, T5), not paused. Root cause: the check after the last failed attempt asked only for a pause, and
+  `Athena::line_pause` returns pauses only, so a flagged line ended the item as failed. A flagged line still
+  dispatches, so the item still gets both attempts; the drain then asks the new `Athena::line_flag` (the stored
+  flag, kept only while the line's attempts still reach a flag) and passes the item over with the flag signals
+  and reason (one `passed over` line, no failure counted), and the next queued item runs. Nothing is written.
+  An item whose line is neither flagged nor paused that fails twice still stops the batch.
 - A verifier stopped at its deadline is now its own outcome, `unjudged`, and is rerun once. A first timeout
   reruns the verifier on a fresh snapshot, and the second run's verdict decides; a second timeout leaves the
   criteria unjudged, with the reason "the verifier timed out, so the criteria are unjudged: ..." and evidence
