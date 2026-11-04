@@ -940,17 +940,17 @@ mod produce_and_verify_order_tests {
 
     #[test]
     fn round_one_critic_check_follows_the_shared_reserve() {
-        // job_usd is 50.00 and the reader costs 0.01, so left at the first critic is 49.99 less the planner.
+        // job_usd is 60.00 and the reader costs 0.01, so left at the first critic is 59.99 less the planner.
         // The planner and critic caps are 0.75 here, the producer 10.00 and the verifier 5.00. The critic's
         // reserve is this critic, every later round, the producer and the verifier: 18.75 for 3 rounds and
         // 15.75 for one. The old check (critic + producer + verifier = 15.75) let the 3-round job call the
         // critic at 15.75 with its later rounds unaffordable.
         let rows: [(u32, f64, bool, &str); 5] = [
-            (3, 34.24, false, "$3.00 short"),
-            (3, 31.25, false, "$0.01 short"),
-            (3, 31.24, true, ""),
-            (1, 34.25, false, "$0.01 short"),
-            (1, 34.24, true, ""),
+            (3, 44.24, false, "$3.00 short"),
+            (3, 41.25, false, "$0.01 short"),
+            (3, 41.24, true, ""),
+            (1, 44.25, false, "$0.01 short"),
+            (1, 44.24, true, ""),
         ];
         for (max_rounds, planner_cost, critic_called, shortfall) in rows {
             let repo = repo_with_planning(max_rounds);
@@ -1012,15 +1012,15 @@ mod produce_and_verify_order_tests {
 
     #[test]
     fn dispatch_holds_a_job_that_cannot_afford_every_planning_round() {
-        // Three rounds of 0.75 caps are planned: admission needs 21.50 and passes at 50.00. The reader then
-        // spends 31.50, so 18.50 is left: enough for the producer and verifier (15.00) but not for three
+        // Three rounds of 0.75 caps are planned: admission needs 21.50 and passes at 60.00. The reader then
+        // spends 41.50, so 18.50 is left: enough for the producer and verifier (15.00) but not for three
         // rounds on top (19.50). The job is held before the planner, with the shortfall.
         let repo = repo_with_planning(3);
         let state = tempfile::tempdir().unwrap();
         let calls = Calls::default();
         let script = costing(
             planning_script(vec![good_plan()], vec![accepting_critique()], calls.clone()),
-            Arc::new(Mutex::new(31.5)),
+            Arc::new(Mutex::new(41.5)),
             0.01,
         );
         let athena = athena_with(
@@ -1078,9 +1078,9 @@ mod produce_and_verify_order_tests {
         assert_eq!(ran, 3);
 
         // The retry is a new job judged on its own spend, which starts at 0: the old job's spend is not
-        // carried over, so it is admitted. Its reader now spends 31.50, which leaves less than the 19.50
+        // carried over, so it is admitted. Its reader now spends 41.50, which leaves less than the 19.50
         // that three rounds, the producer and the verifier need.
-        *reader_cost.lock().unwrap() = 31.5;
+        *reader_cost.lock().unwrap() = 41.5;
         let (proposal, _) = athena.retry(job.as_str(), &Quiet).unwrap();
         assert!(proposal.reading.is_some(), "{:?}", proposal.reader_error);
         let head = athena.head().unwrap();

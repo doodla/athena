@@ -4065,7 +4065,7 @@ mod tests {
         let config = shipped_config();
         let reserve = budget_reserve(&config, ReserveStage::Admission);
         assert!(close(reserve, 47.0), "{reserve}");
-        // The shipped job budget of 50.00 covers it; a recorded 8.00 is $39.00 short.
+        // The shipped job budget of 60.00 covers it; a recorded 8.00 is $39.00 short.
         assert!(config.budget.job_usd >= reserve);
         // The config-load check and the runtime reserve are one sum, and the shipped file passes the check.
         assert!(close(config.budget_required(), reserve));

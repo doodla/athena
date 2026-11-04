@@ -874,7 +874,7 @@ pub(crate) mod tests {
         let config = Config::parse(REPO_CONFIG).unwrap();
         let b = &config.budget;
         let plan = config.job_plan.as_ref().unwrap();
-        assert_eq!(b.job_usd, 50.0);
+        assert_eq!(b.job_usd, 60.0);
         let need = 2.0 * b.reader_usd
             + 2.0 * (plan.planner_usd + plan.critic_usd)
             + b.producer_usd
@@ -893,7 +893,7 @@ pub(crate) mod tests {
         let plan = config.job_plan.as_ref().unwrap();
         assert_eq!(
             (b.reader_usd, b.producer_usd, b.verifier_usd, b.job_usd),
-            (2.0, 10.0, 5.0, 50.0)
+            (2.0, 10.0, 5.0, 60.0)
         );
         assert_eq!((b.producer_timeout_s, b.verifier_timeout_s), (5400, 3600));
         assert_eq!((b.reader_timeout_s, b.check_timeout_s), (300, 1800));
@@ -913,8 +913,8 @@ pub(crate) mod tests {
     }
 
     fn with_job_usd(text: &str, job_usd: &str) -> String {
-        let changed = text.replace("job_usd = 50.00", &format!("job_usd = {job_usd}"));
-        assert_ne!(changed, text, "athena.toml sets job_usd = 50.00");
+        let changed = text.replace("job_usd = 60.00", &format!("job_usd = {job_usd}"));
+        assert_ne!(changed, text, "athena.toml sets job_usd = 60.00");
         changed
     }
 
