@@ -127,19 +127,17 @@ pub(crate) mod demo_seam {
         static SEAM: RefCell<Option<Mapper>> = const { RefCell::new(None) };
     }
 
-    /// Clears the seam when dropped. Only this crate's own tests install a mapper, so a `test-support` build
-    /// of it never has one and runs no demonstration.
-    #[cfg(test)]
+    /// Clears the seam when dropped. This crate's tests and, through `test-support`, other crates' tests
+    /// install a mapper; a build where none did runs no demonstration.
+    #[derive(Debug)]
     pub struct Guard;
 
-    #[cfg(test)]
     impl Drop for Guard {
         fn drop(&mut self) {
             SEAM.with(|s| *s.borrow_mut() = None);
         }
     }
 
-    #[cfg(test)]
     pub fn install(map: Mapper) -> Guard {
         SEAM.with(|s| *s.borrow_mut() = Some(map));
         Guard

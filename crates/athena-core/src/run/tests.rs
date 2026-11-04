@@ -3252,4 +3252,202 @@ mod produce_and_verify_order_tests {
         assert!(!job.verifier_prompt.contains("fails-without-"));
         assert!(!job.revert_left);
     }
+
+    // -----------------------------------------------------------------------------------------------------
+    // `hard` mode plans an easy job whose Behavior criterion asks for a failing run without the fix
+
+    /// A reading with one criterion of this kind and text, otherwise as a reader's: not marked hard.
+    fn reading_with_criterion(kind: athena_data::records::CriterionKind, text: &str) -> Reading {
+        let mut reading = fixture_reading(&JobId::parse("20200101-000000-0000").unwrap(), "T");
+        reading.acceptance_criteria = vec![athena_data::records::Criterion {
+            text: text.into(),
+            kind,
+        }];
+        reading
+    }
+
+    #[test]
+    fn the_fails_without_helper_matches_singular_and_plural_wordings() {
+        use athena_data::records::CriterionKind::{Behavior, Content};
+        for text in [
+            "A test fails without the fix",
+            "Tests fail without the change",
+            "The new tests fail without the change.",
+            "the test is failing without the mechanism",
+            "the new test fails on the base",
+            "a test 'fails without the fix'",
+            "A regression test that fails before the fix and passes after",
+            "the demo test FAILS without it",
+            "tests failed without the patch",
+            "a test fails without the new check in place",
+        ] {
+            assert!(
+                asks_for_fails_without_run(&reading_with_criterion(Behavior, text)),
+                "{text}"
+            );
+            assert!(
+                !asks_for_fails_without_run(&reading_with_criterion(Content, text)),
+                "a Content criterion never matches: {text}"
+            );
+        }
+        for text in [
+            "cargo test passes",
+            "the tests still pass",
+            "the build never fails",
+            "a failing check is reported to the user",
+            "the change works without a restart",
+        ] {
+            assert!(
+                !asks_for_fails_without_run(&reading_with_criterion(Behavior, text)),
+                "{text}"
+            );
+        }
+    }
+
+    /// What a hard-mode job did: its end state, every call, the verifier's prompt and the plan records.
+    struct HardModeJob {
+        finished: Box<Finished>,
+        calls: Vec<(Role, String)>,
+        plans: usize,
+        critiques: usize,
+    }
+
+    impl HardModeJob {
+        fn roles(&self) -> Vec<Role> {
+            self.calls.iter().map(|(r, _)| *r).collect()
+        }
+        fn verifier_prompt(&self) -> &str {
+            prompts_of(&self.calls, Role::Verifier)[0]
+        }
+    }
+
+    /// Runs an easy job (the reader does not mark it hard) in `hard` mode whose one criterion has this kind
+    /// and text. The planner and critic answer from these queues; an empty queue fails the test on a call.
+    /// A mapper makes a demonstration run [`README_TEST`].
+    fn run_hard_mode_job(
+        kind: &str,
+        text: &str,
+        planner: Vec<serde_json::Value>,
+        critic: Vec<serde_json::Value>,
+    ) -> HardModeJob {
+        let repo = repo_with_config(
+            "\n[job_plan]\nenabled = true\nmode = \"hard\"\nplanner_usd = 0.75\ncritic_usd = 0.75\n\
+             planner_timeout_s = 600\ncritic_timeout_s = 600\nmax_rounds = 3\n",
+        );
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let inner = planning_script(planner, critic, calls.clone());
+        let (kind, text) = (kind.to_string(), text.to_string());
+        let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            match spec.role {
+                Role::Reader => {
+                    let reading = turn.structured.as_mut().unwrap();
+                    // The job is easy: the reader does not mark it hard.
+                    assert!(reading.get("hard_reason").is_none_or(|v| v.is_null()));
+                    reading["acceptance_criteria"][0] = json!({ "text": text, "kind": kind });
+                }
+                Role::Producer => {
+                    turn.structured.as_mut().unwrap()["criteria_check"][0]["criterion"] =
+                        text.clone().into();
+                }
+                Role::Verifier => {
+                    let verdict = turn.structured.as_mut().unwrap();
+                    verdict["criteria"][0]["criterion"] = text.clone().into();
+                    verdict["criteria"][0]["commands"] = json!(["cargo test"]);
+                    turn.commands_run = vec!["cargo test".into()];
+                }
+                _ => {}
+            }
+            turn
+        });
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let _seam = crate::run::checks::demo_seam::install(std::rc::Rc::new(|_: &[String]| {
+            vec!["sh".to_string(), "-c".to_string(), README_TEST.to_string()]
+        }));
+        let (id, finished) = finished_job(&athena);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = &records.jobs[id.as_str()];
+        HardModeJob {
+            finished,
+            calls: calls.lock().unwrap().clone(),
+            plans: job.plans.len(),
+            critiques: job.critiques.len(),
+        }
+    }
+
+    #[test]
+    fn an_easy_job_whose_behavior_criterion_asks_for_a_fails_without_run_is_planned_in_hard_mode() {
+        let seam = json!("run_hard_mode_job with a scripted planner and critic queue; exists");
+        let job = run_hard_mode_job(
+            "behavior",
+            "A test fails without the fix",
+            vec![demonstration_plan_with_seam(seam)],
+            vec![accepting_critique()],
+        );
+        assert_eq!(
+            job.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            job.finished.reason
+        );
+        assert_eq!(
+            job.roles(),
+            [
+                Role::Reader,
+                Role::Planner,
+                Role::Critic,
+                Role::Producer,
+                Role::Verifier
+            ]
+        );
+        assert_eq!((job.plans, job.critiques), (1, 1));
+        let prompt = job.verifier_prompt();
+        let section = &prompt[prompt.find("## Checks Athena ran on this tree").unwrap()..];
+        assert!(
+            section.contains("fails-without-1: not a check"),
+            "the verifier sees the demonstration: {section}"
+        );
+        assert!(
+            section.contains("failed without the fix (exit 1)"),
+            "{section}"
+        );
+    }
+
+    /// `demonstration_plan` for a behavior criterion: it also names a test seam.
+    fn demonstration_plan_with_seam(seam: serde_json::Value) -> serde_json::Value {
+        let mut plan = demonstration_plan("cargo test --locked demo");
+        plan["demonstrations"][0]["seam"] = seam;
+        plan
+    }
+
+    #[test]
+    fn an_easy_job_in_hard_mode_without_a_fails_without_criterion_is_not_planned() {
+        for (kind, text) in [
+            ("behavior", "the tests still pass"),
+            ("behavior", "the build never fails"),
+            ("content", "a test fails without the fix"),
+        ] {
+            let job = run_hard_mode_job(kind, text, vec![], vec![]);
+            assert_eq!(
+                job.finished.state,
+                OutcomeState::Landed,
+                "{text}: {}",
+                job.finished.reason
+            );
+            assert_eq!(
+                job.roles(),
+                [Role::Reader, Role::Producer, Role::Verifier],
+                "{kind} {text}"
+            );
+            assert_eq!((job.plans, job.critiques), (0, 0), "{kind} {text}");
+            assert!(!job.verifier_prompt().contains("fails-without-"), "{text}");
+        }
+    }
 }

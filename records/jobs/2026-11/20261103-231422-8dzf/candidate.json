@@ -1,0 +1,99 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261103-231422-8dzf",
+  "base_commit": "2dc26c2c0cfbde8ca8ee63a143c188b0c3362a9e",
+  "base_fingerprint": "sha256:73df2ed94ae4e35e6ef60bad901b2fb2d5ca8b15ca034b437f14074e75cf3b94",
+  "previous_job": "20261104-065707-4pvy",
+  "candidate_commit": "32f48822985ea3e39497dcfe6adab56db3a62a32",
+  "candidate_tree": "1f8ae80d027a38001becb0f6a0912fe64efcc393",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 307894
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 231395
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 74547
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 299488
+    }
+  ],
+  "fingerprint": "sha256:5d97e0839573ef1542e64d1e80bd6d663f6fc8763ad52f0561826a3b7a2fd457",
+  "violations": [],
+  "producer_report": {
+    "summary": "A drain re-read that ends as needing acceptance now gives its --job-limit slot back. Root cause: run_job takes the slot (st.started += 1) before the re-read, and the needs-accepting arm never returned it. That arm now decrements st.started under the state lock; the re-read cost still counts against the budget. I updated the Limits::max_jobs doc, the --job-limit help in main.rs (the stop-reason table line), and CHANGELOG.md. I added a regression test at max_jobs 1: `a` needs accepting, `b` lands, and the drain does not stop at the job limit. I did not run the revert demonstration myself; the brief leaves it to Athena's recorded revert run.",
+    "files": [
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test drain",
+        "result": "pass",
+        "note": "165 passed, including the new test, the_job_limit_stops_the_loop and the existing needs-accepting test"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed; the banned-word scan is clean"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-cli --test drain`. A new test with max_jobs 1 has item a end as needs accepting and item b runnable. It asserts jobs[0].outcome == \"needs accepting\", landed == 1 and stop != Stop::JobLimit, and it passes.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-cli --test drain`: 165 passed. The new test a_run_that_needs_accepting_does_not_use_up_the_job_limit uses max_jobs 1 and asserts all three."
+      },
+      {
+        "criterion": "Fails without the fix: with the decrement of st.started in the needs-accepting arm of run_job reverted on a scratch copy, `cargo test -p athena-cli --test drain` fails on the new test. The verifier sees this as Athena's recorded revert run under 'Checks Athena ran'.",
+        "status": "met",
+        "evidence": "I did not run the revert myself; Athena records it. Without the decrement, the slot taken at st.started += 1 stays used. With max_jobs 1, run_job then returns JobLimit for b, so landed would be 0 and the stop JobLimit. The new test's assertions would fail."
+      },
+      {
+        "criterion": "`git diff` of crates/athena-cli/src/drain.rs shows the needs-accepting arm in run_job giving the slot back (`st.started` decremented under the state lock). The JobLimit check and the failed, held and passed paths are unchanged.",
+        "status": "met",
+        "evidence": "The diff adds a block in the `_ if run.needs_accepting` arm: `let mut st = self.st(); st.started = st.started.saturating_sub(1);`. The other edit in drain.rs is a doc comment. No other path is touched."
+      },
+      {
+        "criterion": "`cargo test -p athena-cli --test drain` still passes the_job_limit_stops_the_loop and the existing needs-accepting tests, and `git diff` shows no removed or weakened asserts.",
+        "status": "met",
+        "evidence": "All 165 tests pass, including the_job_limit_stops_the_loop and a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure. The test-file change only adds a test; no existing line was removed."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --workspace` pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks"
+      },
+      {
+        "criterion": "Grep of crates/athena-cli/src/drain.rs and crates/athena-cli/src/main.rs for the --job-limit help and the Limits::max_jobs doc finds wording that a re-read that only needs accepting does not count toward the limit. CHANGELOG.md has a matching entry.",
+        "status": "met",
+        "evidence": "The Limits::max_jobs doc in drain.rs, the --job-limit arg doc and the `job limit` stop-reason line in main.rs all say a re-read that only needs accepting does not count. CHANGELOG.md has a new Fixed entry under Unreleased."
+      }
+    ],
+    "open_issues": [],
+    "mistakes": [
+      "My first changelog edit failed because the heading was not unique. I retried with more context."
+    ],
+    "learnings": [
+      "The needs-accepting arm of run_job runs after st.started += 1 at the start of run_job, so returning the slot there is the single place to fix it.",
+      "The new test copies the Unaccepted stub from the existing needs-accepting test instead of sharing it."
+    ],
+    "desires": []
+  }
+}

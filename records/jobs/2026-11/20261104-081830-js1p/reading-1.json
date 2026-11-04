@@ -1,0 +1,160 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261104-081830-js1p",
+  "n": 1,
+  "at": "2026-11-04T08:21:47.021955734Z",
+  "invocation_seq": 2,
+  "base_commit": "3f4d761e40e5638ed64609a4034830f43d11dd2c",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Plan jobs whose criteria ask for a 'fails without the fix' run",
+  "summary": "Retry context: job 20261103-231422-8dzf was rejected because an easy job had a 'fails without the fix' criterion, got no plan, and so no demonstration reached the verifier. In dispatch, a job whose accepted criteria name a failing run without the fix is planned even in `hard` mode when the reading is not hard; ordinary easy jobs still skip planning. The audience is the verifier and the maintainer running the drain.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The change and tests are Rust in athena-core."
+    },
+    {
+      "id": "tested",
+      "how": "New tests for both branches; cargo test and clippy must be clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check a planned job reaching the verifier brief, not wiring."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The final criterion is the outcome check of fmt, clippy and the full test run."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is at the planning gate, not a retry of the one job."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the gate plus tests."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs the named cargo test commands."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-core/src/run/mod.rs computes `planned` from `job_plan.plans(reading.hard_reason.is_some())` and `!capability.pins_repo()`, then calls `plan_round` (crates/athena-core/src/run/planning.rs); `JobPlanConfig::plans` in crates/athena-data/src/config.rs holds the enabled/mode rule. Demonstrations are run in crates/athena-core/src/run/checks.rs and rendered for the verifier in crates/athena-core/src/verify.rs. The reading's Criterion (crates/athena-data/src/records.rs) has only `text` and `kind`, with no fails_without field; fails_without exists only on the plan's Demonstration, so the trigger is a Behavior criterion whose text names 'fails without the fix' (case-insensitive; also 'fails without the change/mechanism' variants if the producer judges them the same ask). The property is measured directly by running a job through `Athena::go` with the fake agents, as the existing demonstration tests in crates/athena-core/src/run/tests.rs do. No record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are untouched. The change adds no refusal rule, only widens planning.",
+    "Job 20261103-231422-8dzf: its candidate's work (drain job-limit slot give-back in crates/athena-cli/src/drain.rs, tests/drain.rs, main.rs, and its CHANGELOG.md entry) is a different feature, retried as 20261103-193428-df2m; it is not part of this change and is dropped here. The finding that evidence was missing is addressed at its cause: the planning gate, not the candidate. Its dependency 20261103-231410-asf2 (landed 4 Nov, 64cb889) already runs and shows demonstrations, so it is not touched.",
+    "The existing docs/design/job-planning.md section on modes (section 9) is updated to state the new rule; docs/job-planning.md does not exist.",
+    "`mode = \"all\"` and `enabled = false` behave as today: disabled still plans nothing; planning is still skipped for a pinned-repo capability (study)."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in crates/athena-core/src/run/tests.rs (or crates/athena-cli/tests/job_plan.rs) runs an easy job (hard_reason null, `[job_plan] mode = \"hard\"`) whose Behavior criterion says a test 'fails without the fix': the planner and critic are called, and the verifier prompt contains the 'fails-without-1' record from Athena's revert run. Run `cargo test --locked -p athena-core run::tests` and `cargo test --locked -p athena-cli --test job_plan`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test runs an easy job in `hard` mode with no such criterion and asserts no planner or critic call and no plan record, so ordinary easy jobs still skip planning. Run `cargo test --locked -p athena-core run::tests` and `cargo test --locked -p athena-cli --test job_plan`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The new 'plans' test fails without the fix: with the criterion check in crates/athena-core/src/run/mod.rs reverted to `plans(reading.hard_reason.is_some())` alone, `cargo test --locked -p athena-core run::tests` fails on it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The planning gate in crates/athena-core/src/run/mod.rs (grep `planned`) also holds when any accepted Behavior criterion text names 'fails without the fix', and the trigger is a small named helper with a doc comment, not inline string matching.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/design/job-planning.md (an existing file) and CHANGELOG.md state that a job with a 'fails without the fix' criterion is planned even when judged easy.",
+      "kind": "content"
+    },
+    {
+      "text": "Outcome check: `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` pass, and the existing mode tests in crates/athena-cli/tests/job_plan.rs still pass unchanged.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Job 20261103-231422-8dzf's candidate files crates/athena-cli/src/drain.rs, crates/athena-cli/tests/drain.rs and crates/athena-cli/src/main.rs: the drain job-limit work is not part of this change and is dropped here.",
+    "Changing how demonstrations are run or shown to the verifier (landed in 64cb889; job 20261103-231410-asf2).",
+    "Changing the planner, critic or reader prompts.",
+    "Governance files: athena.toml, defaults.toml and workflows; the repository's `mode = \"hard\"` setting stays.",
+    "Adding a fails_without field to the reading's Criterion record."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.66,
+      "p_user_intervenes": 0.09,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.3
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1800.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7137755102040817,
+      "p_verification_passes": 0.6683673469387755,
+      "p_user_intervenes": 0.08878718535469107,
+      "cost_usd": {
+        "p10": 0.5558032716851544,
+        "p50": 1.3349033000000003,
+        "p90": 3.6890003095189488
+      },
+      "wall_time_s": {
+        "p10": 542.5650861929345,
+        "p50": 1958.5548144798731,
+        "p90": 4194.440212161719
+      }
+    }
+  },
+  "departures": null,
+  "urgent_reason": "It cuts repeated rejected attempts: correct code was rejected three times because the 'fails without the fix' demonstration never ran for an unplanned job.",
+  "hard_reason": "It changes the run pipeline: the rule deciding which jobs are read, planned and verified, so which jobs get a planner and critic.",
+  "producer_effort": "high"
+}

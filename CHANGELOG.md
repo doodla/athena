@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- In `hard` planning mode, a job judged easy is now planned when a Behavior criterion asks for a failing run
+  without the fix (for example "a test fails without the fix", "tests fail without the change" or "the new test
+  fails on the base"). Root cause: the planning gate looked only at the reading's `hard_reason`, so such a job
+  had no plan, Athena never ran its "fails without the fix" demonstration, and the verifier could not observe
+  the criterion. The wording is matched on the lowercased, punctuation-free criterion text; Content criteria
+  and a bare "never fails" do not count, and the producer model is still chosen by `hard_reason` alone.
+  `mode = "all"` and `enabled = false` are unchanged.
 - The firstmate study showed Reopened as a state that ends the task, but teardown sends the reopened backlog
   row back to Queued. Root cause: the model gave Reopened the terminal kind and no way out. Reopened is now a
   waiting state with a new transition (t12) to Queued, a new claim (c45) citing the teardown script's Queued

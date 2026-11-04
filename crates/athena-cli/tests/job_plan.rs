@@ -1188,6 +1188,63 @@ fn a_hard_reading_with_planning_enabled_for_every_job_and_one_with_planning_off_
 }
 
 #[test]
+fn an_easy_job_with_a_fails_without_criterion_is_planned_in_hard_mode_and_the_verifier_sees_the_record()
+ {
+    // The repository's own `mode = "hard"`; the reader does not mark the job hard, but its second criterion
+    // asks for a test that fails without the fix.
+    let config = repository_job_plan_config();
+    assert!(
+        athena_data::Config::parse(&config)
+            .unwrap()
+            .job_plan
+            .unwrap()
+            .mode
+            == athena_data::config::PlanMode::Hard
+    );
+    let fx = Fixture::with_config(&config);
+    let mut scenario = reader_scenario(json!(null));
+    scenario.reading["acceptance_criteria"][1]["text"] = json!("A test fails without the fix");
+    let calls = scenario.invocations.clone();
+    let seen = scenario.seen_by_verifier.clone();
+    // Only the program a demonstration runs is replaced: it passes, so no real cargo starts.
+    let _runner = athena_core::run::install_demo_runner(std::rc::Rc::new(|_: &[String]| {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo 'test result: ok. 1 passed; 0 failed'".to_string(),
+        ]
+    }));
+    let athena = fx.athena(scenario.script());
+    let (job, f) = run_job(&athena);
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            Role::Reader,
+            Role::Planner,
+            Role::Critic,
+            Role::Producer,
+            Role::Verifier
+        ]
+    );
+    let dir = job.dir();
+    for path in ["job-plan-1.json", "critique-1.json"] {
+        assert!(
+            fx.git
+                .path_exists(&fx.head(), &format!("{dir}/{path}"))
+                .unwrap(),
+            "{path}"
+        );
+    }
+    assert!(athena.check_history().unwrap().violations.is_empty());
+    let prompt = seen.lock().unwrap()[1].clone();
+    assert!(
+        prompt.contains("fails-without-1: not a check"),
+        "the verifier is shown Athena's run of the demonstration: {prompt}"
+    );
+}
+
+#[test]
 fn status_reports_planned_and_unplanned_landings_later_cited_as_a_revert_or_fix_beside_the_landed_share()
  {
     let fx = Fixture::with_config(&repository_job_plan_config());

@@ -1,0 +1,257 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261104-091422-p3kx",
+  "round": 1,
+  "at": "2026-11-04T09:17:52.282421822Z",
+  "invocation_seq": 2,
+  "approach": "Add a small named helper in crates/athena-core/src/run/mod.rs that reports whether an accepted reading has a Behavior criterion asking for a failing run without the fix, and change the gate at line 804-809 to `p.plans(reading.hard_reason.is_some() || asks_for_fails_without_run(&reading))`. JobPlanConfig::plans(hard) keeps its signature and meaning (enabled, and mode all or \"hard\" flag), so `off` and `all` are unchanged and only `hard` mode plans more jobs. The helper lowercases the criterion text, turns non-alphanumerics into single spaces, and matches a word starting `fail` (fail, fails, failing, failed) together with an anchor phrase (`without the fix|change|mechanism|patch`, `without it`, `before the fix`, `on the base`, `fails without`), so singular and plural wordings match. Tests: core tests in run/tests.rs drive Athena::ask/go in hard mode with a scripted reader and count planner/critic calls and inspect the verifier prompt. For the CLI test to see a `fails-without-1` record, the existing core-private demo_seam must be reachable from athena-cli tests, so its `install`/`Guard` are compiled under `any(test, feature = \"test-support\")` and re-exported from run/mod.rs under `test-support` only; the production build is unchanged. The CLI test installs a `sh -c` mapper, so no real cargo runs. Docs, the PlanMode::Hard doc comment and the changelog state the new rule.",
+  "decisions": [
+    {
+      "choice": "Fix the gate in Athena::dispatch (run/mod.rs ~line 804) by OR-ing a reading-derived predicate with hard_reason; leave JobPlanConfig::plans(bool) untouched.",
+      "reason": "The fault starts where dispatch decides `planned`: it asks only whether hard_reason is set, so an easy job whose accepted criteria ask for a failing run never gets a plan, a plan demonstration, or the fails-without record the verifier sees. `plans(hard)` already means 'this job counts as hard for planning'; the existing config tests (config.rs 855-857, 1175-1181) pass unchanged and the three modes keep their meaning.",
+      "rejected": [
+        {
+          "option": "Add a second bool parameter to JobPlanConfig::plans",
+          "why": "Changes a public signature and the config tests that must pass unchanged; the extra input is a property of the reading, not of the config."
+        },
+        {
+          "option": "Have the reader set hard_reason for such jobs (change the reader prompt or schema)",
+          "why": "hard_reason also escalates the producer model, so it would change cost and model choice; the reader prompt is out of scope."
+        },
+        {
+          "option": "Use the structured fails_without field of a plan or a new Criterion field",
+          "why": "Plans do not exist before the gate runs, and adding a field to the reading's Criterion record is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Match on normalized text of Behavior criteria only: a `fail*` word plus an anchor phrase, as a small named function with a doc comment.",
+      "reason": "Fixes the previous attempt's finding that plural wordings ('tests fail without the change') were missed, while Content criteria (checked by reading) and bare 'tests pass' stay unplanned. Normalizing punctuation and quotes makes the quoted form 'fails without the fix' match.",
+      "rejected": [
+        {
+          "option": "A regex crate dependency or a stem list",
+          "why": "Needs no new dependency; the anchor-phrase list is short and a unit test pins the forms."
+        },
+        {
+          "option": "Match any criterion mentioning 'fail'",
+          "why": "'the build never fails' or 'a failing check is reported' would plan easy jobs for no reason."
+        }
+      ]
+    },
+    {
+      "choice": "Make criterion 3 checkable by exposing the demo seam to athena-cli tests under the `test-support` feature (re-export `install`/`Guard` from run/mod.rs), and install a `sh -c` mapper in the CLI test.",
+      "reason": "Today `install` and `Guard` are `#[cfg(test)]` in checks.rs lines 130-146, and `demo_runs_here` (checks.rs 94-97) returns false in a test-support build without a seam, so a CLI test could never see a `fails-without-1` record. The core test `a_planned_job_without_a_demo_runner_records_no_demonstration` (tests.rs 3241) confirms no record without a seam. With the seam, the CLI test drives the production dispatch, revert copy and classification and only the program that runs is replaced.",
+      "rejected": [
+        {
+          "option": "Assert only the plan records and the 'Planned demonstrations' section in the CLI test",
+          "why": "Does not meet criterion 3, which names the fails-without-1 record in the verifier prompt."
+        },
+        {
+          "option": "Run a real cargo test in the CLI test",
+          "why": "Slow, and the code comment (checks.rs 91-93) says no test starts real cargo by accident."
+        }
+      ]
+    },
+    {
+      "choice": "No change to athena.toml: `mode = \"hard\"` stays; config.rs gets only a doc-comment update on PlanMode::Hard and JobPlanConfig::plans.",
+      "reason": "Governance files are out of scope; the Hard doc comment would otherwise say only a marked-hard job is planned, which is no longer exactly true. config.rs is a listed deliverable, and its tests are unchanged.",
+      "rejected": [
+        {
+          "option": "Leave config.rs untouched",
+          "why": "Leaves a doc comment that contradicts the gate."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Add the documented helper `asks_for_fails_without_run(&Reading) -> bool`, change the planning gate to `hard_reason.is_some() || helper`, update the comment above it, and re-export the demo seam under `test-support`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "Widen the cfg of `demo_seam::Guard` and `install` to `any(test, feature = \"test-support\")` and fix the comment that said only this crate's tests install a mapper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the helper unit test, a hard-mode job test that is planned and shows the fails-without-1 record, and hard-mode tests that are not planned.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "Add the CLI test for an easy hard-mode job with a fails-without criterion: plan records, history check, and the fails-without-1 record in seen_by_verifier.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Update the doc comments of PlanMode::Hard and JobPlanConfig::plans to say a reading asking for a fails-without run is also planned; no code or test change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "purpose": "State in the 'Planning for hard jobs only' bullet that a job with a 'fails without the fix' Behavior criterion is planned even when judged easy, with the reason.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an [Unreleased] entry naming the root cause and the new planning rule.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read run/mod.rs lines 800-812, run/checks.rs lines 91-151 and tests.rs lines 3041-3254 again to copy their style.",
+    "In crates/athena-core/src/run/mod.rs add `fn asks_for_fails_without_run(reading: &Reading) -> bool` with a `///` comment: for each Behavior criterion, lowercase, map non-alphanumerics to single spaces, then true when the text has a word starting `fail` and one of the anchors `without the fix|change|mechanism|patch`, `without it`, `before the fix`, `on the base`, `fails without`. Change the gate to `.is_some_and(|p| p.plans(reading.hard_reason.is_some() || asks_for_fails_without_run(&reading)))` and update the comment above it (D143 hard marking, plus accepted Behavior criteria that ask for a failing run without the fix, so the demonstration reaches the verifier).",
+    "In crates/athena-core/src/run/checks.rs change `#[cfg(test)]` on `Guard` (and its Drop impl) and `install` to `#[cfg(any(test, feature = \"test-support\"))]` and fix the comment; in run/mod.rs add `#[cfg(feature = \"test-support\")] pub use checks::demo_seam::{Guard as DemoRunnerGuard, install as install_demo_runner};` so `athena_core::run::install_demo_runner` is nameable by athena-cli tests. Check `cargo clippy --all-targets --locked -- -D warnings` for unused or dead-code warnings with the feature on and off.",
+    "In crates/athena-data/src/config.rs update only the doc comments of PlanMode::Hard and JobPlanConfig::plans.",
+    "In crates/athena-core/src/run/tests.rs add: (a) a helper test of asks_for_fails_without_run over the wordings listed in criterion 4; (b) a helper `run_hard_mode_job` that builds repo_with_config with `[job_plan] enabled = true, mode = \"hard\"` and the other planning keys, wraps planning_script to set the reader's criterion kind and text (and the same text in the producer criteria_check and verifier criteria), installs the demo seam with README_TEST, and returns the calls and verifier prompt; (c) the planned test (criterion 1) with a behavior_plan(seam) plan; (d) the not-planned tests (criterion 2) with empty planner/critic queues for a plain behavior criterion, a Content criterion with the phrase, and a 'never fails' behavior criterion.",
+    "In crates/athena-cli/tests/job_plan.rs add the CLI test of criterion 3 after the existing hard-mode tests (near line 1188): config `repository_job_plan_config()`, `Scenario::default()` with the second criterion text replaced by 'A test fails without the fix', `athena_core::run::install_demo_runner(Rc::new(|_| vec![\"sh\".into(), \"-c\".into(), \"echo 'test result: ok. 1 passed; 0 failed'\".into()]))` held for the test, then run_job, and the assertions listed in criterion 3. Leave the existing tests untouched.",
+    "Edit docs/design/job-planning.md (bullet at line 324 and a sentence on why: the demonstration is run by Athena and shown to the verifier only for a planned job) and add the CHANGELOG.md [Unreleased] entry, with the root cause and the rule.",
+    "Run cargo fmt, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked -p athena-core run::tests`, `cargo test --locked -p athena-cli --test job_plan`, and `cargo test --locked`; run `cargo test --locked -p athena-core --test refusal_corpus` too to confirm it is unaffected, and record only the results seen."
+  ],
+  "risks": [
+    {
+      "risk": "The text match is too narrow (misses a wording) or too wide (plans jobs needlessly).",
+      "mitigation": "Limit to Behavior criteria and require both a `fail*` word and an anchor phrase; the unit test pins positive and negative wordings. An over-match only costs one planning round, never a refusal."
+    },
+    {
+      "risk": "Exposing the demo seam widens test-only code, which could leak into the shipped binary or cause a dead-code or unused-import clippy error in a build without `test`.",
+      "mitigation": "The re-export is under `feature = \"test-support\"` only, `demo_runs_here` still needs an installed mapper, and the shipped binary does not enable the feature (athena-cli enables it for dev/test only; verify the athena-cli Cargo.toml line 31 stays in the dev-dependencies section). The step asks the producer to run clippy with and without tests."
+    },
+    {
+      "risk": "The thread-local seam is not seen if the CLI fixture runs dispatch on another thread.",
+      "mitigation": "The seam is thread-local and the fake driver runs in the test's thread (core tests rely on this at tests.rs 3096); the guard is held for the whole test, and the CLI test asserts the roles before the verifier prompt so a failure is clear."
+    },
+    {
+      "risk": "More jobs now cost a planner and critic round, which raises per-job cost under `hard` mode.",
+      "mitigation": "The planned job's preflight reserve already covers planning; the existing cap test pins the stop-before-producer behavior, and the change is bounded to jobs whose criteria ask for the run."
+    },
+    {
+      "risk": "A scripted reader whose criterion text differs from the CRITERION constant in base_script makes the producer or verifier output mismatch and the job fail for a reason unrelated to the gate.",
+      "mitigation": "Make the test wrapper rewrite the criterion text in the reader, producer criteria_check and verifier criteria together, modeled on run_planned_behavior (tests.rs 632-648)."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "planning gate (`planned`)",
+      "dependent": "Athena::dispatch in crates/athena-core/src/run/mod.rs line 804-812 (the gate and `preflight(.., ReserveStage::Dispatch { planned })`)",
+      "kind": "code",
+      "test": "Core test in criterion 1 (planned job) and criterion 2 (unplanned job). The preflight reserve for a newly planned job now includes planning cost, which is the same path a hard job takes; covered by the existing cap test `a_cap_between_the_producer_alone_and_planning_plus_the_producer_stops_the_job_before_the_producer` (job_plan.rs 80).",
+      "reason": null
+    },
+    {
+      "name": "planning gate (`planned`)",
+      "dependent": "dispatch's recursive call after a re-read (run/mod.rs line 774) and every caller of dispatch (go, reread, resume paths)",
+      "kind": "code",
+      "test": null,
+      "reason": "All callers reach the one gate inside dispatch with the accepted reading, so they see the same rule; the resume path (resume_seed, line 826) reuses a stored candidate and plans nothing before as now."
+    },
+    {
+      "name": "JobPlanConfig::plans(hard)",
+      "dependent": "JobPlanConfig::plans in crates/athena-data/src/config.rs line 206 and its tests (lines 855-857, 1175-1181)",
+      "kind": "code",
+      "test": null,
+      "reason": "Signature and body unchanged; only the doc comment of PlanMode::Hard changes. The config tests pass unchanged."
+    },
+    {
+      "name": "[job_plan] mode = \"hard\"",
+      "dependent": "athena.toml `[job_plan] mode = \"hard\"` (lines 205-211) and docs/decisions.md D143 (line 3760)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The setting is unchanged and not edited (governance file). The meaning of `hard` widens to 'hard or asks for a fails-without run', documented in job-planning.md and the changelog; D143 is a decision record that is not edited."
+    },
+    {
+      "name": "planned/unplanned job grouping",
+      "dependent": "athena status planned-versus-unplanned landing shares and later-harm (job_plan.rs 1191 `status_reports_planned_and_unplanned_landings_...`)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli --test job_plan",
+      "reason": "Read from the job's plan record, not from the gate; more jobs fall in the planned group, no record kind or field changes. The test seeds jobs directly and is unaffected."
+    },
+    {
+      "name": "demo_seam install/Guard visibility",
+      "dependent": "run::checks::demo_seam, demo_runs_here and demonstration_records in crates/athena-core/src/run/checks.rs; the core tests at tests.rs 3128-3254",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core run::tests (the five demonstration tests) and cargo test --locked -p athena-cli",
+      "reason": "Only the cfg of `Guard`/`install` widens from `test` to `any(test, feature = \"test-support\")`. `demo_runs_here` still returns true only when a mapper is installed, so every other athena-cli test (none installs one) records no demonstration, as before. Production builds do not compile any of it."
+    },
+    {
+      "name": "records and reading checks",
+      "dependent": "Records allow-list (check_record_file, AnyRecord), crates/athena-core/tests/refusal_corpus.rs and the reading gate refusing_check",
+      "kind": "rule",
+      "test": null,
+      "reason": "No record or data file is added; the helper reads an already accepted Reading and refuses nothing, and it is not called from check_reading_text, so no corpus case maps to it (I read the corpus file's header: it covers the reading gate's refusals, not planning). Running `cargo test -p athena-core --test refusal_corpus` as part of `cargo test --locked` should be unchanged."
+    },
+    {
+      "name": "prompt-set budgets",
+      "dependent": "docs/system-facts.md budget lines (`system_facts_budgets_match_computed`)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt, brief or always-loaded file changes; docs/design/job-planning.md and CHANGELOG.md are not in any role's always-loaded set."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Core test `an_easy_job_whose_behavior_criterion_asks_for_a_fails_without_run_is_planned_in_hard_mode`: repo_with_config sets `[job_plan] enabled = true, mode = \"hard\"` (keeping the repo's other settings); a scripted reader (planning_script wrapped, as run_planned_behavior at tests.rs 632 does) returns hard_reason null and criterion 1 kind behavior, text 'A test fails without the fix' (the wrapper also rewrites the producer criteria_check and verifier criterion text to match); the planner returns a `cargo test --locked demo` plan with a seam and fails_without; the demo_seam mapper runs README_TEST (tests.rs 3122). Asserts planner and critic each called once, in the order Reader, Planner, Critic, Producer, Verifier, and the verifier prompt contains 'fails-without-1: not a check'.",
+      "command": "cargo test --locked -p athena-core run::tests",
+      "observes": "Roles are [Reader, Planner, Critic, Producer, Verifier], state is Landed, and the verifier prompt holds the fails-without-1 record under '## Checks Athena ran on this tree'.",
+      "fails_without": "With the original gate `plans(reading.hard_reason.is_some())`, hard_reason is null, so the call list is [Reader, Producer, Verifier], no plan exists, and the verifier prompt has no 'fails-without-1' text; the assertions on the planner call and the record fail.",
+      "seam": "Production entry points Athena::ask and Athena::go (-> dispatch). Fixtures: FakeAgentDriver with planning_script, repo_with_config, and run::checks::demo_seam::install with a `sh -c` mapper, injected in the test body as in run_demonstration_job (tests.rs 3096-3101). All exist today; a new helper in tests.rs that adds the hard-mode config and rewrites the reader/producer/verifier criterion text is added in step 5."
+    },
+    {
+      "criterion": 2,
+      "method": "Two tests. Core test `an_easy_job_in_hard_mode_without_a_fails_without_criterion_is_not_planned`: same hard-mode repo, reader criterion is behavior 'the tests still pass' (and a second case: a Content criterion whose text says 'a test fails without the fix', and a Behavior one saying 'the build never fails'); the planner and critic queues are empty (planning_script asserts on any unexpected call). Asserts roles are [Reader, Producer, Verifier] and no job-plan-1.json or critique-1.json in the job's records. In the CLI, the existing `with_athena_toml_planning_hard_jobs_only_a_hard_reading_runs_the_planner_and_critic_and_an_ordinary_one_does_not` (job_plan.rs 1104) keeps passing unchanged, since the default Scenario's behavior criterion is 'the tests still pass'.",
+      "command": "cargo test --locked -p athena-core run::tests && cargo test --locked -p athena-cli --test job_plan",
+      "observes": "Roles are exactly Reader, Producer, Verifier for each non-matching wording; no plan or critique record is committed; the CLI test shows the same on the real default scenario.",
+      "fails_without": "If the helper matched any behavior criterion or ignored the kind, the Content and 'never fails' cases would call the planner, and planning_script's empty-queue assertion ('unexpected Planner call') would fail the test; if the gate planned everything in hard mode, the CLI test's null-hard_reason case would see a Planner role.",
+      "seam": "Athena::ask/go with FakeAgentDriver scripted by planning_script (core, exists) and Fixture/Scenario in crates/athena-cli/tests/common/mod.rs (exists). The new tests are added in step 5 and step 6."
+    },
+    {
+      "criterion": 3,
+      "method": "CLI test `an_easy_job_with_a_fails_without_criterion_is_planned_in_hard_mode_and_the_verifier_sees_the_record` in job_plan.rs: config is repository_job_plan_config() (mode hard); Scenario::default() with reading['acceptance_criteria'][1].text set to 'A test fails without the fix' (kind behavior), hard_reason null, and the verdict/producer report unchanged; a `sh -c` mapper installed via the re-exported `athena_core::run::install_demo_runner`. Runs ask/go, asserts Landed, roles [Reader, Planner, Critic, Producer, Verifier], job-plan-1.json and critique-1.json exist at HEAD, check_history() has no violations, and seen_by_verifier[1] contains 'fails-without-1: not a check'.",
+      "command": "cargo test --locked -p athena-cli --test job_plan",
+      "observes": "Plan and critique records are in the landing commit and the verifier's prompt (scenario.seen_by_verifier[1]) contains the fails-without-1 record. This is a test the verifier runs itself, so the evidence is its own run.",
+      "fails_without": "Without the gate change the roles are [Reader, Producer, Verifier], the plan records are absent and the prompt has no 'fails-without-1'. Without the seam exposure (step 3) the test does not compile, and with a seam-less test-support build the record would be absent, so the assertion could not hold.",
+      "seam": "Production entry points Athena::ask/go. Fixtures: Scenario/Fixture in tests/common/mod.rs (exist) and the fake planner in athena-agent/src/fake.rs 353-389, which emits a `cargo test --locked` demonstration with non-blank fails_without for every criterion (exists, read). The demo runner seam is added by step 3 (re-export of demo_seam install/Guard under `test-support`)."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff of run/mod.rs and a unit test. `git diff` shows the gate now reads `p.plans(reading.hard_reason.is_some() || asks_for_fails_without_run(&reading))` and the helper has a doc comment. A core unit test `the_fails_without_helper_matches_singular_and_plural_wordings` in run/tests.rs calls the helper on readings built with fixture_reading-style Criterion values: matches 'A test fails without the fix', 'tests fail without the change', 'the test is failing without the mechanism', 'the new test fails on the base', and the quoted form \"a test 'fails without the fix'\"; does not match 'cargo test passes', a Content-kind criterion with the phrase, or 'the build never fails'.",
+      "command": "git diff -- crates/athena-core/src/run/mod.rs",
+      "observes": "The `plans(` call site has the `||` with the named helper, and the helper carries a `///` comment; the original call alone would give false for a job with hard_reason null (the diff shows the removed line). The unit test passes with `cargo test --locked -p athena-core run::tests`.",
+      "fails_without": "With only the original `plans(reading.hard_reason.is_some())`, the test of the gate in criterion 1 fails; a helper that matched only the singular 'fails without the fix' would fail the plural cases in the unit test."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff of docs/design/job-planning.md (the 'Planning for hard jobs only' bullet near line 324, plus a short sentence in the D143 revision) and CHANGELOG.md ([Unreleased] Fixed or Changed entry), each stating that a job with a Behavior criterion asking for a 'fails without the fix' run is planned even when judged easy in `hard` mode, naming the root cause (the gate looked only at hard_reason, so the demonstration never reached the verifier) and the anchor wordings.",
+      "command": "git diff -- docs/design/job-planning.md CHANGELOG.md",
+      "observes": "Both diffs contain the sentence; the changelog entry sits under `## [Unreleased]`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks and the named existing tests: fmt, clippy and the full test suite. The existing mode tests in config.rs (lines 855-857, 1175-1181) and job_plan.rs (1104, 1161) are not edited, so a diff shows no change to those functions. The refusal corpus is unaffected because the helper is not part of the reading gate; running it shows it still passes.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0; `git diff` shows those existing tests untouched.",
+      "fails_without": "A clippy failure from a re-export unused in a non-test-support build, or a changed `plans` signature breaking config.rs tests, would fail one of the three.",
+      "seam": "Whole-workspace checks; no test double."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "5eee96b36300f2dfde688bcb3ebbf848e838dceb41e8afe6c416cb37da8c0431"
+}

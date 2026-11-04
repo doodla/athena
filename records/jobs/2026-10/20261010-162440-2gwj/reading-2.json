@@ -1,0 +1,155 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261010-162440-2gwj",
+  "n": 2,
+  "at": "2026-11-04T08:20:01.341823229Z",
+  "invocation_seq": 9,
+  "base_commit": "b3c475a9faafca28a857a5a8bdaf472d8acc4aac",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Refuse forged landings of dispatched jobs that never closed",
+  "summary": "Narrowed to one of the three forgeries in design §16.2 / acceptance-2: a landing forged for a job that was read and dispatched but never closed (a single hand-made commit adds the change and the closing records). The gate in athena-gate will refuse it. Goal: a maintainer running `athena check --history` or the commit-msg hook sees the forgery caught.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Test replays the forgery; cargo test and clippy stay clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the forged landing through the gate."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Check is the forged landing being refused, not the rule existing."
+    },
+    {
+      "id": "root-cause",
+      "how": "Rule is on the landing structure, not on one forged job."
+    },
+    {
+      "id": "small",
+      "how": "One forgery route only."
+    },
+    {
+      "id": "rust",
+      "how": "Rust only, no new dependency."
+    },
+    {
+      "id": "mechanism",
+      "how": "Enforced in the gate, not prose."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-gate/src/jobs.rs (entry `check`, which judges a job's records as a set, M27), listed crates/athena-gate/src/{history,records,landing_tests,reconcile,invariant}.rs and crates/athena-core/src/land.rs; the producer must read these for the order in which gate checks run. No new record or data file is added under crates/, so check_record_file/AnyRecord/round-trip tests are unaffected; if the producer adds one it must update them.",
+    "Chosen mechanism: structural, not cryptographic. A landing's closing records (outcome, score, usage, etc.) must follow a dispatched job's earlier records in history, and the gate refuses a single commit that adds the change together with all closing records for a job whose dispatch/verdict evidence is absent or was never closed by Athena. The producer may pick a different non-secret mechanism if the survey shows this one cannot work, and records the choice.",
+    "The other two forgeries (job fabricated record by record, hand-made proposal closed with `athena close`) remain open and are out of scope here as separate follow-up requests; signing or a key/witness ledger is also follow-up.",
+    "Only the gate and its tests change, plus the §16.2 and docs/enforcement.md text for this one route, and a CHANGELOG entry. Governance files (athena.toml, defaults.toml, workflows) are not changed.",
+    "The new refusal is meant to hit only forged landings; genuine fake-agent jobs must still pass."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-gate (e.g. landing_tests.rs) builds a job that was read and dispatched but never closed, then a single commit adding the change plus four closing records, and asserts the gate returns a refusal for it. Run `cargo test -p athena-gate`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A genuine fake-agent job still lands, closes, scores and passes the gate; all existing gate, CLI and core tests pass. Run `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check`, all clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The change refuses more readings of history only for forged landings; replay of past readings expects 2% of newly refused readings, and the higher refusal rate is intended because forged landings must now fail.",
+      "kind": "behavior"
+    },
+    {
+      "text": "docs/design/athena-v0.md §16.2 and docs/enforcement.md mark the forged-landing route as detected (Grep for it in both) and still state that the other two routes (fabricated job, hand-made proposal closed with athena close) pass; CHANGELOG.md records the change.",
+      "kind": "content"
+    },
+    {
+      "text": "The refusal message names the job and says why, so a maintainer can tell a forged landing from a legitimate one; Grep the gate source for the message.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-gate/src/jobs.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "docs/enforcement.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    }
+  ],
+  "out_of_scope": [
+    "Detecting a job fabricated record by record (follow-up request)",
+    "Detecting a hand-made proposal closed with athena close (follow-up request)",
+    "Keyed MAC, signing or a witness ledger outside the repo (follow-up request)",
+    "Changes to athena.toml, defaults.toml, workflows or prompt files"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 400.0,
+        "p50": 1500.0,
+        "p90": 3300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7137755102040817,
+      "p_verification_passes": 0.6683673469387755,
+      "p_user_intervenes": 0.08878718535469107,
+      "cost_usd": {
+        "p10": 0.5558032716851544,
+        "p50": 1.3349033000000003,
+        "p90": 3.6890003095189488
+      },
+      "wall_time_s": {
+        "p10": 542.5650861929345,
+        "p50": 1958.5548144798731,
+        "p90": 4194.440212161719
+      }
+    }
+  },
+  "departures": "Scope cut to one forgery route so median wall time fits the verifier timeout; otherwise near the reference.",
+  "hard_reason": "Adds a gate rule that can refuse landings, in the gate that judges other jobs and its history check.",
+  "producer_effort": "high"
+}
