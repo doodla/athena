@@ -464,6 +464,7 @@ pub fn producer_brief(inputs: &ProducerInputs) -> String {
             );
         }
     }
+    commit_view_paragraph(&mut out, &inputs.request);
     let _ = writeln!(out, "## What the verifier sees\n\n{VERIFIER_VISIBILITY}\n");
     criteria_check_section(&mut out, &inputs.reading);
     let _ = writeln!(out, "{}", unchanged_files_section());
@@ -1189,6 +1190,7 @@ pub fn verifier_brief_with_plan(
         short(&c.base),
         short(&c.candidate)
     );
+    commit_view_paragraph(&mut out, &inputs.request);
     let _ = writeln!(out, "```text\n{}\n```\n", c.stat.trim_end());
     if !inputs.tool_config_from_base.is_empty() {
         let _ = writeln!(
@@ -1426,6 +1428,54 @@ pub const HISTORY_FILE: &str = "HISTORY.txt";
 
 /// How many commits the history file lists at most (see [`HISTORY_FILE`]).
 pub const HISTORY_LIMIT: usize = 200;
+
+/// The commit-view file's name in a producer's and a verifier's snapshot. `athena-git` owns the file; a test in
+/// `athena-core` checks that this constant equals its own.
+pub const COMMITS_FILE: &str = "ATHENA-COMMITS.txt";
+
+/// How many commit hashes of a request get a view (see [`commit_hashes_in`]).
+pub const COMMITS_MAX: usize = 8;
+
+/// The commit hashes a request names: each run of 7 to 40 hexadecimal characters, bounded by anything that is
+/// not a letter or digit, that holds at least one digit and one letter (so a date, a plain number and a word
+/// such as `defaced` are not taken). Lowercased, without duplicates, in order of appearance, at most
+/// [`COMMITS_MAX`]. A hash made only of digits is not found. This is a guess at what the user meant; the
+/// snapshot builder checks every candidate against the repository, so a false one costs a note.
+pub fn commit_hashes_in(text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for token in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if !(7..=40).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        if !token.bytes().any(|b| b.is_ascii_digit())
+            || !token.bytes().any(|b| b.is_ascii_alphabetic())
+        {
+            continue;
+        }
+        let hash = token.to_ascii_lowercase();
+        if !found.contains(&hash) {
+            found.push(hash);
+        }
+        if found.len() == COMMITS_MAX {
+            break;
+        }
+    }
+    found
+}
+
+/// The one sentence a producer's or verifier's brief gains when the request names a commit hash.
+fn commit_view_paragraph(out: &mut String, request: &str) {
+    if commit_hashes_in(request).is_empty() {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "The request names a commit. `{COMMITS_FILE}` in the snapshot root is a read-only view of each named commit that is in \
+         the base commit's history: the full hash, the date, the subject, the changed paths and the diff, with `records/` and \
+         the owner's private paths left out. Read it by its path (`Read {COMMITS_FILE}`, or Grep with that path); a Grep over \
+         the whole directory skips it. If the file is absent, Athena could not build the view.\n"
+    );
+}
 
 /// The planner's and critic's briefs both say what the history file holds and how to read it.
 fn history_section(out: &mut String) {
@@ -3626,6 +3676,60 @@ mod tests {
             VERIFIER_BRIEF_WITHOUT_A_PLAN
         );
         assert_eq!(inputs.names_with_plan(None), inputs.names());
+    }
+
+    #[test]
+    fn commit_hashes_in_picks_only_hashes() {
+        for none in [
+            "",
+            "Add the reader. Jobs 20261012-075824-1x28 and 2026-10-12, version 1.2.3",
+            "the defaced facade and a 1234567890 number",
+            "abcdef",
+            "0123456",
+            &"a1".repeat(21),
+        ] {
+            assert!(commit_hashes_in(none).is_empty(), "{none}");
+        }
+        assert_eq!(
+            commit_hashes_in("fix on commit 64ecdc9, and (64ECDC9) again"),
+            ["64ecdc9"]
+        );
+        let full = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            commit_hashes_in(&format!("see {full}.")),
+            [full.to_string()]
+        );
+        let many: String = (0..12).map(|i| format!("abc123{i:x}0 ")).collect();
+        assert_eq!(commit_hashes_in(&many).len(), COMMITS_MAX);
+    }
+
+    #[test]
+    fn producer_and_verifier_briefs_name_the_commit_view() {
+        let with = "two fix attempts on commit 64ecdc9 were rejected";
+        let mut plain = producer_inputs(None);
+        let mut retry = producer_inputs(None);
+        retry.retry_from = Some(seed());
+        let mut verify = plain_verifier_inputs();
+        // No hash named: no sentence, and the stored copy test above pins the verifier text.
+        for brief in [
+            producer_brief(&plain),
+            producer_brief(&retry),
+            verifier_brief(&verify, true),
+        ] {
+            assert!(!brief.contains(COMMITS_FILE), "{brief}");
+        }
+        plain.request = with.into();
+        retry.request = with.into();
+        verify.request = with.into();
+        for brief in [
+            producer_brief(&plain),
+            producer_brief(&retry),
+            verifier_brief(&verify, true),
+        ] {
+            assert!(brief.contains(COMMITS_FILE), "{brief}");
+            assert!(brief.contains("Read it by its path"), "{brief}");
+            assert!(brief.contains("could not build the view"), "{brief}");
+        }
     }
 
     fn replay_view(newly: usize, total: usize, reason_chars: usize) -> ReplayView {

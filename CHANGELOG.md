@@ -37,6 +37,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A job whose request names a commit hash, such as a retry that cites the commit an earlier fix attempt
+  touched, now lets the producer and the verifier read that commit. Their snapshots gain one read-only text
+  file, `ATHENA-COMMITS.txt`, with the full hash, date, subject, changed paths and diff of each named commit
+  that is in the base commit's history (D155, an exception to D08's rule that agents never see the real history). It is built from the same filter as `HISTORY.txt`: `records/` and
+  `athena-exclude` paths, commit bodies and authors are never written, and no git object, ref, alternate or
+  remote is added, so a snapshot's repository still has no path back to the user's. The file is not part of
+  any candidate. The producer and verifier briefs name the file when the request names a hash, and say to read
+  it by its path, since a Grep over the whole directory skips it. Limits: hashes are taken from the request
+  text only (7 to 40 hexadecimal characters with a digit and a letter, so a hash of digits only is not found),
+  at most 8 are used, a diff is cut at 200 KB per commit, and a commit that is unknown, not in the base's
+  history (for example an earlier rejected candidate), or changed only hidden paths gets a note in the file and
+  no view. A visible `.gitattributes` still names the paths it hides. A request with no hash gives the same
+  snapshots as before.
 - The baseline can now be reused from a green GitHub run instead of being run again on the base commit before
   every job. The base's governed content was usually just tested: by the CI run of the candidate that landed, or
   by the push run on the default branch. Before the baseline checks run, Athena looks, with one read and no

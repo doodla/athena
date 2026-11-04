@@ -21,6 +21,26 @@ pub const HISTORY_LIMIT: usize = 200;
 /// large histories.
 const HISTORY_SCAN_LIMIT: usize = 2000;
 
+/// The commit-view file's name, at the snapshot root (see [`Snapshot::add_commit_views`]).
+pub const COMMITS_FILE: &str = "ATHENA-COMMITS.txt";
+
+/// How many requested commits get a view at most; later hashes are ignored, with a note in the file.
+pub const MAX_REQUESTED_COMMITS: usize = 8;
+
+/// How many bytes of diff one commit's view holds at most.
+const COMMIT_DIFF_LIMIT: usize = 200 * 1024;
+
+/// What [`Snapshot::add_commit_views`] did, by the hashes as requested.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommitViews {
+    /// The full hashes of the commits shown.
+    pub shown: Vec<String>,
+    /// The requested hashes that got no view: not a commit, not in the base commit's history, or a commit that
+    /// changed only paths hidden from agents. The file says so in one shared note, which does not tell these
+    /// apart.
+    pub omitted: Vec<String>,
+}
+
 /// What repository a snapshot gets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotRepo {
@@ -107,6 +127,104 @@ impl Snapshot {
             SnapshotRepo::None | SnapshotRepo::PlainWithHistory | SnapshotRepo::Base => {}
         }
         Ok(snapshot)
+    }
+
+    /// Adds [`COMMITS_FILE`] to a snapshot that has a repository: a read-only text view of the commits in
+    /// `requested` (hashes or abbreviations the job's request names, at most [`MAX_REQUESTED_COMMITS`]).
+    ///
+    /// A commit is shown only if it resolves to a commit in `user` and is an ancestor of (or is)
+    /// `source_commit`. For each, the file holds the full hash, the date, the subject, the changed paths and a
+    /// unified diff of those paths; paths hidden from agents under `rules_commit`'s rules (`records/`,
+    /// `athena-exclude`) and submodule entries are dropped before anything is read, and commit bodies and
+    /// authors are never written. A commit left with no visible path is not shown.
+    ///
+    /// Anything else, a mistyped or unknown hash, a commit outside the base's history or one that changed only
+    /// hidden paths, is omitted, not refused: the call still returns `Ok`, and the file carries one shared note
+    /// that does not say which reason applied, so it does not confirm that a hidden commit exists.
+    ///
+    /// No git object, ref, alternate or remote enters the snapshot; the user's repository is only read. The
+    /// file is listed in the snapshot's `.git/info/exclude`, so it is not part of any candidate, change list or
+    /// work-tree tree. An empty `requested` changes nothing.
+    pub fn add_commit_views(
+        &self,
+        user: &Git,
+        source_commit: &str,
+        rules_commit: &str,
+        requested: &[String],
+    ) -> Result<CommitViews> {
+        if requested.is_empty() {
+            return Ok(CommitViews::default());
+        }
+        let git_dir = self.dir.join(".git");
+        if !git_dir.is_dir() {
+            return Err(crate::GitError::Refused(
+                "this snapshot has no repository, so it cannot carry a commit view".into(),
+            ));
+        }
+        let git = self.git();
+        let tracked = [self.base.as_deref(), self.candidate.as_deref()]
+            .into_iter()
+            .flatten()
+            .try_fold(false, |seen, c| {
+                git.path_exists(c, COMMITS_FILE).map(|here| seen || here)
+            })?;
+        if tracked || self.dir.join(COMMITS_FILE).symlink_metadata().is_ok() {
+            return Err(crate::GitError::Refused(format!(
+                "the snapshot already has a file named {COMMITS_FILE}"
+            )));
+        }
+        let (used, ignored) = requested.split_at(requested.len().min(MAX_REQUESTED_COMMITS));
+        let mut views = CommitViews::default();
+        let mut blocks = String::new();
+        for token in used {
+            let resolved = match resolve_requested(user, source_commit, token)? {
+                Some(commit) => commit,
+                None => {
+                    views.omitted.push(token.clone());
+                    continue;
+                }
+            };
+            if views.shown.contains(&resolved) {
+                continue;
+            }
+            match commit_block(user, rules_commit, &resolved)? {
+                Some(block) => {
+                    blocks.push_str(&block);
+                    views.shown.push(resolved);
+                }
+                None => views.omitted.push(token.clone()),
+            }
+        }
+        let mut out = "# Read-only view of the commits the request names, built by Athena from the user's repository.\n\
+             # Paths hidden from agents are left out. Commit bodies and authors are not shown.\n\
+             # Only commits in the base commit's history are shown.\n\n"
+            .to_string();
+        if !views.omitted.is_empty() {
+            out.push_str(&format!(
+                "Not available: {}. Each is not a known commit, is not in the base commit's history, or changed only \
+                 paths hidden from agents.\n\n",
+                views.omitted.join(", ")
+            ));
+        }
+        if !ignored.is_empty() {
+            out.push_str(&format!(
+                "Ignored: {} more requested hash(es) beyond the first {MAX_REQUESTED_COMMITS}.\n\n",
+                ignored.len()
+            ));
+        }
+        out.push_str(&blocks);
+        // The exclusion goes in before the file does, so no add can pick the file up.
+        let info = git_dir.join("info");
+        std::fs::create_dir_all(&info)?;
+        let exclude = info.join("exclude");
+        let mut rules = std::fs::read_to_string(&exclude).unwrap_or_default();
+        if !rules.is_empty() && !rules.ends_with('\n') {
+            rules.push('\n');
+        }
+        rules.push_str(&format!("/{COMMITS_FILE}\n"));
+        std::fs::write(&exclude, rules)?;
+        std::fs::write(self.dir.join(COMMITS_FILE), out)?;
+        Ok(views)
     }
 
     /// Whether the work tree is exactly as seeded by [`SnapshotRepo::BaseThenTree`]. Always false for any
@@ -284,6 +402,77 @@ pub fn materialize(
     Ok(visible)
 }
 
+/// The full hash `token` names, if it is a commit in `user` that is `source_commit` or one of its ancestors.
+/// A token that is not 4 to 40 hexadecimal characters is never given to git.
+fn resolve_requested(user: &Git, source_commit: &str, token: &str) -> Result<Option<String>> {
+    if !(4..=40).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    let Some(commit) = user.rev_parse(token)? else {
+        return Ok(None);
+    };
+    Ok(user.is_ancestor(&commit, source_commit)?.then_some(commit))
+}
+
+/// The view of one commit (header, visible paths, diff of those paths), or `None` if it changed paths and none
+/// of them is visible to agents under `rules_commit`'s rules.
+fn commit_block(user: &Git, rules_commit: &str, commit: &str) -> Result<Option<String>> {
+    let from = match user.parents(commit)?.first() {
+        Some(parent) => parent.clone(),
+        None => user.empty_tree()?,
+    };
+    let changes = user.diff_tree(&from, commit)?;
+    let all: Vec<String> = changes
+        .iter()
+        .filter(|c| c.old_mode != "160000" && c.new_mode != "160000")
+        .map(|c| c.path.clone())
+        .collect();
+    let classes = classify(user, rules_commit, &all)?;
+    let paths: Vec<String> = all
+        .iter()
+        .filter(|p| {
+            classes
+                .get(*p)
+                .copied()
+                .unwrap_or(PathClass::Governed)
+                .visible_to_agents()
+        })
+        .cloned()
+        .collect();
+    if paths.is_empty() && !changes.is_empty() {
+        return Ok(None);
+    }
+    let (date, subject) = user.date_and_subject(commit)?;
+    let mut block = format!("commit {commit}\ndate {date}\nsubject {subject}\n");
+    if paths.is_empty() {
+        block.push_str("paths\n    (no paths)\n");
+    } else {
+        block.push_str("paths\n");
+        for p in &paths {
+            block.push_str(&format!("    {p}\n"));
+        }
+        let mut diff = user.diff_text(&from, commit, &paths)?;
+        if diff.len() > COMMIT_DIFF_LIMIT {
+            let mut cut = COMMIT_DIFF_LIMIT;
+            while !diff.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            diff.truncate(cut);
+            diff.push_str(&format!(
+                "\n[diff cut at {} KB; the path list above is complete]\n",
+                COMMIT_DIFF_LIMIT / 1024
+            ));
+        }
+        block.push('\n');
+        block.push_str(&diff);
+        if !block.ends_with('\n') {
+            block.push('\n');
+        }
+    }
+    block.push_str("\n----\n\n");
+    Ok(Some(block))
+}
+
 /// The text of the history file: one block per commit, `<short hash> <date> <subject>` then one indented line
 /// per changed path. Paths hidden from agents (`records/`, `athena-exclude`) are dropped, with `rules_commit`'s
 /// rules; a commit left with no visible path is omitted, and one that changed no path at all is listed as
@@ -349,7 +538,8 @@ fn clear_work_tree(dir: &Path) -> Result<()> {
 fn copy_files(from: &Path, to: &Path) -> Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
-        if entry.file_name() == ".git" {
+        // A kept directory's own commit view is never carried into a new snapshot.
+        if entry.file_name() == ".git" || entry.file_name() == COMMITS_FILE {
             continue;
         }
         let target = to.join(entry.file_name());
@@ -922,6 +1112,446 @@ mod tests {
         )
         .unwrap();
         assert!(!snap.dir().join(HISTORY_FILE).exists());
+    }
+
+    /// Every file under `dir` (relative path, bytes), `.git` included; symlinks are listed without content.
+    fn all_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let rel = path.strip_prefix(root).unwrap().display().to_string();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    out.push((rel, Vec::new()));
+                    walk(root, &path, out);
+                } else if kind.is_symlink() {
+                    out.push((rel, Vec::new()));
+                } else {
+                    out.push((rel, std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    /// Everything a snapshot holds that an agent or its git could print: the file names and bytes, the log of
+    /// every ref with patches, and every object in the snapshot's store.
+    fn everything_readable(snap: &Snapshot) -> Vec<u8> {
+        let mut all = Vec::new();
+        for (name, bytes) in all_files(snap.dir()) {
+            all.extend_from_slice(name.as_bytes());
+            all.push(b'\n');
+            all.extend_from_slice(&bytes);
+        }
+        let git = snap.git();
+        for args in [
+            vec!["log", "--all", "-p", "--format=fuller"],
+            vec!["cat-file", "--batch-all-objects", "--batch"],
+        ] {
+            all.extend(git.run_bytes(args, None, &[]).unwrap());
+        }
+        all
+    }
+
+    fn contains(haystack: &[u8], needle: &str) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|w| w == needle.as_bytes())
+    }
+
+    fn commit_view(snap: &Snapshot) -> String {
+        std::fs::read_to_string(snap.dir().join(COMMITS_FILE)).unwrap()
+    }
+
+    fn create(
+        git: &Git,
+        head: &str,
+        name: &str,
+        repo: SnapshotRepo,
+    ) -> (tempfile::TempDir, Snapshot) {
+        let parent = tempfile::tempdir().unwrap();
+        let snap = Snapshot::create(git, head, head, &parent.path().join(name), repo).unwrap();
+        (parent, snap)
+    }
+
+    #[test]
+    fn named_commit_is_readable_in_a_producer_snapshot() {
+        let (dir, git, _) = user_repo();
+        write_files(
+            dir.path(),
+            &[
+                ("src/feature.rs", "pub fn feature() -> u32 { 42 }\n"),
+                ("src/main.rs", "fn main() { feature(); }\n"),
+            ],
+        );
+        let extra = commit_all(&git, "Add the feature");
+        write_files(dir.path(), &[("src/later.rs", "// later\n")]);
+        let later = commit_all(&git, "A later change");
+        let (_p, snap) = create(&git, &extra, "snap-named", SnapshotRepo::Base);
+        let views = snap
+            .add_commit_views(&git, &extra, &extra, std::slice::from_ref(&extra))
+            .unwrap();
+        assert_eq!(views.shown, vec![extra.clone()]);
+        assert!(views.omitted.is_empty());
+        let text = commit_view(&snap);
+        assert!(text.contains(&format!("commit {extra}\n")), "{text}");
+        assert!(text.contains("subject Add the feature\n"), "{text}");
+        assert!(text.contains("\n    src/feature.rs\n"), "{text}");
+        assert!(text.contains("\n    src/main.rs\n"), "{text}");
+        assert!(text.contains("+++ b/src/feature.rs"), "{text}");
+        assert!(text.contains("+pub fn feature() -> u32 { 42 }"), "{text}");
+        assert!(text.contains("-fn main() {}"), "{text}");
+        let date = text
+            .lines()
+            .find_map(|l| l.strip_prefix("date "))
+            .expect("a date line");
+        assert_eq!(date.len(), 10, "{date}");
+        // An abbreviation of a commit that is an ancestor of the base, not the base itself.
+        let (_p2, later_snap) = create(&git, &later, "snap-abbrev", SnapshotRepo::Base);
+        let short = extra[..7].to_string();
+        let views = later_snap
+            .add_commit_views(&git, &later, &later, &[short])
+            .unwrap();
+        assert_eq!(views.shown, vec![extra.clone()]);
+        assert!(commit_view(&later_snap).contains("+++ b/src/feature.rs"));
+        assert!(!commit_view(&later_snap).contains("src/later.rs"));
+    }
+
+    #[test]
+    fn hidden_paths_never_appear_in_the_commit_view() {
+        let (dir, git, _) = user_repo();
+        write_files(
+            dir.path(),
+            &[
+                ("src/main.rs", "fn main() { /* MARK_VISIBLE_22b8 */ }\n"),
+                ("FRONT.md", "MARK_FRONT_7f3a"),
+                ("private/notes.md", "MARK_PRIV_91c2"),
+                ("records/jobs/y.json", "{\"MARK_REC_5d10\":1}"),
+            ],
+        );
+        let requested = commit_all(&git, "Change main with hidden files beside it");
+        write_files(
+            dir.path(),
+            &[
+                ("records/jobs/z.json", "{\"MARK_ONLYREC_0e44\":1}"),
+                ("private/q.md", "MARK_ONLYPRIV_6b19"),
+            ],
+        );
+        let hidden_only = commit_all(&git, "Only hidden subject xyz");
+        write_files(
+            dir.path(),
+            &[("src/main.rs", "fn main() { /* later */ }\n")],
+        );
+        let base = commit_all(&git, "later");
+        let markers = [
+            "MARK_FRONT_7f3a",
+            "MARK_PRIV_91c2",
+            "MARK_REC_5d10",
+            "MARK_ONLYREC_0e44",
+            "MARK_ONLYPRIV_6b19",
+        ];
+        let names = [
+            "private/notes.md",
+            "private/q.md",
+            "records/jobs/y.json",
+            "records/jobs/z.json",
+        ];
+        // The control: git itself prints all of it for the same commits, so the assertions below can fail.
+        let unfiltered: Vec<u8> = [&requested, &hidden_only]
+            .iter()
+            .flat_map(|c| git.run_bytes(["show", c.as_str()], None, &[]).unwrap())
+            .collect();
+        for needle in markers.iter().chain(names.iter()) {
+            assert!(contains(&unfiltered, needle), "control lacks {needle}");
+        }
+        assert!(contains(&unfiltered, "FRONT.md"));
+        let asked = vec![requested.clone(), hidden_only.clone()];
+        let candidate = SnapshotRepo::BaseAndCandidate {
+            candidate_commit: base.clone(),
+        };
+        for (name, repo) in [("snap-base", SnapshotRepo::Base), ("snap-two", candidate)] {
+            let (_p, snap) = create(&git, &base, name, repo);
+            let views = snap.add_commit_views(&git, &base, &base, &asked).unwrap();
+            // (f) The commit that touched only hidden paths is under the note, with no subject.
+            assert_eq!(views.shown, vec![requested.clone()]);
+            assert_eq!(views.omitted, vec![hidden_only.clone()]);
+            let text = commit_view(&snap);
+            assert!(text.contains("Not available:"), "{text}");
+            assert!(!text.contains("Only hidden subject"), "{text}");
+            // The visible part of the same commit is there, so the checks are not vacuous.
+            assert!(text.contains("MARK_VISIBLE_22b8"), "{text}");
+            assert!(text.contains("subject Change main with hidden files"));
+            let seen = everything_readable(&snap);
+            // (a) no hidden content anywhere, (b) no hidden path name anywhere.
+            for needle in markers.iter().chain(names.iter()) {
+                assert!(!contains(&seen, needle), "{name}: {needle} is readable");
+            }
+            // (c) FRONT.md is named by the visible root .gitattributes, as in any snapshot; the view is clean.
+            assert!(!text.contains("FRONT.md"), "{text}");
+            assert!(!text.contains("records"), "{text}");
+            assert!(!text.contains("private"), "{text}");
+        }
+        // (e) the history view of the same repository leaves the hidden paths out too.
+        let (_p, plain) = create(&git, &base, "snap-history", SnapshotRepo::PlainWithHistory);
+        let history = std::fs::read(plain.dir().join(HISTORY_FILE)).unwrap();
+        for needle in markers.iter().chain(names.iter()) {
+            assert!(!contains(&history, needle), "history has {needle}");
+        }
+    }
+
+    #[test]
+    fn a_commit_that_edits_gitattributes_shows_the_rule_it_adds() {
+        // The limit: a visible .gitattributes names the paths it hides, in the snapshot and in the view.
+        let (dir, git, _) = user_repo();
+        write_files(
+            dir.path(),
+            &[(
+                ".gitattributes",
+                "/FRONT.md athena-exclude\n/SPEC.md athena-readonly\n/OTHER.md athena-exclude\n",
+            )],
+        );
+        let edited = commit_all(&git, "Hide another file");
+        let (_p, snap) = create(&git, &edited, "snap-attrs", SnapshotRepo::Base);
+        snap.add_commit_views(&git, &edited, &edited, std::slice::from_ref(&edited))
+            .unwrap();
+        let text = commit_view(&snap);
+        assert!(text.contains("+/OTHER.md athena-exclude"), "{text}");
+    }
+
+    #[test]
+    fn commit_view_gives_the_snapshot_no_path_to_the_users_repository() {
+        let (dir, git, head) = user_repo();
+        write_files(dir.path(), &[("src/main.rs", "fn main() { 2; }\n")]);
+        let extra = commit_all(&git, "Change main");
+        let user_state = |git: &Git| {
+            (
+                git.run_bytes(["for-each-ref"], None, &[]).unwrap(),
+                git.run_bytes(
+                    ["cat-file", "--batch-all-objects", "--batch-check"],
+                    None,
+                    &[],
+                )
+                .unwrap(),
+                git.head().unwrap(),
+                std::fs::read(dir.path().join(".git/config")).unwrap(),
+            )
+        };
+        let before = user_state(&git);
+        let (_p, snap) = create(&git, &extra, "snap-isolated", SnapshotRepo::Base);
+        let views = snap
+            .add_commit_views(&git, &extra, &extra, std::slice::from_ref(&extra))
+            .unwrap();
+        assert_eq!(views.shown, vec![extra.clone()]);
+        let git_dir = snap.dir().join(".git");
+        assert!(!git_dir.join("objects/info/alternates").exists());
+        assert!(!git_dir.join("objects/info/http-alternates").exists());
+        assert_eq!(snap.git().run(["remote"]).unwrap().trim(), "");
+        let config = std::fs::read_to_string(git_dir.join("config")).unwrap();
+        assert!(
+            !config.contains("url") && !config.contains("alternate"),
+            "{config}"
+        );
+        let user_path = dir.path().display().to_string();
+        for (name, bytes) in all_files(snap.dir()) {
+            assert!(
+                !contains(&bytes, &user_path),
+                "{name} names the user's repository"
+            );
+        }
+        // The snapshot's git cannot resolve the real commit; it has only its own one commit.
+        assert!(snap.git().rev_parse(&extra).unwrap().is_none());
+        assert!(snap.git().rev_parse(&head).unwrap().is_none());
+        assert_eq!(snap.git().rev_list_reverse("--all").unwrap().len(), 1);
+        assert_eq!(user_state(&git), before);
+    }
+
+    #[test]
+    fn no_requested_commit_leaves_snapshots_unchanged() {
+        let (dir, git, head) = user_repo();
+        write_files(dir.path(), &[("src/main.rs", "fn main() { 3; }\n")]);
+        let candidate = commit_all(&git, "candidate");
+        let (_p, producer) = create(&git, &head, "snap-none-p", SnapshotRepo::Base);
+        let (_q, verifier) = create(
+            &git,
+            &head,
+            "snap-none-v",
+            SnapshotRepo::BaseAndCandidate {
+                candidate_commit: candidate,
+            },
+        );
+        for (snap, commits) in [(&producer, "1"), (&verifier, "2")] {
+            let exclude = std::fs::read(snap.dir().join(".git/info/exclude")).unwrap();
+            let views = snap.add_commit_views(&git, &head, &head, &[]).unwrap();
+            assert_eq!(views, CommitViews::default());
+            assert!(!snap.dir().join(COMMITS_FILE).exists());
+            assert_eq!(
+                std::fs::read(snap.dir().join(".git/info/exclude")).unwrap(),
+                exclude,
+                "the exclude file is untouched"
+            );
+            let count = snap.git().run(["rev-list", "--count", "HEAD"]).unwrap();
+            assert_eq!(count.trim(), commits);
+            assert_eq!(snap.git().run(["status", "--porcelain"]).unwrap(), "");
+        }
+        assert!(
+            !contains(&everything_readable(&producer), COMMITS_FILE),
+            "nothing names the view file"
+        );
+    }
+
+    #[test]
+    fn unknown_or_unreachable_hashes_are_omitted_with_a_note() {
+        // The chosen behavior is omission with a note, never a refusal and never a panic.
+        let (dir, git, _) = user_repo();
+        git.run(["checkout", "-q", "-b", "side"]).unwrap();
+        write_files(dir.path(), &[("src/side.rs", "// side only\n")]);
+        let side = commit_all(&git, "side only change");
+        git.run(["checkout", "-q", "--orphan", "orph"]).unwrap();
+        write_files(dir.path(), &[("orph.txt", "orphan\n")]);
+        let orphan = commit_all(&git, "orphan only change");
+        git.run(["checkout", "-q", "-f", "main"]).unwrap();
+        let head = git.head().unwrap().unwrap();
+        let blob = git.run(["rev-parse", "HEAD:FRONT.md"]).unwrap();
+        let asked = vec![
+            "deadbeef12".to_string(),
+            side[..10].to_string(),
+            orphan[..10].to_string(),
+            blob.trim()[..10].to_string(),
+            "not-a-hash".to_string(),
+        ];
+        let (_p, snap) = create(&git, &head, "snap-unknown", SnapshotRepo::Base);
+        let views = snap.add_commit_views(&git, &head, &head, &asked).unwrap();
+        assert!(views.shown.is_empty());
+        assert_eq!(views.omitted, asked);
+        let text = commit_view(&snap);
+        assert!(text.contains("Not available:"), "{text}");
+        assert!(!text.contains("diff --git"), "{text}");
+        assert!(!text.contains("side only change"), "{text}");
+        assert!(!text.contains("orphan only change"), "{text}");
+        assert_eq!(snap.git().run(["status", "--porcelain"]).unwrap(), "");
+    }
+
+    #[test]
+    fn only_the_first_requested_commits_are_used() {
+        let (dir, git, _) = user_repo();
+        let mut hashes = Vec::new();
+        for i in 0..(MAX_REQUESTED_COMMITS + 1) {
+            write_files(dir.path(), &[("src/n.txt", &format!("{i}\n"))]);
+            hashes.push(commit_all(&git, &format!("change {i}")));
+        }
+        let head = hashes.last().unwrap().clone();
+        let (_p, snap) = create(&git, &head, "snap-many", SnapshotRepo::Base);
+        let views = snap.add_commit_views(&git, &head, &head, &hashes).unwrap();
+        assert_eq!(views.shown, hashes[..MAX_REQUESTED_COMMITS]);
+        let text = commit_view(&snap);
+        assert!(text.contains("Ignored: 1 more"), "{text}");
+        assert!(!text.contains("change 8"), "{text}");
+    }
+
+    #[test]
+    fn a_long_diff_is_cut_with_a_visible_line_and_the_paths_stay_complete() {
+        let (dir, git, _) = user_repo();
+        let big = "x".repeat(100) + "\n";
+        write_files(dir.path(), &[("src/big.txt", &big.repeat(3000))]);
+        write_files(dir.path(), &[("src/zz.txt", "tail\n")]);
+        let head = commit_all(&git, "big");
+        let (_p, snap) = create(&git, &head, "snap-big", SnapshotRepo::Base);
+        snap.add_commit_views(&git, &head, &head, std::slice::from_ref(&head))
+            .unwrap();
+        let text = commit_view(&snap);
+        assert!(text.contains("[diff cut at 200 KB"), "len {}", text.len());
+        assert!(text.contains("\n    src/zz.txt\n"));
+        assert!(text.len() < COMMIT_DIFF_LIMIT + 4096);
+    }
+
+    #[test]
+    fn commit_view_does_not_change_the_work_tree_tree() {
+        let (dir, git, head) = user_repo();
+        write_files(dir.path(), &[("src/main.rs", "fn main() { 4; }\n")]);
+        let candidate = commit_all(&git, "candidate");
+        let repos = [
+            SnapshotRepo::Base,
+            SnapshotRepo::BaseAndCandidate {
+                candidate_commit: candidate,
+            },
+        ];
+        for (i, repo) in repos.into_iter().enumerate() {
+            let (_p, snap) = create(&git, &head, &format!("snap-tree-{i}"), repo);
+            let tree = snap.work_tree_tree().unwrap();
+            snap.add_commit_views(&git, &head, &head, std::slice::from_ref(&head))
+                .unwrap();
+            assert!(snap.dir().join(COMMITS_FILE).exists());
+            assert_eq!(snap.work_tree_tree().unwrap(), tree);
+            assert_eq!(snap.git().run(["status", "--porcelain"]).unwrap(), "");
+            if i == 0 {
+                assert!(snap.change_list().unwrap().is_empty());
+                write_files(snap.dir(), &[("src/new.rs", "// new\n")]);
+                let paths: Vec<String> = snap
+                    .change_list()
+                    .unwrap()
+                    .into_iter()
+                    .map(|c| c.path)
+                    .collect();
+                assert_eq!(paths, ["src/new.rs"]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_kept_directory_with_a_stale_commit_view_does_not_carry_it_into_the_new_snapshot() {
+        let (_dir, git, head) = user_repo();
+        let parent = tempfile::tempdir().unwrap();
+        let kept = parent.path().join("kept");
+        write_files(
+            &kept,
+            &[
+                (COMMITS_FILE, "an old view\n"),
+                ("src/added.rs", "// kept\n"),
+            ],
+        );
+        let snap = Snapshot::create(
+            &git,
+            &head,
+            &head,
+            &parent.path().join("snap-resumed"),
+            SnapshotRepo::BaseThenDir { dir: kept },
+        )
+        .unwrap();
+        assert!(!snap.dir().join(COMMITS_FILE).exists());
+        let paths: Vec<String> = snap
+            .change_list()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        // The kept files are the new work tree, so the base's other files show as deleted; the stale view is
+        // neither a change nor a file.
+        assert!(paths.contains(&"src/added.rs".to_string()), "{paths:?}");
+        assert!(!paths.iter().any(|p| p == COMMITS_FILE), "{paths:?}");
+    }
+
+    #[test]
+    fn a_snapshot_that_cannot_carry_the_view_refuses_instead_of_overwriting() {
+        let (dir, git, head) = user_repo();
+        let (_p, plain) = create(&git, &head, "snap-plain-view", SnapshotRepo::None);
+        let err = plain
+            .add_commit_views(&git, &head, &head, std::slice::from_ref(&head))
+            .unwrap_err();
+        assert!(err.to_string().contains("no repository"), "{err}");
+        write_files(dir.path(), &[(COMMITS_FILE, "tracked by the user\n")]);
+        let tracked = commit_all(&git, "track a file with the view's name");
+        let (_q, snap) = create(&git, &tracked, "snap-tracked-view", SnapshotRepo::Base);
+        let err = snap
+            .add_commit_views(&git, &tracked, &tracked, std::slice::from_ref(&tracked))
+            .unwrap_err();
+        assert!(err.to_string().contains("already has a file"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(snap.dir().join(COMMITS_FILE)).unwrap(),
+            "tracked by the user\n"
+        );
     }
 
     #[test]

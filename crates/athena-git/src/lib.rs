@@ -19,6 +19,8 @@ pub mod index;
 pub mod records_branch;
 pub mod snapshot;
 
+pub use snapshot::{COMMITS_FILE, CommitViews};
+
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::Write;
@@ -580,6 +582,42 @@ impl Git {
             }
         }
         Ok(lines)
+    }
+
+    /// The unified diff between two trees or commits, limited to `paths`, as text. Read-only. The paths are
+    /// literal (no globs or pathspec magic), and the user's external diff drivers and text conversion filters
+    /// are not run, so no configured program sees the content. Paths go on the command line in chunks, in the
+    /// order given; pass them sorted to get git's order.
+    pub fn diff_text(&self, from: &str, to: &str, paths: &[String]) -> Result<String> {
+        let mut out = String::new();
+        for chunk in paths.chunks(100) {
+            let mut args: Vec<&str> = vec![
+                "diff",
+                "--no-color",
+                "--no-renames",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                from,
+                to,
+                "--",
+            ];
+            args.extend(chunk.iter().map(String::as_str));
+            let bytes =
+                self.run_bytes(args, None, &[("GIT_LITERAL_PATHSPECS", OsStr::new("1"))])?;
+            out.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        Ok(out)
+    }
+
+    /// The committer date (`YYYY-MM-DD`) and subject of a commit.
+    pub fn date_and_subject(&self, commit: &str) -> Result<(String, String)> {
+        let out = self.run(["log", "-1", "--format=%cs%n%s", commit])?;
+        let mut lines = out.lines();
+        let date = lines.next().unwrap_or_default().to_string();
+        let subject = lines.next().unwrap_or_default().to_string();
+        Ok((date, subject))
     }
 
     /// A configuration value, or `None` if unset.
