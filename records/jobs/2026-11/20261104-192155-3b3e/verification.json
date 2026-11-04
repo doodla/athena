@@ -1,0 +1,166 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261104-192155-3b3e",
+  "candidate_commit": "3a5fe1e6fb52031c65929812afb742df0753577a",
+  "verified_fingerprint": "sha256:1e54f01d01045ff4b17fbc7f79c6eb061c6f99ebde5488706a02b4e814d27daa",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "not run"
+      },
+      "output_tail": "",
+      "note": "not run: every changed path matches skip_when_only (docs/, *.md)"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "not run"
+      },
+      "output_tail": "",
+      "note": "not run: every changed path matches skip_when_only (docs/, *.md)"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/41917615385 for 3a5fe1e6fb52031c65929812afb742df0753577a",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 4,
+  "criteria": [
+    {
+      "criterion": "A new file under docs/design/ describes the continuous, drain-owned landing step (rebase, verify, merge, landing record in one queue slot) and explains how it removes the wait between verifier pass and landing record.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read the diff. docs/design/continuous-landing.md section 4 lists the five steps in one slot: rebase, re-check if needed, merge with CI as a parked await, landing record, release. The paragraph 'How this removes the wait' says the slot ends only when the landing record exists. The explanation of today's gaps is inaccurate; see the soundness finding.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The design has an Existing code section that reuses or extends docs/design/async-drain.md, docs/design/native-pr-landing.md and crates/athena-git/src/lib.rs, saying what each already provides.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Section 2's table has a row for each of the three, saying what it provides and how the design uses it. The athena-git functions it names (replay, merge_tree, merge_ff_only, is_ancestor, fetch_remote_branch, push_branch, commit_with_records, squash_text) exist at lib.rs:353-773. The table leaves out drain.rs's Drain::land, PrLander, Landing::Waiting and checks_poll (see findings).",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The note states the predicted saving of 470.0 minutes per landed job (baseline median 528.2, of which 499.1 is landing and rebuild, citing THROUGHPUT.md) and states how the next throughput review measures the minutes after the change landed.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Section 3 gives 470.0 (labeled an estimate from the review) and the baseline 528.2 / 499.1, measured, from THROUGHPUT.md over the last 20 landed jobs. Section 7 says the next review uses StageMinutes::median_of over jobs that landed after the change, finds the change by its citation, compares against 528.2 / 58.2 and 499.1 / 29, and handles small samples. median_of exists at status.rs:682.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The note cites review 20261104-192053-745k and says an implementing change must cite it in its request text.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The header says: 'An implementing change must cite review 20261104-192053-745k in its request text'. Section 7 repeats it.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The note lists alternatives considered, risks (rebase conflicts, ordering, failed landing) and an explicit rollback or failure path.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Section 5 lists alternatives a to e. Section 6's table covers rebase conflict, ordering, failed landing, crash, failed self-rebuild and stacked commits. A Rollback paragraph proposes a setting under [drain.pipeline], off by default. The rollback's description of present behavior is inaccurate (see findings).",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The diff changes only files under docs/design/ (plus optionally CHANGELOG.md); no athena.toml, defaults.toml or workflow file changes.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Only CHANGELOG.md, docs/design/async-drain.md and docs/design/continuous-landing.md changed, matching the expected deliverables.",
+      "commands": [
+        "git diff HEAD~1 --stat"
+      ],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The note describes today's landing without reading the drain code. The drain already rebases, re-checks and merges in one locked slot. The wait comes from the Landing::Waiting hand-off after a check poll of about 10 minutes, and the note never names it or the simpler fix.",
+      "evidence": "Read in the snapshot: Drain::land (crates/athena-cli/src/drain.rs:1677) takes the landing lock, runs recheck_after_rebase, then steps.land, which is PrLander -> land_pr. land_pr merges by REST because athena.toml:189 sets merge_via_rest = true. land_pr polls the checks with checks_poll (wiring.rs:42: 30 attempts, 20 s apart, about 10 minutes). Checks still pending after that become Landing::Waiting (drain.rs:3093-3100). The drain then moves on, and a later `athena land --pr` or drain run merges the job (drain.rs:106-111, 481). The CI run cited for this commit took 570 s. So the likely cause is CI running past the poll limit (an inference; records are absent from the snapshot, so not measured). Yet section 4 says the steps after the verifier are 'separated by gaps where nothing is running'. The Existing code table omits Drain::land, PrLander, Landing::Waiting, landing_from_report and checks_poll. The Rollback paragraph says 'off' returns to 'the present behavior, where a verified job waits for athena land', which is only true when CI runs past the poll limit. A senior engineer would ask for the change to be framed as 'replace the Waiting hand-off with an in-slot CI wait (or re-poll waiting jobs before the drain ends)', with that path named in Existing code and the alternatives.",
+      "location": "docs/design/continuous-landing.md sections 1, 2, 4 and Rollback",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "The fallback names `athena land <job>`; the landing path the drain uses is `athena land --pr`.",
+      "evidence": "drain.rs:110 and 481 say `athena land --pr` merges a waiting job. PrLander's doc comment (drain.rs:3065) says it lands 'through the pull-request path of `athena land --pr`'.",
+      "location": "docs/design/continuous-landing.md section 4, fallback paragraph",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 470.0 prediction is taken from the review without saying that it depends on how many jobs hit Landing::Waiting, which can be read from the drain's 'waiting to merge' lines and the landing outcomes.",
+      "evidence": "The note admits the idle-versus-work split is unmeasured and leaves timing records to the implementing change. It does not name the Waiting share as what the saving depends on.",
+      "location": "docs/design/continuous-landing.md section 3",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "1 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "The candidate adds docs/design/continuous-landing.md, a pointer section in async-drain.md and a CHANGELOG entry. All six content criteria are met: it cites review 20261104-192053-745k and requires implementing changes to cite it, states the 470.0-minute saving against the 528.2 / 499.1 baseline from THROUGHPUT.md, says how the next review measures it, lists alternatives, risks and rollback, and stays within the expected files. It fails on one major soundness finding. The note takes the cause of the wait from the review without reading the drain code, where Drain::land already rebases, re-checks and merges in one locked slot. The wait comes from the Landing::Waiting hand-off after a check poll of about 10 minutes (CI here took 570 s). So the note misdescribes current behavior and its rollback, leaves the code it would change out of its Existing code section, and misses the simpler framing: keep polling a waiting job inside the drain instead of handing it to a later command. Fixing those sections would make the design pass."
+}

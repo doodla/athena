@@ -1,0 +1,151 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261104-215123-fpg0",
+  "n": 1,
+  "at": "2026-11-04T22:47:31.87380499Z",
+  "invocation_seq": 1,
+  "base_commit": "32f5cf108b166ada809d4e606a475b39e4a9cfef",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Run deferred proposed requests in batches when their reading passes",
+  "summary": "The batch (`athena drain`) should treat a request queued by `ask --later`, the Steward or Hestia as queued once its latest reading, though in state proposed, passes every reading check, and run it in priority order. This includes the urgent request that never ran. A reading re-read with changed scope after a settings change still waits for a person. The audience is the operator who relies on unattended batches.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The change is Rust only."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus cargo test and clippy criteria."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria run cargo test."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that the batch runs or leaves items, not that wiring exists."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that the deferred proposed request actually runs in priority order."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to item selection and tests."
+    },
+    {
+      "id": "root-cause",
+      "how": "The selection rule is fixed, not the 42 individual requests."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and test names are written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-cli/src/drain.rs (entry points `drain` and `drain_with`; `Steps::queue` builds the item list, then `Drain::prepare` plans and reads underspecified items, then items run in plan order; `vet` rechecks stale readings; `RealSteps::run` returns `needs_accepting` when `go` returns `GoResult::Reread`), crates/athena-core/src/steward.rs (`queued_work` lists Queued and Proposed jobs on the DRAINED_CHANNELS 'cli' and the steward channel and marks proposed ones read; `approved_work`), crates/athena-core/src/reading.rs (`check_reading_text` and the other `check_*` functions are the reading checks), and crates/athena-cli/tests/drain.rs (stub `Steps` tests such as `a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure`). Scope changes are measured directly by the `needs_accepting` result of a re-read, not by a stand-in.",
+    "Reading of the cause: a proposed job whose latest reading fails reading checks, or that was read earlier, is not run unattended, even though `queued_work` already lists proposed jobs. The producer must find the exact point where the batch skips them. It is probably the item selection in `Steps::queue` or `queued_work`, since the request names the item selection as the change. The fix is to include a proposed job when its latest reading passes every check in `check_reading_text`.",
+    "Hestia's requests are on a drained channel or must be added to the drained set if they are not. The producer checks this and keeps that change minimal.",
+    "No record or data file is added under crates/, so `check_record_file` and `AnyRecord` are unaffected. No governance file changes. The change loosens selection rather than adding a refusal rule, so no refusal-rate criterion applies.",
+    "A reading whose checks fail, and a scope change after a settings change, stay out of the batch and are left for `athena go`."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/tests/drain.rs has a deferred request (queued by `ask --later`) in state proposed whose latest reading passes the reading checks. The drain runs it, and `cargo test -p athena-cli --test drain` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test in crates/athena-cli/tests/drain.rs has a request re-read with a changed scope after a settings change. The drain does not run it, reports it as needing a person (`needs_accepting`), counts no failure, and `cargo test -p athena-cli --test drain` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that a proposed deferred request whose latest reading fails a reading check is not run by the batch, and that a run of proposed and queued items goes in priority order (the urgent one before the lower priority one). `cargo test -p athena-cli` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The diff changes only the drain's item selection (crates/athena-cli/src/drain.rs, and crates/athena-core/src/steward.rs only if selection lives there) and the tests, and `git diff` shows no change to athena.toml, defaults.toml, or .github/workflows.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo test` passes for the workspace, `cargo clippy` is clean, and `cargo fmt --check` passes. The module docs of drain.rs describing 'A read request stays queued' are updated to state the new rule.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Changing the reading checks themselves",
+    "Changing `athena go` or `athena ask` behavior",
+    "Changing the rule that a changed-scope re-read needs a person",
+    "Running the 42 existing proposed requests",
+    "Changes to athena.toml, defaults.toml or workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 3.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2100.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.67,
+      "p_user_intervenes": 0.08719101123595505,
+      "cost_usd": {
+        "p10": 0.5584188368931989,
+        "p50": 1.3460483,
+        "p90": 3.8720571843369203
+      },
+      "wall_time_s": {
+        "p10": 544.4413564344393,
+        "p50": 1980.2520507261522,
+        "p90": 4206.327679514252
+      }
+    }
+  },
+  "departures": "The code is large (drain.rs is about 4000 lines) and the exact skip point is unclear because `queued_work` already lists proposed jobs. That raises cost and time, and lowers the pass probability, relative to the reference.",
+  "urgent_reason": "The urgent request waited 9 hours because batches skipped proposed readings, and running it cuts that wasted idle time.",
+  "hard_reason": "It changes which items the drain selects and runs and relies on the reading checks as a gate, so a mistake could run unvetted work or skip valid work.",
+  "producer_effort": "high"
+}
