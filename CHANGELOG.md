@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- The firstmate study showed Reopened as a state that ends the task, but teardown sends the reopened backlog
+  row back to Queued. Root cause: the model gave Reopened the terminal kind and no way out. Reopened is now a
+  waiting state with a new transition (t12) to Queued, a new claim (c45) citing the teardown script's Queued
+  return, and intro text saying only Done ends the task. Site tests that asserted the old tag or counted
+  summaries were adjusted to match.
+
 ### Added
 
 - The verifier now sees Athena's recorded "fails without the fix" run. Root cause: the verifier gets no

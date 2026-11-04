@@ -860,7 +860,7 @@ mod tests {
     fn the_real_study_gives_every_transition_a_summary_and_both_deciders() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let html = render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap();
-        assert_eq!(html.matches("<p class=\"summary\">").count(), 11);
+        assert_eq!(html.matches("<p class=\"summary\">").count(), 12);
         assert_eq!(html.matches("<p class=\"leadin\">").count(), 5);
         assert!(html.contains("<dt>agent</dt>") && html.contains("<dt>code</dt>"));
     }
@@ -963,8 +963,12 @@ mod tests {
         assert!(!html.contains("model-limit"));
         let at = html.find("<strong>reopened</strong>").unwrap();
         assert!(
-            html[at..]
-                .starts_with("<strong>reopened</strong> <span class=\"tag\">ends the task</span>")
+            html[at..].starts_with("<strong>reopened</strong> <span class=\"tag\">waiting</span>")
+        );
+        assert_eq!(
+            html.matches("<span class=\"tag\">ends the task</span>")
+                .count(),
+            1
         );
         assert!(html.contains("Reopened is not a failure"));
     }
