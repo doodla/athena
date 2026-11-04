@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261010-225741-yvk0",
+  "round": 2,
+  "at": "2026-11-04T14:22:01.561307776Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run_pin_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run_pin_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The commit that prompted the request is a parentless second root, and no test covers that case.",
+      "evidence": "athena.toml:156-157 and crates/athena-gate/src/legacy.rs:44-46 describe 64ecdc9 as \"a parentless second root ... joined main through the merge of the bootstrap (361a786)\". Step 4 names the empty-tree branch for this case. The criterion 1 fixture only uses a normal commit with a parent, so the root-commit path and its diff against the empty tree are never run. A root commit's diff is its whole tree, so this is also the case most likely to hit the 200 KB cap and the records/ filter. Fix: Add a case to the criterion 1 or 2 test: create a parentless commit with `commit-tree` (no -p) that holds a visible file and a records/ file, merge it into main with --allow-unrelated-histories, and request it. Assert it is shown, its visible paths are listed, and records/ is absent.",
+      "location": "Demonstrations, criterion 1 / Step 4 ('first parent or empty tree')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The cap of 8 is applied before rev_parse, so false-positive tokens can push real hashes out.",
+      "evidence": "commit_hashes_in deduplicates and keeps the first 8 tokens before anything is resolved. Tokens such as UUID segments or hex-with-digit ids in the request take slots, and a real hash later in the text is dropped. The note then says it was ignored because of the limit. Fix: Have the core resolve every candidate token with rev_parse and is_ancestor, then cap at 8 commits that resolved. The brief condition can stay 'any candidate token'.",
+      "location": "Decision 4 (commit_hashes_in keeps the first 8) / Step 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The reason for dropping the body is that it can name hidden paths, but the subject can too.",
+      "evidence": "Decision 6 says \"A body can name hidden paths\". A subject such as \"Update records/jobs/x.json\" names one just as well. history_text (snapshot.rs:318) already prints subjects as they are. Criterion 2 says the hidden path name must not appear \"anywhere in the snapshot, including the history view\", and passes only because the fixture's subject is harmless. Fix: Either write in D08 and enforcement.md that subjects are shown as they are (the same as HISTORY.txt) and may name hidden paths, or put the subject through the same hidden-name check and replace it with a placeholder when it matches a hidden path.",
+      "location": "Decision 6 (subject only, no body) / Criterion 2 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The new sentence comes right after text saying history is absent, which reads as a contradiction.",
+      "evidence": "The existing text says \"records/, the owner's private files, and history are absent by design\", and the plan appends a sentence pointing at a commit view. Fix: Start the conditional sentence with something like 'Except: the commits this request names are shown, filtered, in ATHENA-COMMITS.txt ...' so the two sentences agree.",
+      "location": "Decision 5 / briefs.rs:452, 460, 1188",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan relies on and accept the plan; the four findings are minor or nit. Snapshot::create (snapshot.rs:59-110), copy_files (349), work_tree_tree (210), history_text and classify, Git::rev_parse (lib.rs:289, peels to ^{commit}), is_ancestor (353) and diff_tree (513) all exist and behave as the plan describes. The callers named in the plan match the code: producer_snapshot (producer.rs:78), verifier_snapshot and its call sites (mod.rs:1502, verification.rs:298 and :326, checks.rs:367), and the run_pin_tests.rs fake invoker, which records spec.workdir (lines 866 and 933). Hiding the view file through .git/info/exclude follows existing code: pin::mount (pin.rs:127-133) already excludes its mount directory the same way. So candidate trees, seed trees and the prepared tree stay unchanged, and the plan has tests for that. Generating a filtered text file instead of exposing the user's git objects is the sound choice. It reuses the filter HISTORY.txt already uses, puts nothing in the snapshot that links back to the user's repository, and handles typos without failing the job. Each demonstration calls production code (Snapshot::create plus add_commit_views, the brief builders, and a whole job run through the existing fake invoker) and includes a control that would fail without the behavior. The dependents list matches the callers I found by searching. Athena's own scope findings, the edits to mod.rs and run_pin_tests.rs, are argued for in the plan (the one-line main verifier call and a test-only harness), and I find the reasons sufficient. Worth fixing: 64ecdc9, the commit behind the request, is a parentless second root, and that path has no test. Also, the cap of 8 is applied before validation, and commit subjects can name hidden paths just as bodies can. The plan calls no external service."
+}
