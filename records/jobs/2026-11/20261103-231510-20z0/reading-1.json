@@ -1,0 +1,146 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261103-231510-20z0",
+  "n": 1,
+  "at": "2026-11-04T00:30:14.322886397Z",
+  "invocation_seq": 1,
+  "base_commit": "420f4b7ee4e56e13b3788d09077c2bee9a8bb256",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Pass over an item that fails twice while flagged, don't stop batch",
+  "summary": "Extends the earlier fix (a batch no longer stops on repeated failure of an item whose line the scope guard paused) to lines the guard only flagged (T1/T3/T5), as for item 20261103-193428-df2m. After two failed attempts on a flagged line, the drain passes the item over with a reason and runs the next item; the audience is the operator running `athena drain` batches. Previous job 20261103-193428-df2m (a different fix, job-slot counting) is related by id only, so its work is not carried here.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Change and test in Rust under crates/athena-cli."
+    },
+    {
+      "id": "tested",
+      "how": "cargo test, clippy and fmt --check must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "A drain test exercises two failures on a flagged line then the next item running."
+    },
+    {
+      "id": "root-cause",
+      "how": "The stop decision at the ATTEMPTS failure point in Drain::attempts is changed for flagged lines, not just this item."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in drain.rs and its tests, plus a changelog line."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/drain.rs (Drain::attempts around lines 1735-1830, where failures >= ATTEMPTS returns ItemEnd::Failed unless paused_reason finds a pause; Steps::paused at ~650; RealSteps::paused at ~3339) and crates/athena-core/src/scope_guard.rs (Athena::line_pause at 782 returns only Level::Pause marks; live_marks at 796 also holds flags). The cause: line_pause ignores flags, so a flagged line that fails twice yields ItemEnd::Failed and the repeated-failure stop. No record or data file is added, so the records allow-list is untouched; the property is measured by driving Drain with stub Steps in crates/athena-cli/tests/drain.rs.",
+    "Reading of 'pause it': after the second failure on a flagged line the drain passes the item over for the rest of the batch (as ItemEnd::Paused does today), with a note naming the flag signals; it does not write a new pause file. Simplest route: a new defaulted Steps method (e.g. flagged) backed by Athena::live_marks, consulted at the ATTEMPTS point alongside paused_reason.",
+    "The earlier landed fix's tests in tests/drain.rs for paused lines stay passing; an unflagged, unpaused item failing twice still stops the batch as 'repeated failure'.",
+    "Job 20261103-193428-df2m is only the example incident (the item flagged T1, T3, T5); its own verification findings (uncited command evidence for a behavior criterion) concern a different change and are addressed here by naming runnable commands in each behavior criterion."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/tests/drain.rs: an item fails twice on a line that is flagged (not paused), and the batch then runs the next item, which is recorded as run/landed, with no 'repeated failure' stop. Run `cargo test -p athena-cli --test drain` and see it pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows an item that fails twice with no flag and no pause still ends the batch with the repeated-failure stop naming it. Run `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The passed-over flagged item is reported with a line naming it and its flag reason, and the batch summary does not count it as a failed item stopping the run. Checked by the new test's assertions on output under `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Existing paused-line drain tests still pass; `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "drain.rs (Drain::attempts, the stop-reasons text and the module docs near line 26 and 944) says a line that is flagged or paused is passed over after two failures; Grep for 'flagged' in crates/athena-cli/src/drain.rs shows the new rule documented where the old paused rule is.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry stating that a batch no longer stops on repeated failure of a flagged item, citing the 3 Nov incident with item 20261103-193428-df2m.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Job 20261103-193428-df2m's change (re-read 'needs accepting' not counting toward --job-limit): not kept or redone here; its files drain.rs, tests/drain.rs, main.rs and CHANGELOG.md are only touched here for this request's change, and its 'needs accepting' slot logic is not part of this job.",
+    "Changing the scope guard's T1-T5 thresholds or when a flag or pause is recorded.",
+    "Changing the stop on repeated failure for items whose line is neither flagged nor paused.",
+    "Writing or lifting pause files on disk beyond what the existing watcher already does.",
+    "Changing athena.toml, defaults.toml or workflow files."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.66,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1800.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7134020618556701,
+      "p_verification_passes": 0.6675324675324675,
+      "p_user_intervenes": 0.09023255813953487,
+      "cost_usd": {
+        "p10": 0.5588824483776216,
+        "p50": 1.3352032163084988,
+        "p90": 3.6134136703775392
+      },
+      "wall_time_s": {
+        "p10": 540.4818145636394,
+        "p50": 1956.9969620539994,
+        "p90": 4189.8141646494405
+      }
+    }
+  },
+  "departures": null,
+  "hard_reason": "Changes a rule that decides whether a batch stops (the drain's repeated-failure stop), part of the run pipeline.",
+  "producer_effort": "high"
+}
