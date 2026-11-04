@@ -170,9 +170,11 @@ pub enum PlanMode {
     /// Every change job is planned. The default, so a section that only says `enabled = true` is unchanged.
     #[default]
     All,
-    /// Only a job whose reading is marked hard is planned (job-planning.md section 9, D143). A hard job adds
-    /// or changes a rule that can refuse or hold work, or changes landing, the history check, records, the run
-    /// pipeline or the drain; the reader is given that definition in the `hard_reason` field of its output.
+    /// Only a job whose reading is marked hard is planned (job-planning.md section 9, D143), and a job whose
+    /// accepted criteria ask for a failing run without the fix, which the run decides and passes as `hard`.
+    /// A hard job adds or changes a rule that can refuse or hold work, or changes landing, the history check,
+    /// records, the run pipeline or the drain; the reader is given that definition in the `hard_reason` field
+    /// of its output.
     Hard,
 }
 
@@ -202,7 +204,8 @@ pub struct JobPlanConfig {
 }
 
 impl JobPlanConfig {
-    /// Whether a job is planned: planning is enabled and, in `hard` mode, the job's reading is marked hard.
+    /// Whether a job is planned: planning is enabled and, in `hard` mode, `hard` is true. The caller passes
+    /// true for a reading marked hard and for one whose accepted criteria ask for a failing run without the fix.
     pub fn plans(&self, hard: bool) -> bool {
         self.enabled && (self.mode == PlanMode::All || hard)
     }

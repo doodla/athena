@@ -1158,6 +1158,64 @@ fn with_athena_toml_planning_hard_jobs_only_a_hard_reading_runs_the_planner_and_
 }
 
 #[test]
+fn an_easy_job_with_a_fails_without_criterion_is_planned_under_the_repository_hard_mode() {
+    // Not marked hard, but its behavior criterion asks for a test that fails without the fix: the job is
+    // planned, so Athena can run that demonstration and show it to the verifier.
+    let fx = Fixture::with_config(&repository_job_plan_config());
+    let mut scenario = reader_scenario(json!(null));
+    scenario.reading["acceptance_criteria"][1]["text"] =
+        json!("a test fails without the fix and passes with it");
+    let calls = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let (job, f) = run_job(&athena);
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            Role::Reader,
+            Role::Planner,
+            Role::Critic,
+            Role::Producer,
+            Role::Verifier
+        ]
+    );
+    let dir = job.dir();
+    for path in ["job-plan-1.json", "critique-1.json"] {
+        assert!(
+            fx.git
+                .path_exists(&fx.head(), &format!("{dir}/{path}"))
+                .unwrap(),
+            "{path}"
+        );
+    }
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
+#[test]
+fn an_ordinary_easy_job_still_skips_planning_under_the_repository_hard_mode() {
+    // Its behavior criterion ("the tests still pass") does not ask for a failing run without the fix.
+    let fx = Fixture::with_config(&repository_job_plan_config());
+    let scenario = reader_scenario(json!(null));
+    let calls = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let (job, f) = run_job(&athena);
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [Role::Reader, Role::Producer, Role::Verifier]
+    );
+    let dir = job.dir();
+    for path in ["job-plan-1.json", "critique-1.json"] {
+        assert!(
+            !fx.git
+                .path_exists(&fx.head(), &format!("{dir}/{path}"))
+                .unwrap(),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn a_hard_reading_with_planning_enabled_for_every_job_and_one_with_planning_off_follow_the_mode() {
     // `mode = "all"` plans an ordinary reading too; `enabled = false` plans nothing, not even a hard one.
     for (table, ordinary_planned, hard_planned) in [

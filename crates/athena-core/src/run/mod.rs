@@ -39,11 +39,11 @@ use athena_context::{
 };
 use athena_data::records::{
     AcceptedBy, AnyRecord, Baseline, Build, Candidate, Caps, ChangeEntry, ChangeStatus, CheckRun,
-    Critique, CritiqueVerdict, DeliverableAction, Demonstration, DependentKind, Finding,
-    FindingSource, Invocation, InvocationOutcome, Job, JobKind, JobPlan, Outcome, OutcomeState,
-    Owner, PinnedRepo, PlanDecision, PlanDependent, PlanFile, PlanRisk, PolicyViolation,
-    ProducerReport, Reading, RejectedOption, Replay, ReportedCheck, ReportedCriterion, Role, Score,
-    Severity, Totals, Verdict, Verification,
+    CriterionKind, Critique, CritiqueVerdict, DeliverableAction, Demonstration, DependentKind,
+    Finding, FindingSource, Invocation, InvocationOutcome, Job, JobKind, JobPlan, Outcome,
+    OutcomeState, Owner, PinnedRepo, PlanDecision, PlanDependent, PlanFile, PlanRisk,
+    PolicyViolation, ProducerReport, Reading, RejectedOption, Replay, ReportedCheck,
+    ReportedCriterion, Role, Score, Severity, Totals, Verdict, Verification,
 };
 use athena_data::{JobId, sha256_hex};
 use athena_gate::redact::Redactor;
@@ -227,6 +227,35 @@ fn plan_verdict(agent_verdict: CritiqueVerdict, findings: &[Finding]) -> Critiqu
     } else {
         agent_verdict
     }
+}
+
+/// The wordings that name a failing run without the fix, in lower case with single spaces. "Tests fail without
+/// the fix" holds the second one.
+const FAILING_RUN_PHRASES: [&str; 4] = [
+    "fails without the fix",
+    "fail without the fix",
+    "fails without the change",
+    "fails without the mechanism",
+];
+
+/// Whether an accepted Behavior criterion asks for a run that fails without the fix. Such a criterion is
+/// shown to the verifier as a demonstration, and a demonstration runs only from an accepted plan, so the job
+/// is planned even when judged easy. The text is compared in lower case with whitespace collapsed, against
+/// `FAILING_RUN_PHRASES`; a Content criterion that only mentions the phrase does not count.
+fn asks_for_failing_run(reading: &Reading) -> bool {
+    reading
+        .acceptance_criteria
+        .iter()
+        .filter(|c| c.kind == CriterionKind::Behavior)
+        .any(|c| {
+            let text = c
+                .text
+                .to_lowercase()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            FAILING_RUN_PHRASES.iter().any(|p| text.contains(p))
+        })
 }
 
 /// Runs `command` to the end, killing it after `timeout`. An error says how it ended when it did not succeed.
@@ -799,14 +828,13 @@ impl Athena {
         crate::disk::clear_hold(&self.state, &id);
         let capability_id = reading.capability.clone().expect("checked by the caller");
         let capability = self.capability(&capability_id)?;
-        // In `hard` mode only a reading marked hard is planned; the marking is the one that escalates the
-        // producer (job-planning.md section 9, D143).
-        let planned = jc
-            .config
-            .job_plan
-            .as_ref()
-            .is_some_and(|p| p.plans(reading.hard_reason.is_some()))
-            && !capability.pins_repo();
+        // In `hard` mode a reading marked hard is planned; the marking is the one that escalates the producer
+        // (job-planning.md section 9, D143). A reading whose accepted criteria ask for a failing run without
+        // the fix is planned too, even when judged easy: a demonstration runs only from an accepted plan, so
+        // without one the verifier never sees the run its criterion asks for (job 20261103-231422-8dzf).
+        let planned = jc.config.job_plan.as_ref().is_some_and(|p| {
+            p.plans(reading.hard_reason.is_some() || asks_for_failing_run(&reading))
+        }) && !capability.pins_repo();
         // The whole path still to run (every planning round, the producer and the verifier) must be
         // affordable before anything is committed.
         self.preflight(&jc, job.spent_usd(), ReserveStage::Dispatch { planned })?;

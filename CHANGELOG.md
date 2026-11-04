@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A job with a "fails without the fix" criterion is now planned even when the reader judged it easy. Root
+  cause: the planning gate in `athena go` looked only at `hard_reason`, so in `hard` mode an easy job got no
+  plan, and Athena runs a "fails without the fix" demonstration only from an accepted plan; the verifier saw no
+  such run and rejected correct code (job 20261103-231422-8dzf). The gate now also plans when an accepted
+  Behavior criterion names a failing run without the fix (case and spacing ignored). Ordinary easy jobs still
+  skip planning, and `mode = "all"`, `enabled = false` and the study exception are unchanged. Tests cover a
+  planned easy job whose verifier brief holds the revert-run record, and an ordinary easy job that is not
+  planned.
 - The firstmate study showed Reopened as a state that ends the task, but teardown sends the reopened backlog
   row back to Queued. Root cause: the model gave Reopened the terminal kind and no way out. Reopened is now a
   waiting state with a new transition (t12) to Queued, a new claim (c45) citing the teardown script's Queued
