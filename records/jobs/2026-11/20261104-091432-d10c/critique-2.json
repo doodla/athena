@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-091432-d10c",
+  "round": 2,
+  "at": "2026-11-04T11:01:04.95172728Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/close.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/close.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "A revert record with exit code 0 leaks into the job-wide `ran` list through the unchanged filter line, which bypasses the per-criterion scope.",
+      "evidence": "verify.rs 378 keeps `.filter(|c| c.passed && (c.exit_code == Some(0) || (c.reused && c.exit_code.is_none())))` and adds every match's command to `ran`, which every criterion uses (line 503). Decision 3 and step 3 set passed = true on every revert record. A demonstration that still passes without the fix exits 0 (run/tests.rs 3164-3186 has that case: 'exit code 0', 'passed without the fix'). Such a record matches the filter, so its command becomes seen for every behavior criterion, including ones outside revert_for. It is also a run on the reverted copy, not the candidate tree. Demonstration case (e) uses only a failing run, so it would not catch this. Fix: Keep revert records out of the job-wide loop without editing the searched text. For example, chain `.filter(|c| c.revert_for.is_empty())` before the existing filter call, so the line `c.reused && c.exit_code.is_none()` stays the same. Add a verify.rs test: a revert record with exit_code Some(0) and revert_for [3], cited by criterion 2, stays unseen with the Major finding. Say in the docs whether an exit-0 revert run counts for its own criteria at all.",
+      "location": "Plan decision 2 / step 4; crates/athena-core/src/verify.rs:374-381",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The run-level 'criterion citing the record is met' assertion has no seam for making the fake verifier cite the record.",
+      "evidence": "run_demonstration_job(repo, plan, runs, also_edit) builds its script from planning_script plus a producer edit hook. No parameter controls the verifier's structured output or its cited commands, and the plan does not say how the fake verifier will cite 'fails-without-1'. Fix: Name the seam: add a parameter or a variant of run_demonstration_job that overrides the Role::Verifier turn's criteria commands with the record's command or name. Then assert that the stored criterion is met with commands_verified true.",
+      "location": "Demonstration for criterion 4, third assertion; crates/athena-core/src/run/tests.rs:3069-3099",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The record's name is built in two places.",
+      "evidence": "run/checks.rs 331 already builds `fails-without-{first criterion}` for the CheckSpec, and revert_record builds the name again from group.criteria. Fix: Take the name from `run.name`, which run_check copies from the spec, or have both places call one helper, so the shown name and the recorded name cannot drift apart.",
+      "location": "Decision 4 / step 3 (revert_record)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read verify.rs judge() (lines 362-509), run/checks.rs (demonstration_records and demonstration_runs, 215-355), run/verification.rs (64-140), close.rs landing_body, the admission filter-line test, and the run-level demonstration helper. I also grepped the readers of `.checks`. The design mostly holds up and fits one producer run: the `revert_for` scope field, the per-criterion rule, adding the records after the verifier's inputs are built, the close.rs count helper and the carried-line rendering. One soundness hole is left. Every revert record has passed = true, and the plan keeps the job-wide filter at verify.rs 378 (`c.passed && (c.exit_code == Some(0) || ...)`) exactly as it is. So a revert run that exits 0 (the test still passed without the fix, a case the existing test a_demonstration_that_still_passes_without_the_fix_is_recorded_as_passing produces) goes into the job-wide `ran` list and counts for every criterion. That breaks the plan's own per-criterion scope and adds to the D43 loosening. None of the planned negative cases uses exit 0, so no test would catch it. Everything else I checked is right: the helpers exist, the dependents list covers the `.checks` readers I found, and Athena's close.rs finding is answered with a reason. One small gap: the run-level verdict assertion needs the fake verifier to cite the record, and run_demonstration_job has no parameter for that."
+}

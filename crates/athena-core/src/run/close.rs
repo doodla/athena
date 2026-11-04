@@ -615,6 +615,12 @@ fn branch_suffix(athena: &Athena) -> String {
     }
 }
 
+/// The number of checks in a verification record, not counting recorded "fails without the fix" runs: those
+/// are demonstrations, not checks that passed.
+fn measured_check_count(checks: &[athena_data::records::CheckRun]) -> usize {
+    checks.iter().filter(|c| c.revert_for.is_empty()).count()
+}
+
 fn landing_body(reading: &Reading, verification: &Verification) -> String {
     let mut body = format!("{}\n\nCriteria met:\n", reading.summary.trim());
     for (i, c) in verification.criteria.iter().enumerate() {
@@ -628,7 +634,7 @@ fn landing_body(reading: &Reading, verification: &Verification) -> String {
     let minor = verification.findings.len();
     body.push_str(&format!(
         "\nVerified independently: final verdict pass; {} checks passed; {minor} finding(s) of minor or lower severity.",
-        verification.checks.len()
+        measured_check_count(&verification.checks)
     ));
     if let Some(summary) = &verification.summary {
         body.push_str(&format!("\n\nVerifier: {}", summary.trim()));
@@ -644,4 +650,35 @@ pub fn build_text(build: &Build) -> String {
         short(&build.source_commit),
         if build.dirty { ", dirty" } else { "" }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::measured_check_count;
+    use athena_data::records::CheckRun;
+    use athena_data::{Quantity, Unit};
+
+    fn check(name: &str, revert_for: Vec<u32>) -> CheckRun {
+        CheckRun {
+            name: name.into(),
+            command: vec!["cargo".into(), "test".into()],
+            exit_code: Some(0),
+            passed: true,
+            tests_ran: None,
+            duration: Quantity::measured(1.0, Unit::Seconds, "test"),
+            output_tail: String::new(),
+            note: None,
+            failed_tests: Vec::new(),
+            reused: false,
+            revert_for,
+        }
+    }
+
+    #[test]
+    fn a_revert_record_is_not_counted_as_a_passed_check() {
+        let ordinary = check("test", Vec::new());
+        let revert = check("fails-without-1", vec![1]);
+        assert_eq!(measured_check_count(&[ordinary.clone(), revert]), 1);
+        assert_eq!(measured_check_count(&[ordinary.clone(), ordinary]), 2);
+    }
 }

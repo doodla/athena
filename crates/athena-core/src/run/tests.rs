@@ -1701,6 +1701,7 @@ mod produce_and_verify_order_tests {
             note: Some(crate::checks::deadline_note(limit_s)),
             failed_tests: Vec::new(),
             reused: false,
+            revert_for: Vec::new(),
         }
     }
 
@@ -2646,6 +2647,7 @@ mod produce_and_verify_order_tests {
             note: None,
             failed_tests: Vec::new(),
             reused: false,
+            revert_for: Vec::new(),
         }
     }
 
@@ -3330,6 +3332,19 @@ mod produce_and_verify_order_tests {
         planner: Vec<serde_json::Value>,
         critic: Vec<serde_json::Value>,
     ) -> HardModeJob {
+        run_hard_mode_job_citing(kind, text, planner, critic, None)
+    }
+
+    /// [`run_hard_mode_job`], except that when `cited` is set the fake verifier cites only that text for
+    /// the criterion and ran nothing itself, so only Athena's own records can make the text seen running.
+    fn run_hard_mode_job_citing(
+        kind: &str,
+        text: &str,
+        planner: Vec<serde_json::Value>,
+        critic: Vec<serde_json::Value>,
+        cited: Option<&str>,
+    ) -> HardModeJob {
+        let cited = cited.map(String::from);
         let repo = repo_with_config(
             "\n[job_plan]\nenabled = true\nmode = \"hard\"\nplanner_usd = 0.75\ncritic_usd = 0.75\n\
              planner_timeout_s = 600\ncritic_timeout_s = 600\nmax_rounds = 3\n",
@@ -3354,8 +3369,16 @@ mod produce_and_verify_order_tests {
                 Role::Verifier => {
                     let verdict = turn.structured.as_mut().unwrap();
                     verdict["criteria"][0]["criterion"] = text.clone().into();
-                    verdict["criteria"][0]["commands"] = json!(["cargo test"]);
-                    turn.commands_run = vec!["cargo test".into()];
+                    match &cited {
+                        Some(cited) => {
+                            verdict["criteria"][0]["commands"] = json!([cited]);
+                            turn.commands_run = Vec::new();
+                        }
+                        None => {
+                            verdict["criteria"][0]["commands"] = json!(["cargo test"]);
+                            turn.commands_run = vec!["cargo test".into()];
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -3418,6 +3441,71 @@ mod produce_and_verify_order_tests {
             section.contains("failed without the fix (exit 1)"),
             "{section}"
         );
+    }
+
+    /// A behavior criterion that asks for a "fails without the fix" run, whose verifier cites `cited`
+    /// and ran nothing: the stored criterion, and the stored checks.
+    fn judged_citing(cited: &str) -> (athena_data::records::CriterionResult, Vec<CheckRun>) {
+        let seam =
+            json!("run_hard_mode_job_citing with a scripted planner and critic queue; exists");
+        let job = run_hard_mode_job_citing(
+            "behavior",
+            "A test fails without the fix",
+            vec![demonstration_plan_with_seam(seam)],
+            vec![accepting_critique()],
+            Some(cited),
+        );
+        let verification = job.finished.verification.expect("the job was verified");
+        (verification.criteria[0].clone(), verification.checks)
+    }
+
+    #[test]
+    fn a_criterion_citing_the_recorded_demonstration_is_seen_running_by_command_and_by_name() {
+        for cited in ["cargo test --locked demo", "fails-without-1"] {
+            let (criterion, _) = judged_citing(cited);
+            assert!(criterion.commands_verified, "{cited}: {criterion:?}");
+            assert!(criterion.met, "{cited}: {criterion:?}");
+        }
+        // A command the demonstration did not run stays unseen.
+        let (criterion, _) = judged_citing("cargo test --locked other");
+        assert!(!criterion.commands_verified, "{criterion:?}");
+        assert!(!criterion.met, "{criterion:?}");
+    }
+
+    #[test]
+    fn the_demonstration_run_is_stored_in_the_verification_checks_in_the_pass_that_shows_it() {
+        let repo = repo_with_planning(3);
+        let job = run_demonstration_job(
+            &repo,
+            demonstration_plan("cargo test --locked demo"),
+            Some(README_TEST),
+            None,
+        );
+        let checks = job.finished.verification.expect("verified").checks;
+        let stored: Vec<&CheckRun> = checks.iter().filter(|c| !c.revert_for.is_empty()).collect();
+        assert_eq!(stored.len(), 1, "{checks:?}");
+        let run = stored[0];
+        assert_eq!(run.name, "fails-without-1");
+        assert_eq!(run.revert_for, [1]);
+        assert!(run.passed);
+        assert_eq!(run.command, ["cargo", "test", "--locked", "demo"]);
+        assert_eq!(run.exit_code, Some(1));
+        assert!(run.output_tail.contains("test demo ... FAILED"), "{run:?}");
+        // The same pass showed it to the verifier, once.
+        let prompt = &job.verifier_prompt;
+        assert_eq!(prompt.matches("fails-without-1: not a check").count(), 1);
+        // An ordinary check is not marked.
+        assert!(checks.iter().any(|c| c.revert_for.is_empty()));
+    }
+
+    #[test]
+    fn a_demonstration_that_did_not_run_is_not_stored_as_a_check() {
+        let repo = repo_with_planning(3);
+        let mut plan = demonstration_plan("cargo test --locked demo");
+        plan["demonstrations"][0]["command"] = "cargo test --locked && echo done".into();
+        let job = run_demonstration_job(&repo, plan, Some("exit 1"), None);
+        let checks = job.finished.verification.expect("verified").checks;
+        assert!(checks.iter().all(|c| c.revert_for.is_empty()), "{checks:?}");
     }
 
     /// `demonstration_plan` for a behavior criterion: it also names a test seam.

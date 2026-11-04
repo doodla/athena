@@ -1,0 +1,170 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261104-103213-f1cw",
+  "n": 1,
+  "at": "2026-11-04T10:52:44.208731327Z",
+  "invocation_seq": 2,
+  "base_commit": "1cf0def9d09c25d195befc7fe2c0c41e470db89b",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Reuse a green CI result as the job baseline when the fingerprint matches",
+  "summary": "The baseline stage (`take_baseline`) skips its local fmt, clippy and test run when a green GitHub result exists for the base's governed content (same fingerprint, resolved the way candidate checks are). It then records a reused baseline. Otherwise it runs locally as today. The audience is Athena's operator, who pays about 20 minutes per job for the local baseline.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The change is Rust only."
+    },
+    {
+      "id": "tested",
+      "how": "Tests cover the reused and local paths, with cargo test and clippy passing."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that no local run happens on a hit and that the local run still happens on a miss."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is the baseline record and local-run count, not the new wiring."
+    },
+    {
+      "id": "buy-first",
+      "how": "It reuses the existing CI resolution and fingerprint code."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the baseline stage."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs the named cargo tests."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and the CHANGELOG entry are written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: the entry point is `take_baseline` in crates/athena-core/src/run/checks.rs, called from `baseline_stage` in crates/athena-core/src/run/mod.rs (about line 1394) before the producer. Today it builds a `Baseline` and runs `baseline_checks`, which calls `crate::checks::baseline_runs` (crates/athena-core/src/checks.rs). The new order is: resolve a CI result for the base's fingerprint first (`resolve` in crates/athena-core/src/ci_result.rs, `Source::Ci`, the same path candidate checks use in run/mod.rs around lines 1499-1587 and `reuse_statement` in verify.rs). Only when that gives no green result does the baseline probe run locally.",
+    "Code survey: the baseline record is `Baseline` in crates/athena-data/src/records.rs (`athena.baseline/1`, `deny_unknown_fields`, written at `<job>/baseline.json`). The change adds an optional reuse marker to it (for example a `reused` source note), defaulted so existing files still parse. The records validation accepts it through `check_record_file` (records.rs line 3050) and the `AnyRecord::Baseline` arm, which maps the path to `baseline.json` and the schema to `BASELINE_SCHEMA`. Because the schema tag stays the same, the allow-list needs no new path. The existing baseline round-trip tests in records.rs (around lines 4524-4598, using `check_record_file` on `{job}/baseline.json`) are extended to cover the new field.",
+    "Code survey: the saving is measured directly in tests, not through a stand-in. The local-run path is observed by whether `baseline_runs` (the check executor) is called, as the existing `a_green_run_for_the_same_sha_is_reused_and_nothing_runs_locally` test in ci_result.rs and `ci_reuse_run` in crates/athena-core/src/run/tests.rs do for candidates. The recorded `Baseline.checks` then carry `reused: true` (the `CheckRun` field already exists) with no local run.",
+    "The governed-content fingerprint of the base is the existing `fingerprint(&git, base, base)` used for `base_fingerprint` in run/candidate.rs. The base's CI result is looked up by that fingerprint, which may match another commit's green run, such as the landed candidate or main.",
+    "A reused baseline keeps the `failed_before` and `failed_tests_before` semantics. A green CI result means all checks passed, so no check is excused as pre-existing. A CI lookup error, a red or pending run, or a missing run falls back to the local run with a note, and the job never fails because of the lookup.",
+    "No governance file (athena.toml, defaults.toml, workflows) needs to change. A nested run keeps its existing skip note."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-core/src/run/tests.rs (run with `cargo test -p athena-core baseline`) gives a green CI result for the base's fingerprint. `take_baseline` returns a baseline marked reused, whose checks are marked reused and pass, and the local check executor was never invoked.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test (run with `cargo test -p athena-core baseline`) has no CI result, a red one, or a lookup error for the base's fingerprint. `take_baseline` runs the checks locally as before and returns the same records as before, with no reuse marker, and a red or error case also leaves a note.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The `Baseline` round-trip tests in crates/athena-data/src/records.rs, via `check_record_file` and `AnyRecord::Baseline` on `{job}/baseline.json`, pass with and without the new reuse field. An older baseline file with no such field still parses (`cargo test -p athena-data`).",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo test`, `cargo clippy --all-targets` and `cargo fmt --check` pass on the whole workspace.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Reuse is keyed on the same governed-content fingerprint that candidate check reuse uses, through the existing `ci_result::resolve` path, not a new lookup. The reuse decision and its reason (reused from which run, or why it ran locally) are printed in the job's output like the existing `ci         checks reused from ...` line.",
+      "kind": "content"
+    },
+    {
+      "text": "Docs or CHANGELOG.md state that the baseline can now be reused from a green CI result, and what happens when none exists.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Changing how candidate checks are reused, or the CI polling and wait logic.",
+    "Changing athena.toml, defaults.toml or any workflow under .github/workflows/.",
+    "Skipping the baseline for jobs with no green CI result.",
+    "Changing the verdict rules for pre-existing failures."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.65,
+      "p_verification_passes": 0.58,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.9,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7101522842639594,
+      "p_verification_passes": 0.6675126903553299,
+      "p_user_intervenes": 0.08838268792710706,
+      "cost_usd": {
+        "p10": 0.5566121699743194,
+        "p50": 1.3355031999999998,
+        "p90": 3.666034665160089
+      },
+      "wall_time_s": {
+        "p10": 543.0885001951771,
+        "p50": 1962.2506357336158,
+        "p90": 4198.189971879542
+      }
+    }
+  },
+  "departures": "The change touches the run pipeline and a record schema, so cost and time are above the reference and pass rates are slightly lower.",
+  "urgent_reason": "It removes about 20 minutes of redundant duplicated checking per job, which is wasted time.",
+  "hard_reason": "It changes the run pipeline (how a job's baseline stage is produced), and the baseline feeds the verdict's pre-existing-failure judgment, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
