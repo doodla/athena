@@ -1,0 +1,252 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261104-171104-yb47",
+  "round": 1,
+  "at": "2026-11-04T19:24:47.710147669Z",
+  "invocation_seq": 2,
+  "approach": "The snapshot already holds every requested value except `[budget] job_usd`, which is 50.00 and must be 60.00. Set that one line in athena.toml. Several tests pin the shipped value 50.00, by replacing the text \"job_usd = 50.00\" or by asserting 50.0. Raising it to 60.00 would break them, `cargo test --locked -p athena-data` included. So also update those test literals (test code only, no production code, no schema or key change) and refresh the Unreleased CHANGELOG entry, which still says 50.00. The brief's \"athena.toml only\" and \"config.rs untouched\" conflict with criterion 4. The only edits in config.rs are to its `#[cfg(test)]` module.",
+  "decisions": [
+    {
+      "choice": "Set job_usd = 60.00 in athena.toml and update the tests that pin 50.00, test code only.",
+      "reason": "The owner asked for 60. The tests `the_repository_budget_covers_two_reading_and_two_planning_rounds`, `the_repository_budget_caps_cover_their_sum` and the helper `with_job_usd` (config.rs, lines 877, 896, 916-917) assert 50.0 or replace the exact text `job_usd = 50.00` with `assert_ne!`. Without the edit, criterion 4 fails.",
+      "rejected": [
+        {
+          "option": "Change only athena.toml and leave the tests",
+          "why": "The athena-data tests fail on `assert_eq!(b.job_usd, 50.0)`. The athena-core tests that replace 50.00 fail on `assert_ne!`, or silently stop testing."
+        },
+        {
+          "option": "Keep job_usd at 50.00",
+          "why": "The owner's direction and the brief both say 60. 50.00 would also leave the 47.00 requirement with only 3.00 of headroom."
+        },
+        {
+          "option": "Rewrite the tests to read job_usd from the parsed config instead of using literals",
+          "why": "This is a bigger change than the task needs. A literal update is the smallest edit and keeps each test's intent."
+        }
+      ]
+    },
+    {
+      "choice": "Update the Unreleased CHANGELOG entry in place (50.00 to 60.00) rather than add a second bullet.",
+      "reason": "The existing bullet describes this same lift and states job_usd as 50.00. Leaving it would be wrong. CHANGELOG.md is a listed deliverable.",
+      "rejected": [
+        {
+          "option": "Add a new bullet",
+          "why": "The same change would then be recorded twice, with a contradicting number."
+        }
+      ]
+    },
+    {
+      "choice": "Do not change any other key. reader_timeout_s, check_timeout_s, planner_timeout_s, critic_timeout_s and the rest stay as they are.",
+      "reason": "Out of scope, and the snapshot already has them as wanted.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "Change line 38 `job_usd = 50.00` to `job_usd = 60.00`. Verify that all other requested values already match; change nothing else.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Edit the Unreleased 'Changed' bullet (lines 12-16): job_usd is raised to 60.00, covering the 47.00 the caps require, and tests that pinned 50.00 are updated.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Test module only: line 877 `50.0` to `60.0`, line 896 tuple `50.0` to `60.0`, lines 916-917 the replace source and message to `job_usd = 60.00`. No production code, key or schema change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Test only (lines 1328-1329): replace source `job_usd = 50.00` to `job_usd = 60.00`; keep 46.00.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Test only: lines 973, 1000 and 1031 use 60.00 as the replaced or restored shipped value; update the comment at 1030.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Test only: round_one_critic_check_follows_the_shared_reserve rows and comment (+10.00 each), dispatch_holds_a_job_that_cannot_afford_every_planning_round reader cost 31.5 to 41.5 and its comment.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Comment only at line 4068: 'shipped job budget of 50.00' to 60.00.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Test only: line 4141 expect `(2.0, 60.0)`.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In athena.toml, change `job_usd = 50.00` (line 38) to `job_usd = 60.00`. Confirm by reading that reader_usd 2.00, producer_usd 10.00, verifier_usd 5.00, producer_timeout_s 5400, verifier_timeout_s 3600, planner_usd 3.00, critic_usd 3.00 and max_rounds 5 are already set, and change no other line.",
+    "In crates/athena-data/src/config.rs `mod tests`: set line 877 to `assert_eq!(b.job_usd, 60.0)`, the tuple at line 896 to `(2.0, 10.0, 5.0, 60.0)`, and `with_job_usd` (lines 916-917) to replace and assert on `job_usd = 60.00`.",
+    "In crates/athena-core/src/admission.rs line 1328-1329, replace `job_usd = 50.00` with `job_usd = 60.00` as the source text (keep the 46.00 target and the message).",
+    "In crates/athena-core/src/run_pin_tests.rs, use `job_usd = 60.00` as the replaced text at lines 973 and 1000, and restore to 60.00 at line 1031; update the comment at 1030 ('shipped 60.00').",
+    "In crates/athena-core/src/run/tests.rs, shift the five planner_cost rows in round_one_critic_check_follows_the_shared_reserve by +10.00 (44.24, 41.25, 41.24, 44.25, 44.24) and fix the comment at 943 (job_usd 60.00, left 59.99). In dispatch_holds_a_job_that_cannot_afford_every_planning_round, change the reader cost 31.5 to 41.5 and the comment (passes at 60.00; reader spends 41.50, leaving 18.50).",
+    "In crates/athena-core/src/reading.rs line 4068, change the comment to 'shipped job budget of 60.00'.",
+    "In crates/athena-cli/tests/drain.rs line 4141, change the expected pair to `(2.0, 60.0)`.",
+    "In CHANGELOG.md, edit the Unreleased 'Changed' bullet: job_usd is raised to 60.00, covering the 47.00 the caps require (reader + max_rounds × (planner + critic) + producer + verifier), admission's budget check passes, and the tests that pinned the old values are updated; the schema and the check are unchanged.",
+    "Run `cargo fmt --all --check`, `cargo test --locked -p athena-data`, then `cargo test --locked` and `cargo clippy --all-targets --locked -- -D warnings`. Run `git diff` and confirm that production code is unchanged and no key was added or removed in athena.toml."
+  ],
+  "risks": [
+    {
+      "risk": "Another test pins a value derived from job_usd 50 that the grep missed, for example through arithmetic on the parsed config.",
+      "mitigation": "The verifier runs `cargo test --locked` for the whole workspace. The producer greps the crates for `job_usd = 50`, `50.0`, `49.99` and `31.5` before finishing. The grep run here found the files in the plan."
+    },
+    {
+      "risk": "Off-by-a-cent errors in the shifted rows of round_one_critic_check_follows_the_shared_reserve.",
+      "mitigation": "Recompute every row from the formula: left = 60 - 0.01 - planner cost, against reserves 18.75 (3 rounds) and 15.75 (1 round), then run `cargo test --locked -p athena-core round_one_critic_check_follows_the_shared_reserve`."
+    },
+    {
+      "risk": "The test edits widen the diff beyond 'athena.toml only' (criterion 3).",
+      "mitigation": "Edits are limited to literals and comments inside test modules. Review `git diff` to confirm no production line changed."
+    },
+    {
+      "risk": "Formatting drift in the edited test lines.",
+      "mitigation": "Run `cargo fmt --all --check` after the edits, since the checks include fmt."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "athena.toml [budget] job_usd = 50.00",
+      "dependent": "crates/athena-data/src/config.rs tests (lines 873-952: the_repository_budget_covers_two_reading_and_two_planning_rounds, the_repository_budget_caps_cover_their_sum, with_job_usd helper)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-data (the three pinned places at lines 877, 896 and 916-917 are changed to 60). Lines 924-956 use absolute values 46.99, 47.00, 8.00 and are unaffected.",
+      "reason": null
+    },
+    {
+      "name": "athena.toml [budget] job_usd = 50.00",
+      "dependent": "crates/athena-core/src/admission.rs line 1327-1341, test a_job_usd_below_the_stage_caps_is_a_configuration_violation (BASE_CONFIG replace)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core a_job_usd_below_the_stage_caps_is_a_configuration_violation. The replace source text becomes `job_usd = 60.00`; the 46.00 target and '$1.00 short' stay, since the required sum is still 47.00.",
+      "reason": null
+    },
+    {
+      "name": "athena.toml [budget] job_usd = 50.00",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs lines 973, 1000, 1030-1031 and the comment at 995",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget admission_refuses_a_job_short_of_the_whole_planning_reserve. The replace sources become 60.00; the targets 2.60 and 20.00 are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "athena.toml [budget] job_usd = 50.00",
+      "dependent": "crates/athena-core/src/run/tests.rs lines 941-1052 (round_one_critic_check_follows_the_shared_reserve, dispatch_holds_a_job_that_cannot_afford_every_planning_round)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core round_one_critic_check_follows_the_shared_reserve dispatch_holds_a_job_that_cannot_afford_every_planning_round. These tests get job_usd from athena.toml. Planner costs shift by +10.00 (44.24, 41.25, 41.24, 44.25, 44.24) and the reader cost from 31.5 to 41.5; the reserves 18.75, 15.75 and 19.50 are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "athena.toml [budget] job_usd feeding drain caps.run",
+      "dependent": "crates/athena-cli/tests/drain.rs line 4141, test the_default_plan_budget_affords_a_read_where_drain_would_need_a_read_and_a_run; production code crates/athena-cli/src/drain.rs line 3410 (`run: jc.config.budget.job_usd`)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli --test drain the_default_plan_budget_affords_a_read_where_drain_would_need_a_read_and_a_run. The expected pair becomes (2.0, 60.0); the other assertions (`caps.read + caps.run > 2.0`) still hold.",
+      "reason": null
+    },
+    {
+      "name": "athena.toml [budget] job_usd",
+      "dependent": "crates/athena-core/src/reading.rs lines 4062-4087 (shipped_budget_covers_the_reserve) and its 'shipped 50.00' comment",
+      "kind": "code",
+      "test": null,
+      "reason": "It asserts `job_usd >= reserve` and the reserve 47.0, not the literal 50. It still passes at 60; only the comment is stale and is updated."
+    },
+    {
+      "name": "athena.toml [budget] job_usd",
+      "dependent": "crates/athena-cli/tests/lifecycle.rs lines 1007, 1701; crates/athena-cli/tests/drain.rs lines 3034, 3057; crates/athena-cli/tests/job_plan.rs lines 86, 148 (via `with_job_usd` in tests/common/mod.rs)",
+      "kind": "code",
+      "test": null,
+      "reason": "They overwrite the line with an absolute value through `with_job_usd` (tests/common/mod.rs lines 96-112), so the shipped 60 does not matter. The 51.00 tests still differ from the base file, so the 'config changed' paths still run."
+    },
+    {
+      "name": "job_usd must cover budget_required (47.00)",
+      "dependent": "Admission check on athena.toml changes (crates/athena-core/src/admission.rs line 616, `Config::check_budget` at config.rs 819-830) and runtime reserve (reading.rs 414-435)",
+      "kind": "rule",
+      "test": "shipped_budget_covers_the_reserve (reading.rs line 4063) and the_repository_budget_caps_cover_their_sum",
+      "reason": "60.00 >= 47.00, so admission accepts the file. The rule is unchanged."
+    },
+    {
+      "name": "Unreleased changelog entry",
+      "dependent": "CHANGELOG.md line 14 ('job_usd is raised to 50.00')",
+      "kind": "code",
+      "test": null,
+      "reason": "It states the old job_usd value. The plan edits it to 60.00 and the 47.00 requirement with headroom."
+    },
+    {
+      "name": "job_usd text in design docs",
+      "dependent": "docs/design/parallel-jobs.md lines 251-255 and docs/design/job-planning.md line 122",
+      "kind": "rule",
+      "test": null,
+      "reason": "They describe job_usd by name and do not state its value, so nothing changes."
+    },
+    {
+      "name": "athena.toml parse (all keys)",
+      "dependent": "Other include_str!(\"../../../athena.toml\") users (invocation.rs 376, routing.rs 870, introspect.rs 1857, hestia.rs 2163, scope_guard.rs 1049, work_decisions.rs 494, code_health.rs 1004, athena-score lib.rs 690, athena-agent env.rs 158, athena-cap-change lib.rs 141, athena-cli main.rs 1696)",
+      "kind": "code",
+      "test": null,
+      "reason": "A grep of crates for '50.00', '50.0', '49.99' and 'job_usd' found no literal pinned to the value in these files. They parse the file and read no changed value as a number. The verifier's full `cargo test --locked` is the backstop."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of athena.toml against the base and Grep the [budget] table. Reader, producer, verifier, timeouts are already at target in the snapshot, so the diff may show only the job_usd line.",
+      "command": "git diff -- athena.toml",
+      "observes": "The [budget] table reads reader_usd 2.00, producer_usd 10.00, verifier_usd 5.00, job_usd 60.00, producer_timeout_s 5400, verifier_timeout_s 3600. The diff has a single changed line, `-job_usd = 50.00` and `+job_usd = 60.00`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the diff and the [job_plan] table (athena.toml lines 209-216 in the snapshot).",
+      "command": "git diff -- athena.toml",
+      "observes": "planner_usd 3.00, critic_usd 3.00, max_rounds 5. The diff shows no added or removed key, and no line outside `job_usd`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Run `git status` and `git diff --stat`. This criterion as written (only athena.toml changes) conflicts with criterion 4: the pinned test literals must change as well. The check here is that no non-test code and no config key changed.",
+      "command": "git status",
+      "observes": "Modified files are athena.toml, CHANGELOG.md and test code in config.rs, admission.rs, run_pin_tests.rs, run/tests.rs, reading.rs (comment) and tests/drain.rs. The diff of config.rs lies wholly inside `mod tests`. No struct, parser or `check_budget` line is touched.",
+      "fails_without": null
+    },
+    {
+      "criterion": 4,
+      "method": "Run the command. It parses the shipped athena.toml through `REPO_CONFIG = include_str!(\"../../../athena.toml\")` (config.rs line 838) and runs `Config::parse` and `check_budget` on it.",
+      "command": "cargo test --locked -p athena-data",
+      "observes": "Exit 0 with all athena-data tests passing, including `the_repository_budget_caps_cover_their_sum` (now expects job_usd 60.0 and the sum 47.0) and `job_usd_below_the_reserve_is_refused_by_the_budget_check`.",
+      "fails_without": "With job_usd = 60.00 and the old test literals, `the_repository_budget_covers_two_reading_and_two_planning_rounds` fails on `assert_eq!(b.job_usd, 50.0)`, and `with_job_usd` fails its `assert_ne!`. The test edits in config.rs are what make the crate pass. A verifier also runs `cargo test --locked` for the dependent athena-core and athena-cli tests.",
+      "seam": "Production entry points `Config::parse` and `Config::check_budget` in crates/athena-data/src/config.rs. The fixture is the real athena.toml, included at compile time. No double. The seam exists today (read, config.rs lines 807-830, 838)."
+    },
+    {
+      "criterion": 5,
+      "method": "Arithmetic from the file, shown by the named test. The brief's figure of 23 is the sum with one planning round (2+10+5+3+3). The real admission sum is `Config::budget_required` = reader + max_rounds × (planner + critic) + producer + verifier (config.rs lines 807-813), i.e. 2 + 5×6 + 10 + 5 = 47. job_usd 60 is at least 47, and also at least 23. Also run `cargo test --locked -p athena-core shipped_budget_covers_the_reserve` and `a_job_usd_below_the_stage_caps_is_a_configuration_violation`.",
+      "command": "cargo test --locked -p athena-data the_repository_budget_caps_cover_their_sum",
+      "observes": "The sum is 47.00 and `config.check_budget().is_ok()` holds at job_usd 60. The admission test refuses a 46.00 budget with '$1.00 short' and accepts the shipped file.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: The brief says only athena.toml changes and config.rs is untouched, but job_usd 60 cannot pass `cargo test --locked -p athena-data` without editing the test module in config.rs (and pinned tests in other crates). Is a test-literal-only change in those files acceptable? The plan assumes yes.",
+    "User: Criterion 5 gives the stage-cap sum as 23, which counts one planning round. With max_rounds 5 the admission sum is 47 (config.rs `budget_required`). 60 covers both. Is it fine to read criterion 5 against 47?"
+  ],
+  "producer_section_sha256": "87401c6de80c495655e646453d2e5417d5c3036827120e6d948bc288c19f9487"
+}
