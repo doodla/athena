@@ -195,6 +195,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The decisions page no longer lists proposals that were approved or rejected. Root cause: approve-work and
+  reject-work record their decisions under `records/work-decisions/` on main, but the page read work items and
+  decisions only from the `athena/records` branch, which holds no decisions, so every proposal looked
+  undecided. The page now also reads work decisions from main's tree and drops each proposal they name.
 - A batch no longer stops as a repeated failure when an item's second failure paused its line. The drain asked
   whether the line was paused only before each attempt, so the failure that did the pausing went unchecked, the
   item ended as failed, and the batch stopped with money and job slots left. It now asks once more after the

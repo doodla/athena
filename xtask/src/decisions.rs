@@ -1,7 +1,10 @@
 //! The owner decision briefs page: `decisions.html`, built beside `index.html` by `cargo run -p xtask -- site`.
 //!
 //! The page lists the Steward's open proposals (work items of kind proposal that no work decision names) read
-//! from the records branch `athena/records`. Each proposal becomes a short brief: its title, rung, source,
+//! from the records branch `athena/records`. Work decisions are read from both places: the records branch and
+//! the tree of main (the checkout's HEAD). Approve-work and reject-work record their decisions under
+//! `records/work-decisions/` on main, which the records branch does not hold, so reading the branch alone
+//! left every proposal looking undecided. Each proposal becomes a short brief: its title, rung, source,
 //! evidence, a recommendation, and a link to the record on GitHub at the branch tip. The style is the owner's
 //! (`docs/conventions/owner-style.md`): plain words, nothing invented.
 //!
@@ -36,6 +39,9 @@ use std::path::Path;
 
 /// The most words of prose one brief may show, counting every displayed line.
 pub const MAX_WORDS: usize = 160;
+
+/// The tree of main in the checkout (its HEAD), where approve-work and reject-work record their decisions.
+const MAIN_TREE: &str = "HEAD";
 
 /// What a card says when the steward wrote no brief for the proposal.
 const NO_BRIEF: &str = "No brief written yet";
@@ -282,6 +288,24 @@ fn read_snapshot(git: &Git, tip: &str) -> Result<Snapshot> {
                 Ok(_) => {}
                 Err(e) => unreadable.push(format!("{}: {e}", entry.path)),
             }
+        }
+    }
+    // Approve and reject decisions are committed to main, not to the records branch, so main's tree is read
+    // too. A checkout with no commit, or no decisions directory on main, adds nothing.
+    for entry in git
+        .ls_tree_under(MAIN_TREE, "records/work-decisions")
+        .unwrap_or_default()
+    {
+        if entry.kind != "blob" {
+            continue;
+        }
+        let bytes = git.cat_blob(&entry.oid)?;
+        match check_record_file(&entry.path, &bytes) {
+            Ok(Some(AnyRecord::WorkDecision(d))) => {
+                decided.insert(d.work_item);
+            }
+            Ok(_) => {}
+            Err(e) => unreadable.push(format!("{}: {e}", entry.path)),
         }
     }
     proposals.retain(|p| !decided.contains(&p.item.id));
@@ -710,6 +734,88 @@ mod tests {
         }
         // Oldest first.
         assert!(html.find("Retry a failed").unwrap() < html.find("Name an owner").unwrap());
+    }
+
+    /// Commits `record` to main of the repository (not to the records branch).
+    fn commit_to_main(dir: &Path, git: &Git, record: &AnyRecord) {
+        let path = dir.join(record.canonical_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, record.to_json()).unwrap();
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "decide"]).unwrap();
+    }
+
+    fn decision_of(id: &str, work_item: &RecordId, approved: bool) -> AnyRecord {
+        use athena_data::records::{WorkDecision, WorkDecisionState};
+        AnyRecord::WorkDecision(WorkDecision {
+            id: RecordId::parse(id).unwrap(),
+            at: at(),
+            work_item: work_item.clone(),
+            decision: if approved {
+                WorkDecisionState::Approved {
+                    job: JobId::parse("20261030-081746-a1he").unwrap(),
+                }
+            } else {
+                WorkDecisionState::Rejected {
+                    reason: "not now".into(),
+                }
+            },
+        })
+    }
+
+    /// Two proposals on the records branch; decisions are committed to main only.
+    fn decided_on_main(approve: bool, reject: bool) -> (tempfile::TempDir, WorkItem, WorkItem) {
+        let (dir, git) = init_repo();
+        let (first, second) = two_fixtures();
+        let changes: Vec<Change> = [&first, &second]
+            .iter()
+            .map(|i| put(path_of(i), AnyRecord::WorkItem(Box::new((*i).clone()))))
+            .collect();
+        RecordsWriter::new(&git)
+            .append("records", &changes)
+            .unwrap();
+        if approve {
+            let d = decision_of("20261030-081746-a1he", &first.id, true);
+            commit_to_main(dir.path(), &git, &d);
+        }
+        if reject {
+            let d = decision_of("20261030-081747-b2jf", &second.id, false);
+            commit_to_main(dir.path(), &git, &d);
+        }
+        (dir, first, second)
+    }
+
+    #[test]
+    fn proposals_decided_on_main_drop_off_the_page() {
+        let (dir, first, second) = decided_on_main(true, true);
+        // The decisions are not on the records branch.
+        let git = Git::isolated(dir.path());
+        let tip = match resolve_tip(&git).unwrap() {
+            RecordsTip::At { tip, .. } => tip,
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            git.ls_tree_under(&tip, "records/work-decisions")
+                .unwrap()
+                .is_empty()
+        );
+        let html = render(&locate(dir.path()));
+        assert!(!html.contains(first.id.as_str()), "{html}");
+        assert!(!html.contains(second.id.as_str()), "{html}");
+        assert!(!html.contains("<article"), "{html}");
+        assert!(html.contains("No proposal is waiting for a decision"));
+    }
+
+    #[test]
+    fn a_proposal_with_no_decision_on_main_is_still_listed() {
+        // Only the first proposal is approved; the second has no decision anywhere.
+        let (dir, first, second) = decided_on_main(true, false);
+        let html = render(&locate(dir.path()));
+        assert_eq!(html.matches("<article").count(), 1, "{html}");
+        assert!(html.contains("1 waiting"));
+        assert!(html.contains("Name an owner for reviews"));
+        assert!(html.contains(second.id.as_str()));
+        assert!(!html.contains(first.id.as_str()));
     }
 
     #[test]
