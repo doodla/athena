@@ -37,6 +37,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The baseline can now be reused from a green GitHub run instead of being run again on the base commit before
+  every job. The base's governed content was usually just tested: by the CI run of the candidate that landed, or
+  by the push run on the default branch. Before the baseline checks run, Athena looks, with one read and no
+  wait, for a finished green run of `fmt`, `clippy` and `test` for the same governed content, through the same
+  resolution the candidate's checks use. First it looks for the run of the landed job's candidate, found from
+  the `verification.json` the landing commit carries, and accepted only when the fingerprint recorded there
+  equals the base's own fingerprint and the landing changed no workflow file. Then it looks for the run of that
+  commit on the default branch (read from the local `origin/HEAD`). A hit makes the baseline a reused record:
+  `baseline.json` gains an optional `reused_from` with the run's address (absent when the checks ran here, so
+  older files still parse), every check is marked reused and passed, no check runs on this machine, and the job
+  prints `ci         baseline reused from <run> for <base>`. When there is no such result (no run, an
+  unfinished, red or untrusted one, an unreachable host, a different fingerprint, a landing of more than one
+  job, no `origin/HEAD`) or the repository has no GitHub origin, the baseline runs here exactly as before, and
+  a `ci         baseline runs locally: <reason>` line says why; a lookup never fails the job. A reused baseline
+  holds only passed checks, so it excuses no failure as pre-existing.
 - The verifier now sees Athena's recorded "fails without the fix" run. Root cause: the verifier gets no
   producer report and cannot change files, so a criterion that needs a recorded run of the new test failing on
   the old code could never be shown to it, and correct changes were rejected on that alone. After the producer

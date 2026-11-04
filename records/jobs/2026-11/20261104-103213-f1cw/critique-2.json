@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-103213-f1cw",
+  "round": 2,
+  "at": "2026-11-04T12:54:32.111921166Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/checks.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/checks.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/attribution.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/attribution.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Lookup A reads `<job dir>/verification.json` from the `athena/records` tip, but I found no production code that writes a job's verification there or reads it from there. The test seeds that file itself, so it passes only against records the plan invented.",
+      "evidence": "The only production writes to the records branch I found are `gh/records.rs:156` (`{dir}/{id}.json` history records: landings, landing-intents, declared) and the one-time C0 import (`records_import.rs:138/206`). No production `show_file(&tip, …verification.json)` exists; the reads of a records tip in reconcile.rs, gh/records.rs and attribution.rs are for manifests, legacy-exempt and history records. The one production reader of a job's verification.json (`gh/landing.rs:67`) reads it from a commit on main, not from the records tip. records-history.md:312-318 describes closing records in the commits being landed. Step 8's `seed_landed_job` writes `<job dir>/verification.json` onto `athena/records`, so criterion 1(b) can pass while live lookup A never finds a verification. Fix: Before planning lookup A, find where a landed post-C0 job's `verification.json` actually lives. Check the close/land path (gh/landing.rs:53-67, `athena_gate::invariant::closing_jobs`, state.rs). Read it from there, for example `git.show_file(base, <job dir>/verification.json)` on the landed commit if it is in main's tree. Or take the fingerprint and candidate commit from a record that is on the branch. Make `seed_landed_job` write the records in the place and shape production writes them, ideally through the production writer or close path, not a hand-placed file.",
+      "location": "Decision 1 / Step 6 lookup A; Demonstration for criterion 1(b), `seed_landed_job`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "With an empty change list, the baseline trusts a green candidate run that the candidate path would have refused because the candidate changed a workflow file.",
+      "evidence": "ci_result.rs:222-225: `resolve` trusts `Reading::Green` only `if !workflow_changed`, where `workflow_changed` comes from `changed` (paths under WORKFLOW_DIR). Lookup A resolves the previous job's `candidate_commit` with `&[]`, so that guard can never fire. A previous job that edited .github/workflows/ ran its own edited workflow on its CI run, and that green run would now be reused. Fix: For lookup A, pass the previous candidate's changed paths (from its candidate record), or refuse lookup A when that candidate touched WORKFLOW_DIR. Add that case to the criterion 2 loop.",
+      "location": "Decision 4 / Step 6: empty change list passed to `run_routed_with_record`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The risk text says `verified_fingerprint` is recorded under the base's own rules. It is recorded under the previous job's base rules.",
+      "evidence": "candidate.rs:170 and mod.rs:542 compute `f = fingerprint(&git, &c, &p)` (candidate content under the previous base `p`'s rules). The plan compares that with `fingerprint(&git, base, base)`. The comparison is conservative: changed rules give a mismatch and a local run. But the stated reasoning is wrong. Fix: Correct the risk text: a rules change in the previous job makes the hashes differ, so the job falls back to a local run (safe, but no saving). Keep the mismatch test.",
+      "location": "Risks, 4th bullet (rules commit)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan assumes the dispatch checkout is on main. A detached HEAD or another branch gives no branch, or the wrong one, for main's push run.",
+      "evidence": "The plan lists 'no branch' among its fallback reasons but never says which branch a drain run is on. `CiBranchSource::fetch` filters by branch (gh/client.rs about 950-975, per the plan). Fix: Use the configured default or landing branch (the one `land` merges into) instead of whatever is checked out, or state why `current_branch()` is always main when the baseline runs.",
+      "location": "Step 6 lookup B: `git.current_branch()`",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The round-2 plan fits the request and the reading. It reuses the existing `routing::run_routed_with_record` / `ci_result::resolve` path with a refusing Exec and one read. It uses `Kind::Config` behaviour so no check is skipped (I read routing.rs:45-106 and 256-325). It adds a backward-compatible optional `reused_from` field. It keeps `Baseline.note` unset on a fallback, so `failed_before` behaves as today. The dependents list is thorough. I checked the named code exists: `take_baseline` (run/checks.rs:176), `with_ci_source` (mod.rs:1318), `cutover_commit_at` and the private `read_records` (attribution.rs:91, 250), `fingerprint(&git, p, p)` (candidate.rs:37), and the candidate push to `ci_branch` (mod.rs:1472). The main gap is lookup A, the source the request names first. It reads a previous job's `verification.json` from the `athena/records` tip, but I found no production code that writes or reads a job's verification there. The only branch writers are the history records and the C0 import, and `gh/landing.rs:67` reads verification.json from a main commit. The criterion 1(b) test seeds that file by hand, so it would pass against records production may never write. Minor points: the empty change list skips `resolve`'s distrust of runs where a workflow file changed; the risk text says which rules the verified fingerprint uses wrongly; and lookup B depends on the current branch. Revise lookup A to read the verification from where production stores it, and seed the test the same way."
+}

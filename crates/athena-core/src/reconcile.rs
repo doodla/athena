@@ -367,7 +367,7 @@ impl CommitHost for NoHost {
 }
 
 /// The default branch from the local `origin/HEAD`, without asking the host.
-fn local_default_branch(git: &Git, remote: &str) -> Option<String> {
+pub(crate) fn local_default_branch(git: &Git, remote: &str) -> Option<String> {
     let exit = git
         .exit(
             [

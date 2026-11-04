@@ -1,0 +1,320 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261104-103213-f1cw",
+  "round": 2,
+  "at": "2026-11-04T12:52:20.601055729Z",
+  "invocation_seq": 5,
+  "approach": "Make `take_baseline` (run/checks.rs) look for a green GitHub result before it runs anything locally. It looks only for a non-nested job whose origin is on GitHub, and it makes at most two lookups, each with one read, no wait and an `Exec` that refuses to run checks. It sends each lookup through the candidate path unchanged (`routing::route`, `routing::run_routed_with_record`, `ci_result::resolve`). Lookup A is keyed on governed content: find the job whose landing record on the records branch has `host_commit == base`, read that job's `verification.json` from the same tip, and accept it only if `verified_fingerprint == fingerprint(&git, base, base)`. Then resolve its `candidate_commit` on `gh::ci_branch(job)`. That run finished before the job landed. Lookup B is the base SHA on the branch the job was dispatched from (`git.current_branch()`), i.e. main's push run. A hit means a green record with all runs passed. The baseline then holds the reused `CheckRun`s (`reused: true`) and a new optional `Baseline.reused_from` (the run address). Any other result (no landing, fingerprint differs, missing, unfinished, red, lookup error, no branch) runs `baseline_checks` as today and prints the reason on a `ci         baseline ...` line. `with_ci_source` is split into `with_ci_source_on(branch, wait_s, act)` plus an unchanged wrapper. The records-branch reverse lookup (host commit to job ids) goes in athena-gate `attribution.rs` beside `cutover_commit_at`, because `read_records` is private there. This answers the round-1 finding: the landed candidate's run is the first source, matched by fingerprint, and main's run by SHA is the second.",
+  "decisions": [
+    {
+      "choice": "Two lookups in order: A, the landed candidate's CI-branch run matched by fingerprint, then B, the base SHA on the dispatch branch. Both go through `run_routed_with_record` and so `resolve`.",
+      "reason": "The request and the accepted reading name the landed candidate's run and main's run. In a drain loop main's run for the squash commit is usually unfinished (ci.yml gives each push its own full run), so B alone would rarely save anything. The candidate's run finished before landing (the land step waits for it). Fingerprint equality, using the existing `fingerprint(&git, base, base)` that candidate.rs:37 already computes, is the 'same governed content' guard. A squash that was rebased onto newer main has a different fingerprint and falls through to B. The repository is past C0 (athena.toml:153 `cutover_job`), so commits carry no `Athena-Job` trailer. The job therefore comes from the records branch: `Landing.host_commit` and `Landing.commits[].job` (athena-data history.rs:221-238, the same shape `cutover_commit_at` reads, attribution.rs:91-118), and `Verification.verified_fingerprint` and `candidate_commit` (records.rs:846-849).",
+      "rejected": [
+        {
+          "option": "B only (SHA on the dispatch branch)",
+          "why": "Round-1 critic: main's run is usually still going, so the saving rarely appears, and the landed candidate named in the request is dropped."
+        },
+        {
+          "option": "Read `Athena-Job` and `Athena-Verified-Content` trailers (the critic's first idea)",
+          "why": "After C0 Athena writes no trailers (close.rs:444-447, landing.rs:51-52). The records branch is the source that works in this repository. The trailer path is not needed."
+        },
+        {
+          "option": "Read the previous job's directory in the local state dir",
+          "why": "Closing removes the job directory (state.rs:283-284 says so). The records branch is what stays."
+        },
+        {
+          "option": "A new CI lookup or an index of runs by fingerprint",
+          "why": "Criterion 5 asks for the existing `resolve` path. The fingerprint is compared on the records side and `resolve` keeps its exact-SHA check (ci_result.rs:196)."
+        }
+      ]
+    },
+    {
+      "choice": "Add `reused_from: Option<String>` to `Baseline` with `#[serde(default, skip_serializing_if = \"Option::is_none\")]`; the schema tag stays `athena.baseline/1`.",
+      "reason": "Old files parse and local-baseline files are byte-identical to before. `check_record_file`, the path allow-list and the `AnyRecord::Baseline` arm need no change.",
+      "rejected": [
+        {
+          "option": "New schema version",
+          "why": "Needs a new tag and allow-list work, and old files would no longer parse unchanged."
+        },
+        {
+          "option": "Only mark each `CheckRun` as reused",
+          "why": "The brief wants the baseline itself marked reused."
+        }
+      ]
+    },
+    {
+      "choice": "The fallback reason goes on an output line (`ci         baseline runs locally: <reason>`), not in `Baseline.note`. This is a stated departure from the wording of criterion 2 ('also leaves a note'); the note is the output line, and the producer's report must say so.",
+      "reason": "`Baseline::failed_before` returns false whenever `note` is set (records.rs:2629-2630). A note on a local fallback would stop real pre-existing failures from being excused, which changes the verdict rules, and that is out of scope.",
+      "rejected": [
+        {
+          "option": "Set `Baseline.note` on a red or error lookup",
+          "why": "It would disable pre-existing-failure marking for that job."
+        }
+      ]
+    },
+    {
+      "choice": "Use a refusing `Exec`, `Wait{polls:1, pause:0}`, an empty change list and a kind that applies no path skipping.",
+      "reason": "`resolve` falls back to its `LocalChecks` when no green run exists. The refusing `Exec` turns that into an error, which the stage reads as 'no CI result' and then runs the real local baseline. Polling or waiting would be new, out-of-scope behavior.",
+      "rejected": [
+        {
+          "option": "Call `resolve` directly and rebuild the `CheckRun`s",
+          "why": "Duplicates `runs_from_record` in routing.rs."
+        }
+      ]
+    },
+    {
+      "choice": "No new output line for a repository with no GitHub origin, and none in a nested run.",
+      "reason": "`a_fake_job_takes_its_baseline_before_the_producer...` (tests.rs about 439-472) asserts exactly 8 lines for an origin-less repository.",
+      "rejected": [
+        {
+          "option": "Always print a ci line",
+          "why": "Breaks that test and adds noise where no lookup was possible."
+        }
+      ]
+    },
+    {
+      "choice": "Edit core/src/checks.rs:1223 (`baseline_failing`) by adding `reused_from: None` and nothing else. Edit athena-gate `attribution.rs` only to add `landed_jobs_at`.",
+      "reason": "The first is a required compile fix for the new field. The second is needed because `read_records` is private there. Both are outside the brief's deliverable list; the producer says so in its report.",
+      "rejected": [
+        {
+          "option": "Duplicate the records-branch reader in athena-core",
+          "why": "gh/records.rs has its own private `records_under`, so a copy would be a third reader."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "`take_baseline` tries the CI lookups first through a new private helper `reused_baseline`. The helper has lookup A, which reads the records branch through `landed_jobs_at`, checks `verified_fingerprint` and resolves on `ci_branch(job)`, and lookup B, the base SHA on the dispatch branch. It prints the `ci         baseline ...` line. A private `RefuseExec` implements `routing::Exec`. On a green record it fills `checks` and `reused_from`; otherwise `baseline_checks` runs as today.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Split `with_ci_source` into `with_ci_source_on(branch, wait_s, act)` plus the unchanged wrapper. Extract the origin test into `has_github_origin()`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the reuse and fallback tests, `ci_reuse_run_with`, `CiReply::Unreachable`, `CiReplies::only_for`, `baseline_reads()`, `seed_landed_job`; narrow `reads()` to CI-branch requests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `Baseline.reused_from` with a doc comment; update `sample_baseline`; extend the round-trip tests, including an old-form file.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "action": "modify",
+      "purpose": "Documentation only: the module header says `resolve` also serves the baseline of the base commit (one read, no wait). No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add `reused_from: None` to the test helper `baseline_with` (line 1656). No logic change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "One line only: `reused_from: None` in the `baseline_failing` literal (line 1223). Not on the brief's list, but required to compile.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/attribution.rs",
+      "action": "modify",
+      "purpose": "Add `pub fn landed_jobs_at(git, tip, host_commit) -> Result<Vec<JobId>>` beside `cutover_commit_at`. It reads `landings/` and `landing-intents/` with the private `read_records` and returns the jobs of the landing whose `host_commit` matches. Not on the brief's list: `read_records` is private here. Add a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry: the baseline is reused from a green GitHub run (the landed candidate's, matched by fingerprint, or main's for the base commit); otherwise it runs locally as before, with the reason on a `ci` line.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read `Kind::parse`, `path_rule_applies` and `runs_from_record` in routing.rs, the `Exec` trait, and how `run_routed_with_record` treats a Blocked outcome (a Fallback error). Pick a kind that applies no path skipping. Read `athena_git::records_branch::{resolve_tip, RecordsTip}` and the writer API, `AnyRecord::parse` for `verification.json`, and `Git::show_file`.",
+    "records.rs: add `reused_from: Option<String>` to `Baseline` with `#[serde(default, skip_serializing_if = \"Option::is_none\")]` and a doc comment. Fix `sample_baseline` and extend the round-trip tests (with, without, old-form JSON, unknown key refused).",
+    "Add `reused_from: None` to the literals in core/src/checks.rs:1223, verify.rs:1656 and run/checks.rs:182.",
+    "attribution.rs: add `landed_jobs_at` and its test; run `cargo test -p athena-gate`.",
+    "mod.rs: extract `has_github_origin()`. Make `with_ci_source` a wrapper over `with_ci_source_on(branch, wait_s, act)`, with no behavior change for the candidate.",
+    "checks.rs: add `RefuseExec`. Add `reused_baseline(&self, ctx) -> Option<(Vec<CheckRun>, String)>`. It does nothing when `has_github_origin()` is false. Otherwise it tries lookup A: `resolve_tip`, `landed_jobs_at(tip, base)`, `verification.json` per job (must pass and have `verified_fingerprint == fingerprint(&git, base, base)`), then `run_routed_with_record(&route, &candidate_commit, &[], ci, &RefuseExec, one_read)` inside `with_ci_source_on(ci_branch(job))`. Then it tries lookup B with the base SHA on `git.current_branch()`. Any error or non-landed result moves on to the next lookup and is remembered as the reason. It returns Some only for `Ok((runs, Some(record)))` with `Source::Ci`, `record.all_passed()` and every run passed. Otherwise it prints `ci         baseline runs locally: <reason>`.",
+    "`take_baseline`, after the nested early return: call `reused_baseline`. On Some, print `ci         baseline reused from <address> for <base>`, set `checks` and `reused_from`, and return without creating the snapshot. On None, run `baseline_checks` unchanged. `Baseline.note` stays unset on a fallback.",
+    "tests.rs: add `ci_reuse_run_with`, `CiReply::Unreachable` (arms in `runs()` and `jobs()`), `CiReplies::only_for(sha, branch)`, `baseline_reads()`, `seed_landed_job` (real records on `athena/records`), and narrow `reads()` to `branch=athena/ci/`. Write `baseline_reused_from_main_run_runs_nothing_locally`, `baseline_reused_from_landed_candidate_run_runs_nothing_locally` and `baseline_runs_locally_when_no_green_ci_result_exists`. Use `MARKS_BASELINE` and `<job_dir>/baseline-ran` as the local-run signal.",
+    "ci_result.rs: update the module doc only. Run `cargo test -p athena-core`, `cargo test -p athena-data`, `cargo test -p athena-gate`, `cargo test -p athena-cli --test drain low_disk` and the workspace `cargo test --locked`. Fix any assertion the always-green GitHub fakes change in drain.rs or lifecycle.rs, naming each in the report.",
+    "CHANGELOG.md: add the Unreleased entry. In the report, say that the 'note' of criterion 2 is the `ci` output line, not `Baseline.note`, and why, and that checks.rs and attribution.rs are outside the deliverable list. Finish with `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`."
+  ],
+  "risks": [
+    {
+      "risk": "The landing record names several jobs, as a squash of a chain does, or the records branch is not fetched, so lookup A finds nothing.",
+      "mitigation": "Try each named job whose recorded fingerprint matches. With no usable job, go to lookup B, then to the local run, with the reason printed. No job fails because of the lookup."
+    },
+    {
+      "risk": "GitHub drops workflow runs of a deleted CI branch, or `branch` filtering fails for a deleted branch, so lookup A never hits.",
+      "mitigation": "It falls back to B and then to a local run. This is the host question below. The producer's tests use the fake, so they do not prove the live behavior."
+    },
+    {
+      "risk": "A kind that applies the path rule could skip checks, and a reused baseline would then hold fewer checks than a local one.",
+      "mitigation": "Step 1 picks a kind with no path skipping and the change list is empty. The criterion 1 test asserts the three check names."
+    },
+    {
+      "risk": "A fingerprint match with a different rules commit (athena.toml or .gitattributes changed) would be wrongly trusted.",
+      "mitigation": "The comparison uses `fingerprint(&git, base, base)` against the value the verification recorded under the base's own rules. Changed rules give a different hash, so the lookup is refused. The test covers the mismatch case."
+    },
+    {
+      "risk": "Extra GitHub reads and a records-branch read for every GitHub-origin job, and a read error breaking the baseline.",
+      "mitigation": "At most two reads, no pause. `read_ci` turns a fetch error into Missing, and any Err from the routed call or the records read is caught and falls back."
+    },
+    {
+      "risk": "The integration fakes that answer every CI read green (test_support.rs about 718) change what GitHub-origin jobs record as the baseline.",
+      "mitigation": "Run the drain.rs low_disk tests and `cargo test --locked`. Adjust any affected assertion and name it in the report."
+    },
+    {
+      "risk": "An older Athena binary reads a reused baseline under `deny_unknown_fields`.",
+      "mitigation": "`skip_serializing_if` leaves local-baseline files unchanged. Only a reused baseline carries the key, and records are read by the same release."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "New `Baseline.reused_from` field",
+      "dependent": "Baseline struct literals: crates/athena-core/src/checks.rs:1223 (`baseline_failing`), crates/athena-core/src/verify.rs:1656 (`baseline_with`), crates/athena-data/src/records.rs about 4501 (`sample_baseline`), crates/athena-core/src/run/checks.rs:182",
+      "kind": "code",
+      "test": "Each literal gets `reused_from: None`. `cargo test --locked` compiles and passes the checks.rs, verify.rs and records.rs tests.",
+      "reason": null
+    },
+    {
+      "name": "Baseline.checks and Baseline.note semantics",
+      "dependent": "Baseline::failed_before, mark_pre_existing and held_for_timeout (crates/athena-core/src/checks.rs); called in run/mod.rs about 1615-1632",
+      "kind": "code",
+      "test": "The criterion 1 test asserts every reused check passed; the existing `mark_pre_existing` tests in checks.rs are unchanged.",
+      "reason": "A reused baseline has every check passed and no note, so nothing is excused as pre-existing (a green run means all passed). A local fallback leaves `note` unset, so `failed_before` behaves as today. No verdict rule changes."
+    },
+    {
+      "name": "Baseline record schema and path allow-list",
+      "dependent": "Records validation: `check_record_file` and the `AnyRecord::Baseline` arm for `baseline.json`, schema `athena.baseline/1` (records.rs about 3050)",
+      "kind": "rule",
+      "test": "cargo test -p athena-data baseline: round trips with and without the field, and the old-form file.",
+      "reason": null
+    },
+    {
+      "name": "CI source read count in a job with a GitHub origin",
+      "dependent": "crates/athena-core/src/run/tests.rs ci_reuse_* tests (about 2765-2915), which assert `replies.reads()` of 1 or 76",
+      "kind": "code",
+      "test": "Step 7 narrows `reads()` to requests carrying `branch=athena/ci/`, so those assertions hold. The new tests use `baseline_reads()`. `cargo test -p athena-core ci_reuse`.",
+      "reason": null
+    },
+    {
+      "name": "Output lines of the baseline stage",
+      "dependent": "crates/athena-core/src/run/tests.rs `a_fake_job_takes_its_baseline_before_the_producer...` (8 output lines, `baseline   probe ok`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core a_fake_job_takes_its_baseline",
+      "reason": "The repository has no origin, so no lookup is made and no line is printed."
+    },
+    {
+      "name": "Integration fakes that answer CI reads",
+      "dependent": "crates/athena-cli/tests/drain.rs `gate_run` (a GitHub origin with `CiAnswer::Green` or `CiAnswer::NoRun`, through `install_github_fakes`, test_support.rs about 718) and its tests `low_disk_with_a_green_ci_run_does_not_hold_the_checks_stage` (about 2526), `low_disk_with_a_github_origin_and_no_ci_run_holds_before_the_local_run` (about 2560) and the retry path (about 2499-2522). Replaces the wrong lifecycle.rs entry from round 1: lifecycle.rs has no GitHub origin and does not use these fakes, so it is unaffected.",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain low_disk. Green: the baseline stage now reads CI and the fake answers green for any SHA, so the baseline is reused with no local baseline run; the producer adjusts any assertion on read counts or on the order of the disk hold, and names it in the report. NoRun: the lookups find nothing, the baseline runs locally as before, and the hold still comes before the candidate's checks (the disk gate at mod.rs:1399 after `baseline_stage` is unchanged).",
+      "reason": null
+    },
+    {
+      "name": "CI source selection",
+      "dependent": "Athena::with_ci_source (run/mod.rs:1318) and its caller at mod.rs:1560 for the candidate's checks",
+      "kind": "code",
+      "test": "The existing ci_reuse_* tests (read counts, 75 pauses of 20 s, `ci_reuse_no_github_origin_uses_no_ci`) pass unchanged.",
+      "reason": "It keeps its signature and behavior and becomes a wrapper over `with_ci_source_on(ci_branch(job), ..)`. The candidate path, its wait and its polling are untouched."
+    },
+    {
+      "name": "take_baseline callers and modes",
+      "dependent": "take_baseline's caller baseline_stage (run/producer.rs:44), reached only from produce_and_verify (run/mod.rs:1394). Resumed jobs enter at check_and_verify and skip it. A nested run returns early in take_baseline.",
+      "kind": "code",
+      "test": "cargo test -p athena-core (existing nested and resume tests).",
+      "reason": "A nested run keeps its skip note and makes no lookup. Resumed jobs never reach the baseline stage. `baseline_stage` is unchanged and reads only `baseline.checks` and `note`."
+    },
+    {
+      "name": "Read-only use of the records branch from the baseline stage",
+      "dependent": "The records branch tip (`athena_git::records_branch::resolve_tip`) and the landing records under `landings/` and `landing-intents/`, read by athena-gate attribution.rs (`cutover_commit_at`, `read_records`), reconcile.rs and gh/records.rs",
+      "kind": "code",
+      "test": "A unit test in attribution.rs for `landed_jobs_at` (found, host commit unknown, malformed record ignored); `cargo test -p athena-gate`.",
+      "reason": "The new `landed_jobs_at` only reads, and the existing readers are unchanged. A missing branch or an unreadable record gives None, and the job goes to lookup B."
+    },
+    {
+      "name": "CI runs the lookups rely on",
+      "dependent": "ci.yml triggers (push to main and athena/ci/**) and the CI-branch deletion when a job closes (gh/early.rs:334-335); `CiBranchSource::fetch` (gh/client.rs about 950-975) filters runs by head_sha, event=push and branch",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No workflow or configuration change. The plan relies on GitHub keeping workflow runs after their branch is deleted; the host question below covers it. If the runs are gone, lookup A finds nothing and the baseline falls back as today."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two whole-job tests through `Athena::go`: (a) `baseline_reused_from_main_run_runs_nothing_locally`: a green run exists for the base SHA on the dispatch branch. (b) `baseline_reused_from_landed_candidate_run_runs_nothing_locally`: the previous job landed with `host_commit` equal to the base, and its CI-branch run is green.",
+      "command": "cargo test -p athena-core baseline_reused",
+      "observes": "In both tests the stored `Baseline` has `reused_from == Some(CI_RUN_ADDRESS)`. Its checks are fmt, clippy and test, each with `reused` true and `passed` true. `note` is None. The file `<job_dir>/baseline-ran`, which `MARKS_BASELINE` (`touch ../baseline-ran`, tests.rs about 1907) creates whenever a local baseline runs, does not exist. The output has `ci         baseline reused from <address> for <base>`. In (b) the fake saw the lookup on `athena/ci/<prev job>` with the previous job's `candidate_commit` as `head_sha`, and read the runs once.",
+      "fails_without": "Without the reuse in `take_baseline`, the baseline runs locally: `baseline-ran` exists, `reused_from` is None and the ci line is absent. If lookup A were dropped, (b) would fall to the Missing main lookup and run locally. In (b) the fake gives green only for the previous job's candidate SHA and CI branch and Missing for the base SHA on main, so only lookup A can pass it.",
+      "seam": "Production entry point: `Athena::go`, reaching `take_baseline` through `baseline_stage` (run/mod.rs:1394). The fake is `ci_seam::install` with `CiReplies` (exists: tests.rs:2539, mod.rs `ci_seam`). It is injected as the runner of the `gh::Runner`, and the decisions stay in production `routing` and `resolve`. Step 7 adds `CiReplies::only_for(sha, branch)`, which answers Missing for any other (sha, branch) pair, and `baseline_reads()`. Step 7 also adds the `ci_reuse_run_with(origin, reply, check)` helper and the helper `seed_landed_job(git, job, host_commit, candidate_commit, fingerprint)`. The latter writes real `landings/*.json`, `landing-intents/*.json` and `<job dir>/verification.json` files onto `athena/records` using the existing `athena_git::records_branch` writer; the producer reads that writer's API first. The guard is a GitHub origin on the fake repository; the helper asserts the CI source was read."
+    },
+    {
+      "criterion": 2,
+      "method": "A test `baseline_runs_locally_when_no_green_ci_result_exists` loops over these cases: CiReply::Missing, CiReply::Red, CiReply::Unfinished, a new CiReply::Unreachable (the runner returns Err), a landed previous job whose recorded fingerprint differs from the base's (lookup A is refused by the guard and B is Missing), and a no-origin control.",
+      "command": "cargo test -p athena-core baseline_runs_locally",
+      "observes": "In every case `<job_dir>/baseline-ran` exists, `reused_from` is None, `baseline.checks` has the same names as before with `reused` false, and `note` is None. With a GitHub origin the output has `ci         baseline runs locally: <reason>`. The reason names the run address for Red, says the recorded fingerprint differs for the mismatch case, and says there is no usable CI result for Missing, Unfinished and Unreachable. This ci-line is how the 'note' in criterion 2 is met (see Decision 3). With no origin there is no ci baseline line, and the existing 8-line test still passes.",
+      "fails_without": "If the code reused on any result, or skipped the local run on an error, a red run or a fingerprint mismatch, then `baseline-ran` would be missing or `reused_from` set. If the fingerprint guard were missing, the mismatch case would be reused. If the reason line were dropped, the line assertion would fail.",
+      "seam": "Same entry point `Athena::go`, same `ci_seam` and `CiReplies`, and the same helpers as criterion 1, added by step 7. The `Unreachable` variant is a new arm in `CiReplies::gh` that returns Err; step 7 adds it. Production `run_routed_with_record`, the fingerprint comparison and `baseline_checks` decide. The fakes supply only GitHub-shaped replies and the records files."
+    },
+    {
+      "criterion": 3,
+      "method": "Extend the Baseline tests (`sample_baseline`, the `check_record_file` round trip on `{job}/baseline.json`, the `AnyRecord::Baseline` arm). Round-trip a value with `reused_from: Some(..)` and one with None. Add a test that an older JSON with no `reused_from` key parses.",
+      "command": "cargo test -p athena-data baseline",
+      "observes": "Both values round-trip through `check_record_file`. The old-form JSON parses with `reused_from` None. A None value serializes with no `reused_from` key. An unknown key is still refused (`deny_unknown_fields`).",
+      "fails_without": "Without `#[serde(default)]` the old file fails to parse. Without the field, the Some round-trip does not compile.",
+      "seam": "`check_record_file` and `AnyRecord::Baseline` in records.rs (exist, about line 3050). No double; the test builds records with the extended `sample_baseline` (the existing helper at about line 4501, changed by step 2)."
+    },
+    {
+      "criterion": 4,
+      "method": "The gate: the full workspace suite, clippy and fmt.",
+      "command": "cargo test --locked",
+      "observes": "All pass, including `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`. This covers the existing ci_reuse_* tests (their `reads()` counts hold because step 7 narrows `reads()` to requests carrying `branch=athena/ci/`, and lookup B uses the dispatch branch). It also covers the drain.rs low_disk tests and the cli lifecycle tests.",
+      "fails_without": "A missed `Baseline { .. }` literal (core/src/checks.rs:1223, verify.rs:1656, records.rs about 4501, run/checks.rs:182) fails compilation. A changed read count fails the ci_reuse_* tests.",
+      "seam": "Not a behavior test of its own. The existing seams are used unchanged, with `reads()` narrowed in step 7."
+    },
+    {
+      "criterion": 5,
+      "method": "The ci-line assertions in tests 1 and 2, plus a read of `take_baseline`: it calls `routing::run_routed_with_record`, which calls `ci_result::resolve`, inside `with_ci_source_on`. No new lookup function appears in ci_result.rs.",
+      "command": "cargo test -p athena-core baseline_",
+      "observes": "Test 1 sees `ci         baseline reused from <CI_RUN_ADDRESS> for <base>`. Test 2 sees `ci         baseline runs locally: <reason>`. The fingerprint compared in the guard is the one from `fingerprint(&git, base, base)`, the same function candidate.rs:37 uses for `base_fingerprint`.",
+      "fails_without": "Without the printed lines, both tests fail on their line assertions.",
+      "seam": "Same as tests 1 and 2: `ci_seam` and `CiReplies` (exist), and the `Lines` UI (exists, used at tests.rs about 2735)."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the Unreleased section of CHANGELOG.md, added in step 9. A note is also added to the module doc of ci_result.rs.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The entry says the baseline is reused from a green GitHub run when the base's governed content was just tested: the landed candidate's run (matched by fingerprint) or main's run for the base commit. It says that otherwise (no run, unfinished, red, lookup error, fingerprint differs, no GitHub origin) the baseline runs locally as before, with the reason printed on a `ci` line.",
+      "fails_without": "A missing entry fails the criterion on inspection.",
+      "seam": "No test seam; a content criterion checked by reading the diff."
+    }
+  ],
+  "open_questions": [
+    "Host: Does GitHub keep and return the workflow runs of an `athena/ci/<job>` branch after the branch is deleted when the job closes, through the runs API filtered by head_sha, event=push and branch? The code (gh/client.rs about 964-974, gh/early.rs:334-335) does not show it. If not, lookup A never hits live and only main's run by SHA (B) can save time.",
+    "Host: Is the `athena/records` branch present locally, or as `origin/athena/records`, on the machine that runs the next job, with the previous landing's records already on it? `resolve_tip` (records_branch.rs:55) reads either, but whether the landing records are fetched before the next job starts cannot be learned from the code."
+  ],
+  "producer_section_sha256": "7eee4449188c1e185767181216a29af4eba04b32ecbdcceeab485140f3151fd0"
+}

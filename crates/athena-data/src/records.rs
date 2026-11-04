@@ -2617,6 +2617,12 @@ pub struct Baseline {
     pub checks: Vec<CheckRun>,
     /// Why the baseline is empty or partial, if it is.
     pub note: Option<String>,
+    /// The address of the GitHub run whose green result stands in for the checks, when the baseline was
+    /// reused and not run: a finished green run for the same governed content as the base commit. Every
+    /// check then has `reused` set and passed. Absent (and not written) when the checks ran here, and in files
+    /// written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reused_from: Option<String>,
 }
 
 /// What a verification check's note starts with when the same check already failed on the base commit.
@@ -4504,7 +4510,62 @@ mod tests {
             before_invocation: 1,
             checks: vec![check("fmt"), check("test")],
             note: None,
+            reused_from: None,
         }
+    }
+
+    #[test]
+    fn a_baseline_written_before_reuse_existed_still_parses_with_no_source() {
+        let record = AnyRecord::Baseline(Box::new(sample_baseline()));
+        let json = record.to_json();
+        assert!(
+            !json.contains("reused_from"),
+            "a baseline that ran here serialises as before: {json}"
+        );
+        let path = format!("{}/baseline.json", job().dir());
+        assert!(check_record_file(&path, json.as_bytes()).is_ok());
+        let AnyRecord::Baseline(b) = AnyRecord::parse("x", json.as_bytes()).unwrap() else {
+            panic!("a baseline")
+        };
+        assert_eq!(b.reused_from, None);
+        assert_eq!(b.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_reused_baseline_round_trips_and_validates() {
+        let mut b = sample_baseline();
+        for c in &mut b.checks {
+            c.passed = true;
+            c.exit_code = None;
+            c.reused = true;
+        }
+        b.reused_from = Some("https://github.com/owner/repo/actions/runs/4242".into());
+        let record = AnyRecord::Baseline(Box::new(b));
+        let json = record.to_json();
+        assert!(json.contains("reused_from"), "{json}");
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
+        let path = format!("{}/baseline.json", job().dir());
+        assert!(check_record_file(&path, json.as_bytes()).is_ok());
+        let AnyRecord::Baseline(back) = AnyRecord::parse("x", json.as_bytes()).unwrap() else {
+            panic!("a baseline")
+        };
+        assert_eq!(
+            back.reused_from.as_deref(),
+            Some("https://github.com/owner/repo/actions/runs/4242")
+        );
+        assert!(
+            !back.failed_before("fmt"),
+            "a reused baseline excuses nothing"
+        );
+    }
+
+    #[test]
+    fn a_baseline_with_an_unknown_key_is_still_refused() {
+        let json = AnyRecord::Baseline(Box::new(sample_baseline())).to_json();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["reused_form"] = serde_json::json!("typo");
+        let path = format!("{}/baseline.json", job().dir());
+        assert!(check_record_file(&path, value.to_string().as_bytes()).is_err());
     }
 
     #[test]

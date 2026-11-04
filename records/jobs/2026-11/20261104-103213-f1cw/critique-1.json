@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-103213-f1cw",
+  "round": 1,
+  "at": "2026-11-04T12:48:54.105729949Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/checks.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/checks.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The SHA-only lookup with no wait targets main's push run, which is usually still running when the next job starts. It also drops the landed candidate's run, which the request and the accepted reading both name.",
+      "evidence": "From the code: the comment at ci.yml:59-62 says two push runs of the same commit 'each ran the full 16 minutes', because a push run misses the pull request's cached pass. Main cannot restore pass entries scoped to a pull request (ci.yml:108-110; system facts: CI caches). In a drain loop the next job's baseline starts soon after the previous landing, so a single read with no wait will likely see main's run unfinished. If so, the saving the request asks for (about 20 minutes per job) will rarely appear; this is an estimate, not measured. The accepted reading says the base's fingerprint 'may match another commit's green run, such as the landed candidate'. The plan rejects that route because 'the candidate's SHA is not known from the base', but the repository has what is needed: landed commits carry an `Athena-Job` trailer (commits.rs:288-312), `landed_commit` already maps an `Athena-Verified-Content: <fingerprint>` trailer to a commit (gh/landing.rs:32-41), and each job's `Candidate` record holds its commit and fingerprints (records.rs:766-771, `<job>/candidate.json`). From these the plan can get the candidate's SHA, compare fingerprints, and call the same `resolve` on `gh::ci_branch(job)` (gh/early.rs:336). That run already finished before landing. Fix: Add a second source, through the same `run_routed_with_record`/`resolve` path. Read the base commit's `Athena-Job` trailer and load that job's candidate record. If its fingerprint equals `fingerprint(&git, base, base)`, resolve the candidate commit's SHA on `athena/ci/<job>`. Keep the base-SHA lookup on main as the first or second try. Test both: a green candidate-branch run whose fingerprint matches is reused; one whose fingerprint differs is not. If the producer cannot fit this into one run, return the question to the user before coding instead of shipping the narrowed version, because without the candidate route the main saving is unlikely to appear.",
+      "location": "Approach / Decision 2 (SHA-on-dispatch-branch, one read, no wait) and Open question 1",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list names lifecycle.rs as a reader of the always-green GitHub fakes. lifecycle.rs does not use them; drain.rs `gate_run` does, and the list omits it.",
+      "evidence": "Grep for `install_github_fakes` in crates/athena-cli/tests finds matches only in drain.rs (lines 2455 and 2504), none in lifecycle.rs. In drain.rs, `gate_run` sets a GitHub origin with `CiAnswer::Green` or `CiAnswer::NoRun`, on a disk that reads low while checks run. The tests that use it are `low_disk_with_a_green_ci_run_does_not_hold_the_checks_stage` (2526), `low_disk_with_a_github_origin_and_no_ci_run_holds_before_the_local_run` (2560) and the retry path (2499-2522). Under this change their baseline stage now reads CI, and with Green it is reused, so the read counts and the disk-hold ordering change. Fix: Replace the lifecycle.rs entry with these three drain.rs tests. For each, state the expected behavior: Green means a reused baseline with no local baseline run; NoRun means a local baseline as before, and the hold still comes before the candidate's checks. Name `cargo test -p athena-cli --test drain low_disk` as the check. If lifecycle.rs stays on the list, say why: it has no GitHub origin, so it is unaffected.",
+      "location": "Dependents: 'Integration fakes that answer every CI read as green'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan puts the fallback reason on an output line instead of in `Baseline.note`. The reason is sound, but the change from the wording of criterion 2 is not stated.",
+      "evidence": "`Baseline::failed_before` returns false whenever `note` is set (records.rs:2629-2630). Putting the reason in `note` would stop real pre-existing failures from being excused. The plan names this risk, but criterion 2 literally asks that the red and error cases leave a note. Fix: Say in the plan and in the producer report that the 'note' of criterion 2 is met by the `ci         baseline runs locally: <reason>` output line, not by `Baseline.note`, and why.",
+      "location": "Decision 4 vs acceptance criterion 2 ('a red or error case also leaves a note')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Editing checks.rs is outside the listed deliverables but required. The plan already says so; keep the edit to the one struct literal.",
+      "evidence": "Athena's own finding raises this. The `baseline_failing` helper (checks.rs:1223) builds a `Baseline` literal, which will not compile once the new field is added. Fix: Limit the edit to adding `reused_from: None` to that literal, and note it in the producer report.",
+      "location": "Files: crates/athena-core/src/checks.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The mechanics hold up. I checked each against the code: the call path through `run_routed_with_record` and `resolve`, the `with_ci_source` split, the `reused_from` field with `serde(default)`, keeping `Baseline.note` unset on a fallback (`failed_before` returns false whenever a note is set, records.rs:2630), and the `MARKS_BASELINE` and `CiReplies` test seams. The plan's citations are accurate: `resolve` requires `run.sha == sha` (ci_result.rs:196), `CiBranchSource` filters on head_sha, event and branch (gh/client.rs:970), and `take_baseline` is at run/checks.rs:176. The main problem is the approach. The plan narrows \"same fingerprint\" to \"same SHA, one read, no wait on the dispatch branch\". That leaves only main's own push run, which is the run least likely to be finished when the next job starts. It drops the landed candidate's run, which the request and the accepted reading both name. The plan's argument that no fingerprint route exists overlooks data the repository already has. Separately, the dependents list names lifecycle.rs as the reader of the always-green GitHub fakes. lifecycle.rs does not use them; drain.rs does, and the list omits it."
+}
