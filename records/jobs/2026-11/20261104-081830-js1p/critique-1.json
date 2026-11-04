@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-081830-js1p",
+  "round": 1,
+  "at": "2026-11-04T08:27:39.254367701Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The demonstration commands for criteria 1, 2 and 6 are `&&` chains, so Athena will not run them on the reverted copy and no fails-without record reaches the verifier.",
+      "evidence": "crates/athena-core/src/verify.rs:717-730: `demonstration_command` returns None for any word containing one of `|&;<>()$...`. checks.rs:270-273 then records `not a plain cargo test command` and does not run it. The plan's commands read `cargo test --locked -p athena-core run::tests && cargo test --locked -p athena-cli --test job_plan`, and criterion 6 chains five commands the same way. Fix: Give each demonstration exactly one plain `cargo test ...` command, for example `cargo test --locked -p athena-core run::tests` for the core test. admission.rs:188 allows one demonstration per criterion, so if the CLI test also needs a revert run, put it under one command (for example the core test's name filter) or cite the second command in `method`/`observes`. State which command's fails-without record the verifier will see.",
+      "location": "Demonstrations, criteria 1, 2 and 6 (Run lines)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The helper unit test names `asks_for_failing_run`, so on Athena's reverted copy the run::tests target fails to compile and never shows the plans-test failing.",
+      "evidence": "verify.rs:870-871 and 902-941: `revert_plan` keeps test files (tests.rs is a declared test module of run/mod.rs, mod.rs:1844-1845) but reverts run/mod.rs to the base, keeping only its test modules. The base has no `asks_for_failing_run`, so tests.rs no longer compiles. The producer's manual mutation in step 4 keeps the helper and only edits the gate line, so it does not match what Athena actually runs. Criterion 3 says the command 'fails on it' (the plans-test). A compile error does not show that. Fix: Do not name the helper from test code. Cover its cases (Content criterion, case and double spaces, unrelated text, no criteria) through `Athena::go` scenarios with fake readers. Or reach it only through a seam that exists at the base. Then state in criterion 3's fails_without that the reverted copy compiles and the plans-test fails on its role-order assertion.",
+      "location": "Step 3 (helper unit test) and Demonstrations, criteria 2 and 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 2's fails_without describes a mutation (an over-broad gate), not the fix's absence. On Athena's revert run the ordinary-job test passes, and the verifier will be shown that.",
+      "evidence": "checks.rs:288-339 runs every demonstration that has a fails_without on a copy with the whole change reverted. Reverting the widening leaves ordinary easy jobs unplanned, so the test stays green there. Fix: Say in fails_without and observes that this test is a guard against over-widening: it passes on the reverted copy as well and goes red only under the named mutation. Then the verifier does not read a pass on the revert run as missing evidence.",
+      "location": "Demonstrations, criterion 2 (Fails without the behavior)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The reason given for matching only Behavior criteria is factually wrong: admission does not stop a Content criterion's demonstration from carrying fails_without, and such demonstrations do run.",
+      "evidence": "admission.rs:199-201 only skips the fails_without and seam requirements for non-Behavior criteria. verify.rs:734-757 `demonstration_groups` groups by fails_without with no kind filter. The existing test at run/tests.rs:3128 runs `fails-without-1` for the base reading's Content criterion (tests.rs:228, `kind: content`). Fix: Keep the Behavior-only rule, since the accepted reading and criterion 4 state it. Replace the reason with that one, and drop the claim that a Content criterion cannot hold a fails_without demonstration.",
+      "location": "Decision 2 (Reason and the rejected 'Match any criterion kind')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The dependents list leaves out doc comments that state the old rule.",
+      "evidence": "crates/athena-data/src/records.rs:472-475 (doc of `hard_reason`: 'is planned when `[job_plan] mode` is `hard`') and crates/athena-context/src/outputs.rs:43 (reader output doc on hard marking and `[job_plan] mode`) both describe hard marking as the only thing that sets planning. reading.rs:4024 has a test comment saying the same. Fix: List these readers. Either update the doc lines to say a failing-run criterion also plans a job, or say why they stay true as written. Note that outputs.rs feeds the reader's prompt set, which has a budget of 1997 of 2000, so any wording change there must stay inside it.",
+      "location": "Dependents / Files",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The open question about plural wording is already settled by the phrase list.",
+      "evidence": "'tests fail without the fix' contains the listed phrase 'fail without the fix', so `contains` already matches it. Fix: Drop the plural case from the question and ask only about wordings that differ, such as 'fails without this change' or 'fails without it'.",
+      "location": "Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Criterion 1's test is described with two different demonstration plans.",
+      "evidence": "Criterion 1 says `planning_script(vec![behavior_plan(seam)], ...)`, whose command is `cargo test --locked` (tests.rs:668-679). The Risks section says the command is `cargo test --locked demo`, which is the command `demonstration_plan` uses (tests.rs:3045). Fix: Pick one: `behavior_plan` with a seam and a single explicit command. Remember a Behavior criterion's demonstration needs a seam, or admission sends the plan back.",
+      "location": "Demonstrations, criterion 1 vs Risks (third bullet)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The fix is in the right place. Widening the `planned` gate at run/mod.rs:804-809 with a named helper is the root-cause change, and passing a bool into `JobPlanConfig::plans` (config.rs:206) keeps the meaning of `enabled` and `mode`. The phrase match on criterion text is what the request and the accepted reading ask for, so the approach is sound. What fails is the plan's own demonstrations: they would not reach the verifier through the mechanism this job exists to feed. First, the demonstrations for criteria 1, 2 and 6 chain commands with `&&`. `demonstration_command` (verify.rs:717-730) treats any `&` as a shell metacharacter, so Athena records them as \"not a plain cargo test command\" and never runs them on the reverted copy. Second, the helper unit test in run/tests.rs names `asks_for_failing_run`. Athena's revert run (verify.rs `revert_plan`) keeps tests.rs but puts run/mod.rs back to the base, which removes the helper. On the reverted copy, `run::tests` would then fail to compile instead of failing on the plans-test, which is not what criterion 3 asks to show. Two smaller points: the stated reason for the Behavior-only rule is wrong about admission.rs, and one open question rests on a substring mistake."
+}
