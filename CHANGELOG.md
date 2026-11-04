@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Design note `docs/design/continuous-landing.md` for throughput review `20261104-192053-745k`: landing as one
+  step owned by the drain's ordered landing queue, with the predicted saving of 470.0 minutes per landed job
+  (baseline 528.2, of which 499.1 is landing and rebuild) and how the next review measures it. Design only; no
+  code changed.
 - The throughput review now flags a slowdown even while a design request is open. Every review that runs
   compares the latest median minutes per landed job with the previous review's and names the stages whose
   median minutes grew, largest first, in the record's note and in the drain line. When the median grew by more
