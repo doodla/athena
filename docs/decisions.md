@@ -230,7 +230,10 @@ amend earlier entries without rewriting them. All of these entries belong to the
   - (b) Full clones per job.
   - (c) Containers.
   - (d) `git archive` exports.
-- **Tradeoff:** Each snapshot is a copy, and agents lose `git log` of the real history. That is the point.
+- **Tradeoff:** Each snapshot is a copy, so `git log` inside it never shows the real history. Amended by D155:
+  an agent can read the commits a job's request names through a filtered, read-only text file,
+  `ATHENA-COMMITS.txt`; the rest of the history stays hidden, and no git object or ref of the user's
+  repository enters the snapshot.
   - (a) shares objects, refs, and configuration with the user's repository: `git show` reaches excluded
     content, `update-ref` moves branches, and `sparse-checkout set` rewrites shared configuration (review
     1, R1 and R2).
@@ -4231,3 +4234,50 @@ should replace those estimates with its figures.
 - **Reversal cost:** Low. Delete `repin_command` and its tests and restore the old message.
 - **Provenance:** Read: `crates/athena-agent/src/claude.rs`, `xtask/src/main.rs`. Measured: the tests named
   above. Not measured: how often Claude Code updates.
+
+## D155 · A request that names a commit gives the producer and verifier a filtered, read-only view of it
+
+- **Case:** The request for this job states that two fix attempts on a commit it names were rejected because
+  neither the producer nor the verifier could see that commit. The records of those attempts are not in this
+  job's snapshot, so that account is as stated by the request, not read or measured here. D08 gave agents no
+  view of the real history (now amended by this decision), which is why a cited commit could not be inspected.
+- **Decision:** In the narrow case of a request that names commit hashes, D08's rule that agents see none of the
+  real history gets one exception. The request text is scanned for hashes (7 to 40 hexadecimal characters with
+  at least one digit and one letter, lowercased, deduplicated, at most 8). When there are any, the producer's
+  and the verifier's snapshots gain one text file, `ATHENA-COMMITS.txt`, at the root. For each named commit that
+  is the base commit or one of its ancestors it holds the full hash, the date, the subject, the changed paths
+  and a unified diff of those paths, built from the user's repository by `Snapshot::add_commit_views`. The
+  paths pass the same `classify()` filter as `HISTORY.txt`: `records/` and `athena-exclude` paths and submodule
+  entries are dropped before any content is read, rename detection, external diff programs and text
+  conversion filters are off, and commit bodies and authors are never written. A hash that is unknown, not a
+  commit, outside the base's history, or a commit that changed only hidden paths is left out under one shared
+  note, which does not say which reason applied; the job goes on. No git object, ref, alternate or remote enters
+  the snapshot, so the isolation of D08 is unchanged. The file is listed in the snapshot's `.git/info/exclude`
+  before it is written, so no candidate, change list or prepared tree holds it, and a kept directory's copy is
+  not carried into a new snapshot. The brief says where the file is only when the request names a hash, and
+  says to read it by its path, because a search over the whole directory skips excluded files. With no hash in
+  the request, snapshots and briefs are as before. The scratch snapshot that runs the demonstration commands
+  gets no view, since no agent reads it.
+- **Alternatives:** (a) Alternates or a remote from the snapshot to the user's repository, so git reads the real
+  commits. (b) Rewrite the named commits into the snapshot's own repository, with hidden paths removed. (c)
+  Always include the full history in every snapshot, or extend `HISTORY.txt`. (d) Refuse a job whose hash does
+  not resolve. (e) A patch file per commit. (f) Commit the view into the snapshot's base commit.
+- **Tradeoff:** (a) gives a path back to `records/` and `athena-exclude` content through the object database,
+  which D08 forbids. (b) gives the commits new ids, so the cited hash would not resolve, and a rewrite across
+  merges risks leaving hidden blobs in the object store. (c) discloses more than any job needs and is out of
+  scope. (d) would stop a job over a mistyped token, a convenience feature; silent omission was also rejected,
+  because an agent could not tell a missing view from an empty one, which was the fault behind the rejected
+  attempts. (e) needs more paths to explain. (f) changes the one-commit and two-commit shape and the base tree
+  the change list is measured against. The text view costs a little: hashes are read from the request text
+  only; a hash made only of digits is not found; a diff is cut at 200 KB per commit with a visible line; and
+  only commits in the base's history are shown, so a commit that is not on the base, such as an earlier
+  rejected candidate, gets only the note. A visible `.gitattributes` still names the paths it hides, in every
+  snapshot as before and in the diff of a commit that edits it. A commit subject can name a path, as in
+  `HISTORY.txt`; bodies and authors are not shown for that reason.
+- **Reversal cost:** Low. Remove `Snapshot::add_commit_views`, its calls in `run/producer.rs` and
+  `run/verification.rs`, and the conditional brief sentence; no record, configuration or workflow changed.
+- **Provenance:** Stated: the request's account of the two rejected attempts and the goal of read-only history
+  access when a job needs it. Read: `crates/athena-git/src/snapshot.rs`, `crates/athena-core/src/run/producer.rs`,
+  `crates/athena-core/src/run/verification.rs`, `crates/athena-context/src/briefs.rs`, D08. Measured: `cargo test
+  -p athena-git`, `-p athena-context` and the wiring test in `run_pin_tests.rs`. Not measured: how many past
+  requests name a hash, or how large the named commits are.

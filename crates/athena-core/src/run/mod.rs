@@ -1499,7 +1499,7 @@ impl Athena {
         // check-tool configuration in the working tree.
         let verify_dir = job_dir.join("verify");
         let (vsnap, tool_config_from_base, prepared) =
-            self.verifier_snapshot(&verify_dir, &p, &c, ctx.pin_dir.as_deref())?;
+            self.verifier_snapshot_for(&verify_dir, &p, &c, ctx)?;
         let check_env = athena_agent::env::build(
             &EnvSpec {
                 agents: &jc.config.agents,
