@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The decisions page lists only proposals that are still open and above the raising role's limit, and says "Nothing waiting for you" when there are none.
 - The verifier now sees Athena's recorded "fails without the fix" run. Root cause: the verifier gets no
   producer report and cannot change files, so a criterion that needs a recorded run of the new test failing on
   the old code could never be shown to it, and correct changes were rejected on that alone. After the producer
