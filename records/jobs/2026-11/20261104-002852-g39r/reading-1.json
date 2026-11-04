@@ -1,0 +1,172 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261104-002852-g39r",
+  "n": 1,
+  "at": "2026-11-04T00:31:43.235996886Z",
+  "invocation_seq": 2,
+  "base_commit": "4e514c84e5271430767bfb300212128e4480166a",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add steward-written brief fields to proposals and render them first",
+  "summary": "The steward, when it raises a proposal above its limit, writes five plain-language fields (question, if_yes, if_no, cost, recommendation with a one-line reason) into the work-item record. The decisions page (xtask/src/decisions.rs) renders them before any evidence path, puts paths in a collapsed section, and shows the title with 'No brief written yet' when absent. No text-rewriting code is added. Audience: the owner who decides proposals.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests for both render cases, record round-trip and the prompt; cargo test and clippy pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check rendered output order and the exact fallback text."
+    },
+    {
+      "id": "root-cause",
+      "how": "The model writes the plain-language fields, not string rules."
+    },
+    {
+      "id": "strangers",
+      "how": "Page text and prompt are written for the owner as an outside reader."
+    },
+    {
+      "id": "small",
+      "how": "One optional field and one render change."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs the named cargo tests."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-data/src/records.rs: WorkItem (deny_unknown_fields, validate()) gains one optional `brief` field (serde default, skip if none) holding the five fields, so existing records still parse. The records validation is check_record_file (records.rs:3003), which parses bytes into AnyRecord::WorkItem and then runs WorkItem::validate; the new field is accepted there, and the existing round-trip test using sample_work_item (records.rs ~3737) is extended to cover a work item with a brief and one without. I also read crates/athena-core/src/steward.rs: decide() builds the WorkItem from a ProposedChange and returns Decision::Proposed above the role's limit, so the brief is carried from ProposedChange into the item only on that path. Every other WorkItem constructor (steward.rs, audience.rs:98, work_decisions.rs and drain.rs tests) must set brief None.",
+    "Code survey: the entry point for rendering is xtask/src/decisions.rs: Brief::new from a WorkItem, Brief::html, render, and the existing check that a brief has a recommendation line and is under MAX_WORDS. The new fields are rendered directly from the record, as stored text escaped with the existing escape; the existing derived recommendation() string is replaced for items with a brief. Evidence paths move into an HTML details element. The existing word-limit check must not reject a record without a brief.",
+    "Code survey: the steward prompt is STEWARD_PROMPT in crates/athena-data/src/roles.rs:120; the prompt budget in crates/athena-context/src/lib.rs (steward_system_prompt) must still fit, so the added text stays short. How the steward model's output reaches ProposedChange (its output parser in steward.rs) must be extended to read the five fields.",
+    "The user's stated rule 'no text transformation code in the site build' is read as: no title-to-question rewriting; escaping and layout only.",
+    "Governance files (athena.toml, defaults.toml, workflows) are not changed; the pages workflow already renders this page."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p xtask`: a test builds a steward proposal WorkItem with all five fields and asserts the rendered page contains question, if_yes, if_no, cost and recommendation text, each at an earlier byte offset than the first evidence path, and that the paths sit inside a collapsed <details> element.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p xtask`: a test renders a proposal WorkItem with no brief and asserts the output contains its title and the exact text 'No brief written yet', and that rendering does not fail.",
+      "kind": "behavior"
+    },
+    {
+      "text": "STEWARD_PROMPT in crates/athena-data/src/roles.rs names the five fields (question, if_yes, if_no, cost, recommendation with a one-line reason) and the owner-style rules (short, plain, no jargon); a unit test in crates/athena-data asserts these terms are present (checkable with Grep).",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-data`: the records round-trip and check_record_file tests accept a work item with a brief and one without (old records still parse), and reject a brief with an empty field.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a steward test shows decide() on a rung above the role's limit yields a WorkItem carrying the brief, and that the steward output parser reads the five fields.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Grep of xtask/src/decisions.rs shows no new code that rewrites, splits or replaces words in titles; the page code only escapes and lays out stored fields.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check`: all pass, including the existing decisions-page tests and the prompt budget tests.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "xtask/src/decisions.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-data/src/roles.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/audience.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/work_decisions.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/work_decisions.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Any code that rewrites proposal titles into questions",
+    "Back-filling briefs for existing proposals",
+    "Changing athena.toml, defaults.toml or workflows",
+    "Changing the decision approve/reject commands"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.6
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7134020618556701,
+      "p_verification_passes": 0.6675324675324675,
+      "p_user_intervenes": 0.09023255813953487,
+      "cost_usd": {
+        "p10": 0.5588824483776216,
+        "p50": 1.3352032163084988,
+        "p90": 3.6134136703775392
+      },
+      "wall_time_s": {
+        "p10": 540.4818145636394,
+        "p50": 1956.9969620539994,
+        "p90": 4189.8141646494405
+      }
+    }
+  },
+  "departures": "Touches the record type, steward, prompt and site code across four crates, so cost and time lean above the reference."
+}

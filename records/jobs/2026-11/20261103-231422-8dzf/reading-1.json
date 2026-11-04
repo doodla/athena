@@ -1,0 +1,140 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261103-231422-8dzf",
+  "n": 1,
+  "at": "2026-11-03T23:17:22.410950219Z",
+  "invocation_seq": 2,
+  "base_commit": "535133842d0f4d521d0f170b2d6c33d27dcad311",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Retry 193428-df2m: re-reads needing acceptance skip the job limit",
+  "summary": "Retry of rejected job 20261103-193428-df2m (code was correct; only the 'fails without the fix' evidence was missing). Re-apply the change so a drain re-read ending as needs accepting gives its --job-limit slot back, with a regression test at job limit 1. It depends on job 20261103-231410-asf2, which lets the verifier see Athena's own revert-and-run record. For operators of `athena drain`.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New regression test plus fmt, clippy and test criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the drain outcome and stop reason by running the tests."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is in the job counter, not at the one symptom."
+    },
+    {
+      "id": "small",
+      "how": "One focused change, the same four files as the earlier attempt."
+    },
+    {
+      "id": "rust",
+      "how": "Rust change."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code Survey: Code survey: crates/athena-cli/src/drain.rs: run_job takes a slot at `st.started += 1` (~line 1439) after the `st.started >= max_jobs` check (~1433); the `_ if run.needs_accepting` arm (~1537) is where the slot is returned. `needs_accepting` comes only from the re-read result (~3572 in the test stub). crates/athena-cli/tests/drain.rs holds the drain tests and its stub. The property is measured directly through the drain report (jobs outcomes, landed, stop reason), not through a stand-in. No record or data file is added, so records validation is unaffected. No refusal rule is added.",
+    "Job 20261103-193428-df2m: its candidate's four files (CHANGELOG.md, crates/athena-cli/src/drain.rs, crates/athena-cli/src/main.rs, crates/athena-cli/tests/drain.rs) are kept as deliverables and redone from base, because earlier changes were discarded. The fix is unchanged: a decrement of st.started under the state lock in the needs-accepting arm, plus doc/help wording. Its one major finding (behavior criterion 2 had no recorded command) is addressed by the dependency 20261103-231410-asf2: Athena runs the planned revert demonstration and shows the verifier the record. Its nit (the test uses the stub rather than Source::Reread) is accepted as is.",
+    "Job 20261103-231410-asf2 is a dependency, not part of this change. This job relies on the verifier receiving the recorded failing run of the new test against the old counter, and it does not touch the mechanism that provides it.",
+    "The criteria below name a plan with one demonstration: revert the decrement in drain.rs, then run the new test."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-cli --test drain`. A new test with max_jobs 1 has item a end as needs accepting and item b runnable. It asserts jobs[0].outcome == \"needs accepting\", landed == 1 and stop != Stop::JobLimit, and it passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Fails without the fix: with the decrement of st.started in the needs-accepting arm of run_job reverted on a scratch copy, `cargo test -p athena-cli --test drain` fails on the new test. The verifier sees this as Athena's recorded revert run under 'Checks Athena ran'.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`git diff` of crates/athena-cli/src/drain.rs shows the needs-accepting arm in run_job giving the slot back (`st.started` decremented under the state lock). The JobLimit check and the failed, held and passed paths are unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo test -p athena-cli --test drain` still passes the_job_limit_stops_the_loop and the existing needs-accepting tests, and `git diff` shows no removed or weakened asserts.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --workspace` pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Grep of crates/athena-cli/src/drain.rs and crates/athena-cli/src/main.rs for the --job-limit help and the Limits::max_jobs doc finds wording that a re-read that only needs accepting does not count toward the limit. CHANGELOG.md has a matching entry.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    }
+  ],
+  "out_of_scope": [
+    "Avoiding the re-read itself, or changing which config changes trigger a re-read.",
+    "Changing the money budget accounting; the re-read cost still counts against the budget.",
+    "Changing how failed, held or budget-short outcomes count toward the job limit.",
+    "Auto-accepting readings whose scope differs.",
+    "The mechanism that shows the verifier the revert run (job 20261103-231410-asf2).",
+    "Governance files: athena.toml, defaults.toml and workflows."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.7,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.4,
+        "p50": 1.0,
+        "p90": 2.8
+      },
+      "wall_time_s": {
+        "p10": 400.0,
+        "p50": 1600.0,
+        "p90": 3900.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7134020618556701,
+      "p_verification_passes": 0.6710182767624021,
+      "p_user_intervenes": 0.09065420560747663,
+      "cost_usd": {
+        "p10": 0.558696957613696,
+        "p50": 1.3381399470728312,
+        "p90": 3.61544587835159
+      },
+      "wall_time_s": {
+        "p10": 539.8880646620003,
+        "p50": 1944.6460228959993,
+        "p90": 4193.971727751003
+      }
+    }
+  },
+  "departures": null
+}

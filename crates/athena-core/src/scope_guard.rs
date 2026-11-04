@@ -12,7 +12,9 @@
 //! [`t3_cost`] is `forecasts.reader.cost_usd.p90()` of the latest reading of the newest request of the line
 //! that has a finished attempt.
 //! `Athena::go` (dispatch) and `Athena::retry` refuse a paused line ([`Athena::line_pause`]). Nothing here
-//! stops or signals a running process, and nothing lifts a pause: the owner deletes the pause file.
+//! stops or signals a running process, and nothing lifts a pause: the owner deletes the pause file. A flag
+//! dispatches as usual; the drain asks [`Athena::line_flag`] only after an item's last failed attempt, to pass
+//! the item over instead of stopping the batch.
 //!
 //! Why an attempt stopped decides whether it counts. The reason comes from one classifier,
 //! [`crate::disk::StopCause`], which also decides what `athena retry` may resume; this module keeps no list of
@@ -789,6 +791,30 @@ impl Athena {
         (line_state(records, &requests, line).2.overall() == Level::Pause).then_some(mark)
     }
 
+    /// The flag on the line that `job_id` belongs to, if there is one: the stored flag, returned only while the
+    /// line's attempts, read under the current rule, still reach a flag. A line that is paused has no flag here
+    /// (its pause is [`Athena::line_pause`]). The drain asks this after an item's last failed attempt, to pass
+    /// the item over. The file is left as it is; this never creates or removes a mark.
+    pub fn line_flag(&self, records: &Records, job_id: &str) -> Option<LineMark> {
+        let requests = request_records(records);
+        let at = requests.iter().position(|r| r.id == job_id)?;
+        let lines = group_lines(&requests);
+        let line = lines.iter().find(|l| l.contains(&at))?;
+        let first = &requests[line[0]].id;
+        let mark = read_mark(&flag_path(&self.state, first)).filter(|m| !m.is_pause())?;
+        (line_state(records, &requests, line).2.overall() >= Level::Flag).then_some(mark)
+    }
+
+    /// One line about a flagged line: which line, the signals and the reason.
+    pub fn flag_note(&self, mark: &LineMark) -> String {
+        format!(
+            "line {} is flagged ({}): {}",
+            mark.line,
+            mark.signal_names(),
+            mark.reason
+        )
+    }
+
     /// The marks `athena status` shows: the stored marks ([`list_lines`]) that still hold. A pause is shown
     /// only while the line's recomputed level is a pause ([`Athena::line_pause`]), a flag while it is a flag or
     /// a pause. A mark whose line has no finished attempt in `records` cannot be recomputed and is shown as
@@ -1447,6 +1473,44 @@ mod watcher_tests {
         assert!(held.signal_names().contains("T4"), "{held:?}");
         assert!(r.athena.retry(b.as_str(), &Quiet).is_err());
         assert!(r.pause(&a).exists());
+    }
+
+    #[test]
+    fn line_flag_returns_the_flag_only_while_it_holds_and_never_a_pause() {
+        // Two rejections of different criteria: the line is flagged, not paused.
+        let r = rig(0.8, 0.01, &[Some(0), Some(1)]);
+        let (a, b) = r.two_rejections();
+        let records = r.records();
+        let stored = read_mark(&r.flag(&a)).expect("the watcher flagged the line");
+        assert_eq!(
+            r.athena.line_flag(&records, b.as_str()),
+            Some(stored.clone())
+        );
+        assert_eq!(
+            r.athena.line_flag(&records, a.as_str()),
+            Some(stored.clone())
+        );
+        let note = r.athena.flag_note(&stored);
+        assert!(
+            note.starts_with(&format!("line {a} is flagged (T1)")) && note.contains(&stored.reason),
+            "{note}"
+        );
+        assert_eq!(r.athena.line_pause(&records, b.as_str()), None);
+        let other = r.ask("something unrelated about the licence");
+        assert_eq!(r.athena.line_flag(&r.records(), other.as_str()), None);
+
+        // A pause mark is not a flag.
+        std::fs::remove_file(r.flag(&a)).unwrap();
+        write_mark(r.pause(&a), &mark("pause", a.as_str(), "T4")).unwrap();
+        assert_eq!(r.athena.line_flag(&records, b.as_str()), None);
+
+        // A flag for a line that has since landed no longer holds.
+        let r = rig(0.8, 0.01, &[None]);
+        let a = r.ask("describe the demo in the readme");
+        assert_eq!(r.go(&a).unwrap(), OutcomeState::Landed);
+        write_mark(r.flag(&a), &mark("flag", a.as_str(), "T1")).unwrap();
+        assert_eq!(r.athena.line_flag(&r.records(), a.as_str()), None);
+        assert!(r.flag(&a).exists(), "the stored file is left as it is");
     }
 
     #[test]
