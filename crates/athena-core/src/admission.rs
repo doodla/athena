@@ -1325,8 +1325,8 @@ mod tests {
 
     #[test]
     fn a_job_usd_below_the_stage_caps_is_a_configuration_violation() {
-        let text = BASE_CONFIG.replace("job_usd = 12.00", "job_usd = 9.00");
-        assert_ne!(text, BASE_CONFIG, "athena.toml sets job_usd = 12.00");
+        let text = BASE_CONFIG.replace("job_usd = 50.00", "job_usd = 46.00");
+        assert_ne!(text, BASE_CONFIG, "athena.toml sets job_usd = 50.00");
         let found = configuration(admit_files(&[("athena.toml", &text)]));
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].path.as_deref(), Some("athena.toml"));
