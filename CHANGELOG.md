@@ -17,6 +17,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Baseline reuse now finds the default branch's CI run. Root cause: the default-branch step asked for a run
+  on the base's own content commit, but the default branch holds a different squash commit with the same
+  governed content, so the host never had that commit and every job re-ran the baseline locally. The step
+  now reads the run of the default branch's tip (the local `origin/<branch>` ref) when the tip's
+  governed-content fingerprint equals the base's; a tip with other content runs the baseline locally.
 - A criterion that cites Athena's own "fails without the fix" run now counts that run as seen running. Root
   cause: Athena ran each planned demonstration and showed it to the verifier, but did not write it to the
   verification record's checks, so the verdict's seen-running rule (D43) could not count it, and a Behavior

@@ -2971,6 +2971,8 @@ mod produce_and_verify_order_tests {
             ])
             .unwrap();
             content = git.head().unwrap().unwrap();
+            git.run(["update-ref", "refs/remotes/origin/main", &content])
+                .unwrap();
             CiReplies::new(CiReply::Green).only_for(&content, "main")
         });
         let baseline = &run.baseline;
@@ -2990,6 +2992,89 @@ mod produce_and_verify_order_tests {
         );
         let line = format!("ci         baseline reused from {CI_RUN_ADDRESS} for {base}");
         assert!(run.lines.contains(&line), "{:#?}", run.lines);
+    }
+
+    /// Points `origin/main` (the default branch) at a new commit on top of the head that changes
+    /// `change` (nothing when `None`), then puts the head back, so the job's base is not that commit.
+    /// Returns the commit on main.
+    fn main_tip_beside_head(git: &Git, change: Option<&str>) -> String {
+        git.run([
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ])
+        .unwrap();
+        let before = git.head().unwrap().unwrap();
+        if let Some(text) = change {
+            write_file(git, "changed-on-main.txt", text);
+            git.run(["add", "-A"]).unwrap();
+        }
+        git.run(["commit", "-q", "--allow-empty", "-m", "squash on main"])
+            .unwrap();
+        let tip = git.head().unwrap().unwrap();
+        git.run(["update-ref", "refs/remotes/origin/main", &tip])
+            .unwrap();
+        git.run(["reset", "-q", "--hard", &before]).unwrap();
+        tip
+    }
+
+    #[test]
+    fn baseline_reused_from_a_squash_on_main_with_the_bases_fingerprint() {
+        let mut tip = String::new();
+        let run = ci_reuse_run_with(Some(GITHUB), MARKS_BASELINE_OUTSIDE, |git| {
+            tip = main_tip_beside_head(git, None);
+            CiReplies::new(CiReply::Green).only_for(&tip, "main")
+        });
+        let baseline = &run.baseline;
+        assert_ne!(baseline.base_commit, tip, "main's tip is not the base");
+        assert_eq!(
+            baseline.reused_from.as_deref(),
+            Some(CI_RUN_ADDRESS),
+            "{:#?}",
+            run.lines
+        );
+        assert_baseline_checks(baseline);
+        assert!(baseline.checks.iter().all(|c| c.reused && c.passed));
+        assert!(!run.baseline_ran, "the baseline checks ran locally");
+        let reads = run.baseline_reads();
+        assert!(
+            reads
+                .iter()
+                .any(|p| p.contains(&format!("head_sha={tip}")) && p.contains("branch=main&")),
+            "{reads:?}"
+        );
+    }
+
+    #[test]
+    fn baseline_runs_locally_when_main_tip_has_other_governed_content() {
+        let mut tip = String::new();
+        let run = ci_reuse_run_with(Some(GITHUB), MARKS_BASELINE_OUTSIDE, |git| {
+            tip = main_tip_beside_head(git, Some("other content\n"));
+            CiReplies::new(CiReply::Green).only_for(&tip, "main")
+        });
+        assert!(
+            run.baseline_ran,
+            "the baseline did not run here: {:#?}",
+            run.lines
+        );
+        assert_eq!(run.baseline.reused_from, None);
+        assert!(run.baseline.checks.iter().all(|c| !c.reused));
+        assert!(
+            run.baseline_reads().iter().all(|p| !p.contains(&tip)),
+            "main's run was read: {:?}",
+            run.baseline_reads()
+        );
+        let said: Vec<&String> = run
+            .lines
+            .iter()
+            .filter(|l| l.starts_with("ci         baseline "))
+            .collect();
+        assert!(
+            said.len() == 1
+                && said[0].starts_with("ci         baseline runs locally: ")
+                && said[0].contains("has other governed content than the base"),
+            "{said:?}"
+        );
     }
 
     #[test]
