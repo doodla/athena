@@ -1,0 +1,341 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261010-154013-a9gz",
+  "round": 3,
+  "at": "2026-11-04T02:44:56.555596168Z",
+  "invocation_seq": 10,
+  "approach": "Record the branch checked out at dispatch in a new optional `dispatch_branch` on the `athena.job/1` record (written where run/mod.rs builds the `Job` at dispatch). `land::plan` takes a `&Dispatched` (`Unknown`, `Branch(name)`, `Detached`) and reads `git.current_branch()` itself. If the dispatch branch is known and differs from the current one, `plan` returns a new `Plan::OtherBranch(reason)` before the ancestor check. The reason names the dispatch branch. Records without the field are `Unknown` and keep today's behavior. Retry (close.rs ~484) treats `OtherBranch` like `Stale`: it bails and the job stays blocked, writing nothing. First landing (close.rs ~228) records a `stale` outcome as today only when the checked-out branch already holds the job's `job.json`. If it does not, `land_or_block` bails with a message naming the dispatch branch and writes nothing. Reason: the closing score is recomputed by the gate from the job's records in the committed tree (athena-gate/src/jobs.rs:301-319, `expected_score`; athena-score/src/lib.rs:412-452 reads the job record, readings and invocations). On a branch that lacks them it would differ from the score close.rs builds from the in-memory job, so the gate would refuse Athena's own commit. Edits to run/mod.rs (the `Job` literal names every field) and lifecycle.rs (the `go` flow can only be driven there) are outside the listed deliverables. Both are justified here and named in the final report.",
+  "decisions": [
+    {
+      "choice": "Store `dispatch_branch: Option<String>` on `records::Job` with `#[serde(default, skip_serializing_if = \"Option::is_none\")]`, set in run/mod.rs at dispatch (the `Job` literal ~888, using `self.git.current_branch()?`). `Some(\"\")` means a detached HEAD at dispatch. The convention is stated in three places: the field's doc comment, the land.rs header, and the reason text for that case ('dispatched on a detached HEAD (recorded as an empty branch name)').",
+      "reason": "No existing dispatch-time field holds the branch. `Outcome.branch` (close.rs:56, records.rs ~872) is the branch at finish. `Job.base_commit` is a commit id. `Job` is committed before work starts, and both landing paths already hold it (`ctx.job.job`, `job.job`). `default` plus `skip_serializing_if` follow the existing `pin` field, so old records parse under `deny_unknown_fields` and keep the old behavior as `Unknown`. Finding 5 allowed keeping the empty-string sentinel if named explicitly; that is done.",
+      "rejected": [
+        {
+          "option": "Use `Outcome.branch`",
+          "why": "It is written at finish, so it is the value to compare against, not the dispatch branch."
+        },
+        {
+          "option": "Add a second field `dispatch_detached: bool`",
+          "why": "Two fields allow an invalid pair (a branch name plus detached=true). The one field plus a documented convention is smaller, and the reading asks for a single recorded branch."
+        },
+        {
+          "option": "Plain `Option<String>` with `None` for detached",
+          "why": "A detached dispatch could not be told from a job dispatched before this change, which must keep the old behavior."
+        },
+        {
+          "option": "Add the field to the candidate record",
+          "why": "Candidate has /1 and /2 schemas with parse rules in `AnyRecord::parse`, and is written after the producer runs, not at dispatch."
+        },
+        {
+          "option": "Derive the branch at verification start",
+          "why": "The branch can change between dispatch and verification, and a blocked retry runs in a later session. Only a record written at dispatch survives both."
+        }
+      ]
+    },
+    {
+      "choice": "The rule is the first step of `land::plan`, which gains a `&Dispatched` parameter and reads `git.current_branch()` itself. A new variant `Plan::OtherBranch(String)` carries the reason. The only matches on `Plan` are close.rs:229/257, close.rs:485/488, and the land.rs tests (grep of crates/).",
+      "reason": "close.rs:228 and :484 are the only callers of `plan`, so one rule covers first landing and retry. Reading the branch inside `plan`, from the repository that supplies `head`, stops a caller from passing a branch that disagrees with `head`. A separate variant lets the first-landing caller choose between recording stale and bailing, without matching on reason text.",
+      "rejected": [
+        {
+          "option": "Check in each caller in close.rs",
+          "why": "The rule would be written twice and could drift; it is not the root-cause location."
+        },
+        {
+          "option": "Caller passes the current branch as a string",
+          "why": "A caller or test could pass a branch that is not the one `head` came from."
+        },
+        {
+          "option": "Return `Plan::Stale` for the mismatch",
+          "why": "First landing must tell a branch mismatch from other stale reasons, because the stale records commit is safe only when the branch holds the job's records (decision 3)."
+        }
+      ]
+    },
+    {
+      "choice": "Detached HEAD: a detached dispatch is always refused. A branch dispatch that finishes on a detached HEAD is also refused. The reason text says which case it is.",
+      "reason": "The accepted assumption treats a differing or absent branch as refused. A detached HEAD names no branch, so the rule cannot confirm the job is landing where it was dispatched.",
+      "rejected": [
+        {
+          "option": "Land when both dispatch and finish are detached and the base is an ancestor",
+          "why": "That is today's behavior for the one case the rule cannot verify."
+        }
+      ]
+    },
+    {
+      "choice": "First landing, branch mismatch (answers findings 3 and 4). `land_or_block` looks at the job in `Records::load(&self.git, &head)` (`records.jobs.get(id).and_then(|j| j.job.as_ref())`). (a) If the checked-out branch holds the job's `job.json`, `Plan::OtherBranch` is handled like `Plan::Stale`: the existing stale outcome is committed on the checked-out branch with a gate-checked records-only commit. (b) If it does not hold it, `land_or_block` bails before `build_commit`: 'job X was dispatched on `A`, but `B` is checked out and has no records of the job; nothing was recorded or landed. Check out `A`, or `athena retry X`'. Nothing is written, and the checked-out tip is unchanged. In both cases the dispatch branch A never gets an outcome. The job there has `job.json` and no outcome, so `status` shows it as `interrupted` (`state_name`, status.rs:1616-1619; listed in `open`, status.rs:1671-1675). `athena go X` then bails 'was interrupted' and points to `athena retry` and `athena close` (run/mod.rs:346-359). The test asserts this.",
+      "reason": "`score_on` builds the closing score from the in-memory job and all its readings and invocations (close.rs:23-37). The gate recomputes it from the commit's tree (jobs.rs:301-319, `expected_score`). On a branch with no `job.json`, readings or earlier invocations, `accepted`, `reading_accepted` and the invocation list differ (athena-score/src/lib.rs:412-452), so `build_commit` would bail with 'the gate refused Athena's own commit'. The branch holds `job.json` exactly when it contains the dispatch commit, and the dispatch commit comes after the ask and reading commits, so `job.json` present implies the job's earlier records are present. In case (a) the gate sees the same shape as any stale outcome today. This is read from the code, not run; the case (b) test is the check.",
+      "rejected": [
+        {
+          "option": "Always commit the stale outcome on the checked-out branch",
+          "why": "On a branch forked before dispatch the gate would likely refuse the commit, and `go` would fail with a gate error instead of a clear reason."
+        },
+        {
+          "option": "Always bail and record nothing on first landing",
+          "why": "The accepted reading and criterion 1 say stale. Case (a) is safe, so recording it keeps the stated outcome there."
+        },
+        {
+          "option": "Copy the job's records onto the checked-out branch so the stale commit passes the gate",
+          "why": "It would write a job's whole record set to a branch it never ran on, and the invocation records are in earlier commits, not in the closing files. That is a larger change than the landing decision."
+        },
+        {
+          "option": "Write the stale outcome onto the dispatch branch without checking it out",
+          "why": "`Git` has no update-ref method (athena-git/src/lib.rs). It would move a ref that another worktree may have checked out, and it is auto-switching territory, out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Retry path (`retry_landing`): `Plan::Stale(reason) | Plan::OtherBranch(reason)` share the existing bail (close.rs:485-487). The job stays blocked and nothing is committed.",
+      "reason": "The blocked outcome is already on the dispatch branch, and it can still land after the user checks that branch out again. The retry only runs where the blocked records are visible, so the records problem of decision 4 does not arise.",
+      "rejected": [
+        {
+          "option": "Write a new outcome on the retry",
+          "why": "The job is already blocked, and the existing bail for other stale reasons leaves it so."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal-corpus case. `refusal_corpus` is not a demonstration.",
+      "reason": "The rule compares a stored branch name with the current one. It parses no request text, reading or stem list, so there is no input form to map to a case in crates/athena-core/tests/refusal_corpus.rs.",
+      "rejected": [
+        {
+          "option": "Add a corpus case",
+          "why": "The corpus covers reading and request text, and no such input reaches this rule."
+        }
+      ]
+    },
+    {
+      "choice": "Do not edit docs/records.md.",
+      "reason": "Its `athena.job/1` row is not an exhaustive field list (the existing `pin` and `class_of_work` are not in it), and no test compares it with the struct. The field is documented on the struct.",
+      "rejected": [
+        {
+          "option": "Add the field to the docs row",
+          "why": "It widens scope to a file outside the deliverables for a row that is already partial."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Add `Dispatched` and `Plan::OtherBranch`; check the branch first in `plan`; update the header with the rule, including the detached convention and pre-field jobs; update existing `plan` tests and add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "purpose": "Pass `Dispatched::from_record(...)` from the job record to `plan` in `land_or_block` and `retry_landing`. First landing: treat `OtherBranch` as stale when the branch holds the job's `job.json`, else bail with nothing written. Retry: share the existing stale bail.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Set `dispatch_branch` in the dispatch-time `Job` literal (~888). Not a listed deliverable: the literal names every field, and dispatch is the only place the dispatch branch is known.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `dispatch_branch: Option<String>` to `Job` with `default` and `skip_serializing_if`; update the test literal; add round-trip tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Add `dispatch_branch: None` to the `dispatched()` test literal (~597).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Integration tests for criteria 1 (two cases) and 3, and extra assertions for criterion 2. Not a listed deliverable: the behavior criteria can only be shown through the real `go` flow, which these tests drive.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under `[Unreleased]` stating that jobs now land only on the branch they were dispatched from.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read before editing: land.rs `plan` and its tests; the `Job` struct in records.rs (~603-630); the `Job` literal in run/mod.rs (~888-938); the two `plan` calls in close.rs (228, 484); lifecycle.rs `local_edits_block_the_landing_and_go_retries_it` (~1773) and `a_candidate_lands_over_a_records_only_interleave`; and what `go` does after the `during_verification` hook (tests/common/mod.rs:631), to find a hook point that survives a branch switch.",
+    "In records.rs add `dispatch_branch: Option<String>` to `Job` with `#[serde(default, skip_serializing_if = \"Option::is_none\")]` and a doc comment: the branch checked out at dispatch; the empty string means a detached HEAD; absent means a record made before the field.",
+    "Fix every `Job` struct literal: the records.rs test (~4850) and store.rs `dispatched()` (~597) get `dispatch_branch: None`. In run/mod.rs, next to `dispatched_at`, call `self.git.current_branch()?` and set `dispatch_branch: Some(name or String::new())`.",
+    "In land.rs add `pub enum Dispatched { Unknown, Branch(String), Detached }` with `from_record(Option<&str>)` (None gives Unknown, empty gives Detached) and `Plan::OtherBranch(String)`. Add `dispatched: &Dispatched` to `plan`. As its first step read `git.current_branch()?` and return `Plan::OtherBranch` for: a differing branch ('the job was dispatched on branch `A`, but branch `B` is checked out; nothing landed'); a detached current HEAD ('... but HEAD is detached'); a detached dispatch ('the job was dispatched on a detached HEAD (recorded as an empty branch name), which names no branch to land on'). `Unknown` skips the check. Update the header: add 'require the current branch is the branch the job was dispatched from, else stale' next to the ancestor line, plus a sentence for an outside reader on the detached case and on jobs dispatched before the field existed.",
+    "In close.rs compute `Dispatched::from_record(ctx.job.job.as_ref().and_then(|j| j.dispatch_branch.as_deref()))` once before the attempts loop in `land_or_block` and pass it to `plan`; do the same from `job.job` in `retry_landing`. In `land_or_block`, map `Plan::OtherBranch(reason)` to `Plan::Stale(reason)` when `Records::load(&self.git, &head)?.jobs.get(id.as_str())` has a `job` record; otherwise `bail!` with the message from decision 4(b), before any `build_commit`. In `retry_landing`, make the existing bail arm `Plan::Stale(reason) | Plan::OtherBranch(reason)`.",
+    "Add the CHANGELOG entry under `## [Unreleased]` in a `### Changed` section (create it if absent), written for an outside reader: jobs now land only on the branch they were dispatched from; a job finished on another branch lands nothing; a blocked job stays blocked until that branch is checked out.",
+    "Add tests. land.rs: update the existing `plan` tests to pass `&Dispatched::Unknown`; add tests for a different branch (refused, reason names the dispatch branch, checked before the ancestor rule), the same branch with head equal to the base, the same branch after an excluded-path commit (`PRIVATE.md`, replay), detached dispatch, detached current HEAD (`git checkout --detach`), and `Unknown` landing as before. records.rs: the criterion 7 round-trip tests. lifecycle.rs: criterion 1 tests (a) and (b), the criterion 3 test, and the extra criterion 2 assertions, with the hook capturing tips through `Arc<Mutex<String>>`.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any existing test that dispatched on one branch and finished on another, with a comment, and report which ones changed. In the final report name run/mod.rs and lifecycle.rs as files outside the listed deliverables and why each was needed."
+  ],
+  "risks": [
+    {
+      "risk": "The stale records commit on a branch lacking the job's records is likely refused by the gate. This is read from the code (jobs.rs:301-319, athena-score/src/lib.rs:412-452), not run.",
+      "mitigation": "`land_or_block` checks for the job's `job.json` on `head` first and bails before `build_commit` if it is missing. Criterion 1 test (b) exercises exactly that branch shape and asserts nothing is written."
+    },
+    {
+      "risk": "Case (a) holds `job.json` but a later record the gate needs is missing from the branch (a fork part-way through the job).",
+      "mitigation": "All of a job's records before the dispatch commit were committed before it, so `job.json` present implies the rest. If the gate still refuses, `build_commit` fails before `advance`, so nothing is written and the error names the gate. Test (a) runs `check_history()`."
+    },
+    {
+      "risk": "Test (b)'s hook switches to `other` while verification is running, and later steps in `go` read records or files from the new HEAD, so the test fails for an unrelated reason.",
+      "mitigation": "The producer reads the code after the hook point first (step 1). If something reads the dispatch records from HEAD, it uses the nearest hook point that works. The assertion on the error text names the dispatch branch, so a different failure is visible."
+    },
+    {
+      "risk": "An existing integration test dispatches on one branch and finishes on another, and now refuses.",
+      "mitigation": "Run the full `cargo test --locked` in step 8. Change a test only where it truly switches branches between dispatch and finish, with a comment saying so, and report which. Do not weaken the rule."
+    },
+    {
+      "risk": "Forgetting a `Job` struct literal or a `Plan` match breaks the build in another crate.",
+      "mitigation": "Search found literals only at run/mod.rs:888, store.rs ~597 and records.rs ~4850, and `Plan` matches only in close.rs and land.rs. Other `Job` values are JSON stubs that parse through `#[serde(default)]`. The build in step 8 confirms it."
+    },
+    {
+      "risk": "Dispatch fails if `current_branch()` errors.",
+      "mitigation": "Use `?` so a git failure stops the dispatch loudly instead of recording no branch. The same call already runs at finish (close.rs:56)."
+    },
+    {
+      "risk": "A job resumed or retried from kept work gets a new `Job` record, so its dispatch branch is the one at that dispatch.",
+      "mitigation": "This is the intended meaning of 'dispatched from'. Every dispatch goes through the one literal at run/mod.rs:888."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`land::plan` signature and the new `Plan::OtherBranch` variant",
+      "dependent": "crates/athena-core/src/run/close.rs `land_or_block` (line 228) and `retry_landing` (line 484), the only callers of `land::plan`, with the `Plan` matches at close.rs:229/257 and :485/488; also `use crate::land::{Plan, plan}` at run/mod.rs:9 (imports only)",
+      "kind": "code",
+      "test": "New lifecycle tests for criteria 1, 2 and 3; existing `local_edits_block_the_landing_and_go_retries_it` and `a_candidate_lands_over_a_records_only_interleave` still pass in `cargo test --locked`. A missed match arm fails the build.",
+      "reason": null
+    },
+    {
+      "name": "Landing behavior when the checked-out branch differs, in every mode (`Athena::go`, drain, parallel)",
+      "dependent": "crates/athena-cli/tests/drain.rs, reconcile.rs, trailer_stop.rs, history_pr_head.rs and lifecycle.rs (all reach landing through `land_or_block` under the repository lock, including the `[parallel] max_concurrency` drain path)",
+      "kind": "code",
+      "test": "`cargo test --locked` runs them. Read: history_pr_head.rs:75 and lifecycle.rs:3173 switch branches before `ask`; reconcile.rs:91 detaches while building a fixture pull request, not across a job's dispatch and finish; trailer_stop.rs only restores README.md. Any test that does dispatch and finish on different branches fails and is changed with a comment in step 8, without weakening the rule.",
+      "reason": null
+    },
+    {
+      "name": "The stale outcome committed on the checked-out branch (case (a)), and the gate check of that commit",
+      "dependent": "crates/athena-core/src/run/close.rs `land_or_block` stale arm and settlement (close.rs:229-256, :350-368: stale records commit via `build_commit` and `advance`, resume-mark settling, cleanup), and the gate in crates/athena-gate (jobs.rs:301-319 score recomputation, invariant.rs landing checks, `landing_tests.rs`)",
+      "kind": "rule",
+      "test": "Criterion 1 test (a) asserts the `Stale` state, the records-only diff and `check_history()` with no violations. Test (b) shows the case where the gate would refuse (no `job.json` on the branch): `land_or_block` bails before `build_commit`, nothing is written.",
+      "reason": null
+    },
+    {
+      "name": "New optional `Job.dispatch_branch` on `athena.job/1`",
+      "dependent": "crates/athena-data/src/records.rs `Job` (`deny_unknown_fields`) and its literals at store.rs ~597 and records.rs ~4850; JSON job stubs at reading.rs:5875, run/tests.rs:1176, status.rs:2392, pr_check.rs:262 and athena-gate/src/landing_tests.rs:108",
+      "kind": "code",
+      "test": "records.rs round-trip tests (criterion 7); `cargo test --locked -p athena-core -p athena-gate` covers the stubs and literals.",
+      "reason": "Every JSON stub omits the key and still parses because of `#[serde(default)]`. The two struct literals get `dispatch_branch: None` in step 3. `..dispatched_job_stub()` at reading.rs fills the field from the stub."
+    },
+    {
+      "name": "How a job whose first landing was refused looks on the dispatch branch (a dispatched job with no outcome)",
+      "dependent": "crates/athena-core/src/status.rs `state_name` (1616-1619) and the `open` list (1671-1675); run/mod.rs:346-359 (`go` on an interrupted job); manage.rs:145",
+      "kind": "code",
+      "test": "Criterion 1 tests (a) and (b) assert `status()` shows the job as `interrupted` in `open` after `git checkout -q main`, and test (a) asserts `go` bails with 'interrupted'.",
+      "reason": null
+    },
+    {
+      "name": "`athena.job/1` documentation",
+      "dependent": "docs/records.md line 92 (`athena.job/1` row); docs/ontology.toml",
+      "kind": "rule",
+      "test": null,
+      "reason": "The row is not an exhaustive field list (it omits `pin` and `class_of_work`) and no test compares it with the struct. docs/ontology.toml only checks the marker 'the dispatched job' in that file, which is untouched. The field is documented on the struct."
+    },
+    {
+      "name": "Pull-request landing path",
+      "dependent": "crates/athena-core/src/gh.rs and gh/landing.rs (`athena land`)",
+      "kind": "code",
+      "test": null,
+      "reason": "It does not call `land::plan` (grep finds no use outside close.rs); it merges a job's own pull request on the host, so the current-branch rule does not apply. Unchanged."
+    },
+    {
+      "name": "`Outcome.branch` and `Git::current_branch`",
+      "dependent": "close.rs:56 and :470 (`Outcome.branch`), status.rs and manage.rs readers of `Git::current_branch` (athena-git/src/lib.rs:344)",
+      "kind": "code",
+      "test": null,
+      "reason": "Neither is changed. `Outcome.branch` still records the branch at finish, and `current_branch` gains one more caller (`plan`) plus one at dispatch."
+    },
+    {
+      "name": "Host branch rules (squash-merge, linear history on main)",
+      "dependent": "docs/system-facts.md host merge rules; .github/workflows/ci.yml",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The change touches only local landing in the user's checkout. It does not push, merge or set any host branch rule, and it changes no workflow."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two integration tests drive the real `Athena::go` flow in crates/athena-cli/tests/lifecycle.rs, plus a land.rs unit test on `plan`. Test (a), `a_job_finished_on_a_branch_with_its_records_goes_stale`: the fixture is on `main`. A guarded-once `Scenario.during_verification` hook runs `git checkout -q -b other` (so `other` holds the dispatch commit) and stores `other`'s tip in an `Arc<Mutex<String>>`. After `go` it asserts: state `Stale` and the reason contains `main`; `other`'s new tip has the captured tip as its parent; `git diff --name-only` between them lists only paths under `records/`; README.md has no greeting; `fingerprint(new tip, base)` equals `fingerprint(base, base)`; `main`'s tip is unchanged; `job.json` at the dispatch commit has `dispatch_branch` `main`; `check_history()` reports no violations. After `git checkout -q main` it asserts `status()` lists the job in `open` with state `interrupted`, and `go` on it returns an error containing `interrupted`. Test (b), `a_job_finished_on_a_branch_without_its_records_changes_nothing`: before `ask`, the test runs `git branch other` at the fixture's initial tip, so `other` has the base but not the dispatch commit. The hook captures `main`'s tip and runs `git checkout -q other`. It asserts `go` returns an error naming `main` and saying nothing was recorded or landed; `other`'s tip equals the initial tip exactly; README.md has no greeting; `git ls-tree -r --name-only other` lists nothing under `records/jobs/`; after `git checkout -q main`, `status()` shows the job `interrupted`. The unit test `a_job_dispatched_elsewhere_is_refused_on_another_branch` calls `plan` with `Dispatched::Branch(\"main\")` on a repository whose current branch is `other`, with the base an ancestor of head, and expects `Plan::OtherBranch` naming `main`.",
+      "command": "cargo test --locked -p athena-cli --test lifecycle a_job_finished_on_a_branch && cargo test --locked -p athena-core land::tests::a_job_dispatched_elsewhere",
+      "observes": "A job finished on another branch lands nothing: state `stale` with a reason naming the dispatch branch when the other branch holds the job's records; no commit and an error naming the dispatch branch when it does not. The other branch gets no job content in either case, and in case (b) its tip is unchanged. The gate accepts the case (a) records commit. After returning, the dispatch branch shows the job as `interrupted`.",
+      "fails_without": "Without the check, `plan` returns `Plan::Tree` because the base is an ancestor of `other`'s head, and the job lands on `other` with state `Landed`. The state, reason, README, fingerprint, tip and records assertions in (a) and (b) all fail. The unit test fails because `plan` returns `Plan::Tree`.",
+      "seam": "Production entry points: `Athena::go` (reaching `close_dispatched`, then `land_or_block`, close.rs:204) and `land::plan`. Injection: the existing `Scenario.during_verification` hook (`Option<Arc<dyn Fn() + Send + Sync>>`, tests/common/mod.rs:422, called at :631; lifecycle.rs:1726 and :1773 already use it), and `fx.git.run` for the branch setup. The hook only runs git checkout commands and records a tip; the branch decision stays in production code. Both exist today. The `Dispatched` argument and `Plan::OtherBranch` are added in steps 4 and 5. The unit test reuses the existing `repo()`, `commit()` and `pass()` helpers."
+    },
+    {
+      "criterion": 2,
+      "method": "The existing lifecycle test `a_candidate_lands_over_a_records_only_interleave` stays and gains assertions that the state is `Landed` and that `job.json` at the dispatch commit has `dispatch_branch` `main`. A new land.rs unit test `a_job_lands_when_the_dispatch_branch_is_checked_out` calls `plan` with `Dispatched::Branch(\"main\")` on `main`, twice. Once with head equal to the base (expects `Plan::Tree` of the candidate's tree). Once after a commit that changes only an excluded path (`PRIVATE.md`), which takes the `merge_tree` replay branch (expects `Plan::Tree`).",
+      "command": "cargo test --locked -p athena-cli --test lifecycle a_candidate_lands_over_a_records_only_interleave && cargo test --locked -p athena-core land::tests::a_job_lands_when",
+      "observes": "A fast-forward landing with state `Landed` occurs on the dispatch branch, both with head equal to the base and after records-only changes were replayed.",
+      "fails_without": "A rule that compared the wrong branch, or refused whenever the head moved, turns these into a refusal and fails the `Landed` and `Plan::Tree` assertions. The old behavior also passes, so this pins the allow side of the rule, not the refusal.",
+      "seam": "Production entry points: `Athena::go` and `land::plan`. Fixtures: the existing `Fixture` and `during_verification` hook add the records-only commit; the land.rs unit test uses the existing `repo()`, `commit()` and `pass()` helpers. All exist today."
+    },
+    {
+      "criterion": 3,
+      "method": "New lifecycle test `a_blocked_job_will_not_retry_on_another_branch`. It copies the setup of `local_edits_block_the_landing_and_go_retries_it` (lifecycle.rs ~1773): `during_verification` writes a local edit, so `go` ends `Blocked` on `main`. The test restores README.md, runs `git checkout -q -b other` (which holds the blocked records), records `other`'s tip, and calls `athena.go` on the job, reaching `retry_landing`. It asserts: the call is an error naming `main` and saying the job stays blocked; `other`'s tip is unchanged; README.md has no greeting; no `outcome-landed.json` exists. It then runs `git checkout -q main` and `go` again, and asserts `Landed`.",
+      "command": "cargo test --locked -p athena-cli --test lifecycle a_blocked_job_will_not_retry_on_another_branch",
+      "observes": "The retry on the wrong branch is refused with the dispatch branch in the error, the job stays blocked, and nothing is committed. The retry on the dispatch branch lands.",
+      "fails_without": "Without the check in `plan`, the retry on `other` lands the change: `go` returns `Ok` with state `Landed`, so the `is_err` assertion fails.",
+      "seam": "Production entry points: `Athena::go` on a blocked job (reaching `retry_landing`, close.rs:387) and `land::plan`. The fixture and hook exist today, and `local_edits_block_the_landing_and_go_retries_it` already uses them. The new test adds no seam."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three checks Athena runs on the result, then the land tests in athena-core and the lifecycle landing tests.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked -p athena-core land",
+      "observes": "Formatting and clippy report nothing. All land.rs tests (the squash resync, `pr_commits` and the existing `plan` tests, which now pass `&Dispatched::Unknown`) pass with the new signature.",
+      "fails_without": "A missed call site of `plan`, a missed `Plan` match arm, or a missed `Job` struct literal fails the build. A changed behavior in the existing `plan` tests fails them.",
+      "seam": "The cargo commands run the production code as is. The existing land.rs tests call `plan` directly, with the argument added in step 4."
+    },
+    {
+      "criterion": 5,
+      "method": "Content check by reading the `//!` header of crates/athena-core/src/land.rs in the diff.",
+      "command": "git diff -- crates/athena-core/src/land.rs",
+      "observes": "The header's rule block has a line 'require the current branch is the branch the job was dispatched from, else stale' next to the ancestor line. A sentence for an outside reader covers the detached case (recorded as an empty branch name), and jobs dispatched before the field existed (no check).",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Content check by reading the CHANGELOG.md diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "An entry under `## [Unreleased]`, in a `### Changed` section (added if absent), says jobs now land only on the branch they were dispatched from. A job finished on another branch lands nothing: it goes stale, or stays blocked on retry.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "New tests in the records.rs test module. (a) A `Job` with `dispatch_branch: Some(\"main\")` and one with `Some(\"\")` pass through `AnyRecord::Job(..).to_json()`, `AnyRecord::parse` and `check_record_file`, and equal the original. (b) A job JSON with no `dispatch_branch` key parses, yields `None`, and serializes without the key. (c) The existing `Job` test literal (~4850) gets `dispatch_branch: None` and still round-trips.",
+      "command": "cargo test --locked -p athena-data records",
+      "observes": "All records round-trip tests pass, with and without the new field.",
+      "fails_without": "If the field were missing from `Job`, `deny_unknown_fields` would make `check_record_file` and `AnyRecord::parse` reject the record that has it. If it lacked `#[serde(default)]`, the record without it would fail to parse.",
+      "seam": "Production entry points: `AnyRecord::parse` and `check_record_file` (records.rs ~3045). The tests build records in memory and need no fixture. They exist today. The store.rs `dispatched()` literal (~597) is updated in step 3."
+    },
+    {
+      "criterion": 8,
+      "method": "The refusals are shown by the criterion 1 and 3 tests. The '5% of newly refused readings' figure is an expectation about use, not measured by any test, and the plan does not claim to check it. The full suite shows the extra refusals are limited to jobs that switch branches between dispatch and finish.",
+      "command": "cargo test --locked",
+      "observes": "The full suite passes. New refusals appear only in the new tests; same-branch landings in lifecycle, drain, reconcile, trailer_stop and history_pr_head are unchanged (each creates its branch before `ask`, or does not dispatch a job across branches).",
+      "fails_without": "A rule that refused ordinary same-branch landings would fail the existing landing tests, such as `landed` in lifecycle.rs near line 223.",
+      "seam": "Production entry point: `Athena::go` through the existing integration suite. The fixtures exist today."
+    }
+  ],
+  "open_questions": [
+    "User: Criterion 1 says B's tip is unchanged and the outcome is stale. The code cannot give both everywhere. When B holds the job's records (it was forked after dispatch), the plan records a stale outcome on B, so B's tip moves by one records-only commit and gains no job content. When B lacks them (it was forked before dispatch), the plan records nothing, B's tip is unchanged, and `go` ends with an error naming the dispatch branch; the job shows as interrupted on the dispatch branch. This is because the gate would likely refuse a stale score commit on a branch without the job's records. Please confirm this reading of the wording.",
+    "User: Criterion 8's '5% of newly refused readings' is read as an expectation about use, not a threshold a test enforces. No code or data in the repository measures a refusal rate. Please confirm."
+  ],
+  "producer_section_sha256": "e630eb1c32532ea3bffb0619bce53cedb5067d6b0007c5400d63740fa72bd0f9"
+}

@@ -61,6 +61,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Jobs now land only on the branch they were dispatched from. Before, a job landed on whatever branch was
+  checked out when it finished, as long as its base commit was an ancestor there, so switching branches
+  while a job ran could put its change on the wrong branch. Root cause: the landing decision
+  (`land::plan`) checked only the ancestor rule and never compared the branch. Now the job record keeps the
+  branch checked out at dispatch (`dispatch_branch`; an empty value means a detached HEAD), and `plan`
+  refuses any other checked-out branch before it looks at the base. A job finished on another branch lands
+  nothing: it goes stale with a reason that names the dispatch branch when that branch holds the job's
+  records, and when it does not, `go` fails with the same reason and writes nothing. A blocked job whose
+  retry runs on another branch stays blocked until the dispatch branch is checked out again. A job
+  dispatched or finished on a detached HEAD does not land. Jobs dispatched before this change have no
+  recorded branch and keep the old rule. This refuses more landings than before, which is intended.
 - A reused red CI run now gives the verifier the names of the failing tests and the end of the failing job's
   log. Root cause: `resolve` turned a red run into a bare failed record and `runs_from_record` built the failed
   `test` check with no `failed_tests` and no `output_tail`, and the verifier brief showed neither, so the
