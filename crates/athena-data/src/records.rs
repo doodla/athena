@@ -626,6 +626,11 @@ pub struct Job {
     /// The repository a study job reads, pinned by the core before dispatch. Absent for other work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<PinnedRepo>,
+    /// The branch that was checked out when the job was dispatched; the job lands only there. The empty
+    /// string means HEAD was detached at dispatch. Absent in a record made before this field existed: such
+    /// a job is not held to a branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_branch: Option<String>,
 }
 
 /// A repository ref resolved by the core to one commit: the URL and ref the configuration named, and the
@@ -4861,10 +4866,66 @@ mod tests {
             )),
             note: None,
             pin: None,
+            dispatch_branch: None,
         };
         let record = AnyRecord::Job(Box::new(job));
         assert_eq!(record.canonical_path(), "records/jobs/bootstrap/job.json");
         let back = AnyRecord::parse("x", record.to_json().as_bytes()).unwrap();
         assert_eq!(back, record);
+    }
+
+    /// A bootstrap job record with the given dispatch branch.
+    fn job_on(branch: Option<&str>) -> AnyRecord {
+        let AnyRecord::Job(mut job) = AnyRecord::parse(
+            "x",
+            br#"{"schema": "athena.job/1", "id": "bootstrap", "kind": "bootstrap", "title": "Bootstrap",
+                "class_of_work": null, "capability": null, "accepted_reading": null, "accepted_by": null,
+                "owner": {"role": "automation engineer", "capability": null, "model": null, "note": null},
+                "verifier_model": null, "caps": null, "base_commit": null, "config_sha256": null,
+                "defaults_sha256": null, "athena": null, "driver": null, "brief_sha256": null,
+                "dispatched_at": null, "request_path": null, "request_sha256": null, "cost": null,
+                "tokens": null, "note": null}"#,
+        )
+        .unwrap() else {
+            panic!("a job record")
+        };
+        job.dispatch_branch = branch.map(str::to_string);
+        AnyRecord::Job(job)
+    }
+
+    #[test]
+    fn a_job_keeps_its_dispatch_branch_through_a_round_trip() {
+        // A named branch and the empty string (a detached HEAD at dispatch) both survive, and the
+        // records check accepts the file.
+        for branch in ["main", ""] {
+            let record = job_on(Some(branch));
+            let text = record.to_json();
+            assert!(text.contains("\"dispatch_branch\""), "{text}");
+            let back = AnyRecord::parse("x", text.as_bytes()).unwrap();
+            assert_eq!(back, record);
+            let AnyRecord::Job(job) = &back else {
+                panic!("a job record")
+            };
+            assert_eq!(job.dispatch_branch.as_deref(), Some(branch));
+            let checked = check_record_file(&record.canonical_path(), text.as_bytes())
+                .unwrap()
+                .expect("a record");
+            assert_eq!(checked, record);
+        }
+    }
+
+    #[test]
+    fn a_job_record_made_before_the_dispatch_branch_existed_still_parses() {
+        let record = job_on(None);
+        let text = record.to_json();
+        assert!(!text.contains("dispatch_branch"), "{text}");
+        let AnyRecord::Job(job) = AnyRecord::parse("x", text.as_bytes()).unwrap() else {
+            panic!("a job record")
+        };
+        assert_eq!(job.dispatch_branch, None);
+        let checked = check_record_file(&record.canonical_path(), text.as_bytes())
+            .unwrap()
+            .expect("a record");
+        assert_eq!(checked, record);
     }
 }
