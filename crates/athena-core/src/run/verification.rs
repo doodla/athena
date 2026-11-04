@@ -295,7 +295,7 @@ impl Athena {
                         ctx.ui
                             .line("timeout    the verifier timed out; it reruns once");
                         let (fresh, _, fresh_tree) =
-                            self.verifier_snapshot(&verify_dir, &p, &c, ctx.pin_dir.as_deref())?;
+                            self.verifier_snapshot_for(&verify_dir, &p, &c, ctx)?;
                         if fresh_tree != prepared {
                             bail!("a fresh verifier snapshot differs from the first one");
                         }
@@ -323,7 +323,7 @@ impl Athena {
                 }
                 ctx.ui.line("fault      the verifier's snapshot changed; its verdict is discarded and verification reruns once");
                 let (fresh, _, fresh_tree) =
-                    self.verifier_snapshot(&verify_dir, &p, &c, ctx.pin_dir.as_deref())?;
+                    self.verifier_snapshot_for(&verify_dir, &p, &c, ctx)?;
                 if fresh_tree != prepared {
                     bail!("a fresh verifier snapshot differs from the first one");
                 }
@@ -421,6 +421,7 @@ impl Athena {
     /// Creates the verifier's snapshot at `dir` (removing what is there): base then candidate as two commits,
     /// the pinned tree mounted if there is one, and the base's check-tool configuration in the work tree.
     /// Returns it with the tool-config paths and the work tree's tree as prepared.
+    /// This form carries no commit view; the verifier itself reads [`Athena::verifier_snapshot_for`].
     pub(super) fn verifier_snapshot(
         &self,
         dir: &std::path::Path,
@@ -428,6 +429,39 @@ impl Athena {
         candidate: &str,
         pin_dir: Option<&std::path::Path>,
     ) -> Result<(Snapshot, Vec<String>, String)> {
+        let (snapshot, tool_config, prepared, _) =
+            self.build_verifier_snapshot(dir, base, candidate, pin_dir, &[])?;
+        Ok((snapshot, tool_config, prepared))
+    }
+
+    /// [`Athena::verifier_snapshot`] for a snapshot an agent reads: when the job's request names commits, it
+    /// also holds the read-only view of them (the producer's snapshot gets the same). A view that cannot be
+    /// built is a warning line, and the snapshot is as without it.
+    pub(super) fn verifier_snapshot_for(
+        &self,
+        dir: &std::path::Path,
+        base: &str,
+        candidate: &str,
+        ctx: &RunContext<'_>,
+    ) -> Result<(Snapshot, Vec<String>, String)> {
+        let requested = super::producer::requested_commits(ctx);
+        let (snapshot, tool_config, prepared, note) =
+            self.build_verifier_snapshot(dir, base, candidate, ctx.pin_dir.as_deref(), &requested)?;
+        if let Some(note) = note {
+            ctx.ui.line(&note);
+        }
+        Ok((snapshot, tool_config, prepared))
+    }
+
+    /// The shared builder. The last value is the line to show about the commit view, if one was asked for.
+    fn build_verifier_snapshot(
+        &self,
+        dir: &std::path::Path,
+        base: &str,
+        candidate: &str,
+        pin_dir: Option<&std::path::Path>,
+        requested: &[String],
+    ) -> Result<(Snapshot, Vec<String>, String, Option<String>)> {
         crate::pin::remove_tree(dir)?;
         let snapshot = Snapshot::create(
             &self.git,
@@ -438,11 +472,23 @@ impl Athena {
                 candidate_commit: candidate.to_string(),
             },
         )?;
+        let note = if requested.is_empty() {
+            None
+        } else {
+            Some(
+                match snapshot.add_commit_views(&self.git, base, base, requested) {
+                    Ok(views) => super::producer::commit_view_line("verifier", &views),
+                    Err(error) => {
+                        format!("warning    no commit view for the verifier: {error}")
+                    }
+                },
+            )
+        };
         if let Some(pin_dir) = pin_dir {
             mount(pin_dir, snapshot.dir())?;
         }
         let tool_config = crate::toolconfig::apply_base_tool_config(&snapshot)?;
         let prepared = snapshot.work_tree_tree()?;
-        Ok((snapshot, tool_config, prepared))
+        Ok((snapshot, tool_config, prepared, note))
     }
 }

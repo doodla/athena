@@ -39,6 +39,41 @@ pub(super) struct Reported {
     pub(super) work: PathBuf,
 }
 
+/// The commit hashes the job's request names (none when the job has no request).
+pub(super) fn requested_commits(ctx: &RunContext<'_>) -> Vec<String> {
+    athena_context::briefs::commit_hashes_in(
+        ctx.job
+            .request
+            .as_ref()
+            .map(|r| r.text.as_str())
+            .unwrap_or(""),
+    )
+}
+
+/// The one UI line that says which requested commits a snapshot's view shows and which it left out.
+pub(super) fn commit_view_line(role: &str, views: &athena_git::CommitViews) -> String {
+    let short = |hashes: &[String]| {
+        hashes
+            .iter()
+            .map(|h| h.chars().take(12).collect::<String>())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "commits    the {role}'s view of {}{}",
+        if views.shown.is_empty() {
+            "none".to_string()
+        } else {
+            short(&views.shown)
+        },
+        if views.omitted.is_empty() {
+            String::new()
+        } else {
+            format!(" (not available: {})", short(&views.omitted))
+        }
+    )
+}
+
 impl Athena {
     /// Stage S1: the configured checks on the base commit, before the producer starts.
     pub(super) fn baseline_stage(
@@ -97,6 +132,17 @@ impl Athena {
             (None, None) => SnapshotRepo::Base,
         };
         let snapshot = Snapshot::create(&self.git, &p, &p, &work, repo)?;
+        // A request that names commits gets a read-only, filtered view of them; a failure is a warning only.
+        let requested = requested_commits(ctx);
+        match snapshot.add_commit_views(&self.git, &p, &p, &requested) {
+            Ok(views) if !requested.is_empty() => {
+                ctx.ui.line(&commit_view_line("producer", &views))
+            }
+            Ok(_) => {}
+            Err(error) => ctx.ui.line(&format!(
+                "warning    no commit view for the producer: {error}"
+            )),
+        }
         if let Some(pin_dir) = &ctx.pin_dir {
             mount(pin_dir, snapshot.dir())?;
         }
