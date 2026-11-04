@@ -781,6 +781,84 @@ fn fault_findings(finished: &crate::run::Finished) -> Vec<athena_data::records::
         .collect()
 }
 
+/// What each producer and verifier run found in its snapshot: the role, whether the commit view was there,
+/// the snapshot's `git status --porcelain`, and the commit count of its repository.
+type ViewSeen = Arc<Mutex<Vec<(Role, bool, String, String)>>>;
+
+fn view_watcher(seen: ViewSeen) -> Tweak {
+    Arc::new(move |spec: &AgentInvocation, _: &mut FakeTurn| {
+        if !matches!(spec.role, Role::Producer | Role::Verifier) {
+            return;
+        }
+        let inner = Git::isolated(&spec.workdir);
+        let status = inner
+            .run(["--no-optional-locks", "status", "--porcelain"])
+            .unwrap();
+        let commits = inner.run(["rev-list", "--count", "HEAD"]).unwrap();
+        seen.lock().unwrap().push((
+            spec.role,
+            spec.workdir.join(athena_git::COMMITS_FILE).exists(),
+            status,
+            commits.trim().to_string(),
+        ));
+    })
+}
+
+#[test]
+fn a_request_naming_a_commit_gives_the_producer_and_verifier_its_view_and_one_without_gives_neither()
+ {
+    assert_eq!(
+        athena_git::COMMITS_FILE,
+        athena_context::briefs::COMMITS_FILE
+    );
+    for named in [false, true] {
+        let (dir, git) = repo(&config(true));
+        let first = git.head().unwrap().unwrap();
+        let request = if named {
+            format!("study the demo, as in commit {first}")
+        } else {
+            "study the demo".to_string()
+        };
+        let state = tempfile::tempdir().unwrap();
+        let seen: ViewSeen = Arc::default();
+        let athena = athena_with(
+            &dir,
+            &state,
+            CountingPinner::new(FAKE_SHA),
+            Arc::default(),
+            view_watcher(seen.clone()),
+        );
+        let proposal = athena.ask(&request, &Quiet).unwrap();
+        let GoResult::Finished(finished) = athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+            .unwrap()
+        else {
+            panic!("expected the job to finish");
+        };
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let seen = seen.lock().unwrap().clone();
+        let roles: Vec<Role> = seen.iter().map(|s| s.0).collect();
+        assert_eq!(roles, [Role::Producer, Role::Verifier]);
+        for (role, has_view, status, commits) in &seen {
+            assert_eq!(*has_view, named, "{role:?}, named {named}");
+            assert_eq!(status, "", "{role:?}: the snapshot is clean");
+            let expected = if *role == Role::Producer { "1" } else { "2" };
+            assert_eq!(commits, expected, "{role:?}");
+        }
+        // The view never reaches the candidate.
+        let candidate = finished
+            .verification
+            .as_ref()
+            .unwrap()
+            .candidate_commit
+            .clone();
+        let files = git
+            .run(["ls-tree", "-r", "--name-only", candidate.as_str()])
+            .unwrap();
+        assert!(!files.contains(athena_git::COMMITS_FILE), "{files}");
+    }
+}
+
 /// A verifier that, on its first `n` runs, is stopped at its deadline: the driver reports `TimedOut` with
 /// no verdict. Later runs answer pass. Every run is recorded in `runs`.
 fn timing_out_verifier(runs: Runs, n: usize) -> Tweak {

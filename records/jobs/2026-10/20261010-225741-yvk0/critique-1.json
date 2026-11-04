@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261010-225741-yvk0",
+  "round": 1,
+  "at": "2026-11-04T14:15:51.54291435Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/checks.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/checks.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run_pin_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run_pin_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "As written, the hidden-path-name scan fails on today's snapshot, so it cannot show the new filter works.",
+      "evidence": "`user_repo()` commits a root `.gitattributes` containing `/FRONT.md athena-exclude\\n` (snapshot.rs:500-501). That file is visible, and `snapshots_hold_only_what_agents_may_see` shows a Base snapshot materializes visible files. The plan walks 'every file under the snapshot dir including .git' and runs `git cat-file --batch-all-objects --batch`, then asserts that the string `FRONT.md` appears nowhere. The `.gitattributes` file and its blob contain that string, so the assertion fails whether or not the view leaks anything. The same applies whenever a requested commit edits `.gitattributes`: that diff is visible and names the newly hidden paths. Fix: Split the assertion. (a) Check hidden marker contents across all snapshot files and git output. (b) Check hidden path names in `ATHENA-COMMITS.txt` and in the snapshot's git output for the view only, or use hidden paths declared only by a hidden `.gitattributes` (for example under `private/`, like `private/notes.md`), so their names appear in no visible file. State in enforcement.md and D08 that a visible `.gitattributes` and its diffs still name the paths they hide, as today's snapshot already does. Run the unfiltered-`git show` control against the same assertion set.",
+      "location": "Demonstrations, Criterion 2 (`hidden_paths_never_appear_in_the_commit_view`)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "An unlisted byte-identical verifier brief test breaks when the sentence is added unconditionally.",
+      "evidence": "briefs.rs:3600-3621 holds `VERIFIER_BRIEF_WITHOUT_A_PLAN` and the test `a_verifier_brief_without_a_plan_is_byte_identical_to_the_stored_copy`. Line 3612 is exactly `records/, the owner's private files, and history are absent by design; their absence is not a finding.\\n\\n`. Step 6 adds a sentence after that wording in the verifier 'The change' text (line 1188), which changes the bytes. The dependents list and criterion 6 cite only line 2717. Fix: Add this test to the dependents. Preferably make the brief sentence conditional on a view having been written: pass a flag or the shown-hash list into the producer and verifier brief inputs. Then the no-hash brief stays byte-identical, which also serves criterion 4, and agents are never pointed at a file that does not exist. If the sentence stays unconditional, say that the stored copy is updated and why.",
+      "location": "Files: briefs.rs; Dependents: 'Producer and verifier brief wording'; Demonstrations, Criterion 6",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The reason for rejecting `.git/` also applies to the chosen design: ripgrep skips files listed in `.git/info/exclude`.",
+      "evidence": "ripgrep honours `.gitignore` and `.git/info/exclude` by default, the same way it skips hidden directories. A directory-wide Grep in the snapshot will therefore not find `ATHENA-COMMITS.txt`. Only Read or Grep given the explicit file path will reach it. Fix: Correct the rationale. Have the brief sentence tell agents to Read `ATHENA-COMMITS.txt` or to Grep it by its explicit path. Optionally have the criterion 8 brief test assert that the path is named.",
+      "location": "Decision 2 (rejected: write the file inside .git/); brief sentence in step 6",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`JobRecords.request` is an `Option<Request>`, so the request text is not a plain field access.",
+      "evidence": "store.rs:22 declares `pub request: Option<Request>`. Fix: Handle `None` explicitly (no hashes, no view) in both `producer_snapshot` and `verifier_snapshot`, and cover it in the no-hash core test or a unit test.",
+      "location": "Step 4 / Decision 4 ('ctx.job.request.text')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A hex token could resolve to a tree or blob, including a hidden file's blob, unless the lookup forces a commit.",
+      "evidence": "The plan's rev_parse resolves a token the request supplies. A short hex abbreviation can match a non-commit object. `is_ancestor` would then probably fail and the hash would be omitted, but that relies on an error path. Fix: Resolve with `<hash>^{commit}` (or `--verify`), so that any non-commit object goes straight to the shared 'not available' note. Add a blob-hash case to the criterion 5 test.",
+      "location": "Step 2 (`rev_parse` then `is_ancestor`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A commit the job cites that is not on main (for example an earlier rejected candidate) will always be omitted.",
+      "evidence": "The request concerns fix attempts on 64ecdc9. If that commit were an Athena candidate and not a commit on main, the view would show only the note. Fix: State this limit in the CHANGELOG and D08, so readers know only commits in the base's history are shown.",
+      "location": "Decision 3 (ancestor-of-base rule)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The approach fits the request and the reading. It generates a filtered text view in the core, gives the snapshot no alternates, remote or real objects, accepts only ancestors of the base, and excludes the file through `.git/info/exclude`. pin.rs already uses the same append-to-exclude pattern (pin.rs:129-132). I checked the named code. The four `verifier_snapshot` callers are at the lines the plan gives (verification.rs:298, 326; mod.rs:1502; checks.rs:367). `verifier_snapshot` builds `prepared` after `Snapshot::create` and the mount (verification.rs:432-445). `producer_snapshot` builds a Base, BaseThenTree or BaseThenDir snapshot at producer.rs:99. The one-line edits to mod.rs and checks.rs, and the test in run_pin_tests.rs, are justified, so Athena's out-of-deliverables findings carry little weight. Two problems need a revision. First, the criterion 2 demonstration cannot pass as written. The fixture's visible root `.gitattributes` holds `/FRONT.md athena-exclude` (snapshot.rs:501), and today's snapshots already include that file. A scan of every file and every git object for the string `FRONT.md` would therefore fail before the new code is involved. Second, the verifier brief has a byte-identical stored-copy test (briefs.rs:3600-3621, matching line 3612). Adding a sentence to the verifier's 'The change' text unconditionally breaks that test, and the dependents list does not mention it. Smaller issues: `ctx.job.request` is an `Option`; ripgrep skips files listed in `.git/info/exclude` when it searches a directory, which the plan's reason for not using `.git/` overlooks; and the rev-parse step should force `^{commit}`."
+}
