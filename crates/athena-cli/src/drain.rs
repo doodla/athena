@@ -31,6 +31,12 @@
 //!   last failed attempt, for a line the item's own failed attempt has just paused. Neither is a failed
 //!   attempt, so neither counts toward the repeated-failure stop: an item whose second failure paused its line
 //!   is passed over with the pause reason, and the batch goes on to the next queued item.
+//! - **A flagged line is passed over after two failures.** A line the scope guard has only flagged (T1, T3 or
+//!   T5, not a pause) is still dispatched, so its item gets both attempts. [`Steps::flagged`] is asked only
+//!   after the last failed attempt, when no pause was found ([`ItemEnd::Flagged`]): the item is then passed
+//!   over for the rest of the batch with the flag signals as the reason, it is not a failed item, and the
+//!   batch goes on to the next queued item. Nothing is written. An item whose line is neither flagged nor
+//!   paused that fails twice still stops the batch as a repeated failure.
 //! - **Concurrency.** A group is worked by up to `max_concurrency` workers; the next group starts only when
 //!   the group before it is done, so an item that depends on another starts after it has finished. Landing
 //!   and rating go one at a time (a lock), and every model call's cap is held against the budget while it is
@@ -654,6 +660,14 @@ pub trait Steps {
     fn paused(&self, _jobs: &[String]) -> Vec<(String, String)> {
         Vec::new()
     }
+    /// Which of `jobs` are on a line the scope guard has only flagged (not paused), each with the reason to
+    /// show: the line, the signals and why. Only a flag that still holds counts. Unlike [`Steps::paused`] this
+    /// is asked only after an item's last failed attempt and never before a read, so a flagged line is still
+    /// dispatched; an item that failed twice on such a line is passed over ([`ItemEnd::Flagged`]) instead of
+    /// stopping the batch. The default has no flagged line, as for steps that have no scope guard.
+    fn flagged(&self, _jobs: &[String]) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// What rebasing a verified job's branch onto the latest main did, as far as the re-check rule needs it.
@@ -942,7 +956,9 @@ pub enum Stop {
     BudgetSpent,
     /// One item failed twice. An item whose reader gave no reading twice is not this: it is skipped, with its
     /// reason, and the next item runs. Nor is an item whose line the scope guard has paused, even when its
-    /// second failure is what paused it: it is passed over, with the pause reason, and the batch goes on.
+    /// second failure is what paused it: it is passed over, with the pause reason, and the batch goes on. The
+    /// same holds for an item whose line the guard has flagged: after two failures it is passed over, with the
+    /// flag reason, and the batch goes on.
     RepeatedFailure,
     /// Nothing is queued (or everything queued was worked). This is not success.
     QueueEmpty,
@@ -1001,7 +1017,7 @@ impl Stop {
                 "spend plus the next model call's cap would exceed the budget; the rest stays queued"
             }
             Stop::RepeatedFailure => {
-                "the same item failed twice; the item is named (an item whose line is paused is passed over and does not stop the batch)"
+                "the same item failed twice; the item is named (an item whose line is flagged or paused is passed over and does not stop the batch)"
             }
             Stop::QueueEmpty => "nothing was left to work; this is not success",
             Stop::JobLimit => "the job limit was reached",
@@ -1290,6 +1306,9 @@ enum ItemEnd {
     /// The item's line is paused by the scope guard, with the reason. It is passed over before it is read or
     /// run: not a failed attempt, so it does not count toward the repeated-failure stop.
     Paused(String),
+    /// The item failed twice on a line the scope guard has flagged but not paused, with the flag reason. It is
+    /// passed over for the rest of the batch: not a repeated failure, so the batch goes on to the next item.
+    Flagged(String),
 }
 
 /// What one call of [`Drain::land`] came to.
@@ -1810,13 +1829,28 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             failures += 1;
             if failures >= ATTEMPTS {
                 // The last failure may itself have paused the line. That is the scope guard's doing, not a
-                // repeated failure of the item: pass it over and let the batch go on.
-                return match self.paused_reason(item) {
-                    Some(reason) => ItemEnd::Paused(reason),
+                // repeated failure of the item: pass it over and let the batch go on. A line the guard has
+                // only flagged (a flag still dispatches, so the item had both attempts) is passed over the
+                // same way, with the flag reason. Only an item whose line is neither paused nor flagged
+                // stops the batch as a repeated failure.
+                if let Some(reason) = self.paused_reason(item) {
+                    return ItemEnd::Paused(reason);
+                }
+                return match self.flagged_reason(item) {
+                    Some(reason) => ItemEnd::Flagged(reason),
                     None => ItemEnd::Failed,
                 };
             }
         }
+    }
+
+    /// The reason the scope guard has only flagged the line of `item`, if it has.
+    fn flagged_reason(&self, item: &Item) -> Option<String> {
+        self.steps
+            .flagged(std::slice::from_ref(&item.job))
+            .into_iter()
+            .next()
+            .map(|(_, reason)| reason)
     }
 
     /// The reason the scope guard has paused the line of `item`, if it has.
@@ -2423,7 +2457,9 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 ),
             ),
             ItemEnd::Waiting => self.pass_over(&item.job, &self.last_landing(&item.job)),
-            ItemEnd::Paused(reason) => self.pass_over(&item.job, &reason),
+            ItemEnd::Paused(reason) | ItemEnd::Flagged(reason) => {
+                self.pass_over(&item.job, &reason)
+            }
             ItemEnd::Skipped => self.pass_over(
                 &item.job,
                 &format!(
@@ -3344,6 +3380,21 @@ impl Steps for RealSteps<'_> {
             .filter_map(|job| {
                 let mark = self.athena.line_pause(&records, job)?;
                 Some((job.clone(), self.athena.pause_refusal(&mark)))
+            })
+            .collect()
+    }
+
+    /// Asks [`Athena::line_flag`], which recomputes the line's level from the records, so a stored flag that
+    /// no longer holds is not reported. Records that cannot be loaded report nothing flagged, so the item then
+    /// ends as a repeated failure.
+    fn flagged(&self, jobs: &[String]) -> Vec<(String, String)> {
+        let Ok(records) = self.records() else {
+            return Vec::new();
+        };
+        jobs.iter()
+            .filter_map(|job| {
+                let mark = self.athena.line_flag(&records, job)?;
+                Some((job.clone(), self.athena.flag_note(&mark)))
             })
             .collect()
     }
