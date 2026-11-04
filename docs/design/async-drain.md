@@ -329,3 +329,10 @@ come first. Nothing here changes a limit until job 10.
     only if the number falls and no landed job later causes harm.
 
 Rollback at any step: set `max_in_flight = 1`.
+
+## 13. Follow-up: continuous landing
+
+Throughput review `20261104-192053-745k` found that landing and rebuild is 499.1 of 528.2 median minutes per landed
+job. `docs/design/continuous-landing.md` proposes that the landing queue of section 6 own the whole sequence
+(rebase, checks if needed, merge, landing record) in one slot, so no later command is needed to notice the merge.
+It extends build jobs 6 to 9 above and changes no limit.
