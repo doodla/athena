@@ -217,6 +217,12 @@ impl Athena {
         let _lock = self.state.lock_repository()?;
         let mut result: Option<(OutcomeState, String, String, Option<String>)> = None;
         let mut score = None;
+        let dispatched = Dispatched::from_record(
+            ctx.job
+                .job
+                .as_ref()
+                .and_then(|j| j.dispatch_branch.as_deref()),
+        );
         for _attempt in 0..3 {
             let head = self.head()?;
             let attempt_score = score_on(&head)?;
@@ -225,7 +231,27 @@ impl Athena {
                 attempt_score.clone(),
             ))));
             score = Some(attempt_score);
-            match plan(&self.git, verified, &head)? {
+            let mut decision = plan(&self.git, verified, &head, &dispatched)?;
+            if let Plan::OtherBranch(reason) = decision {
+                // The stale outcome is committed on the checked-out branch, and the gate recomputes the
+                // closing score from the records in that commit's tree. A branch that does not hold the
+                // job's record (it was cut before dispatch) would make the gate refuse Athena's own
+                // commit, so nothing is written there.
+                let holds_job = Records::load(&self.git, &head)?
+                    .jobs
+                    .get(id.as_str())
+                    .is_some_and(|j| j.job.is_some());
+                if !holds_job {
+                    bail!(
+                        "job {id} did not land: {reason}. The checked-out branch has no records of the \
+                         job, so nothing was recorded either. Check out the dispatch branch, then \
+                         `athena retry {id}`"
+                    );
+                }
+                decision = Plan::Stale(reason);
+            }
+            match decision {
+                Plan::OtherBranch(_) => unreachable!("mapped to a stale outcome above"),
                 Plan::Stale(reason) => {
                     let mut files = closing_files.clone();
                     files.push(NewFile::record(&AnyRecord::Outcome(Box::new(outcome(
@@ -478,11 +504,13 @@ impl Athena {
         )))];
         let body = landing_body(&reading, &verification);
         let landing_message = message(&reading.title, &body, &trailers);
+        let dispatched =
+            Dispatched::from_record(job.job.as_ref().and_then(|j| j.dispatch_branch.as_deref()));
         let _lock = self.state.lock_repository()?;
         for _attempt in 0..3 {
             let head = self.head()?;
-            match plan(&self.git, &v, &head)? {
-                Plan::Stale(reason) => bail!(
+            match plan(&self.git, &v, &head, &dispatched)? {
+                Plan::Stale(reason) | Plan::OtherBranch(reason) => bail!(
                     "job {id} can no longer land: {reason}. It stays blocked; `athena close {id} --why \"...\"` abandons it, and a new ask redoes the work"
                 ),
                 Plan::Tree(tree) => {

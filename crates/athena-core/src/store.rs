@@ -607,6 +607,7 @@ mod tests {
             tokens: None,
             note: None,
             pin: None,
+            dispatch_branch: None,
         }
     }
 

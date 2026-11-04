@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261010-154013-a9gz",
+  "round": 3,
+  "at": "2026-11-04T02:45:47.978307652Z",
+  "invocation_seq": 11,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/lifecycle.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/lifecycle.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Sharing the existing stale bail with `OtherBranch` gives the user the wrong remedy.",
+      "evidence": "The existing bail at close.rs:485-487 says the job \"can no longer land: {reason}. It stays blocked; `athena close {id} --why \"...\"` abandons it, and a new ask redoes the work\". For a branch mismatch the job can still land once the dispatch branch is checked out (decision 5 says so), so the advice to abandon it or ask again is misleading. Fix: Use a separate arm for `Plan::OtherBranch(reason)` that bails with \"job {id} stays blocked: {reason}. Check out the dispatch branch and run `athena go {id}` again\". Make the criterion 3 test assert that this advice is in the error.",
+      "location": "Decision 5 / Step 5; crates/athena-core/src/run/close.rs:485-487",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Case (b) points the user to `athena retry`, but the plan never checks that the kept candidate and resume mark survive the early bail.",
+      "evidence": "run/mod.rs:1392-1394 writes a resume mark once the candidate is built, so `athena retry` can resume with no new producer run. The bail in `land_or_block` drops the in-memory closing records (candidate, verification and invocations). The plan does not say whether the resume mark and kept candidate are still in place for the retry its message recommends. If they are not, the work and its cost are redone. Fix: In step 5, make sure the case (b) bail happens before any cleanup or settling of resume marks. In test (b), assert that the job's resume mark or kept candidate still exists after the error, or state in the risks section that a retry starts from scratch.",
+      "location": "Decision 4(b) / Criterion 1 test (b)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The case (a)/(b) split relies on an argument, read from the code and not run, that the gate accepts the stale commit whenever `job.json` is present. A refusal there would show up as a gate error, not a clear reason.",
+      "evidence": "The risks section admits the argument was not run. If the gate does refuse in case (a), `build_commit` fails with 'the gate refused Athena's own commit' instead of the branch reason. Fix: In case (a), if `build_commit` errors for the stale `OtherBranch` commit, fall back to the case (b) bail with the branch reason and add the gate error as context. That keeps the user-facing reason clear even if the argument is wrong somewhere.",
+      "location": "Decision 4 (job.json presence as the proxy for gate acceptance)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan names and its claims hold. `land::plan(git, verified, head)` is at land.rs:37. Its only callers are close.rs:228 (`land_or_block`) and close.rs:484 (`retry_landing`). `Plan` is matched only in close.rs (229/257, 485/488) and in the land.rs tests. `Git::current_branch` is at athena-git/src/lib.rs:344 and returns `Result<Option<String>>`. The only `Job` struct literals are at run/mod.rs ~888-918, store.rs:603 and records.rs:4851. No separate schema file defines `athena.job/1`. The rule goes in `land::plan`, where the fault starts, so both landing paths get it. Old records are kept working with `serde(default)`. The empty-string convention for a detached HEAD is now stated explicitly. The split on first landing (record a stale outcome when the branch holds the job's records, otherwise bail and write nothing) is justified by the gate recomputing the score from the committed tree, and the plan raises the resulting change to criterion 1's wording with the user as an open question. Every demonstration drives the real `Athena::go` and `land::plan` through the existing `during_verification` hook. Each would fail without the check, because the ancestor-only rule returns `Plan::Tree` and the job lands on the other branch. The dependents list matches what I found by grep. The two files outside the deliverables (run/mod.rs and lifecycle.rs) are justified and will be reported. That matches Athena's own minor findings, so I do not raise them again. My remaining findings are minor: the retry bail text gives the wrong advice for a branch mismatch, and case (b) should keep the job's resume state so that the advised `athena retry` does not redo the work."
+}

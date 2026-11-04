@@ -1813,6 +1813,205 @@ fn a_candidate_lands_over_a_records_only_interleave() {
             .unwrap()
     );
     assert!(athena.check_history().unwrap().violations.is_empty());
+    // The job record names the branch it was dispatched from, and the job landed on that branch.
+    assert_eq!(
+        dispatch_branch_of(&fx, &proposal.job.dir()).as_deref(),
+        Some("main")
+    );
+    assert_eq!(fx.git.current_branch().unwrap().as_deref(), Some("main"));
+    assert!(fx.file("README.md").unwrap().contains("Hello, reader."));
+}
+
+/// The `dispatch_branch` the job record at `dir` holds on the current branch.
+fn dispatch_branch_of(fx: &Fixture, dir: &str) -> Option<String> {
+    let bytes = fx
+        .git
+        .show_file("HEAD", &format!("{dir}/job.json"))
+        .unwrap()
+        .expect("the job record is on the branch");
+    match AnyRecord::parse("job.json", &bytes).unwrap() {
+        AnyRecord::Job(job) => job.dispatch_branch,
+        other => panic!("not a job record: {other:?}"),
+    }
+}
+
+/// A hook that, the first time verification runs, creates and checks out `other` and stores that branch's
+/// tip (the commit it was cut from) in the returned cell.
+fn switch_to_new_branch_during_verification(
+    fx: &Fixture,
+    scenario: &mut Scenario,
+    create: bool,
+) -> Arc<Mutex<String>> {
+    let tip = Arc::new(Mutex::new(String::new()));
+    let seen = tip.clone();
+    let root = fx.root().to_path_buf();
+    let once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    scenario.during_verification = Some(Arc::new(move || {
+        if once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let git = athena_git::Git::at(&root);
+        *seen.lock().unwrap() = git.head().unwrap().unwrap();
+        if create {
+            git.run(["checkout", "-q", "-b", "other"]).unwrap();
+        } else {
+            git.run(["checkout", "-q", "other"]).unwrap();
+        }
+    }));
+    tip
+}
+
+#[test]
+fn a_job_finished_on_a_branch_with_its_records_goes_stale() {
+    // The job is dispatched on `main`; `other`, cut from main's tip during verification, holds the job's
+    // dispatch records and the job's base. The job must not land there: it goes stale on `other`, which
+    // gains records only, and `main` is not touched.
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    let cut = switch_to_new_branch_during_verification(&fx, &mut scenario, true);
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Stale, "{}", f.reason);
+    assert!(
+        f.reason.contains("`main`") && f.reason.contains("`other`"),
+        "{}",
+        f.reason
+    );
+    let cut = cut.lock().unwrap().clone();
+    assert_eq!(fx.git.current_branch().unwrap().as_deref(), Some("other"));
+    // `main` still holds exactly what it held when the checkout happened.
+    assert_eq!(fx.git.run(["rev-parse", "main"]).unwrap().trim(), cut);
+    // `other` gained records and nothing else: no greeting, and the governed content is unchanged.
+    let changed = fx
+        .git
+        .run(["diff", "--name-only", &cut, &fx.head()])
+        .unwrap();
+    assert!(!changed.trim().is_empty());
+    assert!(
+        changed.lines().all(|p| p.starts_with("records/")),
+        "{changed}"
+    );
+    assert!(!fx.file("README.md").unwrap().contains("Hello, reader."));
+    assert_eq!(
+        athena_git::attrs::fingerprint(&fx.git, &fx.head(), &cut).unwrap(),
+        athena_git::attrs::fingerprint(&fx.git, &cut, &cut).unwrap()
+    );
+    assert_eq!(
+        dispatch_branch_of(&fx, &proposal.job.dir()).as_deref(),
+        Some("main")
+    );
+    assert!(athena.check_history().unwrap().violations.is_empty());
+
+    // Back on `main` the job has no outcome: it shows as interrupted and `go` will not run it again.
+    fx.git.run(["checkout", "-q", "main"]).unwrap();
+    let status = athena.status().unwrap();
+    assert!(
+        status
+            .open
+            .iter()
+            .any(|l| l.id == proposal.job.as_str() && l.state == "interrupted"),
+        "{:?}",
+        status.open
+    );
+    let error = athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+        .unwrap_err();
+    assert!(error.to_string().contains("interrupted"), "{error}");
+}
+
+#[test]
+fn a_job_finished_on_a_branch_without_its_records_changes_nothing() {
+    // `other` was cut before the job was dispatched, so it lacks the job's records. Recording a stale
+    // outcome there would put a closing score on a branch that cannot support it, so nothing is written:
+    // `go` fails naming the dispatch branch, and `other` keeps its tip.
+    let fx = Fixture::new();
+    fx.git.run(["branch", "other"]).unwrap();
+    let before_other = fx.head();
+    let mut scenario = Scenario::default();
+    let cut = switch_to_new_branch_during_verification(&fx, &mut scenario, false);
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let error = athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+        .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("`main`"), "{text}");
+    assert!(text.contains("nothing"), "{text}");
+    let main_tip = cut.lock().unwrap().clone();
+    assert_eq!(fx.git.current_branch().unwrap().as_deref(), Some("other"));
+    assert_eq!(fx.head(), before_other, "the other branch is unchanged");
+    assert_eq!(fx.git.run(["rev-parse", "main"]).unwrap().trim(), main_tip);
+    assert!(!fx.file("README.md").unwrap().contains("Hello, reader."));
+    let listed = fx
+        .git
+        .run(["ls-tree", "-r", "--name-only", "other"])
+        .unwrap();
+    assert!(!listed.contains("records/jobs/"), "{listed}");
+
+    fx.git.run(["checkout", "-q", "main"]).unwrap();
+    let status = athena.status().unwrap();
+    assert!(
+        status
+            .open
+            .iter()
+            .any(|l| l.id == proposal.job.as_str() && l.state == "interrupted"),
+        "{:?}",
+        status.open
+    );
+}
+
+#[test]
+fn a_blocked_job_will_not_retry_on_another_branch() {
+    // The retry of a blocked landing is held to the dispatch branch too.
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    let root = fx.root().to_path_buf();
+    scenario.during_verification = Some(Arc::new(move || {
+        std::fs::write(root.join("README.md"), "# Demo\n\nmy own local edit\n").unwrap();
+    }));
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Blocked, "{}", f.reason);
+    fx.git.run(["checkout", "--", "README.md"]).unwrap();
+    fx.git.run(["checkout", "-q", "-b", "other"]).unwrap();
+    let tip = fx.head();
+
+    let error = athena
+        .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+        .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("`main`"), "{text}");
+    assert!(text.contains("stays blocked"), "{text}");
+    assert_eq!(fx.head(), tip, "nothing was committed on the other branch");
+    assert!(!fx.file("README.md").unwrap().contains("Hello, reader."));
+    assert!(
+        !fx.git
+            .path_exists(
+                &fx.head(),
+                &format!("{}/outcome-landed.json", proposal.job.dir())
+            )
+            .unwrap()
+    );
+
+    // On the dispatch branch the same retry lands.
+    fx.git.run(["checkout", "-q", "main"]).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert!(fx.file("README.md").unwrap().contains("Hello, reader."));
 }
 
 #[test]

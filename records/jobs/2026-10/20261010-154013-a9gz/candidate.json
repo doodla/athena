@@ -1,0 +1,164 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261010-154013-a9gz",
+  "base_commit": "6226e319db0c98125eb7f815039d0997e853782f",
+  "base_fingerprint": "sha256:c612e6f723b7f155d10196cf56cc035ca35e823d6394e4d939cb83da6147c7bc",
+  "previous_job": "20261104-002852-g39r",
+  "candidate_commit": "206f48b1cae4e43a302b881f5d25ace9da880fce",
+  "candidate_tree": "ebf1259c47cc40fe6ee34596559aa64602b1433f",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 305503
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 135956
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 37070
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28342
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 78426
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 28142
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 191238
+    }
+  ],
+  "fingerprint": "sha256:e2a167c032ce19935de7ea7967e353bcf2a72c3ac627563c9ad379108b5225d4",
+  "violations": [],
+  "producer_report": {
+    "summary": "A job now lands only on the branch it was dispatched from. Root cause: `land::plan` checked only that the job's base is an ancestor of HEAD and never compared branches. Dispatch now records the checked-out branch in a new optional `dispatch_branch` on `athena.job/1`. An empty value means a detached HEAD; an absent value means a record made before the field, which keeps the old behavior. `plan` takes a `Dispatched` argument, reads the current branch itself, and returns a new `Plan::OtherBranch(reason)` before the ancestor check. The reason names the dispatch branch. Retry after blocked (`retry_landing`) treats it like `Stale`: it bails and the job stays blocked, with nothing written. First landing (`land_or_block`) records a stale outcome only when the checked-out branch holds the job's `job.json`. Otherwise it bails and writes nothing. I confirmed the reason by disabling the rule: the gate then refused Athena's own commit because the closing score no longer followed from the branch's records. The dispatch branch then shows the job as `interrupted`. The land.rs header, CHANGELOG and tests are updated. Tests cover plan unit cases, records round-trips with and without the field, and three lifecycle tests through the real `go` flow. With the rule disabled, the three new lifecycle tests fail (Landed instead of Stale, a gate refusal, and a retry that lands). `cargo test --locked` exited 0, but I could not read the persisted output, so I have no per-test counts.",
+    "files": [
+      "crates/athena-core/src/land.rs",
+      "crates/athena-core/src/run/close.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/store.rs",
+      "crates/athena-data/src/records.rs",
+      "crates/athena-cli/tests/lifecycle.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test --locked -p athena-data a_job_",
+        "result": "pass",
+        "note": "The two new round-trip tests (with and without dispatch_branch, including the empty value) pass."
+      },
+      {
+        "command": "cargo test --locked -p athena-core land::tests",
+        "result": "pass",
+        "note": "19 tests pass: the existing ones with `&Dispatched::Unknown` and the new branch-rule tests."
+      },
+      {
+        "command": "cargo test --locked -p athena-cli --test lifecycle -- a_job_finished_on_a_branch a_blocked_job_will_not_retry a_candidate_lands_over a_governed_change local_edits_block",
+        "result": "pass",
+        "note": "6 passed. The three new tests fail when `Dispatched::from_record` is forced to return `Unknown`: Landed instead of Stale, a gate refusal, and a retry that lands. That edit was reverted."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 tests pass, including the boundary-word scan, run after the CHANGELOG edit."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "The command returned no error exit. The output was too large to display and I could not read the persisted copy, so I have no per-test counts."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test`. A new test dispatches a job on branch A, switches to branch B (which contains the base commit), finishes the job, and shows that B's tip is unchanged and the outcome is stale (or blocked) with a reason naming the dispatch branch.",
+        "status": "met",
+        "evidence": "Two lifecycle tests: `a_job_finished_on_a_branch_with_its_records_goes_stale` and `a_job_finished_on_a_branch_without_its_records_changes_nothing` (run with `cargo test --locked -p athena-cli --test lifecycle a_job_finished_on_a_branch`), plus the land.rs unit test `a_job_dispatched_elsewhere_is_refused_on_another_branch`. With the rule disabled they fail. In the first test, `other` holds the job's records: state is Stale, the reason names `main`, `main`'s tip is unchanged, and `other` gains only `records/` paths. In the second, `other` lacks the job's records: `go` errors naming `main`, `other`'s tip is exactly unchanged, and nothing under `records/jobs/` exists on `other`. In the first case `other`'s tip gains one records-only commit rather than staying unchanged; see open_issues."
+      },
+      {
+        "criterion": "Run `cargo test`. A test shows a job still lands as a fast-forward when the checked-out branch at finish is the dispatch branch, including the records-only-changes replay case.",
+        "status": "met",
+        "evidence": "`a_candidate_lands_over_a_records_only_interleave` now also asserts that `dispatch_branch` is `main` and that the job landed on `main`. The land.rs unit test `a_job_lands_when_the_dispatch_branch_is_checked_out` covers head equal to the base and the replay after an excluded-path (`PRIVATE.md`) commit. It checks the merged tree keeps both the excluded file and the candidate's change. All pass."
+      },
+      {
+        "criterion": "Run `cargo test`. A test shows the retry-after-blocked landing path (close.rs ~484) also refuses when the current branch differs from the dispatch branch.",
+        "status": "met",
+        "evidence": "`a_blocked_job_will_not_retry_on_another_branch` blocks the job on `main`, checks out `other`, and calls `go`. It gets an error naming `main` and saying the job stays blocked; the tip is unchanged, there is no greeting and no `outcome-landed.json`. After checking out `main` again, `go` lands it. Without the rule the retry lands, so the error assertion fails."
+      },
+      {
+        "criterion": "Run `cargo clippy` and `cargo fmt --check`: both are clean, and the existing land and landing tests in crates/athena-core still pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings`, both clean. The land::tests (19) pass in athena-core, and `cargo test --locked` returned no error."
+      },
+      {
+        "criterion": "The header comment of crates/athena-core/src/land.rs states the rule that the current branch must equal the dispatch branch, alongside the existing ancestor rule.",
+        "status": "met",
+        "evidence": "The `//!` header's rule block now has 'require the current branch is the branch the job was dispatched from else stale' directly above the ancestor line. A paragraph below it covers the empty-string detached case, a branch job finished on a detached HEAD, and jobs made before the field."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry stating that jobs now land only on the branch they were dispatched from.",
+        "status": "met",
+        "evidence": "The first bullet under `## [Unreleased]` / `### Changed` begins 'Jobs now land only on the branch they were dispatched from.' It names the root cause and covers the retry, detached and pre-field cases."
+      },
+      {
+        "criterion": "Run `cargo test`. If a record field is added, the round-trip tests for `check_record_file` and `AnyRecord` in crates/athena-data/src/records.rs pass with it and with records that lack it.",
+        "status": "met",
+        "evidence": "New tests `a_job_keeps_its_dispatch_branch_through_a_round_trip` (values `main` and the empty string, through `AnyRecord::parse` and `check_record_file`) and `a_job_record_made_before_the_dispatch_branch_existed_still_parses` (no key; parses as None and serializes without the key). The existing `pending_bootstrap_cost_is_representable` test got `dispatch_branch: None` and still passes. Run with `cargo test --locked -p athena-data a_job_`."
+      },
+      {
+        "criterion": "This change refuses more landings, and the higher refusal rate is intended: expected 5% of newly refused readings.",
+        "status": "met",
+        "evidence": "The extra refusals are shown by the new lifecycle and unit tests. The '5%' figure is an expectation about use, and no test or data in the repository measures it, so I did not claim to check it. `cargo test --locked` returned no error, so no existing same-branch landing test regressed."
+      }
+    ],
+    "open_issues": [
+      "Criterion 1 wording versus behavior (the plan's open question, unanswered): when branch B holds the job's records, B's tip moves by one records-only stale commit and gains no job content. When B lacks them, B's tip is exactly unchanged but `go` ends in an error instead of a stale outcome. The cause is that the gate refuses a stale score commit on a branch without the job's records. Please confirm this reading.",
+      "Criterion 8's '5% of newly refused readings' is read as an expectation about use. No code or data measures it.",
+      "Edits outside the listed deliverables: crates/athena-core/src/run/mod.rs (the dispatch-time `Job` literal now sets `dispatch_branch` from `current_branch()?`, and the import gains `Dispatched`) and crates/athena-cli/tests/lifecycle.rs (the new integration tests). They were needed because dispatch is the only place the branch is known and only the `go` flow can show the behavior.",
+      "No existing test needed changing for the new rule; `plan` calls in the land.rs tests only gained `&Dispatched::Unknown`. No refusal-corpus case was added and docs/records.md was not edited, as the plan decided."
+    ],
+    "mistakes": [
+      "I first wrote a nonsensical `show` closure in the replay unit test and a tautological ancestor assertion in the other-branch test. I rewrote both before running them."
+    ],
+    "learnings": [
+      "Without `dispatch_branch`, a stale outcome committed on a branch that lacks the job's records is refused by the gate: the closing score and outcome totals do not follow from that branch's records. This was seen by running the new tests with the rule disabled, and it is the reason `land_or_block` bails instead of recording stale there.",
+      "`Git::run` does not trim its output, so use `.trim()` when comparing a `rev-parse` result.",
+      "The `during_verification` hook runs inside the verifier invocation, and the rest of `go` tolerates a checkout there. Both new branch-switch tests complete without unrelated failures.",
+      "`Job` struct literals exist only at run/mod.rs, store.rs and the records.rs test; every JSON stub omits the key and parses through `#[serde(default)]`."
+    ],
+    "desires": [
+      "A way to read the persisted full-suite test output, since Grep and Read were denied outside the working directory. Per-test counts from the full run would have been useful."
+    ]
+  }
+}

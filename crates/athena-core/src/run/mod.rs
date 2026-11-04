@@ -6,7 +6,7 @@ use crate::chain::latest_landed_job;
 use crate::checks::{CheckContext, run_check};
 use crate::commits::{NewFile, Refusal, message};
 use crate::invocation::InvocationFacts;
-use crate::land::{Plan, plan};
+use crate::land::{Dispatched, Plan, plan};
 use crate::pin::{is_full_sha, mount};
 use crate::reading::{
     BinaryChecker, NO_HISTORY_REASON, Proposal, ReadingChecker, ReplayCheckers, ReplayRun,
@@ -922,6 +922,8 @@ impl Athena {
             tokens: None,
             note: None,
             pin: pinned.as_ref().map(|(record, _)| record.clone()),
+            // The branch the job lands on; the empty string records a detached HEAD.
+            dispatch_branch: Some(self.git.current_branch()?.unwrap_or_default()),
         };
         let files = vec![
             NewFile::record(&AnyRecord::Job(Box::new(job_record.clone()))),

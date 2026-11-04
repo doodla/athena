@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261010-154013-a9gz",
+  "round": 2,
+  "at": "2026-11-04T02:41:34.982348303Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/mod.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/mod.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/lifecycle.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/lifecycle.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The criterion 1 test only covers a branch B forked from the dispatch commit. It misses the common case the request describes: B is an existing branch that contains the base but not the dispatch commit.",
+      "evidence": "run/mod.rs:912 sets `base_commit` to the head before the dispatch commit, and run/mod.rs:926-938 commits job.json on A after that. The plan's hook runs `git checkout -q -b other` from the current tip, so `other` already holds job.json. When a user switches to a branch that forked at or before the base, B has the base but not job.json. The stale records commit (close.rs:229-246, built on B's head) then puts closing records for the job on B without the job record. The gate dependent's reason ('the stale records commit has the same shape as every existing stale outcome') is only tested for the B-with-job.json shape. This is a dependent entry whose test does not cover it. Fix: Add a second criterion 1 case (or switch the main one) where `other` is created before `ask`/`go`, at the fixture's initial tip. That branch contains the base but not the dispatch commit. Have the hook check it out, then assert the outcome is `Stale`, the reason names `main`, the diff is records-only, and `check_history()` reports no violations. If the gate refuses that commit, say how the plan handles it.",
+      "location": "Demonstrations, Criterion 1; Dependents, 'Closing-record and landing-commit gate checks'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say how the job looks on the dispatch branch A afterwards. Its stale outcome lives only on B, so on A it is a dispatched job with no outcome.",
+      "evidence": "The outcome records are committed on the checked-out branch (close.rs:229-246, commits.rs `advance` fast-forwards the current branch). A holds job.json from the dispatch commit (run/mod.rs:926-938) but never gets an outcome. Fix: State what `status` and `go` show for this job after the user returns to A (for example in-flight, orphaned, or offered for resume). Add one assertion to the criterion 1 test after `git checkout main`, so a later reader knows the behavior is intended.",
+      "location": "Decision 4 (stale on first landing)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Storing an empty string to mean a detached HEAD is an in-band sentinel in a record written for outside readers.",
+      "evidence": "The plan writes `\"dispatch_branch\": \"\"` into job.json for a detached dispatch. A reader of the record has to know this convention from a doc comment in records.rs. The rejected alternative (plain None) was rightly rejected, but a typed value was not considered. Fix: Keep the stored field self-describing. For example, keep `dispatch_branch: Option<String>` and add `dispatch_detached: bool` (default false, skipped when false), or serialize `Dispatched` as a small tagged value. Otherwise keep `Some(\"\")`, but have the reason text and the land.rs header name the convention explicitly.",
+      "location": "Decision 1 / Step 2 (`Some(\"\")` means detached)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The two files outside the deliverables are justified. They only need a line in the change description.",
+      "evidence": "The `Job` literal at run/mod.rs:888-925 names every field, so adding one requires editing it. The behavior criteria need the `go` flow driven from lifecycle.rs, which already uses `during_verification` (lines 1726, 1773). Fix: Keep both. Name them, with the reason, in the final report.",
+      "location": "Files: run/mod.rs and lifecycle.rs (Athena findings 1-2)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's claims against the code. Each is correct: `land::plan` (land.rs:37) has exactly two callers, close.rs:228 in `land_or_block` and close.rs:484 in `retry_landing`. On a refusal, the first landing commits a stale records commit on the checked-out branch, and the retry bails with the job left blocked. The `Job` literal at run/mod.rs:888 names every field. `current_branch` exists at athena-git lib.rs:344. The `during_verification` hook exists (tests/common/mod.rs:422 and :631) and is already used in lifecycle.rs. Putting the rule first in `plan` fixes both landing paths at the root. Recording the branch on the dispatch-time job record is sound, as is mapping a missing field to the old behavior. The existing tests that switch branches (lifecycle.rs:3173, history_pr_head.rs:75) do so before `ask`, so they keep passing. The detached checkouts in the reconcile tests do not dispatch jobs. One major gap: the criterion 1 test forks the other branch from the dispatch commit. That misses the realistic case where the other branch contains the base but not job.json, and the gate dependent is not tested for it. There are also two minor points: how the job looks on the dispatch branch afterwards, and the empty-string sentinel for a detached HEAD. The plan needs a small revision."
+}

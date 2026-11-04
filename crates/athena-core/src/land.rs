@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! H := tip of the user's current branch
+//! require the current branch is the branch the job was dispatched from   else stale
 //! require P is an ancestor of H                          else stale
 //! require the athena-* classification of every path in P ∪ H ∪ C is the same under P's and H's rules
 //! if H == P:                                     tree := tree(C)
@@ -9,6 +10,12 @@
 //! else:                                          stale (governed base content changed)
 //! assert fingerprint(tree; P) == F               (the landed content is the verified content)
 //! ```
+//!
+//! A job lands only on the branch it was dispatched from, even when its base commit is an ancestor of
+//! another branch's tip. The dispatch branch is recorded in the job record (`dispatch_branch`). A job
+//! dispatched on a detached HEAD has the empty string there; it names no branch, so it never lands. A
+//! branch job finished on a detached HEAD does not land either. A job record made before the field
+//! existed has no dispatch branch, and that job keeps the older rule: only the ancestor check applies.
 //!
 //! The caller adds the closing records to the tree, gates the commit, and fast-forwards; a refused
 //! fast-forward makes the job `blocked`.
@@ -31,12 +38,62 @@ pub enum Plan {
     Tree(String),
     /// The job cannot land on this tip; it must be verified again.
     Stale(String),
+    /// The checked-out branch is not the one the job was dispatched from; nothing lands here. The text
+    /// names the dispatch branch.
+    OtherBranch(String),
 }
 
-/// Decides how `verified` lands on `head`.
-pub fn plan(git: &Git, verified: &Verified, head: &str) -> Result<Plan> {
+/// The branch a job was dispatched from, as its job record holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Dispatched {
+    /// The record has no dispatch branch (made before the field existed): no branch check.
+    Unknown,
+    /// HEAD was on this branch at dispatch.
+    Branch(String),
+    /// HEAD was detached at dispatch (recorded as an empty branch name).
+    Detached,
+}
+
+impl Dispatched {
+    /// Reads the record's `dispatch_branch`: absent is `Unknown`, empty is `Detached`.
+    pub fn from_record(recorded: Option<&str>) -> Self {
+        match recorded {
+            None => Dispatched::Unknown,
+            Some("") => Dispatched::Detached,
+            Some(name) => Dispatched::Branch(name.to_string()),
+        }
+    }
+}
+
+/// Decides how `verified` lands on `head`, the tip of the checked-out branch. A job dispatched from a
+/// branch lands only while that branch is checked out.
+pub fn plan(git: &Git, verified: &Verified, head: &str, dispatched: &Dispatched) -> Result<Plan> {
     let p = verified.base();
     let c = verified.candidate();
+    match dispatched {
+        Dispatched::Unknown => {}
+        Dispatched::Detached => {
+            return Ok(Plan::OtherBranch(
+                "the job was dispatched on a detached HEAD (recorded as an empty branch name), which \
+                 names no branch to land on; nothing landed"
+                    .into(),
+            ));
+        }
+        Dispatched::Branch(name) => match git.current_branch()? {
+            Some(current) if current == *name => {}
+            Some(current) => {
+                return Ok(Plan::OtherBranch(format!(
+                    "the job was dispatched on branch `{name}`, but branch `{current}` is checked out; \
+                     nothing landed"
+                )));
+            }
+            None => {
+                return Ok(Plan::OtherBranch(format!(
+                    "the job was dispatched on branch `{name}`, but HEAD is detached; nothing landed"
+                )));
+            }
+        },
+    }
     if !git.is_ancestor(p, head)? {
         return Ok(Plan::Stale(
             "the job's base commit is no longer an ancestor of the branch".into(),
@@ -532,8 +589,114 @@ mod tests {
         // M7 (allows): a verified candidate lands.
         let (_dir, git, p, c, f) = base_and_candidate();
         assert_eq!(
-            plan(&git, &pass(&p, &c, &f), &p).unwrap(),
+            plan(&git, &pass(&p, &c, &f), &p, &Dispatched::Unknown).unwrap(),
             Plan::Tree(git.tree_of(&c).unwrap())
+        );
+    }
+
+    #[test]
+    fn a_job_lands_when_the_dispatch_branch_is_checked_out() {
+        // The allowing side of the branch rule: on the dispatch branch the job lands, with the head at
+        // the base and after a commit that changed only an excluded path (the replay case).
+        let (dir, git, p, c, f) = base_and_candidate();
+        let main = Dispatched::Branch("main".into());
+        assert_eq!(
+            plan(&git, &pass(&p, &c, &f), &p, &main).unwrap(),
+            Plan::Tree(git.tree_of(&c).unwrap())
+        );
+        let head = commit(&git, dir.path(), "PRIVATE.md", "private\n");
+        let Plan::Tree(tree) = plan(&git, &pass(&p, &c, &f), &head, &main).unwrap() else {
+            panic!("the job must land over the excluded change")
+        };
+        assert_eq!(fingerprint(&git, &tree, &p).unwrap(), f);
+        // The replay kept the excluded file next to the candidate's change.
+        let at = |path: &str| {
+            git.run(["cat-file", "-p", &format!("{tree}:{path}")])
+                .unwrap()
+        };
+        assert_eq!(at("PRIVATE.md"), "private\n");
+        assert_eq!(at("a.txt"), "changed\n");
+    }
+
+    #[test]
+    fn a_job_dispatched_elsewhere_is_refused_on_another_branch() {
+        // The base is an ancestor of the other branch's tip, so only the branch rule refuses.
+        let (_dir, git, p, c, f) = base_and_candidate();
+        git.run(["checkout", "-q", "-b", "other"]).unwrap();
+        assert!(git.is_ancestor(&p, &git.head().unwrap().unwrap()).unwrap());
+        let Plan::OtherBranch(reason) = plan(
+            &git,
+            &pass(&p, &c, &f),
+            &p,
+            &Dispatched::Branch("main".into()),
+        )
+        .unwrap() else {
+            panic!("the job must not land on another branch")
+        };
+        assert!(
+            reason.contains("`main`") && reason.contains("`other`"),
+            "{reason}"
+        );
+        // The same call without the recorded branch lands, which is what the rule changes.
+        assert!(matches!(
+            plan(&git, &pass(&p, &c, &f), &p, &Dispatched::Unknown).unwrap(),
+            Plan::Tree(_)
+        ));
+    }
+
+    #[test]
+    fn the_branch_rule_is_checked_before_the_ancestor_rule() {
+        let (dir, git, p, c, f) = base_and_candidate();
+        git.run(["checkout", "-q", "--orphan", "rewritten"])
+            .unwrap();
+        let head = commit(&git, dir.path(), "b.txt", "unrelated\n");
+        let decided = plan(
+            &git,
+            &pass(&p, &c, &f),
+            &head,
+            &Dispatched::Branch("main".into()),
+        )
+        .unwrap();
+        assert!(matches!(decided, Plan::OtherBranch(_)), "{decided:?}");
+    }
+
+    #[test]
+    fn a_job_dispatched_on_a_detached_head_never_lands() {
+        let (_dir, git, p, c, f) = base_and_candidate();
+        let Plan::OtherBranch(reason) =
+            plan(&git, &pass(&p, &c, &f), &p, &Dispatched::Detached).unwrap()
+        else {
+            panic!("a detached dispatch names no branch to land on")
+        };
+        assert!(reason.contains("detached HEAD"), "{reason}");
+    }
+
+    #[test]
+    fn a_branch_job_finished_on_a_detached_head_is_refused() {
+        let (_dir, git, p, c, f) = base_and_candidate();
+        git.run(["checkout", "-q", "--detach"]).unwrap();
+        let Plan::OtherBranch(reason) = plan(
+            &git,
+            &pass(&p, &c, &f),
+            &p,
+            &Dispatched::Branch("main".into()),
+        )
+        .unwrap() else {
+            panic!("a detached HEAD is not the dispatch branch")
+        };
+        assert!(
+            reason.contains("`main`") && reason.contains("detached"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn the_dispatch_branch_is_read_from_the_record() {
+        assert_eq!(Dispatched::from_record(None), Dispatched::Unknown);
+        assert_eq!(Dispatched::from_record(Some("")), Dispatched::Detached);
+        assert_eq!(
+            Dispatched::from_record(Some("main")),
+            Dispatched::Branch("main".into())
         );
     }
 
@@ -542,7 +705,7 @@ mod tests {
         // M7 (blocks): landing after the candidate changed.
         let (_dir, git, p, c, _f) = base_and_candidate();
         let wrong = fingerprint(&git, &p, &p).unwrap();
-        assert!(plan(&git, &pass(&p, &c, &wrong), &p).is_err());
+        assert!(plan(&git, &pass(&p, &c, &wrong), &p, &Dispatched::Unknown).is_err());
     }
 
     #[test]
@@ -553,7 +716,7 @@ mod tests {
             .unwrap();
         let rewritten = commit(&git, dir.path(), "b.txt", "history was rewritten\n");
         assert!(matches!(
-            plan(&git, &pass(&p, &c, &f), &rewritten).unwrap(),
+            plan(&git, &pass(&p, &c, &f), &rewritten, &Dispatched::Unknown).unwrap(),
             Plan::Stale(_)
         ));
     }
@@ -569,7 +732,7 @@ mod tests {
             "/PRIVATE.md athena-exclude\n/a.txt athena-exclude\n",
         );
         assert!(matches!(
-            plan(&git, &pass(&p, &c, &f), &head).unwrap(),
+            plan(&git, &pass(&p, &c, &f), &head, &Dispatched::Unknown).unwrap(),
             Plan::Stale(_)
         ));
     }
