@@ -1969,6 +1969,7 @@ fn queue_steward_request(athena: &Athena, text: &str) -> String {
         source: Reference::path("records/jobs"),
         evidence: Vec::new(),
         request: text.into(),
+        brief: None,
     };
     let queued =
         athena_core::steward::Applier::apply(&RequestQueue, &change, &BTreeSet::new()).unwrap();
@@ -4565,6 +4566,7 @@ fn proposal(id: &str, role: &str, rung: Ladder) -> AnyRecord {
         rung,
         source: Reference::path("src/lib.rs"),
         evidence: vec![Reference::path("README.md")],
+        brief: None,
     }))
 }
 

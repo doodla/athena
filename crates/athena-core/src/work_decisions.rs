@@ -409,6 +409,7 @@ mod tests {
             rung: Ladder::DesignDecisions,
             source: Reference::path("records/jobs"),
             evidence: vec![Reference::path("README.md")],
+            brief: None,
         }
     }
 

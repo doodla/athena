@@ -121,7 +121,10 @@ pub const STEWARD_PROMPT: &str = "You are Athena's steward. You only read: Athen
 its git log, and GitHub runs, pull requests and deploys. Report a work item for each repeated failure and \
 for each source you could not read. Cite sources and evidence by reference; copy no data. Name the rung of \
 the requirements ladder each item concerns; Athena queues a request for a rung at or below your limit and \
-only a proposal above it.";
+only a proposal above it. For a proposal above your limit, also write a brief for the owner, who decides it. \
+The brief has five fields: question (one yes/no line), if_yes (what happens if the owner says yes), if_no \
+(what happens if the owner says no), cost (what yes costs), and recommendation (yes or no, with a one-line \
+reason). Keep each field short (at most 20 words) and plain, with no jargon. Leave the brief null for any other item.";
 
 /// The one steward definition: it runs every five finished tasks, and may change the lowest two rungs.
 /// Version 2 is the first that calls a model.
@@ -240,6 +243,23 @@ mod tests {
     }
 
     #[test]
+    fn the_steward_prompt_names_the_five_brief_fields_and_the_owner_style() {
+        for term in [
+            "question",
+            "if_yes",
+            "if_no",
+            "cost",
+            "recommendation",
+            "one-line reason",
+            "short",
+            "plain",
+            "no jargon",
+        ] {
+            assert!(STEWARD_PROMPT.contains(term), "{term}");
+        }
+    }
+
+    #[test]
     fn the_ladder_is_ordered_highest_first() {
         assert_eq!(Ladder::ALL.len(), 5);
         assert!(Ladder::ALL.windows(2).all(|w| w[0] < w[1]));
@@ -288,7 +308,7 @@ mod tests {
         assert!(role.may_change(Ladder::DefaultsConventions));
         assert!(role.may_change(Ladder::Implementation));
         assert!(
-            role.prompt.len() < 500,
+            role.prompt.len() < 1000,
             "the prompt is short: {}",
             role.prompt.len()
         );
