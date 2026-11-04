@@ -3252,4 +3252,199 @@ mod produce_and_verify_order_tests {
         assert!(!job.verifier_prompt.contains("fails-without-"));
         assert!(!job.revert_left);
     }
+
+    // -----------------------------------------------------------------------------------------------------
+    // An easy job is planned when an accepted criterion asks for a failing run without the fix
+
+    /// The test repository with planning in `hard` mode, as the repository's own `athena.toml` has it.
+    fn repo_with_hard_planning() -> tempfile::TempDir {
+        repo_with_config(
+            "\n[job_plan]\nenabled = true\nmode = \"hard\"\nplanner_usd = 0.75\ncritic_usd = 0.75\n\
+             planner_timeout_s = 600\ncritic_timeout_s = 600\nmax_rounds = 3\n",
+        )
+    }
+
+    /// `inner` with the reader's one criterion set to this kind and text (no `hard_reason`, so the job is
+    /// judged easy), and the producer and verifier answering for that text.
+    fn with_criterion(
+        inner: athena_agent::fake::Script,
+        kind: &'static str,
+        text: &'static str,
+    ) -> athena_agent::fake::Script {
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            if let Some(out) = turn.structured.as_mut() {
+                match spec.role {
+                    Role::Reader => {
+                        out["acceptance_criteria"][0] = json!({ "text": text, "kind": kind });
+                    }
+                    Role::Producer => out["criteria_check"][0]["criterion"] = text.into(),
+                    Role::Verifier => out["criteria"][0]["criterion"] = text.into(),
+                    _ => {}
+                }
+            }
+            // A behavior criterion is met only when its evidence cites a command that was seen running.
+            if spec.role == Role::Verifier && kind == "behavior" {
+                turn.structured.as_mut().unwrap()["criteria"][0]["commands"] =
+                    json!(["cargo test"]);
+                turn.commands_run = vec!["cargo test".into()];
+            }
+            turn
+        })
+    }
+
+    /// What an easy job did: how it ended, every call, and whether a plan and a critique were recorded.
+    struct EasyJob {
+        finished: Box<Finished>,
+        calls: Vec<(Role, String)>,
+        plan_recorded: bool,
+        critique_recorded: bool,
+    }
+
+    impl EasyJob {
+        fn roles(&self) -> Vec<Role> {
+            self.calls.iter().map(|(r, _)| *r).collect()
+        }
+
+        fn verifier_prompt(&self) -> &str {
+            prompts_of(&self.calls, Role::Verifier)[0]
+        }
+    }
+
+    const SKIPPED: [Role; 3] = [Role::Reader, Role::Producer, Role::Verifier];
+    const PLANNED: [Role; 5] = [
+        Role::Reader,
+        Role::Planner,
+        Role::Critic,
+        Role::Producer,
+        Role::Verifier,
+    ];
+
+    /// Runs a job judged easy, whose one criterion has this kind and text, over a repository planning in
+    /// `hard` mode. The planner and critic answer a behavior plan with a seam and an accepting critique. When
+    /// `runs` is set, Athena's demonstration run executes that script instead of cargo.
+    fn run_easy_job(kind: &'static str, text: &'static str, runs: Option<&str>) -> EasyJob {
+        let repo = repo_with_hard_planning();
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let seam = json!("run_easy_job with a scripted planner and critic queue; exists");
+        let inner = planning_script(
+            vec![behavior_plan(seam)],
+            vec![accepting_critique()],
+            calls.clone(),
+        );
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            with_criterion(inner, kind, text),
+        );
+        let _seam = runs.map(|body| {
+            let body = body.to_string();
+            crate::run::checks::demo_seam::install(std::rc::Rc::new(move |_argv: &[String]| {
+                vec!["sh".to_string(), "-c".to_string(), body.clone()]
+            }))
+        });
+        let (id, finished) = finished_job(&athena);
+        let git = Git::at(repo.path());
+        let at_head = |name: &str| {
+            git.path_exists("HEAD", &format!("{}/{name}", id.dir()))
+                .unwrap()
+        };
+        let (plan_recorded, critique_recorded) =
+            (at_head("job-plan-1.json"), at_head("critique-1.json"));
+        let calls = calls.lock().unwrap().clone();
+        EasyJob {
+            finished,
+            calls,
+            plan_recorded,
+            critique_recorded,
+        }
+    }
+
+    const FAILING_RUN: &str = "a test that fails without the fix covers the demo";
+
+    #[test]
+    fn easy_job_planning_a_fails_without_criterion_is_planned_and_the_verifier_gets_the_revert_run()
+    {
+        let job = run_easy_job("behavior", FAILING_RUN, Some(README_TEST));
+        assert_eq!(
+            job.roles(),
+            PLANNED,
+            "the planner and critic run for an easy job"
+        );
+        assert!(job.plan_recorded && job.critique_recorded);
+        assert_eq!(
+            job.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            job.finished.reason
+        );
+        let prompt = job.verifier_prompt();
+        let section = &prompt[prompt.find("## Checks Athena ran on this tree").unwrap()..];
+        for text in [
+            "fails-without-1",
+            "failed without the fix (exit 1)",
+            "test demo ... FAILED",
+        ] {
+            assert!(section.contains(text), "the record omits {text}: {section}");
+        }
+    }
+
+    #[test]
+    fn easy_job_planning_a_failing_run_wording_is_planned_whatever_its_case_or_number() {
+        for text in [
+            "a test FAILS  without the Fix covers the demo",
+            "a test fails without the change covers the demo",
+            "a test fails without the mechanism covers the demo",
+            "the tests fail without the fix and pass with it",
+        ] {
+            let job = run_easy_job("behavior", text, None);
+            assert_eq!(job.roles(), PLANNED, "{text}");
+            assert!(job.plan_recorded, "{text}");
+        }
+    }
+
+    #[test]
+    fn easy_job_planning_an_ordinary_criterion_is_skipped() {
+        let repo = repo_with_hard_planning();
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        // Empty queues: the first planner or critic call fails the test.
+        let inner = planning_script(vec![], vec![], calls.clone());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            with_criterion(inner, "behavior", CRITERION),
+        );
+        let (id, finished) = finished_job(&athena);
+        assert_eq!(finished.state, OutcomeState::Landed, "{}", finished.reason);
+        let calls = calls.lock().unwrap().clone();
+        let roles: Vec<Role> = calls.iter().map(|(r, _)| *r).collect();
+        assert_eq!(roles, SKIPPED);
+        let git = Git::at(repo.path());
+        for name in ["job-plan-1.json", "critique-1.json"] {
+            let path = format!("{}/{name}", id.dir());
+            assert!(!git.path_exists("HEAD", &path).unwrap(), "{path}");
+        }
+        let prompt = prompts_of(&calls, Role::Verifier)[0];
+        assert!(!prompt.contains("fails-without-"), "{prompt}");
+    }
+
+    #[test]
+    fn easy_job_planning_an_ordinary_wording_is_skipped_whatever_the_kind() {
+        for (kind, text) in [
+            ("behavior", "the build fails without a network"),
+            ("behavior", "the tests pass"),
+            // A content criterion that names the phrase is read, not run.
+            ("content", FAILING_RUN),
+        ] {
+            let job = run_easy_job(kind, text, None);
+            assert_eq!(job.roles(), SKIPPED, "{kind}: {text}");
+            assert!(!job.plan_recorded && !job.critique_recorded, "{text}");
+        }
+    }
 }

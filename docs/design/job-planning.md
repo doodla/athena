@@ -329,6 +329,14 @@ it is built. Two changes follow.
   drain. The reader is given that definition in the `hard_reason` field of its output schema. `mode = "all"`
   plans every change job, as before, and `enabled = false` is still a full off switch, whatever the mode. The
   caps, timeouts and `max_rounds` are unchanged. The planning code, the resume path and the other measures stay.
+  *Also planned in `hard` mode:* a job whose accepted reading has a Behavior criterion naming a failing run
+  without the fix ("fails without the fix", "fail without the fix", "fails without the change" or "fails
+  without the mechanism", compared without regard to case or spacing) is planned even when judged easy. Athena
+  runs a "fails without the fix" demonstration only from an accepted plan, so a job with no plan gave the
+  verifier no such run and the verifier rejected correct work (job 20261103-231422-8dzf). This changes only
+  whether the job is planned: the marking that escalates the producer is untouched, a Content criterion that
+  merely mentions the phrase does not plan the job, and `mode = "all"`, `enabled = false` and the study
+  exception (a pinned repository is never planned) behave as before.
 - **Later harm beside the landed share.** `athena status` reports, for planned and for unplanned dispatched
   jobs separately, how many landings were later cited as the cause of a failure, a revert or a fix job, next to
   that group's landed share (and as `keep_rule.later_harm` in `--json`). All three are read from records that
