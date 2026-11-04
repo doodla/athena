@@ -22,12 +22,13 @@ use anyhow::{Context, Result, bail};
 use athena_agent::env::Side;
 use athena_context::briefs::plain_boundary_text;
 use athena_context::outputs::{
-    RefKindOutput, RungOutput, StewardItemOutput, StewardKindOutput, StewardOutput, steward_schema,
+    RefKindOutput, RungOutput, StewardBriefOutput, StewardItemOutput, StewardKindOutput,
+    StewardOutput, steward_schema,
 };
 use athena_context::{Composed, steward_system_prompt};
 use athena_data::records::{
-    AnyRecord, AudienceRating, Invocation, InvocationOutcome, OutcomeState, RefKind, Reference,
-    Request, Role, WorkDecisionState, WorkItem, WorkItemKind,
+    AnyRecord, AudienceRating, Invocation, InvocationOutcome, OutcomeState, OwnerBrief, RefKind,
+    Reference, Request, Role, WorkDecisionState, WorkItem, WorkItemKind,
 };
 use athena_data::roles::{Ladder, RoleDefinition, steward};
 use athena_data::{JobId, RecordId};
@@ -310,6 +311,8 @@ pub struct ProposedChange {
     pub evidence: Vec<Reference>,
     /// The request queued when the steward may change this rung itself.
     pub request: String,
+    /// The owner's brief, kept only when the change is raised above the role's limit.
+    pub brief: Option<OwnerBrief>,
 }
 
 /// A request queued to apply a change.
@@ -642,6 +645,11 @@ pub fn decide(
     } else {
         Decision::Proposed
     };
+    // Only a proposal above the limit goes to the owner, so only it carries a brief.
+    let brief = match decision {
+        Decision::Proposed => change.brief.clone(),
+        Decision::Applied(_) => None,
+    };
     let item = WorkItem {
         id: RecordId::generate(now),
         at: now,
@@ -652,6 +660,7 @@ pub fn decide(
         rung: change.rung,
         source: change.source.clone(),
         evidence,
+        brief,
     };
     Ok((decision, item))
 }
@@ -676,6 +685,7 @@ pub fn blind_spot_change(source: &str, title: &str) -> ProposedChange {
         source: Reference::path(source),
         evidence: Vec::new(),
         request: blind_spot_request(source, title),
+        brief: None,
     }
 }
 
@@ -899,6 +909,10 @@ fn validate_item(
             "{key}: a request is at most {MAX_REQUEST} characters"
         ));
     }
+    let brief = item
+        .brief
+        .map(|b| check_brief(b).map_err(|e| format!("{key}: brief: {e}")))
+        .transpose()?;
     Ok(ProposedChange {
         kind: match item.kind {
             StewardKindOutput::RepeatedFailure => WorkItemKind::RepeatedFailure,
@@ -910,6 +924,32 @@ fn validate_item(
         source,
         evidence,
         request,
+        brief,
+    })
+}
+
+/// The most words one field of a brief may hold, so the whole card stays short enough for the decisions page.
+const MAX_BRIEF_WORDS: usize = 20;
+
+/// Checks the five fields of a brief: each is one non-empty line of at most [`MAX_BRIEF_WORDS`] words, and
+/// none holds a word the admission scan refuses (it is reworded, as a title is).
+fn check_brief(raw: StewardBriefOutput) -> Result<OwnerBrief, String> {
+    let field = |name: &str, text: String| -> Result<String, String> {
+        let text = plain_boundary_text(text.trim()).map_err(|e| format!("{name}: {e}"))?;
+        let words = text.split_whitespace().count();
+        if text.is_empty() || text.contains('\n') || words > MAX_BRIEF_WORDS {
+            return Err(format!(
+                "{name} is one line of 1 to {MAX_BRIEF_WORDS} words"
+            ));
+        }
+        Ok(text)
+    };
+    Ok(OwnerBrief {
+        question: field("question", raw.question)?,
+        if_yes: field("if_yes", raw.if_yes)?,
+        if_no: field("if_no", raw.if_no)?,
+        cost: field("cost", raw.cost)?,
+        recommendation: field("recommendation", raw.recommendation)?,
     })
 }
 
@@ -1512,6 +1552,27 @@ mod tests {
                 &JobId::parse("20261010-153012-k7q2").unwrap(),
             )],
             request: "Make the change.".into(),
+            brief: Some(owner_brief()),
+        }
+    }
+
+    fn owner_brief() -> OwnerBrief {
+        OwnerBrief {
+            question: "Should the steward retry a failed check once?".into(),
+            if_yes: "A failed check runs a second time.".into(),
+            if_no: "A failed check stops the job at once.".into(),
+            cost: "About one more minute per failure.".into(),
+            recommendation: "Yes: most failures here pass on the second run.".into(),
+        }
+    }
+
+    fn brief_output() -> StewardBriefOutput {
+        StewardBriefOutput {
+            question: "Should the steward retry a failed check once?".into(),
+            if_yes: "A failed check runs a second time.".into(),
+            if_no: "A failed check stops the job at once.".into(),
+            cost: "About one more minute per failure.".into(),
+            recommendation: "Yes: most failures here pass on the second run.".into(),
         }
     }
 
@@ -1544,7 +1605,70 @@ mod tests {
             assert_eq!(*applier.0.borrow(), 0, "{rung:?} is not applied");
             assert_eq!(item.rung, rung);
             assert_eq!(item.evidence.len(), 1, "the evidence is cited");
+            assert_eq!(
+                item.brief,
+                Some(owner_brief()),
+                "{rung:?} carries the brief"
+            );
             assert!(item.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn an_applied_change_does_not_carry_the_brief() {
+        let role = steward(at());
+        let (decision, item) = decide(
+            &role,
+            &change(Ladder::Implementation),
+            &Counting::default(),
+            &BTreeSet::new(),
+            at(),
+        )
+        .unwrap();
+        assert!(matches!(decision, Decision::Applied(_)));
+        assert_eq!(item.brief, None);
+    }
+
+    #[test]
+    fn the_steward_output_parser_reads_the_five_brief_fields() {
+        let role = steward(at());
+        let records = records_with_job("20261010-153012-k7q2");
+        let json = serde_json::json!({ "items": [{
+            "kind": "proposal", "key": "proposal:retry", "title": "Retry a failed check",
+            "rung": "design-decisions",
+            "source": { "kind": "path", "value": "records/jobs" },
+            "evidence": [{ "kind": "job", "value": "20261010-153012-k7q2" }],
+            "request": null,
+            "brief": {
+                "question": "Should the steward retry a failed check once?",
+                "if_yes": "A failed check runs a second time.",
+                "if_no": "A failed check stops the job at once.",
+                "cost": "About one more minute per failure.",
+                "recommendation": "Yes: most failures here pass on the second run."
+            }
+        }] });
+        let output: StewardOutput = serde_json::from_value(json).unwrap();
+        let valid = validate_items(output.items, &role, &records);
+        assert!(valid.rejected.is_empty(), "{:?}", valid.rejected);
+        assert_eq!(valid.changes[0].brief, Some(owner_brief()));
+        // A brief with an empty or multi-line field drops the item with a reason.
+        for bad in [" ", "one\ntwo"] {
+            let mut raw = item(
+                StewardKindOutput::Proposal,
+                "proposal:retry",
+                RungOutput::DesignDecisions,
+            );
+            raw.brief = Some(StewardBriefOutput {
+                cost: bad.into(),
+                ..brief_output()
+            });
+            let valid = validate_items(vec![raw], &role, &records);
+            assert!(valid.changes.is_empty());
+            assert!(
+                valid.rejected[0].contains("brief: cost"),
+                "{:?}",
+                valid.rejected
+            );
         }
     }
 
@@ -1624,6 +1748,7 @@ mod tests {
                 value: "20261010-153012-k7q2".into(),
             }],
             request: Some("Add the convention.".into()),
+            brief: Some(brief_output()),
         }
     }
 

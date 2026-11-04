@@ -111,6 +111,7 @@ pub fn work_item(rating: &AudienceRating, id: RecordId, now: Timestamp) -> WorkI
         rung: Ladder::Implementation,
         source: record.clone(),
         evidence: vec![record],
+        brief: None,
     }
 }
 

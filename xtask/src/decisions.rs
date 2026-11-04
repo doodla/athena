@@ -5,6 +5,12 @@
 //! evidence, a recommendation, and a link to the record on GitHub at the branch tip. The style is the owner's
 //! (`docs/conventions/owner-style.md`): plain words, nothing invented.
 //!
+//! The words of a card are written by the steward, not by this page: when it raises a proposal above its
+//! limit it stores five plain-language fields in the work item (question, if_yes, if_no, cost, recommendation).
+//! The page shows them first, as stored, and puts the rung, source, evidence and record link in a collapsed
+//! section. A proposal without them shows its title and "No brief written yet". The page only escapes and lays
+//! out stored text; it never rewrites a title.
+//!
 //! Records are read with `athena_data::records::check_record_file`, so they are the same records every other
 //! reader sees and no new file format exists. A brief shows only what the proposal's fields hold: there is no
 //! cost, risk or approval wording. The recommendation comes from the raising role's recorded limit: a proposal
@@ -19,7 +25,7 @@ use crate::site::{ATHENA_URL, CSS, DECISIONS_PAGE, escape, source_url};
 use anyhow::{Result, bail};
 use athena_data::RecordId;
 use athena_data::records::{
-    AnyRecord, RefKind, Reference, WorkItem, WorkItemKind, check_record_file,
+    AnyRecord, OwnerBrief, RefKind, Reference, WorkItem, WorkItemKind, check_record_file,
 };
 use athena_data::roles::{Ladder, RoleDefinition, may_change};
 use athena_git::Git;
@@ -29,7 +35,10 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 /// The most words of prose one brief may show, counting every displayed line.
-pub const MAX_WORDS: usize = 120;
+pub const MAX_WORDS: usize = 160;
+
+/// What a card says when the steward wrote no brief for the proposal.
+const NO_BRIEF: &str = "No brief written yet";
 
 /// One proposal as a short brief. Every field is text the page shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +49,10 @@ pub struct Brief {
     source_line: String,
     /// One line per cited record, or the single line `Evidence: not recorded`.
     evidence_lines: Vec<String>,
+    /// The derived recommendation line, from the raising role's limit.
     recommendation: String,
+    /// The five fields the steward wrote, shown as stored. None for a proposal raised without them.
+    owner: Option<OwnerBrief>,
     /// The record's path on the records branch.
     record_path: String,
     /// The link to that record on GitHub at the branch tip.
@@ -114,6 +126,7 @@ impl Brief {
             source_line: format!("Source: {}", reference_text(&item.source)),
             evidence_lines,
             recommendation: recommendation(item, roles),
+            owner: item.brief.clone(),
             record_path: record_path.to_string(),
             record_url: source_url(ATHENA_URL, tip, record_path, 0, 0),
         };
@@ -130,6 +143,16 @@ impl Brief {
             self.source_line.clone(),
         ];
         lines.extend(self.evidence_lines.iter().cloned());
+        match &self.owner {
+            Some(o) => lines.extend([
+                o.question.clone(),
+                o.if_yes.clone(),
+                o.if_no.clone(),
+                o.cost.clone(),
+                o.recommendation.clone(),
+            ]),
+            None => lines.push(NO_BRIEF.to_string()),
+        }
         lines.push(self.recommendation.clone());
         lines.push(format!("Record: {}", self.record_path));
         lines
@@ -160,8 +183,29 @@ impl Brief {
         Ok(())
     }
 
+    /// The card: the title and the steward's five fields first, then the evidence, source and record link in
+    /// a collapsed section. The stored text is escaped and laid out as it was written.
     fn html(&self) -> String {
         let mut out = format!("<article class=\"card\"><h3>{}</h3>", escape(&self.title));
+        match &self.owner {
+            Some(o) => {
+                let _ = write!(
+                    out,
+                    "<p class=\"question\"><strong>{}</strong></p>\
+                     <p>If yes: {}</p><p>If no: {}</p><p>Cost: {}</p>\
+                     <p class=\"recommendation\"><strong>Recommendation: {}</strong></p>",
+                    escape(&o.question),
+                    escape(&o.if_yes),
+                    escape(&o.if_no),
+                    escape(&o.cost),
+                    escape(&o.recommendation)
+                );
+            }
+            None => {
+                let _ = write!(out, "<p class=\"no-brief\">{NO_BRIEF}</p>");
+            }
+        }
+        out.push_str("<details><summary>Evidence and record</summary>");
         for line in [&self.rung_line, &self.role_line, &self.source_line] {
             let _ = write!(out, "<p>{}</p>", escape(line));
         }
@@ -169,11 +213,13 @@ impl Brief {
         for line in &self.evidence_lines {
             let _ = write!(out, "<li>{}</li>", escape(line));
         }
+        out.push_str("</ul>");
+        if self.owner.is_none() {
+            let _ = write!(out, "<p>{}</p>", escape(&self.recommendation));
+        }
         let _ = write!(
             out,
-            "</ul><p class=\"recommendation\"><strong>{}</strong></p>\
-             <p>Record: <a href=\"{}\">{}</a></p></article>",
-            escape(&self.recommendation),
+            "<p>Record: <a href=\"{}\">{}</a></p></details></article>",
             escape(&self.record_url),
             escape(&self.record_path)
         );
@@ -370,7 +416,77 @@ mod tests {
             rung,
             source,
             evidence: vec![Reference::path("README.md")],
+            brief: None,
         }
+    }
+
+    fn owner_brief() -> OwnerBrief {
+        OwnerBrief {
+            question: "Should the steward retry a failed check once?".into(),
+            if_yes: "A failed check runs a second time.".into(),
+            if_no: "A failed check stops the job at once.".into(),
+            cost: "About one more minute per failure.".into(),
+            recommendation: "Yes: most failures here pass on the second run.".into(),
+        }
+    }
+
+    #[test]
+    fn a_steward_brief_is_shown_before_any_path_and_the_paths_are_collapsed() {
+        let roles = [role("steward", Ladder::DefaultsConventions)];
+        let mut proposal = item(
+            "20261015-003903-khz6",
+            "steward",
+            "Retry a failed check once",
+            Ladder::DesignDecisions,
+            Reference::path("docs/design/retry.md"),
+        );
+        proposal.evidence = vec![Reference::path("docs/evidence-one.md")];
+        proposal.brief = Some(owner_brief());
+        let html = brief(&proposal, &roles).html();
+        let first_path = html.find("docs/design/retry.md").unwrap();
+        let first_path = first_path.min(html.find("docs/evidence-one.md").unwrap());
+        let b = owner_brief();
+        for text in [&b.question, &b.if_yes, &b.if_no, &b.cost, &b.recommendation] {
+            let at = html
+                .find(text.as_str())
+                .unwrap_or_else(|| panic!("{text}: {html}"));
+            assert!(at < first_path, "{text} comes after a path");
+        }
+        assert!(!html.contains("No brief written yet"));
+        let details = html.find("<details>").unwrap();
+        assert!(details < first_path);
+        assert!(first_path < html.find("</details>").unwrap());
+        assert!(html.contains("<p>Source: path docs/design/retry.md</p>"));
+        // The derived limit line is replaced by the steward's recommendation.
+        assert!(!html.contains("Decide yourself"));
+    }
+
+    #[test]
+    fn a_proposal_without_a_brief_shows_its_title_and_says_none_is_written() {
+        let proposal = item(
+            "20261015-003903-khz6",
+            "steward",
+            "Retry a failed check once",
+            Ladder::DesignDecisions,
+            Reference::path("docs/design/retry.md"),
+        );
+        let html = brief(&proposal, &[]).html();
+        assert!(html.contains("<h3>Retry a failed check once</h3>"));
+        assert!(html.contains("No brief written yet"));
+        assert!(html.find("No brief written yet").unwrap() < html.find("<details>").unwrap());
+        // The whole page renders, and the card is not listed as refused.
+        let snapshot = Snapshot {
+            tip: TIP.into(),
+            proposals: vec![Found {
+                path: path_of(&proposal),
+                item: proposal,
+            }],
+            roles: Vec::new(),
+            unreadable: Vec::new(),
+        };
+        let page = render(&Records::Read(snapshot));
+        assert!(page.contains("1 waiting") && page.contains("No brief written yet"));
+        assert!(!page.contains("Not shown"));
     }
 
     fn path_of(item: &WorkItem) -> String {
@@ -490,7 +606,7 @@ mod tests {
         let ok = Brief::new(&long, &path_of(&long), TIP, &roles).unwrap();
         assert!(ok.words() <= MAX_WORDS);
         // The extra words are in evidence lines, not the title: every displayed line is counted.
-        long.evidence = (0..40)
+        long.evidence = (0..60)
             .map(|n| Reference::path(format!("docs/long/file-{n}.md")))
             .collect();
         let err = Brief::new(&long, &path_of(&long), TIP, &roles).unwrap_err();
