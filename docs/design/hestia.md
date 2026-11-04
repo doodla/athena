@@ -285,6 +285,7 @@ invocation to its closing record.
 throughput review, or the first 10 landings when there is none, **or when the median minutes per landed job is
 worse by more than 20%** than the median the previous review recorded (`WORSEN_RATIO`), once at least one job
 has landed since. Exactly 20% worse is not more than 20%. When it is not due, nothing runs and no model is called.
+A review that runs always makes the comparison described under "Slowdown", whether or not a design request is open.
 
 **The question.** A strong model (the verifier's model, as for the steward, the audience and the auditor) is
 given the status section (`THROUGHPUT.md`) and a copy of `docs/design/` in a read-only workspace. It names the
@@ -298,6 +299,24 @@ which implements the design cites that id. The priority follows the predicted sa
 minutes per landed job is high (never urgent), at least 2 normal, and less is low
 (`priority_for_minutes`). While a request with that title is open (not closed), a later review queues no second
 one and does not ask the model; it still writes its record so the cadence moves on.
+
+**Slowdown.** Every review that runs compares the latest median minutes per landed job with the previous review's,
+even while a design request is open (a rise from 25.4 to about 60 minutes once went unflagged behind an open
+request). A review stores only the landings it counted and the median of the totals, so the previous per-stage
+medians are rebuilt from the job records: the first `landings` request jobs to land, ranked over every landed job
+so that jobs that ran no model do not shift the cut, then the newest 20 measured ones, with the same per-stage
+median as the status section (`previous_stage_medians`, `StageMinutes::median_of`). The rebuild is a
+reconstruction; a landing record written after the review can have moved a job's landing time. The stages whose
+median minutes grew are named, the stage that gained most first (`stage_growth`), in the review's note, in the line
+`athena drain` prints and in a line to the person running the review. When the median grew by **more than 25%**
+(`SLOWDOWN_RATIO`; exactly 25% is not more), the review also queues, without asking the model, one request at
+**high** priority (`slowdown_request`). Its title starts `Throughput slowdown: ` and names the stage that grew most
+with its measured median minutes; the body adds the previous minutes, the median change and the other stages that
+grew. It cites no review id, so it is not mistaken for the change that implements a design proposal. While a
+request with that title is open, a later review names the stages again but queues no second one. A rise between
+20% and 25% runs a review and names the stages but queues nothing. When the median grew by more than 25% but no
+stage's median did (medians of stages are not additive), or the previous window cannot be rebuilt, nothing is
+queued and the note says so.
 
 **Prediction record.** Each review is an `athena.throughput-review/1` record at
 `records/throughput-reviews/<YYYY-MM>/<id>.json`. It holds the landings counted and the window median (the

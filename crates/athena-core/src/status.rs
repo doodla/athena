@@ -13,7 +13,7 @@ use athena_data::records::{
 use athena_gate::invariant::{BOOTSTRAP_OUTCOME, BootstrapRange, bootstrap_range};
 use athena_git::Git;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The paths the installed binary is built from: Athena's own code and the files that build and install it. A
 /// change to one of them after the build commit leaves the installed binary stale.
@@ -675,6 +675,23 @@ impl StageMinutes {
     pub fn total(&self) -> f64 {
         self.named().iter().map(|(_, m)| m).sum()
     }
+
+    /// The median of each stage over `window`, stage by stage. The throughput section and the throughput
+    /// review's comparison with the previous review share this one definition, so the two compare like with
+    /// like. All zero for an empty window.
+    pub fn median_of(window: &[LandedJob]) -> StageMinutes {
+        let column = |pick: fn(&StageMinutes) -> f64| -> f64 {
+            median(&window.iter().map(|j| pick(&j.stages)).collect::<Vec<_>>())
+        };
+        StageMinutes {
+            reading: column(|s| s.reading),
+            planning: column(|s| s.planning),
+            producer: column(|s| s.producer),
+            checks: column(|s| s.checks),
+            verifier: column(|s| s.verifier),
+            landing_and_rebuild: column(|s| s.landing_and_rebuild),
+        }
+    }
 }
 
 /// One landed job with the minutes it spent in each stage.
@@ -880,6 +897,33 @@ pub fn landed_jobs(records: &Records) -> Vec<LandedJob> {
     landed
 }
 
+/// The measured landed jobs among the first `landings` request jobs to land, oldest first.
+///
+/// A throughput review stores `landings`, the count of every landed request job at that time
+/// (`Throughput::landed_total`), but [`landed_jobs`] leaves out landed jobs that ran no model. Cutting
+/// `landed_jobs` by that count would mix the two sets and drift forward by the number of unmeasured jobs. So
+/// the cut is made over all landed request jobs, ordered as [`landed_jobs`] orders them (landing end, then id),
+/// and only then are the unmeasured ones dropped. The result is a reconstruction of what that review saw: a
+/// landing record written after the review can move a job's landing end and so its rank.
+pub fn landed_jobs_among_first(records: &Records, landings: usize) -> Vec<LandedJob> {
+    let mut ranked: Vec<(jiff::Timestamp, String)> = records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
+        .filter_map(|j| Some((landing_end(records, j)?.0, j.id().as_str().to_string())))
+        .collect();
+    ranked.sort();
+    let first: BTreeSet<String> = ranked
+        .into_iter()
+        .take(landings)
+        .map(|(_, id)| id)
+        .collect();
+    landed_jobs(records)
+        .into_iter()
+        .filter(|j| first.contains(&j.id))
+        .collect()
+}
+
 impl Throughput {
     /// Measures `records`. None when no request job landed, so a new repository shows no section.
     pub fn compute(records: &Records) -> Option<Throughput> {
@@ -902,17 +946,7 @@ impl Throughput {
         }
         let measured = landed_jobs(records);
         let window = &measured[measured.len().saturating_sub(THROUGHPUT_WINDOW)..];
-        let column = |pick: fn(&StageMinutes) -> f64| -> f64 {
-            median(&window.iter().map(|j| pick(&j.stages)).collect::<Vec<_>>())
-        };
-        let median_stages = StageMinutes {
-            reading: column(|s| s.reading),
-            planning: column(|s| s.planning),
-            producer: column(|s| s.producer),
-            checks: column(|s| s.checks),
-            verifier: column(|s| s.verifier),
-            landing_and_rebuild: column(|s| s.landing_and_rebuild),
-        };
+        let median_stages = StageMinutes::median_of(window);
         let median_minutes = median(&window.iter().map(|j| j.stages.total()).collect::<Vec<_>>());
 
         let mut spans: Vec<(jiff::Timestamp, jiff::Timestamp)> = Vec::new();
@@ -3476,6 +3510,47 @@ pub(crate) mod planning_cost_tests {
         assert_eq!(throughput.landed_total, 22);
         assert_eq!(throughput.window_jobs, THROUGHPUT_WINDOW);
         assert_eq!(throughput.median_minutes, 10.0);
+    }
+
+    #[test]
+    fn landed_jobs_among_first_ranks_all_landed_jobs_and_keeps_the_measured_ones() {
+        let landed = OutcomeState::Landed;
+        let mut all = Vec::new();
+        // Three landed jobs that ran no model land first, then four measured ones.
+        for n in 0..3u32 {
+            all.extend(timed_job(
+                &format!("20261029-0{n}0000-aa{n:02}"),
+                format!("2026-10-29T0{n}:00:00Z").parse().unwrap(),
+                StageMinutes::default(),
+                landed,
+            ));
+        }
+        for n in 3..7u32 {
+            all.extend(timed_job(
+                &format!("20261029-0{n}0000-aa{n:02}"),
+                format!("2026-10-29T0{n}:00:00Z").parse().unwrap(),
+                minutes(0.0, 0.0, 10.0 * f64::from(n), 0.0, 0.0, 0.0),
+                landed,
+            ));
+        }
+        let records = loaded(all);
+        let throughput = Throughput::compute(&records).unwrap();
+        assert_eq!(throughput.landed_total, 7);
+        assert_eq!(landed_jobs(&records).len(), 4);
+
+        // The first five landings are the three unmeasured jobs and the first two measured ones. Cutting
+        // `landed_jobs` by five would instead keep four measured jobs.
+        let first = landed_jobs_among_first(&records, 5);
+        let ids: Vec<&str> = first.iter().map(|j| j.id.as_str()).collect();
+        assert_eq!(ids, vec!["20261029-030000-aa03", "20261029-040000-aa04"]);
+        assert_eq!(landed_jobs_among_first(&records, 7).len(), 4);
+        assert!(landed_jobs_among_first(&records, 3).is_empty());
+        assert!(landed_jobs_among_first(&records, 0).is_empty());
+
+        // The per-stage median is the one `Throughput::compute` reports.
+        let window = landed_jobs(&records);
+        assert_eq!(StageMinutes::median_of(&window), throughput.median_stages);
+        assert_eq!(StageMinutes::median_of(&[]), StageMinutes::default());
     }
 }
 
