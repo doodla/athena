@@ -2115,7 +2115,8 @@ pub const THROUGHPUT_REVIEW_SCHEMA: &str = "athena.throughput-review/1";
 pub enum ThroughputTrigger {
     /// Ten more landings since the previous review (or the first ten ever).
     Cadence,
-    /// The median minutes per landed job grew by more than 20% against the previous review.
+    /// The median minutes per landed job grew by more than 20% against the previous review. A rise of more
+    /// than 25% also gets a slowdown request; every review compares the stages, whatever the trigger.
     Worsened,
 }
 
@@ -2183,7 +2184,9 @@ pub struct ThroughputReview {
     pub proposal: Option<ThroughputProposal>,
     /// Predictions this review closed.
     pub followups: Vec<ThroughputFollowup>,
-    /// Why there is no proposal or no request, or any other remark; empty when there is nothing to say.
+    /// Why there is no proposal or no request, or any other remark; empty when there is nothing to say. It also
+    /// names the stages whose median minutes grew since the previous review and the slowdown request the
+    /// review queued, when it queued one.
     pub note: String,
 }
 

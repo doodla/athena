@@ -1,0 +1,347 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261104-141009-hsg4",
+  "round": 2,
+  "at": "2026-11-04T20:30:49.631661707Z",
+  "invocation_seq": 4,
+  "approach": "Add pure helpers in hestia.rs and call them from `Athena::throughput_review` ahead of the open-request check. Previous per-stage medians are rebuilt from landed jobs without a schema change. The cut now uses ONE set: a new status.rs helper `landed_jobs_among_first(records, n)` ranks ALL landed request jobs (the set `Throughput::compute` counts into `landed_total`, which is what `previous.landings` stores) by (landing end, id), keeps the first `n`, then keeps only those that `landed_jobs` measured. So unmeasured landed jobs no longer shift the cut. `stage_growth` returns stages whose median minutes grew, largest first. `throughput_review` always compares and names grown stages, open design request or not. When the recorded median grew by more than 25% (`SLOWDOWN_RATIO`), it also queues a code-built `Priority: high` request via `StewardRequest::new` and `self.queue`, naming the biggest-growing stage with its measured and previous minutes. The title starts `Throughput slowdown: `, and an open request with that marker suppresses a duplicate. The remark goes into the review `note` (so it reaches the records and the drain line), into a `ui.line`, and into the records commit subject (built by a pure `review_subject`). The drain line is built by a pure `throughput_outcome` that now shows the remark even when a design request was queued. The design-request path (model, one-open-request rule, `throughput_due`, 20% trigger) is unchanged. status.rs also exposes `StageMinutes::median_of` so review and status share one definition of the per-stage median.",
+  "decisions": [
+    {
+      "choice": "Rebuild the previous per-stage medians with status.rs `landed_jobs_among_first(records, landings)`: sort every landed request job by (landing_end, id) (the key `landed_jobs` sorts by, status.rs 879), take the first `landings` ids, keep the `landed_jobs` entries in that id set, and in hestia.rs `previous_stage_medians` take the newest THROUGHPUT_WINDOW of them and apply `StageMinutes::median_of`. Return None when empty. The 25% test still uses the recorded `previous.window_median_minutes`.",
+      "reason": "`previous.landings` is `measured.landed_total` (hestia.rs 1503), which `Throughput::compute` counts over every landed request job (status.rs 886-890). `landed_jobs` drops landed jobs with no invocation (status.rs 853-854, 862). Cutting `landed_jobs` by that count mixes two sets, so the cut drifts forward by the number of unmeasured jobs and the 'previous' window turns into the current one. Ranking over the full landed set removes the drift. `landing_end` is Some for every landed job (a landed job has a closing outcome), so the full-set ranking uses the same landed_at as `landed_jobs`.",
+      "rejected": [
+        {
+          "option": "Take the first `previous.landings` entries of `landed_jobs` (round 1 plan)",
+          "why": "Mixes two sets; the drift is cumulative and ends in an empty growth list while the median rose over 25% (the reported failure, silently)."
+        },
+        {
+          "option": "Add a per-stage-medians field to ThroughputReview",
+          "why": "Needs a schema bump (deny_unknown_fields) and gives nothing for old records; the accepted reading and the 'small' default say no schema change."
+        },
+        {
+          "option": "Cut by `landed_at <= previous.at`",
+          "why": "A landing record can be written after a review that already counted the job (`landing_end` takes the later of outcome and record), so the time cut can disagree with the stored count."
+        }
+      ]
+    },
+    {
+      "choice": "Queue the slowdown request from code (`StewardRequest::new(Some(Priority::High), ...)` then `self.queue`), before and regardless of the open design request check; never ask the model.",
+      "reason": "The failure was a slowdown hidden behind an open request. A deterministic rule that tests drive without the model is the mechanism the 'mechanism' default asks for.",
+      "rejected": [
+        {
+          "option": "Ask the model to describe the slowdown",
+          "why": "Non-deterministic and costs money; the code already has the measured stage and minutes."
+        },
+        {
+          "option": "Lift the open-request guard for design requests",
+          "why": "Would queue a second design proposal; criterion 5 keeps the single open request."
+        }
+      ]
+    },
+    {
+      "choice": "The slowdown request text does not contain the review id.",
+      "reason": "`throughput_followups` treats any landed job whose request text contains a review id as the change that implements that review's proposal (hestia.rs 1382-1393); citing the id would falsely close the prediction made in the same review.",
+      "rejected": [
+        {
+          "option": "Cite the review id as the design request does",
+          "why": "Corrupts the follow-up measurement."
+        }
+      ]
+    },
+    {
+      "choice": "Dedupe with `SLOWDOWN_MARKER = \"Throughput slowdown: \"`; generalise `open_throughput_request` (hestia.rs 1353) into `open_request_with_marker(records, marker)` and keep the old name as a one-line call with THROUGHPUT_MARKER.",
+      "reason": "The two request kinds are independent; 'Throughput design: ' and 'Throughput slowdown: ' share no prefix, so neither suppresses the other. Stage naming still runs when the request is suppressed.",
+      "rejected": [
+        {
+          "option": "One shared marker",
+          "why": "An open design request would suppress the slowdown request, which is the bug."
+        }
+      ]
+    },
+    {
+      "choice": "`SLOWDOWN_RATIO = 1.25` with strict `>`; `is_slowdown(previous, current)` is false when previous is not above 0. `WORSEN_RATIO` (1.2) stays as the review trigger.",
+      "reason": "Matches `throughput_due`'s 'exactly 20% is not more than 20%' style; a review between 20% and 25% still runs, names stages, queues nothing.",
+      "rejected": [
+        {
+          "option": "Change WORSEN_RATIO to 1.25",
+          "why": "The 20% trigger is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "The stage with the largest added minutes (current minus previous median) is 'grew most'; ties keep pipeline order (stable sort); growth under 1e-6 is ignored. If the median grew over 25% but no stage median grew (or the previous window cannot be rebuilt), queue nothing and say so in the note.",
+      "reason": "Medians of totals and of stages are not additive, so the case can occur; a request must name a stage and inventing one would be wrong.",
+      "rejected": [
+        {
+          "option": "Fall back to the stage with the largest current median",
+          "why": "Names a stage that did not grow."
+        }
+      ]
+    },
+    {
+      "choice": "Carry the finding in the existing `note` string (appended after any existing note with '; ') and in a `ui.line`. A queued slowdown job id appears in the note as `slowdown request {job} queued at high priority`. No record field is added.",
+      "reason": "Existing tests assert `note.contains(\"still open\")` and `starts_with(\"no proposal\")`; appending keeps them true. `review_passes` receives only the `ThroughputReview`, so the note is the carrier to the drain line.",
+      "rejected": [
+        {
+          "option": "New `slowdown_request_job` field on ThroughputReview",
+          "why": "Needs a schema change."
+        }
+      ]
+    },
+    {
+      "choice": "Fix the two reader-facing strings that would otherwise be wrong. (a) Extract the commit subject (hestia.rs 1519-1532) into a pure `review_subject(median, design: Option<&JobId>, slowdown: Option<&JobId>) -> String` that names the design request, the slowdown request, both, or 'no request queued'; `throughput_review` keeps the slowdown job in a local `slowdown_job`. (b) Extract the outcome text in `review_passes` (hestia.rs 1851-1860) into a pure `throughput_outcome(&ThroughputReview) -> String`; in the design-request-queued branch it appends ` · {note}` when the note is not empty, and the other branches already print `r.note`.",
+      "reason": "Without (a) the record history would say 'no request queued' for a review that queued one; without (b) the drain line would not show the slowdown when a design request was queued. Pure functions can be tested without driving the whole drain.",
+      "rejected": [
+        {
+          "option": "Leave the subject and drain line alone",
+          "why": "The subject would be false and the drain line would hide the flag."
+        },
+        {
+          "option": "Drive `review_passes` in a test",
+          "why": "It also runs the backfill, label and spec passes, which need more fixtures; the pure outcome function is the logic that changes."
+        }
+      ]
+    },
+    {
+      "choice": "Extract the per-stage median closure in `Throughput::compute` (status.rs 905-915) into `StageMinutes::median_of(window: &[LandedJob])` and use it in both places.",
+      "reason": "One definition so the review compares like with like; `compute`'s output does not change.",
+      "rejected": [
+        {
+          "option": "Duplicate the closure in hestia.rs",
+          "why": "The two could drift apart with no test failing."
+        }
+      ]
+    },
+    {
+      "choice": "records.rs gets doc-comment-only changes (`ThroughputReview.note`, `ThroughputTrigger::Worsened`).",
+      "reason": "The brief lists records.rs; the `note` doc should say it can hold the slowdown remark. No field, schema or validation change, so the round-trip test stays valid.",
+      "rejected": [
+        {
+          "option": "Leave records.rs untouched",
+          "why": "The `note` doc would describe only proposal-less reasons."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "Add SLOWDOWN_RATIO, SLOWDOWN_MARKER, StageGrowth, is_slowdown, previous_stage_medians, stage_growth, slowdown_request, open_request_with_marker, review_subject and throughput_outcome. Call them in `throughput_review` ahead of the open-request branch. Update the module doc comment (43-52). Add the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add `StageMinutes::median_of` (extracted from `Throughput::compute`) and `landed_jobs_among_first(records, landings)`; add a test of the latter.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Doc-comment-only changes on `ThroughputReview.note` and `ThroughputTrigger::Worsened`; no field, schema or validation change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/hestia.md",
+      "action": "modify",
+      "purpose": "Section 12: the comparison with the previous review, stage naming, the 25% rule and request, the marker and the open-slowdown suppression, and how the previous stage medians are rebuilt.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased `### Added` entry for the slowdown flag and the high-priority request.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "status.rs: add `impl StageMinutes { pub fn median_of(window: &[LandedJob]) -> StageMinutes }`, moving the `column` closure and the six medians out of `Throughput::compute` (~905-915), and use it there. Run the existing status throughput tests to show no change.",
+    "status.rs: add `pub fn landed_jobs_among_first(records: &Records, landings: usize) -> Vec<LandedJob>`. It collects (landing_end, id) for every landed request job (the set counted into `landed_total`; `landing_end(records, job)` is Some for them), sorts by (time, id), takes the first `landings` ids, and returns the entries of `landed_jobs(records)` whose id is in that set, oldest first. Doc comment: why the cut is made over all landed jobs. Add status test `landed_jobs_among_first_ranks_all_landed_jobs_and_keeps_the_measured_ones`, with unmeasured landed jobs (`timed_job` with `StageMinutes::default()`) before measured ones.",
+    "hestia.rs: add `SLOWDOWN_RATIO` (1.25), `SLOWDOWN_MARKER`, `StageGrowth { stage, previous_minutes, minutes }` with `added()`, `is_slowdown(previous, current)`, `previous_stage_medians(records, previous: &ThroughputReview) -> Option<StageMinutes>` (calls `landed_jobs_among_first(records, previous.landings as usize)`, takes the newest THROUGHPUT_WINDOW, `StageMinutes::median_of`, None if empty), `stage_growth(previous, current) -> Vec<StageGrowth>` (stages from `named()` that grew by more than 1e-6, stable sort by added minutes descending), and `slowdown_request(previous_median, median, growth) -> Result<String, String>` (Err on empty growth; title `Throughput slowdown: {stage} grew from {previous:.1} to {minutes:.1} min per landed job`; a body with the median change, the biggest stage with its measured and previous minutes, and all grown stages on one line; no bullet-like lines and no review id; two acceptance bullets; files `crates/` and `docs/design/`; priority `Some(Priority::High)`; built with `StewardRequest::new(...).map(|r| r.render())`).",
+    "hestia.rs: generalise `open_throughput_request` into `open_request_with_marker(records, marker)`; keep `open_throughput_request` as a one-line call with THROUGHPUT_MARKER.",
+    "hestia.rs: extract `review_subject(median, design: Option<&JobId>, slowdown: Option<&JobId>) -> String` from the subject match at 1519-1532 and `throughput_outcome(r: &ThroughputReview) -> String` from the outcome match at 1851-1860, which appends ` · {note}` in the design-request-queued branch when the note is not empty. Use both (`review_passes` calls `throughput_outcome`).",
+    "hestia.rs `throughput_review`: after `followups`, compute `growth` (from `latest` with `previous_stage_medians(&records, p)` then `stage_growth(&prev, &measured.median_stages)`; empty when there is no previous review or window) and `slowdown = latest.is_some_and(|p| is_slowdown(p.window_median_minutes, measured.median_minutes))`. Build a remark such as `median 25.0 to 60.0 min; stages that grew: producer 25.0 to 45.0, checks 0.0 to 10.0, verifier 0.0 to 5.0`. If `slowdown`, growth is non-empty and no request with SLOWDOWN_MARKER is open: call `slowdown_request` and `self.queue`; keep the job in `slowdown_job`; add `slowdown request {job} queued at high priority` to the remark (or the error text, as the design branch does). If one is open, say `slowdown request {id} is still open`. If `slowdown` and growth is empty, say the median grew over 25% but no stage's median did. This runs before the existing open-request branch, which stays as it is. Append the remark to `note` (joined with '; ' when non-empty). Pass `slowdown_job` to `review_subject`. Print a `ui.line` with the remark after the follow-up lines. `ThroughputReview` fields do not change.",
+    "hestia.rs docs: extend the module comment (43-52) with the comparison against the previous review, the stage naming, the 25% rule and the open-slowdown suppression; write doc comments for an outside reader on the new items, saying that the previous window is a reconstruction over the same landed set the stored count came from.",
+    "records.rs: update only the doc comments on `ThroughputReview.note` and `ThroughputTrigger::Worsened`.",
+    "hestia.rs tests: add `seed_stages(dir, athena, from, count, StageMinutes)` (make `seed_landed` call it with `producer_only`), `seed_unmeasured(dir, athena, from, count)` and `open_design_request_job(...)` (a request-only job built from `timed_job(...)[0]` with its `text` set to a `Throughput design: ...` line, so it stays open). Add tests: A (criterion 1), B (unmeasured jobs before the earlier review), `a_flat_median_queues_nothing`, `a_rise_of_twenty_to_twenty_five_percent_names_stages_but_queues_no_slowdown_request`, `the_slowdown_request_names_the_biggest_stage_and_its_minutes_at_high_priority`, pure tests of `stage_growth` (order, ties, zero-to-positive, shrinking, median over 25% with no grown stage), `review_subject` and `throughput_outcome`.",
+    "docs/design/hestia.md section 12: update the Cadence and Request and priority paragraphs and add a short 'Slowdown' paragraph (comparison with the previous review, the previous stage medians rebuilt from the landed set the stored count came from, naming of grown stages, the 25% rule and request, the marker and the suppression rule). CHANGELOG.md: add an `### Added` entry under `[Unreleased]`.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-core hestia`, `cargo test -p athena-core status`, then `cargo test --locked`; confirm with `git diff --stat` that only the five listed files changed."
+  ],
+  "risks": [
+    {
+      "risk": "The rebuilt previous window can still differ from what the previous review saw, because a landing record written after that review moves a job's `landed_at` and so its rank.",
+      "mitigation": "The unmeasured-job drift, which was cumulative, is gone because the cut is made over the same set the count came from. The remaining error is limited to jobs whose landing time moved after the review. The doc comment says the window is a reconstruction. The 25% decision uses the recorded median, not the reconstruction. If the window comes out empty, the note says the previous stages could not be rebuilt."
+    },
+    {
+      "risk": "The median of totals can exceed 1.25 times the previous one while no stage median grew, so no stage can be named.",
+      "mitigation": "Queue nothing and say in the note that the median grew over 25% but no stage's median did; a `stage_growth` test covers it. Naming a stage that did not grow was rejected."
+    },
+    {
+      "risk": "A slowdown request is queued on every review while the slowdown persists.",
+      "mitigation": "An open request with the slowdown marker holds back another, and each comparison is against the previous review. Test A covers the second review."
+    },
+    {
+      "risk": "The slowdown request could be mistaken for the change that implements a design proposal made in the same review.",
+      "mitigation": "The request text omits the review id, and the pure builder test asserts that."
+    },
+    {
+      "risk": "`athena plan` or the admission scan refuses the new request.",
+      "mitigation": "It is built with `StewardRequest::new`, which checks plan acceptance and applies boundary rewording, and `queue` applies `refuse_banned_input`. Stage lists stay on one line with no bullet-like lines. The builder test checks `request_text_acceptance`."
+    },
+    {
+      "risk": "The test fixtures do not reach a window median of exactly 60.",
+      "mitigation": "Use 9 old and 11 new jobs in the newest 20, so the median is the new value, and assert `window_median_minutes` before the other assertions."
+    },
+    {
+      "risk": "A test fixture for unmeasured landed jobs does not count as landed or measured as expected.",
+      "mitigation": "`timed_job` leaves out zero-minute stages, so `StageMinutes::default()` gives a landed job with only a request and an outcome. `Throughput::compute` counts it in `landed_total` and `landed_jobs` drops it (status.rs 862). The status.rs test asserts both counts before the hestia test relies on them."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "20% worsen trigger and cadence (WORSEN_RATIO, REVIEW_EVERY)",
+      "dependent": "crates/athena-core/src/hestia.rs `throughput_due` (1236) and test `a_throughput_review_is_due_at_ten_landings_and_on_a_rise_of_more_than_twenty_percent`",
+      "kind": "code",
+      "test": null,
+      "reason": "Not changed. The slowdown rule runs after `throughput_due` says a review is due and does not change when one is due."
+    },
+    {
+      "name": "text of the queued slowdown request",
+      "dependent": "crates/athena-core/src/hestia.rs `throughput_followups` (1368-1393), which treats any landed job whose request text contains a review id as the cited change",
+      "kind": "code",
+      "test": "hestia::tests::the_slowdown_request_names_the_biggest_stage_and_its_minutes_at_high_priority (asserts no review id in the text)",
+      "reason": null
+    },
+    {
+      "name": "open design request check (THROUGHPUT_MARKER)",
+      "dependent": "crates/athena-core/src/hestia.rs `open_throughput_request` (1353) and the open-request branch of `throughput_review` (1462)",
+      "kind": "code",
+      "test": "hestia::tests::a_review_queues_one_design_request_with_the_bottleneck_change_and_saving_and_none_while_it_is_open (unchanged; the helper is called with THROUGHPUT_MARKER)",
+      "reason": null
+    },
+    {
+      "name": "per-stage median computation (new `StageMinutes::median_of`)",
+      "dependent": "crates/athena-core/src/status.rs `Throughput::compute` and its tests (~3260, ~3347, ~3476), `athena status`, THROUGHPUT.md built by `Throughput::text`",
+      "kind": "code",
+      "test": "The existing status.rs throughput tests (`median_stages`, `window_jobs == THROUGHPUT_WINDOW`) run unchanged; the extraction moves the closure without changing it.",
+      "reason": null
+    },
+    {
+      "name": "new `landed_jobs_among_first` (added beside `landed_jobs`; `landed_jobs` itself unchanged)",
+      "dependent": "crates/athena-core/src/status.rs `landed_jobs` (855) and its callers: hestia.rs 1457 and 4143/4176, `Throughput::compute` (903)",
+      "kind": "code",
+      "test": "status::tests::landed_jobs_among_first_ranks_all_landed_jobs_and_keeps_the_measured_ones (new): with unmeasured jobs first, `first(n)` keeps the same measured jobs the previous review saw; existing `landed_jobs` tests unchanged.",
+      "reason": null
+    },
+    {
+      "name": "`ThroughputReview.note` text",
+      "dependent": "crates/athena-core/src/hestia.rs tests reading `second.note` and `review.note` (`still open`, `starts_with(\"no proposal\")`)",
+      "kind": "code",
+      "test": "hestia::tests::a_review_queues_one_design_request_with_the_bottleneck_change_and_saving_and_none_while_it_is_open and hestia::tests::a_model_that_fails_still_gives_a_review_record_so_the_cadence_moves_on; the remark is appended only when stages grew or the median grew over 25%, and those fixtures have flat or falling medians.",
+      "reason": null
+    },
+    {
+      "name": "athena.throughput-review/1 record shape",
+      "dependent": "crates/athena-core/src/store.rs (loads `throughput_reviews`), `AnyRecord::ThroughputReview` validate, schema and round-trip test in crates/athena-data/src/records.rs (~4095-4171)",
+      "kind": "code",
+      "test": "The existing records.rs throughput-review round-trip test.",
+      "reason": "No field, serde attribute, schema or validation change; the records.rs edit is doc comments only, so loading and the schema constant are unaffected."
+    },
+    {
+      "name": "the throughput line `review_passes` returns (`design request ... queued`, `no proposal: {note}`, `proposal recorded, no request queued: {note}`)",
+      "dependent": "crates/athena-core/src/hestia.rs `review_passes` (1812) and its consumers in crates/athena-cli/src/drain.rs and the hestia sweep",
+      "kind": "code",
+      "test": "hestia::tests::throughput_outcome_shows_the_slowdown_with_and_without_a_design_request (new, pure) and the existing hestia review_passes test (~2455).",
+      "reason": "The signature and return type of `review_passes` and `throughput_review` do not change. The line text changes only when the note is non-empty in the design-request-queued branch (appended ` · {note}`); the other branches already print the note, which can now include the slowdown remark. Drain tests use a fake `review_passes`."
+    },
+    {
+      "name": "commit subject 'Throughput review: median ... ; no request queued'",
+      "dependent": "records commit subject of the throughput review (hestia.rs 1519-1532) read by anyone browsing `athena/records` history",
+      "kind": "code",
+      "test": "hestia::tests::review_subject_names_the_design_and_slowdown_requests (new, pure): a slowdown-only review does not say 'no request queued'; a design-only review keeps the old text.",
+      "reason": null
+    },
+    {
+      "name": "queueing the new request through existing builder and queue paths",
+      "dependent": "crates/athena-core/src/reading.rs `queue` (873), `refuse_banned_input`, and crates/athena-core/src/steward.rs `StewardRequest::new` (472)",
+      "kind": "code",
+      "test": "hestia::tests::the_slowdown_request_names_the_biggest_stage_and_its_minutes_at_high_priority (asserts `request_text_acceptance` is non-empty).",
+      "reason": "No rule is changed. `StewardRequest::new` applies boundary rewording and checks plan acceptance; `queue` applies `refuse_banned_input`. No parser, stem list, stop list or matching rule is added or changed, so no refusal_corpus case is needed and the refusal-corpus test is not a demonstration."
+    },
+    {
+      "name": "host merge rules, CI, remotes",
+      "dependent": "docs/system-facts.md and host settings (merge rules, CI, remotes)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The change is Rust code, tests and docs; docs/system-facts.md does not mention throughput and no host setting is read or changed."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two new tests drive `Athena::throughput_review` over committed records, with an open `Throughput design: ` request and a model that must not be called. Test A (`a_median_rise_from_25_to_60_with_a_design_request_open_names_the_grown_stages_and_queues_a_high_request`): ten 25-minute jobs (producer 25) plus `earlier_review(10, 25.0)` plus the open design request job, then 11 jobs of 60 minutes (producer 45, checks 10, verifier 5). Test B (`unmeasured_landed_jobs_before_the_earlier_review_do_not_hide_the_growth`): twelve landed jobs with no invocation (`timed_job` with `StageMinutes::default()`) landing first, then ten 25-minute jobs, `earlier_review(22, 25.0)`, the open design request, then 11 jobs of 60 minutes. A naive cut of `landed_jobs` by 22 would take all 21 measured jobs and report nothing. Also a status.rs test of `landed_jobs_among_first`, and a pure test of `review_subject`.",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "Both tests: `review.window_median_minutes == 60.0`; the model call log is empty; `note` contains 'still open' and the names producer, checks and verifier (producer 25.0 to 45.0 first); exactly one open request starts `Throughput slowdown: `, its `priority()` is `Priority::High`, and the queued text begins `Priority: high` and has the stage names and minutes; `note` contains `slowdown request <job> queued`; the `Lines` UI got a line with the stage names. Test B also asserts `previous_stage_medians(...).producer == 25.0` for the rebuilt window. `review_subject` with a slowdown job and no design job contains the job id and not 'no request queued'. A second review with 10 more, slower jobs while the slowdown request is open names the grown stage and queues no second one.",
+      "fails_without": "Without the comparison ahead of the open-request branch, the note is only the 'still open' text and no `Throughput slowdown: ` request exists. With the round-1 cut, Test B finds no grown stage and queues nothing. With the old subject code, the `review_subject` assertion fails.",
+      "seam": "Entry point `Athena::throughput_review` (exists, hestia.rs 1438). Fixtures `put`, `seed_landed`, `athena_with`, `earlier_review`, `Lines`, `throughput_model` and `status::planning_cost_tests::timed_job` (all exist; `timed_job` drops zero-minute stages, so `StageMinutes::default()` gives a landed job with no invocation). Step 8 adds `seed_stages`, `seed_unmeasured`, and `open_design_request_job`. The pure functions `review_subject` and `landed_jobs_among_first` are added by steps 1 and 5. The model fake is injected through `athena_with`, as in the existing throughput tests. No logic sits inside a double."
+    },
+    {
+      "criterion": 2,
+      "method": "New test `a_flat_median_queues_nothing`: ten 25-minute jobs, `earlier_review(10, 25.0)`, ten more 25-minute jobs (twenty landings so the cadence makes the review due), plus an open design request job. Call `throughput_review`, then reload records. A pure `stage_growth` test over equal medians.",
+      "command": "cargo test -p athena-core hestia::tests::a_flat_median_queues_nothing",
+      "observes": "The review runs; the open request count is still the one design request; no job text has a line starting `Throughput slowdown: `; the model was not called; `note` does not name any stage as grown; `stage_growth` of equal medians is empty.",
+      "fails_without": "If every review were treated as a slowdown or unchanged stages were listed as grown, the growth list would be non-empty or a slowdown request would appear.",
+      "seam": "Entry point `Athena::throughput_review` (exists) and pure `stage_growth` (added in step 2). Fixtures exist: `seed_landed`, `earlier_review`, `put`, `athena_with`, `throughput_model`; the open-request fixture is added in step 8."
+    },
+    {
+      "criterion": 3,
+      "method": "New test `a_rise_of_twenty_to_twenty_five_percent_names_stages_but_queues_no_slowdown_request`, looping over two fixtures: ten 20-minute jobs, `earlier_review(10, 20.0)`, 11 producer-only jobs of 24.5 and then of 25.5 minutes, and an open design request. Plus a pure `is_slowdown` test.",
+      "command": "cargo test -p athena-core hestia::tests::a_rise_of_twenty_to_twenty_five_percent_names_stages_but_queues_no_slowdown_request",
+      "observes": "At 24.5 (trigger `Worsened`): `note` names `producer` and no `Throughput slowdown: ` request exists. At 25.5: exactly one high-priority slowdown request exists. `is_slowdown(20.0, 25.0)` is false, `(20.0, 25.1)` true, `(0.0, 10.0)` false.",
+      "fails_without": "A 20% threshold or `>=` would queue a request at 24.5; a threshold above 25% would queue none at 25.5.",
+      "seam": "Entry point `Athena::throughput_review` and pure `is_slowdown` (step 2). Fixtures `seed_landed` (now calls `seed_stages`, step 8), `earlier_review`, `put`, `athena_with` exist."
+    },
+    {
+      "criterion": 4,
+      "method": "Pure test `the_slowdown_request_names_the_biggest_stage_and_its_minutes_at_high_priority` calls `slowdown_request(25.0, 60.0, &growth)` with growth producer 25.0 to 45.0, checks 0.0 to 10.0, verifier 0.0 to 5.0. A grep of `slowdown_request` in hestia.rs shows the stage, the measured minutes and the previous minutes interpolated in the title and body.",
+      "command": "cargo test -p athena-core hestia::tests::the_slowdown_request_names_the_biggest_stage_and_its_minutes_at_high_priority",
+      "observes": "The text starts `Priority: high`; the title is `Throughput slowdown: producer ...`; it contains `45.0`, `25.0`, `60.0` and the other grown stages on one line; `request_text_acceptance(text)` is non-empty; no body line starts like a bullet; no review id appears; `slowdown_request` with an empty growth returns Err.",
+      "fails_without": "A wrong stage, missing minutes or a priority other than high fails the string assertions.",
+      "seam": "Production function `slowdown_request` (step 2), called directly; no double."
+    },
+    {
+      "criterion": 5,
+      "method": "Test A from criterion 1 asserts the model call log is empty and the open design request count stays at one while the stage medians are compared. The existing throughput tests run unchanged, and a pure `throughput_outcome` test shows a review with a queued design request and a slowdown remark prints both.",
+      "command": "cargo test -p athena-core hestia",
+      "observes": "All pass. In the existing open-request test the second review's note still contains 'still open' and the model is called once. `throughput_outcome` for a design-request review with note 'slowdown request X queued at high priority' contains both 'design request' and 'slowdown request X'; with an empty note it equals the old text.",
+      "fails_without": "If the open-request branch were removed or reordered, the existing 'queues one design request and none while it is open' test would show a second model call. If the comparison were skipped, Test A fails. If `throughput_outcome` dropped the note, its assertion fails.",
+      "seam": "Entry point `Athena::throughput_review` (exists); `throughput_model` is the `FakeAgentDriver` injected by `athena_with` (exists, hestia.rs 3893). `throughput_outcome` is added in step 5 and called directly with hand-built `ThroughputReview` values."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks, then `git diff --stat`.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. `git diff --stat` lists only hestia.rs, status.rs, records.rs (doc comments only), docs/design/hestia.md and CHANGELOG.md; no athena.toml, defaults.toml or workflow file.",
+      "fails_without": "A formatting, clippy or test failure fails the command; a governance file change shows in the diff.",
+      "seam": "None: cargo and git run on the working tree."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff of the hestia.rs module comment (lines 43-52) and docs/design/hestia.md section 12, and the CHANGELOG entry.",
+      "command": "git diff -- crates/athena-core/src/hestia.rs docs/design/hestia.md CHANGELOG.md",
+      "observes": "The module comment, the doc comments on `SLOWDOWN_RATIO`, `stage_growth`, `previous_stage_medians`, `slowdown_request`, and section 12 state: every review compares the latest median with the previous review's, even with a design request open; the previous stage medians are rebuilt from the same set of landed jobs the stored count came from; grown stages are named; more than 25% queues a high-priority request naming the biggest-growing stage and its measured minutes; one open slowdown request holds back another. The CHANGELOG Unreleased entry names the behavior.",
+      "fails_without": "Without the doc changes the module comment and section 12 would still describe only the 10-landing and 20% triggers.",
+      "seam": "None: a content check of the diff."
+    }
+  ],
+  "open_questions": [
+    "User: records.rs is a listed deliverable but this plan changes only its doc comments, because the previous stage medians are rebuilt from landed jobs. Should the review store per-stage medians in `athena.throughput-review/1` (a schema change) instead? The plan assumes not, as the accepted reading says."
+  ],
+  "producer_section_sha256": "55dd977aecad46437f518e6ab9a23425c0e85ca422dc6d3e65969edb4f45416f"
+}
