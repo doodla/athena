@@ -1,0 +1,101 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261104-054754-b4f5",
+  "base_commit": "8d6576271d2eaad916aed077bbcb9b489a8a9580",
+  "base_fingerprint": "sha256:ca2fa4a110c0f9f500588b608474b7c0f649545e722dc7cf08a49fe497558283",
+  "previous_job": "20261103-231410-asf2",
+  "candidate_commit": "678e1ea9bfbf202aa3aae17496e6b0bfc4128a19",
+  "candidate_tree": "c1625c9fb0dcbf9d7517a1be6b2c74af6c2698b6",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 306997
+    },
+    {
+      "path": "xtask/src/decisions.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 36121
+    },
+    {
+      "path": "xtask/src/site.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 54835
+    }
+  ],
+  "fingerprint": "sha256:c8f51fe06b50ffba33456154cbf0dc60aea83fa851361f7d8851de0f58f0068f",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: approve-work and reject-work commit decisions under records/work-decisions/ on main, but the decisions page read only the athena/records branch, which holds none. The decided set was always empty, so no proposal dropped off. read_snapshot now also reads work decisions from main's tree (HEAD) and adds them to the decided set. If HEAD has no commit or no decisions directory, nothing is added. I updated the module doc, the doc comment on site::build, and CHANGELOG.md (one Fixed entry that names the root cause). I added two tests. In one, the proposals are on the records branch and an Approved and a Rejected decision are on main, and no id or '<article' appears. In the other, an undecided proposal is still listed as one card.",
+    "files": [
+      "xtask/src/decisions.rs",
+      "xtask/src/site.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p xtask decisions",
+        "result": "pass",
+        "note": "12 passed, including both new tests"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in xtask/src/decisions.rs builds a temp git repo where a proposal work item is on the athena/records branch and its Approved (and a second, Rejected) WorkDecision is under records/work-decisions/ on main only, runs locate() and render(), and asserts the proposal's id is absent and no '<article' appears. Run: cargo test -p xtask decisions.",
+        "status": "met",
+        "evidence": "proposals_decided_on_main_drop_off_the_page passes: asserts the records tip has no work-decisions, then both ids and '<article' are absent. Ran cargo test -p xtask decisions."
+      },
+      {
+        "criterion": "A companion test with an undecided proposal in the same layout asserts it is still listed as one card, so the fix does not hide everything. Run: cargo test -p xtask decisions.",
+        "status": "met",
+        "evidence": "a_proposal_with_no_decision_on_main_is_still_listed passes: exactly one '<article', '1 waiting', undecided id present, approved id absent."
+      },
+      {
+        "criterion": "The new decided-on-main test fails on the base code. The verifier checks this by reading read_snapshot in the base (git show of the base file), where decisions come only from the records tip, and by inspecting that the test's decision is absent from that tip. Run: cargo test -p xtask decisions on the candidate.",
+        "status": "met",
+        "evidence": "Base read_snapshot reads decisions only under the records tip; the test asserts that tip lists no records/work-decisions, so on base the decided set is empty and both cards render, failing the assertions. I did not execute it against the base tree."
+      },
+      {
+        "criterion": "xtask/src/decisions.rs read_snapshot() reads work decisions from main's tree as well as from the records branch, and the module doc says decisions are read from both places and why.",
+        "status": "met",
+        "evidence": "read_snapshot now lists records/work-decisions under HEAD (MAIN_TREE) and unions them into decided; module doc updated with the reason."
+      },
+      {
+        "criterion": "CHANGELOG.md has one entry that names the root cause (decisions are recorded on main while the page read only athena/records) and says only what the diff does, with no claim about the workflow or other behavior.",
+        "status": "met",
+        "evidence": "One entry under Unreleased/Fixed, starting 'The decisions page no longer lists proposals...' with 'Root cause: ...'; it does not mention the workflow."
+      },
+      {
+        "criterion": "cargo test, cargo clippy --all-targets and cargo fmt --check all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks; I ran fmt --check, targeted xtask tests and the policy test, all passing."
+      }
+    ],
+    "open_issues": [
+      "I did not run clippy or the full cargo test; those are left to Athena.",
+      "The fix reads main from the checkout's HEAD. The pages workflow checks out main, so this holds there. A checkout with a different branch at HEAD would read that branch's decisions instead."
+    ],
+    "mistakes": [
+      "Two test-fixture slips (an Approved value with no job id, and an invalid id suffix) failed to compile or run. Both are fixed."
+    ],
+    "learnings": [
+      "Git::ls_tree_under works with HEAD as the treeish, and RecordsWriter does not move HEAD, so main stays separate in tests.",
+      "The Approved decision state carries a job id: Approved { job }.",
+      "Record id suffixes use Crockford base32, which has no letter i."
+    ],
+    "desires": []
+  }
+}
