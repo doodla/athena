@@ -329,6 +329,16 @@ it is built. Two changes follow.
   drain. The reader is given that definition in the `hard_reason` field of its output schema. `mode = "all"`
   plans every change job, as before, and `enabled = false` is still a full off switch, whatever the mode. The
   caps, timeouts and `max_rounds` are unchanged. The planning code, the resume path and the other measures stay.
+  One more job is planned in `hard` mode even when judged easy: one with a Behavior criterion that asks for a
+  failing run without the fix, such as "a test fails without the fix", "tests fail without the change" or "the
+  new test fails on the base". The gate in `Athena::dispatch` first looked only at `hard_reason`, so such a job
+  got no plan, and Athena's run of the "fails without the fix" demonstration (which it makes only for a plan's
+  demonstrations) never reached the verifier, which then could not observe the criterion. The criterion text
+  is lowercased and stripped of punctuation, and must hold a word starting `fail` together with one of
+  `without the fix`, `without the change`, `without the mechanism`, `without the patch`, `without it`,
+  `before the fix` or `on the base`, or with `without` right after that word. Content criteria and a bare
+  "never fails" do not count. The producer is not escalated by this: only `hard_reason` chooses the producer
+  model.
 - **Later harm beside the landed share.** `athena status` reports, for planned and for unplanned dispatched
   jobs separately, how many landings were later cited as the cause of a failure, a revert or a fix job, next to
   that group's landed share (and as `keep_rule.later_harm` in `--json`). All three are read from records that
