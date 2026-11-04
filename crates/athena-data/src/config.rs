@@ -859,11 +859,11 @@ pub(crate) mod tests {
         assert_eq!(plan.mode, PlanMode::Hard);
         assert!(plan.plans(true));
         assert!(!plan.plans(false));
-        assert_eq!(plan.planner_usd, 0.75);
-        assert_eq!(plan.critic_usd, 0.75);
+        assert_eq!(plan.planner_usd, 3.0);
+        assert_eq!(plan.critic_usd, 3.0);
         assert_eq!(plan.planner_timeout_s, 600);
         assert_eq!(plan.critic_timeout_s, 600);
-        assert_eq!(plan.max_rounds, 3);
+        assert_eq!(plan.max_rounds, 5);
         let stripped = unplanned(REPO_CONFIG);
         assert!(!stripped.contains("[job_plan]"));
         assert!(Config::parse(&stripped).unwrap().job_plan.is_none());
@@ -874,7 +874,7 @@ pub(crate) mod tests {
         let config = Config::parse(REPO_CONFIG).unwrap();
         let b = &config.budget;
         let plan = config.job_plan.as_ref().unwrap();
-        assert_eq!(b.job_usd, 12.0);
+        assert_eq!(b.job_usd, 50.0);
         let need = 2.0 * b.reader_usd
             + 2.0 * (plan.planner_usd + plan.critic_usd)
             + b.producer_usd
@@ -886,53 +886,79 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn the_repository_budget_caps_cover_their_sum() {
+        let config = Config::parse(REPO_CONFIG).unwrap();
+        let b = &config.budget;
+        let plan = config.job_plan.as_ref().unwrap();
+        assert_eq!(
+            (b.reader_usd, b.producer_usd, b.verifier_usd, b.job_usd),
+            (2.0, 10.0, 5.0, 50.0)
+        );
+        assert_eq!((b.producer_timeout_s, b.verifier_timeout_s), (5400, 3600));
+        assert_eq!((b.reader_timeout_s, b.check_timeout_s), (300, 1800));
+        assert_eq!(
+            (plan.planner_usd, plan.critic_usd, plan.max_rounds),
+            (3.0, 3.0, 5)
+        );
+        assert_eq!((plan.planner_timeout_s, plan.critic_timeout_s), (600, 600));
+        let sum = b.reader_usd
+            + f64::from(plan.max_rounds) * (plan.planner_usd + plan.critic_usd)
+            + b.producer_usd
+            + b.verifier_usd;
+        assert!((sum - 47.0).abs() < 1e-9, "the caps sum to ${sum:.2}");
+        assert!((config.budget_required() - sum).abs() < 1e-9);
+        assert!(b.job_usd >= config.budget_required());
+        assert!(config.check_budget().is_ok());
+    }
+
     fn with_job_usd(text: &str, job_usd: &str) -> String {
-        let changed = text.replace("job_usd = 12.00", &format!("job_usd = {job_usd}"));
-        assert_ne!(changed, text, "athena.toml sets job_usd = 12.00");
+        let changed = text.replace("job_usd = 50.00", &format!("job_usd = {job_usd}"));
+        assert_ne!(changed, text, "athena.toml sets job_usd = 50.00");
         changed
     }
 
     #[test]
     fn job_usd_below_the_reserve_is_refused_by_the_budget_check() {
-        // (a) One cent under the reader, three planning rounds, the producer and the verifier.
-        let short = Config::parse(&with_job_usd(REPO_CONFIG, "9.99")).unwrap();
-        assert_eq!(short.budget_required(), 10.0);
+        // (a) One cent under the reader, five planning rounds, the producer and the verifier.
+        let short = Config::parse(&with_job_usd(REPO_CONFIG, "46.99")).unwrap();
+        assert_eq!(short.budget_required(), 47.0);
         let error = short.check_budget().unwrap_err();
         assert!(matches!(error, ConfigError::BudgetBelowReserve { .. }));
         let text = error.to_string();
-        for part in ["[budget] job_usd", "$9.99", "$0.01 short", "$10.00"] {
+        for part in ["[budget] job_usd", "$46.99", "$0.01 short", "$47.00"] {
             assert!(text.contains(part), "{part:?} missing from: {text}");
         }
         // (b) Exactly the reserve, and (c) the shipped value, are accepted.
-        let exact = Config::parse(&with_job_usd(REPO_CONFIG, "10.00")).unwrap();
+        let exact = Config::parse(&with_job_usd(REPO_CONFIG, "47.00")).unwrap();
         assert!(exact.check_budget().is_ok());
         assert!(Config::parse(REPO_CONFIG).unwrap().check_budget().is_ok());
         // (d) Parsing stays structural, so a past commit's file with a short budget still reads.
         assert!(Config::parse(&with_job_usd(REPO_CONFIG, "8.00")).is_ok());
         // (e) Without planning the reserve is the reader, the producer and the verifier.
         let unplanned_text = unplanned(REPO_CONFIG);
-        let below = Config::parse(&with_job_usd(&unplanned_text, "5.49")).unwrap();
+        let below = Config::parse(&with_job_usd(&unplanned_text, "16.99")).unwrap();
         assert!(below.check_budget().is_err());
-        let at = Config::parse(&with_job_usd(&unplanned_text, "5.50")).unwrap();
+        let at = Config::parse(&with_job_usd(&unplanned_text, "17.00")).unwrap();
         assert!(at.check_budget().is_ok());
         // (f) A changed cap moves the threshold with no other change: one more round adds one planner and
         // one critic call.
         let mut more = exact.clone();
         more.job_plan.as_mut().unwrap().max_rounds += 1;
-        assert_eq!(more.budget_required(), 11.5);
+        assert_eq!(more.budget_required(), 53.0);
         assert!(more.check_budget().is_err());
-        more.budget.job_usd = 11.5;
+        more.budget.job_usd = 53.0;
         assert!(more.check_budget().is_ok());
     }
 
     #[test]
     fn rounds_count_only_when_planning_is_enabled() {
-        let mut config = Config::parse(&with_job_usd(REPO_CONFIG, "10.00")).unwrap();
+        let mut config = Config::parse(&with_job_usd(REPO_CONFIG, "47.00")).unwrap();
         config.job_plan.as_mut().unwrap().enabled = false;
         // A [job_plan] table that is switched off adds no planning to the requirement.
-        assert_eq!(config.budget_required(), 5.5);
-        assert_eq!(config.planning_usd(2), 3.0);
-        assert_eq!(config.critic_usd(), 0.75);
+        assert_eq!(config.budget_required(), 17.0);
+        assert_eq!(config.planning_usd(2), 12.0);
+        assert_eq!(config.critic_usd(), 3.0);
     }
 
     #[test]

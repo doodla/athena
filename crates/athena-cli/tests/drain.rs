@@ -2017,7 +2017,7 @@ fn the_real_steps_work_a_queued_request_land_it_and_only_then_rate_the_page() {
     assert!(queue.waiting.is_empty());
     assert!(steps.caps().unwrap().run > 0.0);
 
-    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
     assert_eq!(report.stop, Stop::TargetMet, "{}", display::drain(&report));
     assert_eq!(report.landed, 1);
     // The land step was asked once, for the job, before any rating existed.
@@ -3031,7 +3031,7 @@ fn a_change_to_max_concurrency_alone_does_not_invalidate_a_reading() {
 #[test]
 fn a_relevant_config_change_rereads_and_drain_accepts_a_reading_of_the_same_scope() {
     let fx = Fixture::new();
-    let after = with_job_usd(&test_config(), "7.5");
+    let after = with_job_usd(&test_config(), "51.0");
     let scenario = Scenario::default();
     let invocations = scenario.invocations.clone();
     let (job, report, said, reads) =
@@ -3054,7 +3054,7 @@ fn a_relevant_config_change_rereads_and_drain_accepts_a_reading_of_the_same_scop
 #[test]
 fn a_reread_whose_scope_changed_is_left_for_a_person_and_is_not_a_failure() {
     let fx = Fixture::new();
-    let after = with_job_usd(&test_config(), "7.5");
+    let after = with_job_usd(&test_config(), "51.0");
     let first = Scenario::default();
     let invocations = first.invocations.clone();
     let mut later = Scenario::default();
@@ -3112,7 +3112,7 @@ fn a_request_deferred_with_ask_later_is_listed_and_worked_like_a_steward_item() 
         [deferred.as_str()]
     );
 
-    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
     assert_eq!(report.stop, Stop::TargetMet, "{}", display::drain(&report));
     assert_eq!(report.landed, 1);
     assert_eq!(
@@ -3174,7 +3174,7 @@ fn real_steps_read_an_unread_vague_request_and_refuse_it_while_the_specified_one
         .unwrap();
     assert_eq!(vague_entry.missing(), ["ladder rung", "acceptance"]);
 
-    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
     let text = display::drain(&report);
     // The vague request was read by the pass, not refused for being unread...
     let readers = invocations
@@ -3218,7 +3218,7 @@ fn real_steps_read_an_unread_but_specifiable_request_once_and_then_run_it() {
         page: &StubPage,
         lander: &RecordingLander::default(),
     };
-    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
     let text = display::drain(&report);
     assert!(report.refused.is_empty(), "{text}");
     assert_eq!(report.landed, 1, "{text}");
@@ -3271,7 +3271,7 @@ fn a_reader_that_gives_no_reading_is_read_once_more_then_skipped_with_its_error(
     let lines = Lines::default();
     let steps = real_steps_with(&athena, &lander, &lines);
 
-    let report = drain::drain(&steps, limits(50.0), &lines).unwrap();
+    let report = drain::drain(&steps, limits(100.0), &lines).unwrap();
     let text = display::drain(&report);
 
     // The reader ran twice for the item: the read, and one read again.
@@ -3350,7 +3350,7 @@ fn a_re_read_that_succeeds_runs_the_item() {
     let lines = Lines::default();
     let steps = real_steps_with(&athena, &lander, &lines);
 
-    let report = drain::drain(&steps, limits(50.0), &lines).unwrap();
+    let report = drain::drain(&steps, limits(100.0), &lines).unwrap();
     let text = display::drain(&report);
 
     assert_eq!(reads.load(Ordering::SeqCst), 2, "{text}");
@@ -3608,7 +3608,7 @@ fn queued_ids(fx: &Fixture) -> Vec<String> {
 /// Limits that do not stop at the first rating, so every queued item is worked.
 fn work_everything() -> Limits {
     Limits {
-        budget_usd: 50.0,
+        budget_usd: 100.0,
         target_rating: 5,
         max_jobs: 10,
     }
@@ -4049,7 +4049,7 @@ fn a_plan_that_reads_requests_leaves_them_in_the_plan_and_in_the_queue() {
     let steps = real_steps(&athena, &lander);
     assert!(steps.queue().unwrap().items.iter().all(|i| !i.read));
 
-    let report = drain::plan(&steps, 2.0, &Quiet).unwrap();
+    let report = drain::plan(&steps, 4.0, &Quiet).unwrap();
     assert_eq!(readers(&invocations), 2, "both were read by the plan");
     assert!(report.spent_usd > 0.0);
     let in_plan: Vec<&str> = report.entries.iter().map(|e| e.id.as_str()).collect();
@@ -4083,8 +4083,8 @@ fn a_second_plan_lists_the_same_open_requests_and_reads_nothing_again() {
     let lander = RecordingLander::default();
     let steps = real_steps(&athena, &lander);
 
-    let one = drain::plan(&steps, 2.0, &Quiet).unwrap();
-    let two = drain::plan(&steps, 2.0, &Quiet).unwrap();
+    let one = drain::plan(&steps, 4.0, &Quiet).unwrap();
+    let two = drain::plan(&steps, 4.0, &Quiet).unwrap();
     let ids =
         |r: &drain::PlanReport| -> Vec<String> { r.entries.iter().map(|e| e.id.clone()).collect() };
     assert_eq!(ids(&one).len(), 2);
@@ -4106,7 +4106,7 @@ fn drain_works_the_requests_a_plan_read_in_plan_order_without_reading_them_again
     let lander = RecordingLander::default();
     let steps = real_steps(&athena, &lander);
 
-    let planned = drain::plan(&steps, 2.0, &Quiet).unwrap();
+    let planned = drain::plan(&steps, 4.0, &Quiet).unwrap();
     assert_eq!(readers(&invocations), 2);
     // Two jobs may start, so a failed second attempt (a re-reading) is not made.
     let limits = Limits {
@@ -4138,7 +4138,7 @@ fn the_default_plan_budget_affords_a_read_where_drain_would_need_a_read_and_a_ru
     let steps = real_steps(&athena, &lander);
     // With the repository's own caps (athena.toml) a read plus a run does not fit the default budget of 2.
     let caps = steps.caps().unwrap();
-    assert_eq!((caps.read, caps.run), (0.5, 12.0));
+    assert_eq!((caps.read, caps.run), (2.0, 50.0));
     assert!(caps.read + caps.run > 2.0 && caps.read <= 2.0);
 
     // Drain at that budget reads nothing: the run would not fit.
@@ -4359,7 +4359,7 @@ fn drain_lists_and_retries_an_interrupted_job_and_leaves_one_on_another_channel_
         .collect();
     assert_eq!(listed, [(cli.as_str(), true)], "only the drained channel");
 
-    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
     assert_eq!(report.stop, Stop::TargetMet, "{}", display::drain(&report));
     assert_eq!(report.jobs.len(), 1, "{}", display::drain(&report));
     let line = &report.jobs[0];
@@ -4813,7 +4813,7 @@ fn the_real_steps_approve_only_the_in_limit_proposal_and_leave_the_others_waitin
     let before = Records::load(&fx.git, &fx.head()).unwrap();
     assert!(before.work_decisions.is_empty());
 
-    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
     assert_eq!(report.stop, Stop::TargetMet, "{}", display::drain(&report));
     assert_eq!(report.landed, 1);
     let records = Records::load(&fx.git, &fx.head()).unwrap();
@@ -5418,7 +5418,7 @@ fn an_approved_job_is_picked_up_once_and_a_closed_one_is_not_picked_up_again() {
             .count()
     };
     assert_eq!(readers(), 1, "the approval's reading");
-    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
     assert_eq!(report.landed, 1, "{}", display::drain(&report));
     assert_eq!(readers(), 1, "drain did not read it again");
     assert_eq!(lander.0.lock().unwrap().len(), 1);
@@ -5426,7 +5426,7 @@ fn an_approved_job_is_picked_up_once_and_a_closed_one_is_not_picked_up_again() {
     // Now the job is closed: a second drain finds nothing to work.
     let again = steps.queue().unwrap();
     assert!(again.items.is_empty(), "{:?}", again.items);
-    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
     assert_eq!(report.stop, Stop::QueueEmpty);
     assert_eq!(lander.0.lock().unwrap().len(), 1, "landed once, not twice");
 }
@@ -5760,7 +5760,7 @@ fn a_wrong_statement_in_any_page_text_input_fails_the_check_and_is_named() {
             },
             real,
         };
-        let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+        let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
         assert_ne!(report.stop, Stop::TargetMet, "{statement}");
         assert!(!report.target_met());
         let held = report.held_back.as_deref().unwrap();
@@ -5841,7 +5841,7 @@ fn a_model_whose_behavior_differs_from_the_code_fails_the_check_and_holds_drain_
         },
         real,
     };
-    let report = drain::drain(&steps, limits(50.0), &Quiet).unwrap();
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
     assert_ne!(report.stop, Stop::TargetMet);
     assert!(!report.target_met());
     let held = report.held_back.as_deref().unwrap();
@@ -6035,7 +6035,7 @@ fn a_priority_record_overrides_the_priority_in_the_request_text() {
     let steps = real_steps(&athena, &lander);
 
     // By its words the low request comes after the unmarked one.
-    let before = drain::plan(&steps, 2.0, &Quiet).unwrap();
+    let before = drain::plan(&steps, 4.0, &Quiet).unwrap();
     assert_eq!(before.plan.order, [other.as_str(), slow.as_str()]);
     // Read, so no longer queued: a priority cannot be set now.
     let late = athena.set_priority(slow.as_str(), "urgent").unwrap_err();
@@ -6075,7 +6075,7 @@ fn a_priority_record_overrides_the_priority_in_the_request_text() {
     assert_eq!(records.jobs[slow.as_str()].priorities[0].n, 1);
     let lander = RecordingLander::default();
     let steps = real_steps(&athena, &lander);
-    let after = drain::plan(&steps, 2.0, &Quiet).unwrap();
+    let after = drain::plan(&steps, 4.0, &Quiet).unwrap();
     assert_eq!(after.plan.order, [slow.as_str(), other.as_str()]);
 
     // A later record wins over an earlier one.
