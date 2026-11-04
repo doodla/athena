@@ -1321,27 +1321,47 @@ impl Athena {
         wait_s: u64,
         act: impl FnOnce(&dyn crate::ci_result::CiSource, crate::ci_result::Wait) -> T,
     ) -> T {
+        self.with_ci_source_on(&crate::gh::ci_branch(job), wait_s, act)
+    }
+
+    /// The `owner/name` of the GitHub repository `origin` points at, when this is not a nested run and the
+    /// origin is an https URL on github.com. `None` for any other repository: no CI result can be read there.
+    fn github_origin(&self) -> Option<String> {
+        if self.nested.is_some() {
+            return None;
+        }
+        self.git
+            .run(["remote", "get-url", "origin"])
+            .ok()
+            .and_then(|url| crate::gh::GhClient::origin_repository(&url))
+    }
+
+    /// Whether a CI result can be read for this repository (see [`Athena::github_origin`]).
+    pub(super) fn has_github_origin(&self) -> bool {
+        self.github_origin().is_some()
+    }
+
+    /// [`Athena::with_ci_source`] for the push runs on `branch`, which is the job's CI branch for the
+    /// candidate's checks and another branch for a baseline lookup.
+    pub(super) fn with_ci_source_on<T>(
+        &self,
+        branch: &str,
+        wait_s: u64,
+        act: impl FnOnce(&dyn crate::ci_result::CiSource, crate::ci_result::Wait) -> T,
+    ) -> T {
         use crate::ci_result::Wait;
         let one_read = Wait {
             polls: 1,
             pause: std::time::Duration::ZERO,
         };
-        let repository = if self.nested.is_some() {
-            None
-        } else {
-            self.git
-                .run(["remote", "get-url", "origin"])
-                .ok()
-                .and_then(|url| crate::gh::GhClient::origin_repository(&url))
-        };
-        let Some(repository) = repository else {
+        let Some(repository) = self.github_origin() else {
             return act(&crate::routing::NoCi, one_read);
         };
         let wait = Wait {
             polls: crate::routing::ci_polls(wait_s),
             pause: std::time::Duration::ZERO,
         };
-        let branch = crate::gh::ci_branch(job);
+        let branch = branch.to_string();
         #[cfg(any(test, feature = "test-support"))]
         if let Some((runner, sleeper)) = ci_seam::current() {
             let client = crate::gh::GhClient::new(&*runner, repository);

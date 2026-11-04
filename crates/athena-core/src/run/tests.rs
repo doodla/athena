@@ -2515,6 +2515,8 @@ mod produce_and_verify_order_tests {
         TimedOut,
         /// A run that is still going on every read.
         Unfinished,
+        /// The host cannot be asked: every request fails.
+        Unreachable,
     }
 
     const CI_RUN_ADDRESS: &str = "https://github.com/owner/repo/actions/runs/4242";
@@ -2538,6 +2540,8 @@ mod produce_and_verify_order_tests {
     /// `head_sha` and `branch` filters would, and keeps every path it was asked for.
     struct CiReplies {
         reply: CiReply,
+        /// When set, the commit and branch the run exists for: any other request finds no run.
+        only: Option<(String, String)>,
         paths: std::cell::RefCell<Vec<String>>,
     }
 
@@ -2545,13 +2549,27 @@ mod produce_and_verify_order_tests {
         fn new(reply: CiReply) -> CiReplies {
             CiReplies {
                 reply,
+                only: None,
                 paths: Default::default(),
             }
         }
 
+        /// The reply for the run of `sha` on `branch` only; every other commit and branch has no run.
+        fn only_for(mut self, sha: &str, branch: &str) -> CiReplies {
+            self.only = Some((sha.to_string(), branch.to_string()));
+            self
+        }
+
         fn runs(&self, sha: &str, branch: &str) -> serde_json::Value {
+            if let Some((only_sha, only_branch)) = &self.only
+                && (sha != only_sha || branch != only_branch)
+            {
+                return json!({ "workflow_runs": [] });
+            }
             let (status, conclusion) = match self.reply {
-                CiReply::Missing => return json!({ "workflow_runs": [] }),
+                CiReply::Missing | CiReply::Unreachable => {
+                    return json!({ "workflow_runs": [] });
+                }
                 CiReply::Unfinished => ("in_progress", json!(null)),
                 CiReply::Green => ("completed", json!("success")),
                 CiReply::Red | CiReply::RedTest => ("completed", json!("failure")),
@@ -2590,9 +2608,19 @@ mod produce_and_verify_order_tests {
                 CiReply::Cancelled => vec![job(aggregate, "completed", json!("cancelled"))],
                 CiReply::TimedOut => vec![job(aggregate, "completed", json!("timed_out"))],
                 CiReply::Unfinished => vec![job(aggregate, "in_progress", json!(null))],
-                CiReply::Missing => Vec::new(),
+                CiReply::Missing | CiReply::Unreachable => Vec::new(),
             };
             json!({ "jobs": jobs })
+        }
+
+        /// The paths of the requests for runs on branches other than `own`: the reads of the baseline.
+        fn reads_off(&self, own: &str) -> Vec<String> {
+            self.paths
+                .borrow()
+                .iter()
+                .filter(|p| p.contains("/actions/runs?") && !p.contains(&format!("&branch={own}&")))
+                .cloned()
+                .collect()
         }
 
         /// How many times the runs were read (each read of the source starts with this request).
@@ -2612,6 +2640,9 @@ mod produce_and_verify_order_tests {
                 .find(|a| a.starts_with("repos/"))
                 .expect("a repos path");
             self.paths.borrow_mut().push(path.clone());
+            if self.reply == CiReply::Unreachable {
+                bail!("the host cannot be reached");
+            }
             // The log of the failing shard, asked for before the jobs listing branch below.
             if path.ends_with(&format!("/actions/jobs/{SHARD_JOB_ID}/logs")) {
                 return Ok(SHARD_LOG.to_string());
@@ -2662,10 +2693,21 @@ mod produce_and_verify_order_tests {
         sleeps: Vec<std::time::Duration>,
         fake: std::rc::Rc<crate::test_support::EarlyFake>,
         verifier_prompts: Vec<String>,
+        /// The baseline record the job stored at `baseline.json`.
+        baseline: Baseline,
+        /// Whether the baseline checks ran on this machine: they leave `baseline-ran` beside the job's
+        /// directory when they do (see [`MARKS_BASELINE_OUTSIDE`]).
+        baseline_ran: bool,
         _dirs: (tempfile::TempDir, tempfile::TempDir),
     }
 
     impl CiReuse {
+        /// The requests the baseline made for runs: those not on the job's own CI branch.
+        fn baseline_reads(&self) -> Vec<String> {
+            self.replies
+                .reads_off(&crate::gh::ci_branch(&self.done.job))
+        }
+
         /// The commit pushed to the job's CI branch: the candidate.
         fn candidate(&self) -> String {
             self.fake.ci_of("push")[0].commit.clone()
@@ -2685,11 +2727,23 @@ mod produce_and_verify_order_tests {
     /// GitHub origin must make the CI source read the fake: the helper fails when it was never asked, so a
     /// run cannot pass through the local path by accident.
     fn ci_reuse_run(origin: Option<&str>, reply: CiReply) -> CiReuse {
+        ci_reuse_run_with(origin, PASSES, |_| CiReplies::new(reply))
+    }
+
+    /// [`ci_reuse_run`] with the baseline and the checks running `check`, and with `setup` run on the
+    /// repository after the origin is added and before the job is asked for, so the job's base commit is the
+    /// commit it leaves. It returns what the fake `gh` answers.
+    fn ci_reuse_run_with(
+        origin: Option<&str>,
+        check: &'static [&'static str],
+        setup: impl FnOnce(&Git) -> CiReplies,
+    ) -> CiReuse {
         let repo = repo();
         let git = Git::at(repo.path());
         if let Some(url) = origin {
             git.run(["remote", "add", "origin", url]).unwrap();
         }
+        let replies = std::rc::Rc::new(setup(&git));
         let state = tempfile::tempdir().unwrap();
         let counts = Arc::new(Counts::default());
         let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -2704,12 +2758,12 @@ mod produce_and_verify_order_tests {
         let mut athena = athena_with(
             &repo,
             &state,
-            PASSES,
+            check,
             crate::test_support::plenty_of_space,
             script,
         );
         athena.capabilities = vec![Box::new(Docs {
-            check: PASSES,
+            check,
             ci_steps: true,
         })];
         let probe = counts.clone();
@@ -2719,7 +2773,6 @@ mod produce_and_verify_order_tests {
         });
         let proposal = athena.ask("describe the demo", &Quiet).unwrap();
         let _early = crate::gh::early_seam::install(fake.clone(), fake.clone());
-        let replies = std::rc::Rc::new(CiReplies::new(reply));
         let sleeps: std::rc::Rc<std::cell::RefCell<Vec<std::time::Duration>>> = Default::default();
         let slept = sleeps.clone();
         let _ci = ci_seam::install(
@@ -2748,6 +2801,19 @@ mod produce_and_verify_order_tests {
                 "the CI source was never read: {lines:#?}"
             );
         }
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let baseline = records.jobs[done.job.as_str()]
+            .baseline
+            .clone()
+            .expect("the job stored its baseline");
+        // The mark is beside the job's directory, which is cleaned when the job closes.
+        let baseline_ran = athena
+            .state
+            .job_dir(&done.job)
+            .parent()
+            .unwrap()
+            .join("baseline-ran")
+            .exists();
         CiReuse {
             done,
             lines,
@@ -2756,8 +2822,302 @@ mod produce_and_verify_order_tests {
             sleeps,
             fake,
             verifier_prompts,
+            baseline,
+            baseline_ran,
             _dirs: (repo, state),
         }
+    }
+
+    /// A baseline check that leaves `baseline-ran` beside the job directory (it runs in `<job dir>/baseline`),
+    /// where it survives the cleaning of the job directory when the job closes.
+    const MARKS_BASELINE_OUTSIDE: &[&str] = &["sh", "-c", "touch ../../baseline-ran"];
+
+    /// A previous job, as the closing records of a landing name it.
+    const PREVIOUS_JOB: &str = "20261030-120000-abcd";
+    /// The candidate commit the previous job verified and pushed to its CI branch.
+    const PREVIOUS_CANDIDATE: &str = "cccccccccccccccccccccccccccccccccccccccc";
+
+    fn write_file(git: &Git, path: &str, text: &str) {
+        let full = git.dir().join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+
+    /// Commits, on top of the repository's head, a squash as a landing makes it: one commit that adds the
+    /// closing `verification.json` of each of `jobs` (written with the production record type, at its
+    /// canonical path) and, with `workflow`, also a file under `.github/workflows/`. Each record names
+    /// `PREVIOUS_CANDIDATE` and `recorded` as the verified fingerprint, which is the fingerprint of the
+    /// squash's own governed content when `None`, as a real landing records it. Returns the squash commit.
+    fn commit_landed_squash(
+        git: &Git,
+        jobs: &[&str],
+        recorded: Option<&str>,
+        workflow: bool,
+    ) -> String {
+        use athena_data::records::{AnyRecord, Verdict, Verification};
+        let before = git.head().unwrap().unwrap();
+        // The change the landed job made, so the squash is more than records.
+        write_file(
+            git,
+            "landed.txt",
+            &format!("landed by {}\n", jobs.join(" ")),
+        );
+        if workflow {
+            write_file(git, ".github/workflows/extra.yml", "name: extra\n");
+        }
+        // The governed content of the squash: the records are not part of it, so it is read before they
+        // are written, and checked again below.
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "content"]).unwrap();
+        let content = git.head().unwrap().unwrap();
+        let fingerprint_of_content = fingerprint(git, &content, &content).unwrap();
+        for job in jobs {
+            let record = AnyRecord::Verification(Box::new(Verification {
+                job: JobId::parse(job).unwrap(),
+                candidate_commit: PREVIOUS_CANDIDATE.into(),
+                verified_fingerprint: recorded.unwrap_or(&fingerprint_of_content).into(),
+                tool_config_from_base: Vec::new(),
+                checks: Vec::new(),
+                check_cleanup: Vec::new(),
+                verifier_invocation: None,
+                criteria: Vec::new(),
+                findings: Vec::new(),
+                request_reading_mismatch: None,
+                agent_verdict: Some(Verdict::Pass),
+                final_verdict: Verdict::Pass,
+                reasons: Vec::new(),
+                inputs: Vec::new(),
+                summary: None,
+            }));
+            write_file(git, &record.canonical_path(), &record.to_json());
+        }
+        // One commit on the old head, as the host's squash is.
+        git.run(["reset", "-q", "--soft", &before]).unwrap();
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "squash"]).unwrap();
+        let squash = git.head().unwrap().unwrap();
+        assert_eq!(
+            fingerprint(git, &squash, &squash).unwrap(),
+            fingerprint_of_content,
+            "the closing records are not governed content"
+        );
+        squash
+    }
+
+    /// The check names a baseline that ran here holds, and that a reused one holds too.
+    fn assert_baseline_checks(baseline: &Baseline) {
+        let names: Vec<&str> = baseline.checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ALL_CHECKS);
+    }
+
+    #[test]
+    fn baseline_reused_from_the_landed_candidates_run_runs_nothing_locally() {
+        let run = ci_reuse_run_with(Some(GITHUB), MARKS_BASELINE_OUTSIDE, |git| {
+            commit_landed_squash(git, &[PREVIOUS_JOB], None, false);
+            CiReplies::new(CiReply::Green).only_for(
+                PREVIOUS_CANDIDATE,
+                &crate::gh::ci_branch(&JobId::parse(PREVIOUS_JOB).unwrap()),
+            )
+        });
+        let baseline = &run.baseline;
+        let base = &baseline.base_commit;
+        assert_eq!(
+            baseline.reused_from.as_deref(),
+            Some(CI_RUN_ADDRESS),
+            "{:#?}",
+            run.lines
+        );
+        assert_eq!(baseline.note, None);
+        assert_baseline_checks(baseline);
+        for check in &baseline.checks {
+            let note = check.note.as_deref().unwrap_or("");
+            assert!(check.reused && check.passed, "{check:?}");
+            assert!(
+                note.contains(&format!("CI run {CI_RUN_ADDRESS} for {PREVIOUS_CANDIDATE}")),
+                "{note}"
+            );
+        }
+        // Nothing ran on this machine for the baseline.
+        assert!(!run.baseline_ran, "the baseline checks ran locally");
+        // One read, for the previous candidate on its CI branch.
+        let reads = run.baseline_reads();
+        assert_eq!(reads.len(), 1, "{reads:?}");
+        assert!(
+            reads[0].contains(&format!("head_sha={PREVIOUS_CANDIDATE}"))
+                && reads[0].contains(&format!("branch=athena/ci/{PREVIOUS_JOB}&")),
+            "{reads:?}"
+        );
+        let line = format!("ci         baseline reused from {CI_RUN_ADDRESS} for {base}");
+        assert!(run.lines.contains(&line), "{:#?}", run.lines);
+        assert!(
+            !run.lines
+                .iter()
+                .any(|l| l.starts_with("ci         baseline runs locally")),
+            "{:#?}",
+            run.lines
+        );
+    }
+
+    #[test]
+    fn baseline_reused_from_the_default_branch_run_runs_nothing_locally() {
+        let mut content = String::new();
+        let run = ci_reuse_run_with(Some(GITHUB), MARKS_BASELINE_OUTSIDE, |git| {
+            // Main's own run for the commit under the job's records, with no landing in the history.
+            git.run([
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ])
+            .unwrap();
+            content = git.head().unwrap().unwrap();
+            CiReplies::new(CiReply::Green).only_for(&content, "main")
+        });
+        let baseline = &run.baseline;
+        let base = &baseline.base_commit;
+        assert_ne!(*base, content, "the job's base is its records commit");
+        assert_eq!(baseline.reused_from.as_deref(), Some(CI_RUN_ADDRESS));
+        assert_eq!(baseline.note, None);
+        assert_baseline_checks(baseline);
+        assert!(baseline.checks.iter().all(|c| c.reused && c.passed));
+        assert!(!run.baseline_ran, "the baseline checks ran locally");
+        let reads = run.baseline_reads();
+        assert!(
+            reads
+                .iter()
+                .any(|p| p.contains(&format!("head_sha={content}")) && p.contains("branch=main&")),
+            "{reads:?}"
+        );
+        let line = format!("ci         baseline reused from {CI_RUN_ADDRESS} for {base}");
+        assert!(run.lines.contains(&line), "{:#?}", run.lines);
+    }
+
+    #[test]
+    fn baseline_runs_locally_when_no_green_ci_result_exists() {
+        let previous = JobId::parse(PREVIOUS_JOB).unwrap();
+        let branch = crate::gh::ci_branch(&previous);
+        let green = || CiReplies::new(CiReply::Green).only_for(PREVIOUS_CANDIDATE, &branch);
+        // (what is wrong, the run, the words the reason line holds)
+        type Case = (
+            &'static str,
+            Box<dyn FnOnce(&Git) -> CiReplies>,
+            &'static str,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "no run",
+                Box::new(|git| {
+                    commit_landed_squash(git, &[PREVIOUS_JOB], None, false);
+                    CiReplies::new(CiReply::Missing)
+                }),
+                "no usable CI result",
+            ),
+            (
+                "a red run",
+                Box::new({
+                    let branch = branch.clone();
+                    move |git| {
+                        commit_landed_squash(git, &[PREVIOUS_JOB], None, false);
+                        CiReplies::new(CiReply::Red).only_for(PREVIOUS_CANDIDATE, &branch)
+                    }
+                }),
+                CI_RUN_ADDRESS,
+            ),
+            (
+                "an unfinished run",
+                Box::new({
+                    let branch = branch.clone();
+                    move |git| {
+                        commit_landed_squash(git, &[PREVIOUS_JOB], None, false);
+                        CiReplies::new(CiReply::Unfinished).only_for(PREVIOUS_CANDIDATE, &branch)
+                    }
+                }),
+                "no usable CI result",
+            ),
+            (
+                "a host that cannot be asked",
+                Box::new(|git| {
+                    commit_landed_squash(git, &[PREVIOUS_JOB], None, false);
+                    CiReplies::new(CiReply::Unreachable)
+                }),
+                "no usable CI result",
+            ),
+            (
+                "a different fingerprint",
+                Box::new({
+                    let green = green();
+                    move |git| {
+                        commit_landed_squash(git, &[PREVIOUS_JOB], Some(&"0".repeat(64)), false);
+                        green
+                    }
+                }),
+                "differs from the base's",
+            ),
+            (
+                "a landing that edited a workflow",
+                Box::new({
+                    let green = green();
+                    move |git| {
+                        commit_landed_squash(git, &[PREVIOUS_JOB], None, true);
+                        green
+                    }
+                }),
+                "changed a workflow file",
+            ),
+            (
+                "a landing of two jobs",
+                Box::new({
+                    let green = green();
+                    move |git| {
+                        commit_landed_squash(
+                            git,
+                            &[PREVIOUS_JOB, "20261030-130000-abce"],
+                            None,
+                            false,
+                        );
+                        green
+                    }
+                }),
+                "not the landing of one job",
+            ),
+        ];
+        for (what, setup, words) in cases {
+            let run = ci_reuse_run_with(Some(GITHUB), MARKS_BASELINE_OUTSIDE, setup);
+            let baseline = &run.baseline;
+            assert!(
+                run.baseline_ran,
+                "{what}: the baseline did not run here: {:#?} {baseline:?}",
+                run.lines
+            );
+            assert_eq!(baseline.reused_from, None, "{what}");
+            assert_eq!(baseline.note, None, "{what}");
+            assert_baseline_checks(baseline);
+            assert!(baseline.checks.iter().all(|c| !c.reused), "{what}");
+            let said: Vec<&String> = run
+                .lines
+                .iter()
+                .filter(|l| l.starts_with("ci         baseline "))
+                .collect();
+            assert!(
+                said.len() == 1
+                    && said[0].starts_with("ci         baseline runs locally: ")
+                    && said[0].contains(words),
+                "{what}: {said:?}"
+            );
+        }
+        // A repository with no GitHub origin makes no lookup and says nothing about one.
+        let run = ci_reuse_run_with(None, MARKS_BASELINE_OUTSIDE, |_| {
+            CiReplies::new(CiReply::Green)
+        });
+        assert!(run.baseline_ran);
+        assert_eq!(run.baseline.reused_from, None);
+        assert!(run.baseline_reads().is_empty());
+        assert!(
+            !run.lines
+                .iter()
+                .any(|l| l.starts_with("ci         baseline ")),
+            "{:#?}",
+            run.lines
+        );
     }
 
     const ALL_CHECKS: [&str; 3] = ["fmt", "clippy", "test"];

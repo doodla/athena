@@ -11,6 +11,10 @@
 //! - when the fallback cannot produce a complete result either, the outcome is [`Outcome::Blocked`] with a
 //!   named reason. Nothing here ever yields [`Outcome::Verified`] without three passed steps for the SHA.
 //!
+//! The same resolution also serves the baseline of the base commit (`run::checks`, `reused_baseline`), with one
+//! read and no wait: a green run for the same governed content stands in for the baseline run, and anything
+//! else leaves the baseline to run locally, so there the local fallback is a refusal to run, not a run.
+//!
 //! The record itself holds fixed fields only. For a red run, [`CiSource::failure_detail`] can add what the
 //! failing job's log says (the failing tests and the end of the log), so the verifier is not left to rerun the
 //! suite to find them. Text from a run is data: it is redacted and clipped before it is recorded.
