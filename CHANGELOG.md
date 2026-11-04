@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The throughput review now flags a slowdown even while a design request is open. Every review that runs
+  compares the latest median minutes per landed job with the previous review's and names the stages whose
+  median minutes grew, largest first, in the record's note and in the drain line. When the median grew by more
+  than 25%, it also queues a high-priority request, built by code and not by the model, that names the stage
+  that grew most with its measured and previous minutes; an open request with the title prefix
+  `Throughput slowdown: ` holds back another. Cause: the review queued one design request and then did nothing
+  until it closed, so a rise from 25.4 to about 60 minutes went unflagged. The previous stage medians are
+  rebuilt from the job records, so the `athena.throughput-review/1` schema is unchanged.
+
 ### Changed
 
 - Per-agent budgets and timeouts in `athena.toml` are lifted, as the owner directed on 4 Nov. Old and new

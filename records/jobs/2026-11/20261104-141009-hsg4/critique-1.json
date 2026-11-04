@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-141009-hsg4",
+  "round": 1,
+  "at": "2026-11-04T20:28:34.487478725Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The previous window is cut with a count taken from one set and applied to another, so the reconstruction drifts forward and the drift grows over time.",
+      "evidence": "`previous.landings` is stored from `measured.landed_total` (hestia.rs 1503). `Throughput::compute` counts that as every landed request job (status.rs 886-890). `landed_jobs` leaves out landed jobs that ran no model (doc at status.rs 853-854). So 'the first `previous.landings` entries of `landed_jobs`' contains every job the previous review measured plus K newer jobs, where K is the number of unmeasured landed jobs in all history up to that review. K only goes up. Once it nears THROUGHPUT_WINDOW, the 'previous' window is mostly the current window. `stage_growth` then comes back empty, and by Decision 6 the review queues nothing even when the recorded median rose by more than 25%. That is the reported failure again, without any warning. The Risks section calls the effect 'bounded', but it is cumulative. Fix: Cut the same set the count came from. Sort all landed request jobs by `landing_end` (ties by id), the order `landed_jobs` uses. Take the first `previous.landings` of them, keep only the ones in `landed_jobs`, and use the newest THROUGHPUT_WINDOW of those. Another option is a small status.rs helper that returns `landed_jobs` together with each job's rank among all landed jobs. Add a test that puts unmeasured landed jobs (a landed request with no invocations) before the earlier review and asserts the reconstructed previous producer median still equals the old value, and that the 25→60 case still names the stages and queues the request.",
+      "location": "Decision 1 / step 2 `previous_stage_medians`; status.rs 855-880 and 886-890; hestia.rs 1503",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "When the review queues only a slowdown request, the records commit subject still says no request was queued.",
+      "evidence": "The subject is built only from `review.proposal.request_job`. If a design request is open and a slowdown request is queued, the subject is 'Throughput review: median 60.0 min per landed job; no request queued'. That is false and stays in the record history. The plan's dependents list does not mention this reader. Fix: Keep the queued slowdown job id in a local variable and use a subject such as '...; slowdown request {job} queued' (or name both requests). Assert it in the criterion 1 test if records commits are readable there, or at least list it under dependents.",
+      "location": "Step 4; hestia.rs 1519-1532 (commit subject)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan says `review_passes` prints the same line, but that line includes `r.note`, so it will change.",
+      "evidence": "`review_passes` formats `no proposal: {note}` and `proposal recorded, no request queued: {note}`. With the remark appended, the drain line will read for example 'no proposal: throughput design request X is still open; ...; slowdown request Y queued'. The words 'no proposal' are true, but nothing in the line says a request was queued. When a design request was queued, the remark is not shown in this line at all. Fix: Either say in the plan that this line now carries the remark and check it in a review_passes test, or add the slowdown outcome to `outcome` explicitly (for example ' · slowdown request {job} queued at high priority').",
+      "location": "Dependents: `review_passes` entry; hestia.rs 1851-1860",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read hestia.rs (throughput_due, throughput_request, open_throughput_request, throughput_followups, throughput_review, review_passes and the test helpers) and status.rs (landed_jobs, Throughput::compute). The plan fits the request and the accepted reading. Every function, helper and line it names exists, and the change sits where the fault starts: the open-request branch in `throughput_review`, which skips everything else. The slowdown request is queued from code at high priority through `StewardRequest::new` and `self.queue`. Leaving the review id out of its text correctly keeps `throughput_followups` from treating it as the cited change. Separate markers handle duplicates correctly. The demonstrations drive the real `Athena::throughput_review` with committed fixtures, and the window arithmetic is correct: 9 old and 11 new jobs give a median of 60, and 24.5 and 25.5 against 20 fall on either side of the 25% line. One soundness problem needs a fix, so the verdict is revise. The previous per-stage window is cut with `previous.landings`, which counts all landed request jobs, but the cut is applied to `landed_jobs`, which leaves out unmeasured ones. The reconstructed window therefore drifts toward the current one by a cumulative amount. That can leave the grown-stage list empty and suppress the request in exactly the slowdown case the request is about. The fix is to cut the same set the count came from, and to add a test with unmeasured landed jobs. Two minor findings: the commit subject reports no request queued when a slowdown request was queued, and the `review_passes` line changes even though the plan says it does not."
+}

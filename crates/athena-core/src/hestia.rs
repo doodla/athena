@@ -51,6 +51,16 @@
 //! review compares the minutes measured after a change that cites the review with the prediction
 //! ([`throughput_followups`]).
 //!
+//! Every throughput review run also compares the latest median minutes per landed job with the previous
+//! review's, and does so even while a design request is open. The previous per-stage medians are rebuilt from
+//! the job records ([`previous_stage_medians`]), and the stages whose median minutes grew are named, largest
+//! first ([`stage_growth`]), in the review's note and in the line `athena drain` prints. When the median grew
+//! by more than 25% ([`SLOWDOWN_RATIO`], [`is_slowdown`]), the review also queues, without asking the model, a
+//! high-priority request that names the stage that grew most with its measured minutes
+//! ([`slowdown_request`]). Its title starts with [`SLOWDOWN_MARKER`], and an open request with that marker
+//! holds back another. A rise between 20% and 25% still runs a review and names the stages, but queues no
+//! slowdown request.
+//!
 //! The sweep also measures the build. [`Athena::hestia_sweep_with`] runs [`Athena::measure_build_pass`], which
 //! calls [`Athena::measure_build`] (two cold workspace builds in separate worktrees, committed as an
 //! `athena.build-measurement/1` record) when no measurement record exists, and again whenever the content of
@@ -63,7 +73,10 @@ use crate::commits::{NewFile, message};
 use crate::disk::{CargoBuild, CargoBuilder, GB, cargo_lock_blob};
 use crate::plan::Priority;
 use crate::state::format_bytes;
-use crate::status::{LandedJob, Throughput, landed_jobs, median};
+use crate::status::{
+    LandedJob, StageMinutes, THROUGHPUT_WINDOW, Throughput, landed_jobs, landed_jobs_among_first,
+    median,
+};
 use crate::steward::StewardRequest;
 use crate::store::{JobRecords, JobState, Records};
 use crate::{Athena, Ui};
@@ -1205,6 +1218,19 @@ pub const WORSEN_RATIO: f64 = 1.2;
 /// means the last proposal is still being worked, and the review queues no second one.
 pub const THROUGHPUT_MARKER: &str = "Throughput design: ";
 
+/// The median minutes per landed job must be more than this times the previous review's for the review to
+/// queue a slowdown request: a rise of more than 25%. A rise between [`WORSEN_RATIO`] and this still runs a
+/// review and names the stages that grew, but queues no slowdown request.
+pub const SLOWDOWN_RATIO: f64 = 1.25;
+
+/// The title of a slowdown request starts with this. An open request with a line that starts so means the
+/// last slowdown is still being worked, and the review queues no second one. It shares no prefix with
+/// [`THROUGHPUT_MARKER`], so an open design request never holds back a slowdown request, nor the reverse.
+pub const SLOWDOWN_MARKER: &str = "Throughput slowdown: ";
+
+/// A stage whose median grew by less than this many minutes is not reported as grown.
+const GROWTH_EPSILON: f64 = 1e-6;
+
 /// Expected minutes saved per landed job at or above which a design request is high, the most Hestia queues.
 pub const HIGH_MINUTES: f64 = 5.0;
 /// ... normal. Below this a request is low.
@@ -1348,15 +1374,168 @@ pub fn throughput_request(
     .map(|r| r.render())
 }
 
-/// The open request job, if any, whose text has a line that starts with [`THROUGHPUT_MARKER`]. A closed one
-/// (landed, rejected, failed or abandoned) does not count.
-fn open_throughput_request(records: &Records) -> Option<&JobRecords> {
+/// The open request job, if any, whose text has a line that starts with `marker`. A closed one (landed,
+/// rejected, failed or abandoned) does not count.
+fn open_request_with_marker<'a>(records: &'a Records, marker: &str) -> Option<&'a JobRecords> {
     records.request_jobs().into_iter().find(|j| {
         !matches!(j.state(), JobState::Closed(_))
             && j.request
                 .as_ref()
-                .is_some_and(|r| r.text.lines().any(|l| l.starts_with(THROUGHPUT_MARKER)))
+                .is_some_and(|r| r.text.lines().any(|l| l.starts_with(marker)))
     })
+}
+
+/// The open design request, if any: see [`THROUGHPUT_MARKER`].
+fn open_throughput_request(records: &Records) -> Option<&JobRecords> {
+    open_request_with_marker(records, THROUGHPUT_MARKER)
+}
+
+/// Whether the median minutes per landed job rose by more than 25% ([`SLOWDOWN_RATIO`]) from `previous` to
+/// `current`. False when `previous` is not above zero, since a ratio to nothing says nothing. Exactly 25% is
+/// not more than 25%.
+pub fn is_slowdown(previous: f64, current: f64) -> bool {
+    previous > 0.0 && current / previous > SLOWDOWN_RATIO
+}
+
+/// One stage whose median minutes per landed job grew from one throughput review to the next.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StageGrowth {
+    /// The stage's name, as [`StageMinutes::named`] gives it.
+    pub stage: &'static str,
+    /// Its median minutes in the window the previous review saw.
+    pub previous_minutes: f64,
+    /// Its median minutes in the latest window.
+    pub minutes: f64,
+}
+
+impl StageGrowth {
+    /// The minutes the stage's median gained.
+    pub fn added(&self) -> f64 {
+        self.minutes - self.previous_minutes
+    }
+}
+
+/// The stages whose median minutes grew from `previous` to `current`, the stage that gained the most minutes
+/// first. A stage that shrank, stayed the same or grew by under a millionth of a minute is left out. Stages
+/// that gained the same minutes keep pipeline order. The stage medians are medians of each stage alone, so
+/// the list can be empty although the median of the totals rose.
+pub fn stage_growth(previous: &StageMinutes, current: &StageMinutes) -> Vec<StageGrowth> {
+    let mut grown: Vec<StageGrowth> = previous
+        .named()
+        .into_iter()
+        .zip(current.named())
+        .filter_map(|((stage, before), (_, now))| {
+            (now - before > GROWTH_EPSILON).then_some(StageGrowth {
+                stage,
+                previous_minutes: before,
+                minutes: now,
+            })
+        })
+        .collect();
+    grown.sort_by(|a, b| b.added().total_cmp(&a.added()));
+    grown
+}
+
+/// The median minutes of each stage in the window the `previous` review saw, or None when no measured job
+/// is left in it.
+///
+/// A review records only the count of landed jobs it counted and the median of their totals, not the stage
+/// medians. The window is rebuilt from the job records: the first `previous.landings` request jobs to land
+/// ([`landed_jobs_among_first`], which cuts over every landed job so that jobs that ran no model do not move
+/// the cut), then the newest [`THROUGHPUT_WINDOW`] measured ones, as the status section does. It is a
+/// reconstruction: a landing record written after the review can have moved a job's landing time.
+pub fn previous_stage_medians(
+    records: &Records,
+    previous: &ThroughputReview,
+) -> Option<StageMinutes> {
+    let jobs = landed_jobs_among_first(records, previous.landings as usize);
+    let window = &jobs[jobs.len().saturating_sub(THROUGHPUT_WINDOW)..];
+    (!window.is_empty()).then(|| StageMinutes::median_of(window))
+}
+
+/// The text of the slowdown request: the median rose from `previous_median` to `median` minutes per landed
+/// job, and `growth` (from [`stage_growth`], the stage that gained the most first) lists the stages whose
+/// medians grew. It is built with [`StewardRequest`] at high priority. The title starts with
+/// [`SLOWDOWN_MARKER`] and names the stage that grew most with its measured median minutes; the body adds its
+/// previous minutes and the other stages that grew. It does not cite a review id, because
+/// [`throughput_followups`] reads any landed job that cites one as the change that implements that review's
+/// proposal. Err when `growth` is empty, because a request must name a stage.
+pub fn slowdown_request(
+    previous_median: f64,
+    median: f64,
+    growth: &[StageGrowth],
+) -> Result<String, String> {
+    let Some(biggest) = growth.first() else {
+        return Err("no stage's median grew, so there is no stage to name".to_string());
+    };
+    let stages = growth
+        .iter()
+        .map(|g| format!("{} {:.1} to {:.1}", g.stage, g.previous_minutes, g.minutes))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let title = format!(
+        "{SLOWDOWN_MARKER}{} grew from {:.1} to {:.1} min per landed job",
+        biggest.stage, biggest.previous_minutes, biggest.minutes
+    );
+    let body = format!(
+        "Athena's throughput review found that the median minutes per landed job rose from \
+         {previous_median:.1} to {median:.1}, more than 25%, since the previous throughput review. Find why the \
+         stage that grew most now takes longer and remove the cause.\n\n\
+         Stage that grew most: {}, a median of {:.1} minutes per landed job now, {:.1} before.\n\
+         Stages whose median minutes grew, in minutes per landed job before to now: {stages}.\n\n\
+         The medians are over the newest landed jobs that Athena measured. The status section of athena status \
+         prints the same stage medians.",
+        biggest.stage, biggest.minutes, biggest.previous_minutes,
+    );
+    let acceptance = [
+        format!(
+            "The cause of the longer {} stage is found and stated in the change or in a note under docs/design/",
+            biggest.stage
+        ),
+        "The change shortens that stage, and the next throughput review shows the median minutes per landed job falling".to_string(),
+    ];
+    StewardRequest::new(
+        Some(Priority::High),
+        &title,
+        &body,
+        &acceptance,
+        &["crates/".to_string(), "docs/design/".to_string()],
+    )
+    .map(|r| r.render())
+}
+
+/// The commit subject of a throughput review record: the median, then the design request and the slowdown
+/// request the review queued, or that it queued none.
+pub fn review_subject(median: f64, design: Option<&JobId>, slowdown: Option<&JobId>) -> String {
+    let queued = match (design, slowdown) {
+        (Some(d), Some(s)) => format!("design request {d}; slowdown request {s}"),
+        (Some(d), None) => format!("design request {d}"),
+        (None, Some(s)) => format!("slowdown request {s}"),
+        (None, None) => "no request queued".to_string(),
+    };
+    format!("Throughput review: median {median:.1} min per landed job; {queued}")
+}
+
+/// What `athena drain` prints after the median for a throughput review: the design request it queued (and the
+/// note, which can carry a slowdown remark), or why there is none.
+pub fn throughput_outcome(r: &ThroughputReview) -> String {
+    match r.proposal.as_ref() {
+        Some(p) => match &p.request_job {
+            Some(job) => {
+                let queued = format!(
+                    "design request {job} queued at {} priority, predicting {:.1} min saved per landed job",
+                    p.priority, p.expected_minutes_saved
+                );
+                if r.note.is_empty() {
+                    queued
+                } else {
+                    format!("{queued} · {}", r.note)
+                }
+            }
+            None => format!("proposal recorded, no request queued: {}", r.note),
+        },
+        None => format!("no proposal: {}", r.note),
+    }
 }
 
 /// The predictions of earlier reviews that a change has since closed, each set against the measured minutes.
@@ -1435,6 +1614,11 @@ impl Athena {
     /// record, or None when the review is not due, the run is nested, or the kill switch is on. A model that
     /// fails or answers badly still gives a record, without a proposal, so the cadence moves on; the invocation
     /// is recorded either way, since it cost money.
+    ///
+    /// Whether or not a design request is open, a due review also compares the latest stage medians with the
+    /// previous review's, puts the stages that grew in the record's note and in a line to `ui`, and, when the
+    /// median grew by more than 25%, queues a high-priority slowdown request
+    /// (`compare_with_previous_review`).
     pub fn throughput_review(&self, ui: &dyn Ui) -> Result<Option<ThroughputReview>> {
         if self.nested.is_some() || self.state.registry().stopped() {
             return Ok(None);
@@ -1455,6 +1639,9 @@ impl Athena {
             id = RecordId::generate(now);
         }
         let followups = throughput_followups(&records, &landed_jobs(&records));
+        // Compare with the previous review before anything else, so that an open design request cannot
+        // hide a slowdown.
+        let (remark, slowdown_job) = self.compare_with_previous_review(&records, latest, &measured);
 
         let mut note = String::new();
         let mut proposal = None;
@@ -1497,6 +1684,12 @@ impl Athena {
             }
         }
 
+        if !remark.is_empty() {
+            if !note.is_empty() {
+                note.push_str("; ");
+            }
+            note.push_str(&remark);
+        }
         let review = ThroughputReview {
             id,
             at: now,
@@ -1516,20 +1709,14 @@ impl Athena {
             trailers.push(("Athena-Record", invocation_record.canonical_path()));
             files.push(NewFile::record(&invocation_record));
         }
-        let subject = match review
-            .proposal
-            .as_ref()
-            .and_then(|p| p.request_job.as_ref())
-        {
-            Some(job) => format!(
-                "Throughput review: median {:.1} min per landed job; design request {job}",
-                review.window_median_minutes
-            ),
-            None => format!(
-                "Throughput review: median {:.1} min per landed job; no request queued",
-                review.window_median_minutes
-            ),
-        };
+        let subject = review_subject(
+            review.window_median_minutes,
+            review
+                .proposal
+                .as_ref()
+                .and_then(|p| p.request_job.as_ref()),
+            slowdown_job.as_ref(),
+        );
         self.commit_records(
             &files,
             &message(
@@ -1551,7 +1738,88 @@ impl Athena {
                 f.jobs_measured
             ));
         }
+        if !remark.is_empty() {
+            ui.line(&format!(
+                "hestia     throughput review {}: {remark}",
+                review.id
+            ));
+        }
         Ok(Some(review))
+    }
+
+    /// Sets the latest stage medians against the ones the previous review saw ([`previous_stage_medians`]),
+    /// whether or not a design request is open. Returns a remark naming the stages whose median minutes grew,
+    /// largest first (empty when none did, or when there is no previous review), and the slowdown request
+    /// job when one was queued.
+    ///
+    /// When the median minutes per landed job grew by more than 25% ([`is_slowdown`]) and a stage grew, a
+    /// high-priority request naming the stage that grew most is queued ([`slowdown_request`]), unless an
+    /// open request with [`SLOWDOWN_MARKER`] already exists. The comparison is code, not the model, and it
+    /// never queues a second design request. When the median rose but no stage's median did, or the previous
+    /// window cannot be rebuilt, nothing is queued and the remark says so.
+    fn compare_with_previous_review(
+        &self,
+        records: &Records,
+        latest: Option<&ThroughputReview>,
+        measured: &Throughput,
+    ) -> (String, Option<JobId>) {
+        let Some(previous) = latest else {
+            return (String::new(), None);
+        };
+        let growth = previous_stage_medians(records, previous)
+            .map(|before| stage_growth(&before, &measured.median_stages));
+        let mut parts = Vec::new();
+        if let Some(grown) = growth.as_deref().filter(|g| !g.is_empty()) {
+            let stages = grown
+                .iter()
+                .map(|g| format!("{} {:.1} to {:.1}", g.stage, g.previous_minutes, g.minutes))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!(
+                "median {:.1} to {:.1} min per landed job; stages that grew: {stages}",
+                previous.window_median_minutes, measured.median_minutes
+            ));
+        }
+        let mut slowdown_job = None;
+        if is_slowdown(previous.window_median_minutes, measured.median_minutes) {
+            match growth.as_deref() {
+                None => parts.push(
+                    "the median grew by more than 25% but the previous review's stage medians could not be rebuilt; no slowdown request queued"
+                        .to_string(),
+                ),
+                Some([]) => parts.push(
+                    "the median grew by more than 25% but no stage's median did; no slowdown request queued"
+                        .to_string(),
+                ),
+                Some(grown) => {
+                    if let Some(open) = open_request_with_marker(records, SLOWDOWN_MARKER) {
+                        parts.push(format!("slowdown request {} is still open", open.id()));
+                    } else {
+                        match slowdown_request(
+                            previous.window_median_minutes,
+                            measured.median_minutes,
+                            grown,
+                        ) {
+                            Ok(text) => match self.queue(&text) {
+                                Ok((job, _)) => {
+                                    parts.push(format!(
+                                        "slowdown request {job} queued at high priority"
+                                    ));
+                                    slowdown_job = Some(job);
+                                }
+                                Err(e) => parts.push(format!(
+                                    "the slowdown request could not be queued: {e:#}"
+                                )),
+                            },
+                            Err(e) => parts.push(format!(
+                                "the slowdown request could not be built: {e}"
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+        (parts.join("; "), slowdown_job)
     }
 
     /// Runs the model once over a scratch workspace holding the throughput section and the design documents.
@@ -1848,16 +2116,7 @@ impl Athena {
         // The throughput review is due every ten landings or on a 20% slowdown, so most calls print nothing.
         match self.throughput_review(ui) {
             Ok(Some(r)) => {
-                let outcome = match r.proposal.as_ref() {
-                    Some(p) => match &p.request_job {
-                        Some(job) => format!(
-                            "design request {job} queued at {} priority, predicting {:.1} min saved per landed job",
-                            p.priority, p.expected_minutes_saved
-                        ),
-                        None => format!("proposal recorded, no request queued: {}", r.note),
-                    },
-                    None => format!("no proposal: {}", r.note),
-                };
+                let outcome = throughput_outcome(&r);
                 lines.push(format!(
                     "hestia     throughput review ({}): median {:.1} min per landed job over {} landings · {outcome}",
                     r.trigger.as_str(),
@@ -3883,7 +4142,6 @@ mod tests {
     // -----------------------------------------------------------------------------------------------------
     // Throughput review
 
-    use crate::status::StageMinutes;
     use crate::status::planning_cost_tests::timed_job;
     use athena_agent::fake::FakeTurn;
     use std::sync::{Arc, Mutex};
@@ -3925,6 +4183,17 @@ mod tests {
         count: usize,
         minutes: f64,
     ) {
+        seed_stages(dir, athena, from, count, producer_only(minutes));
+    }
+
+    /// Like [`seed_landed`], with the minutes of each stage given.
+    fn seed_stages(
+        dir: &std::path::Path,
+        athena: &Athena,
+        from: usize,
+        count: usize,
+        stages: StageMinutes,
+    ) {
         let mut all = Vec::new();
         for g in from..from + count {
             let (day, hour) = (1 + g / 12, (g % 12) * 2);
@@ -3933,14 +4202,37 @@ mod tests {
                 format!("2026-09-{day:02}T{hour:02}:00:00Z")
                     .parse()
                     .unwrap(),
-                producer_only(minutes),
+                stages,
                 OutcomeState::Landed,
             ));
         }
         put(dir, athena, all);
     }
 
-    fn open_design_requests(known: &Records) -> Vec<&JobRecords> {
+    /// Commits `count` landed jobs that ran no model, so `Throughput` counts them as landed and measures none.
+    fn seed_unmeasured(dir: &std::path::Path, athena: &Athena, from: usize, count: usize) {
+        seed_stages(dir, athena, from, count, StageMinutes::default());
+    }
+
+    /// Commits an open request whose title is a throughput design request, so a review finds one open.
+    fn open_design_request_job(dir: &std::path::Path, athena: &Athena) {
+        let mut job = timed_job(
+            "20260905-000000-d000",
+            "2026-09-05T00:00:00Z".parse().unwrap(),
+            StageMinutes::default(),
+            OutcomeState::Landed,
+        );
+        job.truncate(1);
+        let AnyRecord::Request(request) = &mut job[0] else {
+            panic!("a job starts with its request");
+        };
+        request.text = format!(
+            "{THROUGHPUT_MARKER}Producer waits\n\nAcceptance:\n- A design note exists\n\nFiles: docs/design/\n"
+        );
+        put(dir, athena, job);
+    }
+
+    fn open_with_marker<'a>(known: &'a Records, marker: &str) -> Vec<&'a JobRecords> {
         known
             .request_jobs()
             .into_iter()
@@ -3948,9 +4240,27 @@ mod tests {
             .filter(|j| {
                 j.request
                     .as_ref()
-                    .is_some_and(|r| r.text.lines().any(|l| l.starts_with(THROUGHPUT_MARKER)))
+                    .is_some_and(|r| r.text.lines().any(|l| l.starts_with(marker)))
             })
             .collect()
+    }
+
+    fn open_design_requests(known: &Records) -> Vec<&JobRecords> {
+        open_with_marker(known, THROUGHPUT_MARKER)
+    }
+
+    fn open_slowdown_requests(known: &Records) -> Vec<&JobRecords> {
+        open_with_marker(known, SLOWDOWN_MARKER)
+    }
+
+    fn put_earlier_review(dir: &std::path::Path, athena: &Athena, landings: u32, median: f64) {
+        put(
+            dir,
+            athena,
+            vec![AnyRecord::ThroughputReview(Box::new(earlier_review(
+                landings, median,
+            )))],
+        );
     }
 
     fn earlier_review(landings: u32, median: f64) -> ThroughputReview {
@@ -4213,5 +4523,350 @@ mod tests {
             assert!(text.starts_with(&format!("Priority: {level}\n")), "{text}");
             assert_eq!(open[0].priority(), expected);
         }
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // Throughput review: the comparison with the previous review
+
+    /// Stage minutes of a job that took 60 minutes: the producer 45, the checks 10, the verifier 5.
+    fn slow_stages() -> StageMinutes {
+        StageMinutes {
+            producer: 45.0,
+            checks: 10.0,
+            verifier: 5.0,
+            ..StageMinutes::default()
+        }
+    }
+
+    fn lines_of(ui: &Lines) -> String {
+        ui.0.lock().unwrap().join("\n")
+    }
+
+    #[test]
+    fn a_median_rise_from_25_to_60_with_a_design_request_open_names_the_grown_stages_and_queues_a_high_request()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, seen) = throughput_model(6.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        // Ten jobs of 25 minutes, a review that saw them, an open design request, then eleven of 60 minutes.
+        seed_landed(dir.path(), &athena, 0, 10, 25.0);
+        put_earlier_review(dir.path(), &athena, 10, 25.0);
+        open_design_request_job(dir.path(), &athena);
+        seed_stages(dir.path(), &athena, 10, 11, slow_stages());
+
+        let ui = Lines(std::sync::Mutex::new(Vec::new()));
+        let review = athena.throughput_review(&ui).unwrap().unwrap();
+        assert_eq!(review.window_median_minutes, 60.0);
+
+        // The open design request is respected: no second proposal, the model is not asked.
+        assert_eq!(review.proposal, None);
+        assert!(review.note.contains("still open"), "{}", review.note);
+        assert!(seen.lock().unwrap().is_empty(), "the model was not asked");
+        let known = records(&athena);
+        assert_eq!(open_design_requests(&known).len(), 1);
+
+        // Every stage that grew is named, the one that gained most first, with its minutes.
+        let producer = review.note.find("producer 25.0 to 45.0").expect("producer");
+        let checks = review.note.find("checks 0.0 to 10.0").expect("checks");
+        let verifier = review.note.find("verifier 0.0 to 5.0").expect("verifier");
+        assert!(producer < checks && checks < verifier, "{}", review.note);
+        assert!(
+            review.note.contains("median 25.0 to 60.0"),
+            "{}",
+            review.note
+        );
+        assert!(
+            lines_of(&ui).contains("producer 25.0 to 45.0"),
+            "{}",
+            lines_of(&ui)
+        );
+
+        // One high-priority request names the stage that grew most and its measured minutes.
+        let open = open_slowdown_requests(&known);
+        assert_eq!(open.len(), 1, "exactly one slowdown request");
+        assert_eq!(open[0].priority(), Priority::High);
+        let text = &open[0].request.as_ref().unwrap().text;
+        assert!(text.starts_with("Priority: high\n"), "{text}");
+        for expected in [
+            "Throughput slowdown: producer grew from 25.0 to 45.0 min per landed job",
+            "rose from 25.0 to 60.0",
+            "checks 0.0 to 10.0",
+            "verifier 0.0 to 5.0",
+        ] {
+            assert!(text.contains(expected), "{expected:?} not in:\n{text}");
+        }
+        assert!(
+            review.note.contains(&format!(
+                "slowdown request {} queued at high priority",
+                open[0].id()
+            )),
+            "{}",
+            review.note
+        );
+        assert!(known.throughput_reviews.contains(&review));
+
+        // Ten slower jobs make a second review due while the slowdown request is open: the grown stage is
+        // named again, and no second request is queued.
+        seed_stages(
+            dir.path(),
+            &athena,
+            21,
+            10,
+            StageMinutes {
+                producer: 100.0,
+                ..StageMinutes::default()
+            },
+        );
+        let second = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        assert_eq!(second.window_median_minutes, 80.0);
+        assert!(
+            second.note.contains("producer 45.0 to 72.5"),
+            "{}",
+            second.note
+        );
+        assert!(
+            second
+                .note
+                .contains(&format!("slowdown request {} is still open", open[0].id())),
+            "{}",
+            second.note
+        );
+        let known = records(&athena);
+        assert_eq!(open_slowdown_requests(&known).len(), 1);
+        assert_eq!(open_design_requests(&known).len(), 1);
+        assert!(seen.lock().unwrap().is_empty(), "the model was not asked");
+    }
+
+    #[test]
+    fn unmeasured_landed_jobs_before_the_earlier_review_do_not_hide_the_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, seen) = throughput_model(6.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        // Twelve landed jobs that ran no model, ten of 25 minutes: the review saw 22 landings. Then an open
+        // design request and eleven jobs of 60 minutes.
+        seed_unmeasured(dir.path(), &athena, 0, 12);
+        seed_landed(dir.path(), &athena, 12, 10, 25.0);
+        put_earlier_review(dir.path(), &athena, 22, 25.0);
+        open_design_request_job(dir.path(), &athena);
+        seed_stages(dir.path(), &athena, 22, 11, slow_stages());
+
+        // The window that review saw is rebuilt from its ten measured jobs, not from the newest ones.
+        let known = records(&athena);
+        let before = previous_stage_medians(&known, &earlier_review(22, 25.0)).expect("a window");
+        assert_eq!(before.producer, 25.0);
+        assert_eq!(before.checks, 0.0);
+
+        let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        assert_eq!(review.window_median_minutes, 60.0);
+        assert!(
+            review.note.contains("producer 25.0 to 45.0"),
+            "{}",
+            review.note
+        );
+        let known = records(&athena);
+        let open = open_slowdown_requests(&known);
+        assert_eq!(open.len(), 1, "{}", review.note);
+        assert_eq!(open[0].priority(), Priority::High);
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_flat_median_queues_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, seen) = throughput_model(6.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        seed_landed(dir.path(), &athena, 0, 10, 25.0);
+        put_earlier_review(dir.path(), &athena, 10, 25.0);
+        open_design_request_job(dir.path(), &athena);
+        seed_landed(dir.path(), &athena, 10, 10, 25.0);
+        let before = records(&athena).request_jobs().len();
+
+        let ui = Lines(std::sync::Mutex::new(Vec::new()));
+        let review = athena.throughput_review(&ui).unwrap().unwrap();
+        assert_eq!(review.window_median_minutes, 25.0);
+        assert!(review.note.contains("still open"), "{}", review.note);
+        assert!(
+            !review.note.contains("grew") && !review.note.contains("slowdown"),
+            "{}",
+            review.note
+        );
+        assert_eq!(lines_of(&ui), "", "nothing was reported");
+        let known = records(&athena);
+        assert_eq!(known.request_jobs().len(), before, "no request was queued");
+        assert!(open_slowdown_requests(&known).is_empty());
+        assert_eq!(open_design_requests(&known).len(), 1);
+        assert!(seen.lock().unwrap().is_empty());
+
+        // The same holds for equal stage medians in the pure comparison.
+        assert!(stage_growth(&slow_stages(), &slow_stages()).is_empty());
+    }
+
+    #[test]
+    fn a_rise_of_twenty_to_twenty_five_percent_names_stages_but_queues_no_slowdown_request() {
+        for (minutes, queued) in [(24.5, false), (25.1, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = tempfile::tempdir().unwrap();
+            let (model, _) = throughput_model(6.0);
+            let athena = athena_with(dir.path(), state.path(), model);
+            // A review that saw five jobs of 20 minutes, an open design request, then nine slower jobs.
+            seed_landed(dir.path(), &athena, 0, 5, 20.0);
+            put_earlier_review(dir.path(), &athena, 5, 20.0);
+            open_design_request_job(dir.path(), &athena);
+            seed_landed(dir.path(), &athena, 5, 9, minutes);
+
+            let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+            assert_eq!(review.trigger, ThroughputTrigger::Worsened);
+            assert_eq!(review.window_median_minutes, minutes);
+            assert!(
+                review
+                    .note
+                    .contains(&format!("producer 20.0 to {minutes:.1}")),
+                "{minutes}: {}",
+                review.note
+            );
+            let known = records(&athena);
+            let open = open_slowdown_requests(&known);
+            assert_eq!(
+                open.len(),
+                usize::from(queued),
+                "{minutes}: {}",
+                review.note
+            );
+            if queued {
+                assert_eq!(open[0].priority(), Priority::High);
+            }
+        }
+        assert!(!is_slowdown(20.0, 25.0), "exactly 25% is not more");
+        assert!(is_slowdown(20.0, 25.1));
+        assert!(!is_slowdown(20.0, 12.0));
+        assert!(!is_slowdown(0.0, 10.0), "no ratio to nothing");
+    }
+
+    #[test]
+    fn stage_growth_lists_the_stages_that_grew_largest_first() {
+        let before = StageMinutes {
+            reading: 2.0,
+            planning: 0.0,
+            producer: 10.0,
+            checks: 5.0,
+            verifier: 4.0,
+            landing_and_rebuild: 3.0,
+        };
+        let now = StageMinutes {
+            reading: 4.0,
+            planning: 3.0,
+            producer: 20.0,
+            checks: 5.0,
+            verifier: 2.0,
+            landing_and_rebuild: 5.0,
+        };
+        let grown = stage_growth(&before, &now);
+        // Reading and landing both gained two minutes: pipeline order breaks the tie. Checks stayed and the
+        // verifier shrank, so neither is named.
+        assert_eq!(
+            grown.iter().map(|g| g.stage).collect::<Vec<_>>(),
+            vec!["producer", "planning", "reading", "landing and rebuild"]
+        );
+        assert_eq!(
+            grown[1],
+            StageGrowth {
+                stage: "planning",
+                previous_minutes: 0.0,
+                minutes: 3.0
+            }
+        );
+        assert_eq!(grown[0].added(), 10.0);
+        // Shrinking stages alone give nothing, even if some other median rose.
+        assert!(stage_growth(&now, &before).len() < grown.len());
+        assert!(stage_growth(&now, &now).is_empty());
+    }
+
+    #[test]
+    fn the_slowdown_request_names_the_biggest_stage_and_its_minutes_at_high_priority() {
+        let growth = [
+            StageGrowth {
+                stage: "producer",
+                previous_minutes: 25.0,
+                minutes: 45.0,
+            },
+            StageGrowth {
+                stage: "checks",
+                previous_minutes: 0.0,
+                minutes: 10.0,
+            },
+            StageGrowth {
+                stage: "verifier",
+                previous_minutes: 0.0,
+                minutes: 5.0,
+            },
+        ];
+        let text = slowdown_request(25.0, 60.0, &growth).unwrap();
+        assert!(text.starts_with("Priority: high\n\n"), "{text}");
+        assert!(
+            text.contains(
+                "Throughput slowdown: producer grew from 25.0 to 45.0 min per landed job"
+            ),
+            "{text}"
+        );
+        for expected in [
+            "rose from 25.0 to 60.0",
+            "a median of 45.0 minutes per landed job now, 25.0 before",
+            "producer 25.0 to 45.0, checks 0.0 to 10.0, verifier 0.0 to 5.0",
+        ] {
+            assert!(text.contains(expected), "{expected:?} not in:\n{text}");
+        }
+        assert!(text.lines().any(|l| l.starts_with(SLOWDOWN_MARKER)));
+        assert!(!text.lines().any(|l| l.starts_with(THROUGHPUT_MARKER)));
+        assert!(!crate::reading::request_text_acceptance(&text).is_empty());
+        // No review id: a landed job that cites one is read as the change that implements its proposal.
+        assert!(!text.contains("20260"), "{text}");
+        assert!(slowdown_request(25.0, 60.0, &[]).is_err());
+    }
+
+    #[test]
+    fn review_subject_names_the_design_and_slowdown_requests() {
+        let design = JobId::parse("20261104-100000-d000").unwrap();
+        let slow = JobId::parse("20261104-100100-s000").unwrap();
+        assert_eq!(
+            review_subject(60.0, Some(&design), None),
+            "Throughput review: median 60.0 min per landed job; design request 20261104-100000-d000"
+        );
+        assert_eq!(
+            review_subject(60.0, None, None),
+            "Throughput review: median 60.0 min per landed job; no request queued"
+        );
+        let only_slowdown = review_subject(60.0, None, Some(&slow));
+        assert!(only_slowdown.contains("slowdown request 20261104-100100-s000"));
+        assert!(!only_slowdown.contains("no request queued"));
+        let both = review_subject(60.0, Some(&design), Some(&slow));
+        assert!(both.contains("design request 20261104-100000-d000"));
+        assert!(both.contains("slowdown request 20261104-100100-s000"));
+    }
+
+    #[test]
+    fn throughput_outcome_shows_the_slowdown_with_and_without_a_design_request() {
+        let mut review = earlier_review(21, 60.0);
+        review.proposal = Some(ThroughputProposal {
+            bottleneck: "The producer waits.".into(),
+            stage: "producer".into(),
+            change: "Drain asynchronously.".into(),
+            expected_minutes_saved: 6.0,
+            priority: "high".into(),
+            request_job: Some(JobId::parse("20261104-100000-d000").unwrap()),
+        });
+        let design_only = "design request 20261104-100000-d000 queued at high priority, predicting 6.0 min saved per landed job";
+        assert_eq!(throughput_outcome(&review), design_only);
+        review.note = "slowdown request 20261104-100100-s000 queued at high priority".into();
+        let both = throughput_outcome(&review);
+        assert!(both.starts_with(design_only), "{both}");
+        assert!(
+            both.contains("slowdown request 20261104-100100-s000 queued"),
+            "{both}"
+        );
+        review.proposal = None;
+        assert!(throughput_outcome(&review).starts_with("no proposal: slowdown request"));
     }
 }

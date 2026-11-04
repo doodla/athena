@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-141009-hsg4",
+  "round": 2,
+  "at": "2026-11-04T20:32:21.337856257Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The fixture makes the review due by cadence, not by the 20% trigger, so any assertion that the trigger is Worsened would fail.",
+      "evidence": "throughput_due (hestia.rs 1246) returns Cadence when landed >= before + REVIEW_EVERY. 10 + 11 = 21 >= 20, so the trigger is Cadence. The Worsened branch (1249-1251) is reached only with fewer than 10 new landings. With 10 old jobs and at most 9 new ones in the window, the median stays at the old value (for example 19 jobs: 10×20 and 9×24.5 give a median of 20). So this fixture shape cannot produce Worsened. Fix: Either drop the 'trigger Worsened' claim and do not assert the trigger, or build a Worsened case: seed few old jobs (for example 2 jobs with earlier_review(2, 20.0)) and then fewer than 10 new jobs that still form the window majority, so the median moves above 1.2× while landed < before + 10.",
+      "location": "Demonstrations, Criterion 3 (fixture: ten 20-minute jobs, earlier_review(10, 20.0), 11 new jobs; 'At 24.5 (trigger `Worsened`)')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The drain-line branch 'proposal recorded, no request queued: {note}' stays wrong when a slowdown request was queued but the design request failed to build or queue.",
+      "evidence": "hestia.rs 1857 prints `proposal recorded, no request queued: {}`. The plan changes only the design-request-queued branch (appends ` · {note}`) and says the other branches 'already print the note'. If the note also says 'slowdown request X queued', the line contradicts itself. This is the same fault the plan fixes in the commit subject with review_subject. Fix: In throughput_outcome, word that branch so it does not claim no request was queued, for example 'proposal recorded, design request not queued: {note}'. Add a case to the pure throughput_outcome test.",
+      "location": "Decision 8(b) / Step 5 (throughput_outcome)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The reason for rejecting a time-based cut covers only a cut on landing_end. A cut on the closing outcome's time, which is what made a job count as landed at review time, was not considered.",
+      "evidence": "landing_end (status.rs 790-796) takes the later of the outcome and the landing record. The rejection rests on that. landed_total, however, counts jobs whose state is Closed(Landed), and that state is set by the outcome (closing_outcome(j).at), not by the landing record. The chosen count-based ranking by landing_end has the same reordering risk the plan lists under Risks. Fix: No design change is required, since the count-based cut is sound. Either rank by closing_outcome(j).at instead of landing_end, which matches what made the job count toward previous.landings, or correct the rejection reason and the doc comment so they state the actual residual error.",
+      "location": "Decision 1, rejected alternative 'Cut by landed_at <= previous.at'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The plan does not say what the queued slowdown request asks the next job to do.",
+      "evidence": "The step gives the title and body content but not the two acceptance bullets. The design request's bullets are spelled out at hestia.rs 1337-1340. The queued request is what the operator acts on (outcome-check default). Fix: Write the two acceptance bullets in the plan, for example: find the cause of the growth in the named stage from its measured minutes, and bring that stage's median back below the previous minutes (or explain why not). Have the builder test assert them.",
+      "location": "Step 3 (slowdown_request: 'two acceptance bullets; files crates/ and docs/design/')",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read hestia.rs (throughput_due 1236, throughput_request 1313, open_throughput_request 1353, throughput_followups 1368, throughput_review 1438-1555, review_passes 1812-1874, test fixtures 3886-4177), status.rs (StageMinutes 652-678, landing_end 790, landed_jobs 855-881, Throughput::compute 885-961, timed_job 3097), steward.rs StewardRequest::new (472), store.rs priority() (92), drain.rs and code_health.rs. These confirm the plan's claims. previous.landings is landed_total (hestia.rs 1503), which counts every landed request job (status.rs 886-890). landed_jobs drops jobs with no invocation (862). So the round-1 drift was real, and ranking over the full landed set fixes it. The comparison sits ahead of the open-request branch, and the existing note assertions survive because the remark is appended. The slowdown request deliberately leaves out the review id, so throughput_followups (1392) is not confused. I checked the fixtures by hand. In test A the 20-job window is 9 jobs at 25 minutes and 11 at 60, so the median is 60 and the stages grow by producer +20, checks +10 and verifier +5. In test B, cutting landed_jobs by count alone (the round-1 method) would report no grown stage, so the test would fail without the fix. The flat test reaches cadence at 20 landings. Every criterion has a real seam (Athena::throughput_review with the injected FakeAgentDriver, plus pure builders). The record schema does not change, and the work fits one producer run. I found three minor issues and one nit. The 20-25% test fixture produces trigger Cadence, not Worsened as the plan says. The drain line's 'proposal recorded, no request queued' prefix can still be false when a slowdown request was queued. The reason given for rejecting a time-based cut addresses landing_end rather than outcome time. The acceptance bullets of the slowdown request are not specified. None of these is a blocker or major."
+}
