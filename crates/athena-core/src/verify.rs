@@ -371,14 +371,27 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
     // record reused from a green CI run for the candidate commit: it has no exit code but is marked
     // `reused`. Skipped checks and nested-run placeholders carry no exit code and are not reused, so they
     // never count.
+    //
+    // A recorded revert run (a planned "fails without the fix" demonstration) is not counted here: it ran on
+    // a copy with the fix reverted, and it counts only for the criteria it demonstrates (see `revert_runs`).
+    let mut revert_runs: Vec<&CheckRun> = Vec::new();
     if inputs.candidate_tree.is_some() && inputs.candidate_tree == inputs.checks_tree {
         for check in inputs
             .checks
             .iter()
             .filter(|c| c.passed && (c.exit_code == Some(0) || (c.reused && c.exit_code.is_none())))
         {
+            if !check.revert_for.is_empty() {
+                continue;
+            }
             ran.extend(simple_commands(&check.command.join(" ")));
         }
+        revert_runs.extend(
+            inputs
+                .checks
+                .iter()
+                .filter(|c| !c.revert_for.is_empty() && c.exit_code.is_some()),
+        );
     }
 
     let blocking_checks = |c: &&CheckRun| !c.passed && !is_pre_existing(c, inputs.baseline);
@@ -496,11 +509,22 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
             .iter()
             .map(|c| c.trim().to_string())
             .collect();
+        // A recorded revert run counts as seen running, by its command or its record name, only for the
+        // criteria it demonstrates. It must have finished (an exit code, any value: the verifier judges the
+        // result) and be from the candidate tree (`revert_runs` is empty otherwise). Its `passed` is always
+        // true, so it never blocks the verdict.
+        let number = (i + 1) as u32;
+        let revert_seen = |piece: &String| {
+            revert_runs.iter().any(|r| {
+                r.revert_for.contains(&number)
+                    && (r.name == *piece || simple_commands(&r.command.join(" ")).contains(piece))
+            })
+        };
         let unseen: Vec<&String> = commands
             .iter()
             .filter(|c| {
                 let pieces = simple_commands(c);
-                pieces.is_empty() || !pieces.iter().all(|p| ran.contains(p))
+                pieces.is_empty() || !pieces.iter().all(|p| ran.contains(p) || revert_seen(p))
             })
             .collect();
         let commands_verified = match criterion.kind {
@@ -995,6 +1019,33 @@ pub fn demonstration_view(
     )
 }
 
+/// The name of a group's demonstration run: `fails-without-<first criterion number>`. The run's check name,
+/// the entry shown to the verifier and the stored record all take it from here, so they cannot differ.
+pub fn demonstration_name(group: &DemonstrationGroup) -> String {
+    format!(
+        "fails-without-{}",
+        group.criteria.first().copied().unwrap_or(0)
+    )
+}
+
+/// The stored record of one demonstration run, written to the verification record's checks next to the
+/// entry shown to the verifier.
+///
+/// It keeps the plan's command, the exit code, the count of tests that ran and the output tail, and marks the
+/// criteria the demonstration is for in `revert_for`. `passed` is always `true`: the run is not a pass/fail
+/// check (a nonzero exit is the expected result), so it never blocks a verdict. The verdict counts the
+/// command and the name as seen running for those criteria only, and only when the run finished (D43).
+pub fn revert_record(group: &DemonstrationGroup, run: &CheckRun) -> CheckRun {
+    CheckRun {
+        name: demonstration_name(group),
+        command: group.command.split_whitespace().map(String::from).collect(),
+        passed: true,
+        failed_tests: Vec::new(),
+        revert_for: group.criteria.clone(),
+        ..run.clone()
+    }
+}
+
 /// The record of a demonstration that did not run, with the reason.
 pub fn demonstration_not_run(
     group: &DemonstrationGroup,
@@ -1019,10 +1070,7 @@ fn demonstration_entry(
     ran: bool,
 ) -> athena_context::briefs::CheckResultView {
     athena_context::briefs::CheckResultView {
-        name: format!(
-            "fails-without-{}",
-            group.criteria.first().copied().unwrap_or(0)
-        ),
+        name: demonstration_name(group),
         command: "not a check".into(),
         passed: true,
         demonstration: Some(athena_context::briefs::DemonstrationRunView {
@@ -1452,6 +1500,7 @@ mod tests {
             note: None,
             failed_tests: Vec::new(),
             reused: false,
+            revert_for: Vec::new(),
         }
     }
 
@@ -1969,6 +2018,206 @@ mod tests {
                 .evidence
                 .contains("it cites no command")
         );
+    }
+
+    const REVERT_COMMAND: &str = "cargo test --locked -p athena-core verify";
+
+    /// Athena's stored "fails without the fix" run for `for_criteria`: the shape of job
+    /// 20261104-081830-js1p (exit 101 on the reverted copy), `passed` true because it is not a check.
+    fn revert_check(exit: Option<i32>, for_criteria: &[u32]) -> CheckRun {
+        CheckRun {
+            name: "fails-without-1".into(),
+            command: REVERT_COMMAND.split(' ').map(String::from).collect(),
+            exit_code: exit,
+            passed: true,
+            tests_ran: Some(2),
+            output_tail: "test result: FAILED. 0 passed; 2 failed".into(),
+            revert_for: for_criteria.to_vec(),
+            ..check(true)
+        }
+    }
+
+    fn assert_unseen(j: &Judgment, cited: &str) {
+        assert!(!j.criteria[1].commands_verified, "{cited}");
+        assert!(!j.criteria[1].met, "{cited}");
+        let finding = d43_finding(j).unwrap_or_else(|| panic!("no D43 finding for {cited}"));
+        assert_eq!(finding.severity, Severity::Major);
+        assert!(
+            finding
+                .evidence
+                .contains(&format!("cited but not seen running: `{cited}`")),
+            "{}",
+            finding.evidence
+        );
+    }
+
+    #[test]
+    fn a_recorded_revert_run_cited_by_command_counts_as_seen_running() {
+        let j = judge_recorded(
+            &[check(true), revert_check(Some(101), &[2])],
+            Some("abc"),
+            Some("abc"),
+            vec![REVERT_COMMAND],
+        );
+        assert!(j.criteria[1].commands_verified);
+        assert!(j.criteria[1].met);
+        assert!(d43_finding(&j).is_none(), "{:?}", j.findings);
+        assert_eq!(j.final_verdict, Verdict::Pass, "{:?}", j.reasons);
+    }
+
+    #[test]
+    fn a_recorded_revert_run_cited_by_its_record_name_counts_as_seen_running() {
+        let j = judge_recorded(
+            &[revert_check(Some(101), &[2])],
+            Some("abc"),
+            Some("abc"),
+            vec!["fails-without-1"],
+        );
+        assert!(j.criteria[1].commands_verified);
+        assert!(j.criteria[1].met);
+        assert!(d43_finding(&j).is_none(), "{:?}", j.findings);
+    }
+
+    #[test]
+    fn a_revert_run_that_did_not_finish_or_is_from_another_tree_stays_unseen() {
+        for cited in [REVERT_COMMAND, "fails-without-1"] {
+            let unfinished = judge_recorded(
+                &[revert_check(None, &[2])],
+                Some("abc"),
+                Some("abc"),
+                vec![cited],
+            );
+            assert_unseen(&unfinished, cited);
+            let other = judge_recorded(
+                &[revert_check(Some(101), &[2])],
+                Some("abc"),
+                Some("def"),
+                vec![cited],
+            );
+            assert_unseen(&other, cited);
+            let unknown_tree = judge_recorded(
+                &[revert_check(Some(101), &[2])],
+                Some("abc"),
+                None,
+                vec![cited],
+            );
+            assert_unseen(&unknown_tree, cited);
+        }
+    }
+
+    #[test]
+    fn a_command_or_name_nobody_ran_or_recorded_stays_unseen_beside_a_revert_run() {
+        let recorded = [revert_check(Some(101), &[2])];
+        for cited in [
+            "cargo test --locked -p athena-core other",
+            "fails-without-2",
+        ] {
+            let j = judge_recorded(&recorded, Some("abc"), Some("abc"), vec![cited]);
+            assert_unseen(&j, cited);
+        }
+    }
+
+    #[test]
+    fn a_revert_run_counts_only_for_the_criteria_it_demonstrates() {
+        // Recorded for criterion 3, cited by criterion 2: unseen, by command and by name. An exit-0 record
+        // (the demonstration still passed without the fix) must not leak into the job-wide list either.
+        for exit in [101, 0] {
+            for cited in [REVERT_COMMAND, "fails-without-1"] {
+                let j = judge_recorded(
+                    &[revert_check(Some(exit), &[3])],
+                    Some("abc"),
+                    Some("abc"),
+                    vec![cited],
+                );
+                assert_unseen(&j, cited);
+            }
+        }
+        // Recorded for criteria 2 and 3: each of them sees it. Criterion 3 here is a third behavior one.
+        let three = vec![
+            Criterion {
+                text: "a".into(),
+                kind: CriterionKind::Behavior,
+            },
+            Criterion {
+                text: "b".into(),
+                kind: CriterionKind::Behavior,
+            },
+            Criterion {
+                text: "c".into(),
+                kind: CriterionKind::Behavior,
+            },
+        ];
+        let mut out = output(vec![], vec![]);
+        out.criteria = ["a", "b", "c"]
+            .iter()
+            .map(|t| CriterionVerdictOutput {
+                criterion: (*t).into(),
+                met: true,
+                evidence: "ran it".into(),
+                commands: vec![REVERT_COMMAND.into()],
+            })
+            .collect();
+        let recorded = [revert_check(Some(0), &[2, 3])];
+        let j = judge(&VerdictInputs {
+            criteria: &three,
+            checks: &recorded,
+            output: Some(&out),
+            commands_run: &[],
+            candidate_tree: Some("abc"),
+            checks_tree: Some("abc"),
+            system_fault: None,
+            verifier_failure: None,
+            map_base: None,
+            map_candidate: None,
+            baseline: None,
+            replay: None,
+        });
+        // Criterion 1 is not in `revert_for`; criteria 2 and 3 are, and an exit-0 run still counts as run.
+        let verified: Vec<bool> = j.criteria.iter().map(|c| c.commands_verified).collect();
+        assert_eq!(verified, [false, true, true]);
+        assert!(!j.criteria[0].met && j.criteria[1].met && j.criteria[2].met);
+    }
+
+    #[test]
+    fn a_revert_run_never_blocks_the_verdict_or_counts_as_a_failed_check() {
+        let j = judge_recorded(
+            &[check(true), revert_check(Some(101), &[2])],
+            Some("abc"),
+            Some("abc"),
+            vec!["cargo test"],
+        );
+        assert_eq!(j.final_verdict, Verdict::Pass, "{:?}", j.reasons);
+        assert!(j.reasons.is_empty(), "{:?}", j.reasons);
+    }
+
+    #[test]
+    fn revert_record_keeps_the_run_and_marks_the_criteria_it_is_for() {
+        let group = DemonstrationGroup {
+            criteria: vec![2, 3],
+            command: "cargo test --locked demo".into(),
+            argv: demonstration_command("cargo test --locked demo"),
+        };
+        let run = CheckRun {
+            name: "something-else".into(),
+            command: vec!["sh".into(), "-c".into(), "mapped".into()],
+            exit_code: Some(101),
+            passed: false,
+            failed_tests: vec!["demo x".into()],
+            output_tail: "test demo ... FAILED".into(),
+            tests_ran: Some(1),
+            ..check(false)
+        };
+        let record = revert_record(&group, &run);
+        assert_eq!(record.name, "fails-without-2");
+        assert_eq!(record.name, demonstration_name(&group));
+        let shown = demonstration_view(&group, &run, &RevertPlan::default());
+        assert_eq!(record.name, shown.name);
+        assert_eq!(record.command, ["cargo", "test", "--locked", "demo"]);
+        assert_eq!(record.revert_for, [2, 3]);
+        assert!(record.passed && record.failed_tests.is_empty());
+        assert_eq!(record.exit_code, Some(101));
+        assert_eq!(record.tests_ran, Some(1));
+        assert_eq!(record.output_tail, "test demo ... FAILED");
     }
 
     #[test]

@@ -1,0 +1,438 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261104-091432-d10c",
+  "round": 2,
+  "at": "2026-11-04T10:59:52.53057999Z",
+  "invocation_seq": 4,
+  "approach": "Add one field to CheckRun in athena-data: `revert_for: Vec<u32>`, the criterion numbers (from 1) whose planned 'fails without the fix' run this is; empty for every ordinary check (serde default, skipped when empty, like `reused`). This replaces the earlier `revert: bool`, so the marker and its scope are one value that cannot disagree. Athena builds the record from the finished demonstration run with a pure `revert_record(group, run)` in verify.rs: name `fails-without-N`, the plan's command, the run's exit code, tests_ran and output tail, `revert_for = group.criteria`, and `passed = true`. `passed` here means 'not a pass/fail check', so the record never blocks the verdict, as the demonstration view already says. This deviates from the reading's wording, where `passed` meant 'failed as expected'; the change description, the field's doc comment and the changelog say so. In judge(), inside the existing candidate_tree == checks_tree gate, the job-wide `ran` list is left untouched. A second list of revert records that have an exit code is kept instead. While checking criterion number n, a cited piece counts as seen when it is in `ran`, or when a revert record whose `revert_for` contains n has that command or that record name. The rule is therefore enforced per criterion by code. It covers only criteria whose planned demonstration names a fails-without. The code cannot tell which half of one criterion a cited command supports, and the docs say so. `run/checks.rs` returns each run's view and record together, and `verification_stage` appends the records to `check_runs` after the verifier's input view is built, so the brief is unchanged. The carried check lines in reading.rs show a revert record as 'fails-without-1: revert run (exit code 101)'. A small helper in close.rs keeps revert records out of the PR body's 'N checks passed'.",
+  "decisions": [
+    {
+      "choice": "Mark the record with `revert_for: Vec<u32>` (the criteria it demonstrates) instead of `revert: bool`.",
+      "reason": "Finding 2: the 'fails without the fix part only' scope must be enforced, not just written. judge() walks criteria by index (verify.rs 470) and DemonstrationGroup.criteria (verify.rs 706-713) already holds the numbers, so the record carries them. One field is both the marker (non-empty) and the scope, so the two cannot disagree, and no extra record file is needed. An empty value means an ordinary check, as `reused` false does (records.rs 805-809).",
+      "rejected": [
+        {
+          "option": "`revert: bool` plus a separate `criteria` list",
+          "why": "Two fields could disagree: a revert flag with no criteria, or criteria on an ordinary check."
+        },
+        {
+          "option": "Keep `revert: bool` and the job-wide `ran` list, and mark the 'that part only' limit as prose-only",
+          "why": "The critic's evidence shows this would count the failing run for the 'passes with the fix' part of any criterion citing the same text. The data to scope it exists, so enforcing it is cheap."
+        },
+        {
+          "option": "One record per criterion",
+          "why": "It multiplies records for one run and would repeat the output tail."
+        }
+      ]
+    },
+    {
+      "choice": "In judge(), keep `ran` as it is, with the existing filter line byte for byte. Build a separate list of revert records, inside the tree-equality gate, only those with an exit code. Test each cited piece against `ran` plus the revert records whose `revert_for` contains the criterion's number (i + 1): their command pieces (via simple_commands of command.join(' ')) and their name.",
+      "reason": "This puts the scope in code. A criterion outside the group, a record from another tree, or a run that did not finish gets nothing new. The admission test ci_reuse_replay_the_seen_commands_filter_turns_up_in_a_search_and_must_be_named (admission.rs 1078-1143) searches verify.rs for the filter line, so it stays untouched. The cited name `fails-without-1` is seen only when a revert record of that name exists for that criterion.",
+      "rejected": [
+        {
+          "option": "Add the revert command and name to the job-wide `ran`",
+          "why": "It counts for every behavior criterion, which is the major finding."
+        },
+        {
+          "option": "Count the record name for any record",
+          "why": "A cited name that never ran would be seen, which loosens D43."
+        }
+      ]
+    },
+    {
+      "choice": "The revert record always has passed = true; its exit code stays as run (for example 101). Say in the doc comment on the field and in the changelog that `passed` is 'not a pass/fail check' for these records, and that this departs from the reading's 'failed as the criterion expected'. Render it in the carried check lines (reading.rs 1880-1895) as '<name>: revert run (exit code N)' instead of 'passed'.",
+      "reason": "Existing readers treat `!passed` as a failed check: judge() blocking_checks (verify.rs 384), reading.rs 1933 failed-check carry text, introspect.rs 939-949 and is_pre_existing. A failing revert run is the expected result, so it must not fail the verdict. The demonstration view already states 'no pass or fail of its own' (verify.rs 959-961). The carried-line change stops the next round from reading 'passed (exit code 101)' (finding 3).",
+      "rejected": [
+        {
+          "option": "passed = (exit code != 0)",
+          "why": "A revert run that wrongly passes would then block the verdict and appear as a 'failed check', breaking 64cb889's 'fails nothing' rule."
+        },
+        {
+          "option": "Leave the carried line as 'passed'",
+          "why": "It is misleading in verification.json and in the next round's brief."
+        },
+        {
+          "option": "Skip revert records in the carried lines",
+          "why": "The next round loses the evidence that the revert run happened. The lines are short and bounded by CARRIED_CHECK_LINES."
+        }
+      ]
+    },
+    {
+      "choice": "Build the record with a pure `pub fn revert_record(group, run) -> CheckRun` in verify.rs beside demonstration_view; call it from run/checks.rs after each run_check. The command is the group's plan text split on whitespace, the same text checks.rs line 350 shows the verifier. A run with no exit code (timeout) still gets a record, which judge ignores.",
+      "reason": "One place fixes the field choices, and unit tests reach it. Storing an unfinished run keeps the evidence for maintainers while the exit-code test keeps it uncounted.",
+      "rejected": [
+        {
+          "option": "Build the CheckRun inline in checks.rs",
+          "why": "Nothing would tie the shape the judge tests use to the shape production writes."
+        }
+      ]
+    },
+    {
+      "choice": "demonstration_runs and demonstration_records return (views, revert_records). verification_stage extends `check_runs` after `inputs.checks` is built (verification.rs 74-77, call at 134).",
+      "reason": "The brief keeps its one 'not a check' view per run and nothing is shown twice. judge() (368) and Verification.checks (388) both read the extended list, so the verdict and the stored record agree. The records are written in the same pass that shows the run to the verifier.",
+      "rejected": [
+        {
+          "option": "Extend check_runs before building the verifier's inputs",
+          "why": "The brief would show each run twice."
+        },
+        {
+          "option": "Give judge() a separate list outside checks",
+          "why": "The request wants the run in the record's checks, and a second list could not be rebuilt from the stored record."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the close.rs edit: add `fn measured_check_count(checks: &[CheckRun]) -> usize` that counts checks with an empty `revert_for`, use it in landing_body (close.rs 630-631), and test it in a new `#[cfg(test)] mod tests` in close.rs with two CheckRun literals.",
+      "reason": "close.rs is outside the reading's deliverables (findings 1 and 4), but landing_body prints `verification.checks.len()` as 'checks passed'. Without the edit the pull-request body would report an extra passed check that is a revert run. The edit is a needed follow-on of the record change, not new scope. close.rs has no test module today and landing_body needs a full Reading and Verification, so a helper that takes the slice is the smallest testable unit.",
+      "rejected": [
+        {
+          "option": "Leave the PR body count alone",
+          "why": "It would misreport the number of checks."
+        },
+        {
+          "option": "Test landing_body directly",
+          "why": "It needs a full Reading and Verification fixture, which close.rs does not have."
+        }
+      ]
+    },
+    {
+      "choice": "Add no refusal_corpus case.",
+      "reason": "I read crates/athena-core/tests/refusal_corpus.rs in the first round: its cases (parser_cases, request_citing_cases, reading_check_cases, boundary_word_cases, plan_cases) exercise parsers and reading and plan checks, never judge(). This is a verdict rule on cited commands with no parser or stop list. The input forms are: cited command, cited name, not-run record, other-tree record, out-of-group criterion, uncited command. The verify.rs tests cover them.",
+      "rejected": [
+        {
+          "option": "Corpus cases for the judge rule",
+          "why": "The corpus has no VerdictInputs harness."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `revert_for: Vec<u32>` to CheckRun (serde default, skip when empty, doc comment for an outside reader saying `passed` is 'not a pass/fail check' for these records); add the field to literals; add round-trip, validate and old-shape tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add pub fn revert_record; add the per-criterion revert rule inside the tree-equality gate in judge(); leave the filter line unchanged; add the revert_check fixture and tests for criteria 1 to 3 (including the out-of-group case) and a revert_record unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "demonstration_runs and demonstration_records return (views, revert records), building a record per run through revert_record, none for 'not run' groups.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Take `mut check_runs` and extend it with the revert records after the verifier's inputs are built, so judge() and Verification.checks see them.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable, needed follow-on: measured_check_count helper keeps revert records out of 'N checks passed' in landing_body, with a test module.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Run-level tests: the demonstration is stored in the verification checks with its criteria and the revert marker in the same pass; a 'not run' demonstration stores none; a criterion citing the record is judged met.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Carried check lines render a revert record as 'name: revert run (exit code N)'; add a test; add the field to literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Add the field to CheckRun literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add the field to CheckRun test literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Add the field to the CheckRun test literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "purpose": "Add the field to CheckRun literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add the field to the CheckRun literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Add the field to the placeholder CheckRun literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Add the field to the CheckRun literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/status_durations.rs",
+      "action": "modify",
+      "purpose": "Add the field to the CheckRun literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased / Fixed entry: root cause (run shown but not recorded), the fix, per-criterion scope, and the `passed` meaning.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "purpose": "Paragraph after the 'fails without the fix' text (lines 332-341) stating in prose the per-criterion scope of seen-running for recorded revert runs, and the limit inside one criterion.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs: add `pub revert_for: Vec<u32>` after `reused` in CheckRun with `#[serde(default, skip_serializing_if = \"Vec::is_empty\")]` and a doc comment: the criterion numbers whose planned 'fails without the fix' run this is, empty for an ordinary check; for such a record `passed` means 'not a pass/fail check' and a nonzero exit code is the expected result; it counts as a command seen running only for those criteria (D43). Add `revert_for: Vec::new()` to its literals.",
+    "records.rs tests: a record with revert_for [1, 2] serialises with the key, parses back equal, and validates in a Baseline via AnyRecord::parse and check_record_file (model: a_reused_check_record_round_trips_and_validates). A second test: an ordinary record serialises with no 'revert_for', and JSON without the field loads with it empty.",
+    "verify.rs: add `pub fn revert_record(group: &DemonstrationGroup, run: &CheckRun) -> CheckRun` beside demonstration_view. It copies the run and sets name `fails-without-<first criterion>`, command to the group's command split on whitespace, revert_for to group.criteria.clone(), passed true and failed_tests empty. It keeps exit_code, tests_ran, duration, output_tail and note. Doc comment for an outside reader.",
+    "verify.rs judge(): leave line 378's filter unchanged. Inside the candidate_tree == checks_tree block also collect `revert_runs: Vec<&CheckRun>` of checks with a non-empty revert_for and an exit code (declared before the block, empty otherwise). In the per-criterion unseen filter (499-505), a piece is seen when `ran.contains(p)` or any revert run whose revert_for contains (i + 1) as u32 has `simple_commands(&r.command.join(\" \")).contains(p)` or `r.name == *p`. Comment: counts only for the criteria the run demonstrates, never when it did not finish or is from another tree; `passed` is always true so it never blocks.",
+    "run/checks.rs: make demonstration_runs and demonstration_records return (Vec<CheckResultView>, Vec<CheckRun>). After each run_check, push `revert_record(g, &run)` alongside the view. The not-run groups and the early return at line 284 return an empty second vector. Update the doc comments.",
+    "run/verification.rs: destructure `mut check_runs`; replace the `inputs.checks.extend(...)` of demonstration_records with `let (views, revert_runs) = ...; inputs.checks.extend(views); check_runs.extend(revert_runs);` and extend the comment on why the order matters.",
+    "reading.rs carried_work (1880-1895): when `revert_for` is non-empty print '<name>: revert run (<exit>)' instead of passed/failed. Add a test beside carry_bounds_the_check_lines that the line reads 'fails-without-1: revert run (exit code 101)' and `carry` adds no 'failed check' text for it.",
+    "run/close.rs: add `fn measured_check_count(checks: &[CheckRun]) -> usize` counting checks with an empty revert_for; use it in landing_body instead of `verification.checks.len()`. Add `#[cfg(test)] mod tests` with `a_revert_record_is_not_counted_as_a_passed_check`: [ordinary passed check, revert record] gives 1, and two ordinary checks give 2.",
+    "Add `revert_for: Vec::new()` to every other CheckRun literal: checks.rs, status.rs, introspect.rs, routing.rs, reading.rs, send_back.rs, run/mod.rs, gh/tests.rs, run/tests.rs, status_durations.rs and the verify.rs and records.rs tests. Then run cargo build --tests --locked and fix any literal the compiler reports.",
+    "verify.rs tests: add `revert_check(exit: Option<i32>, for_criteria: &[u32])` (name fails-without-1, passed true, command cargo test --locked -p athena-core verify) and tests: cited command met (criterion 1); cited name met with d43_finding None (criterion 2); not-run (exit None), other tree ('def' and None), unrecorded command, unknown name, and the out-of-group case (revert_for [3], criterion number 2 cites the command and name) all unseen with the Major finding; criterion 3 citing the same record is seen. Add a revert_record unit test on a failed run (name, command, revert_for, passed true, exit code kept).",
+    "run/tests.rs: add a test with run_demonstration_job(repo_with_planning(3), demonstration_plan(\"cargo test --locked demo\"), Some(README_TEST), None). It reads job.finished.verification.unwrap().checks, finds fails-without-1 and asserts revert_for, passed, command, exit_code Some(1) and the output_tail text, and that the verifier prompt still holds 'fails-without-1: not a check' once. Add a case with 'cargo test --locked && echo done' that asserts no revert record is stored. Add a case where the fake verifier cites the record and the stored criterion is met with commands_verified true.",
+    "CHANGELOG.md Unreleased / Fixed: root cause (the revert run was shown but not recorded in checks, so the seen-running rule never counted it); fix (recorded as a revert run, counted for the criteria it demonstrates, by command or record name); `passed` is 'not a pass/fail check' for these records, which differs from the reading's 'failed as expected'; the PR body count excludes them. docs/design/job-planning.md: paragraph after line 341 with the same scope in prose, including the limit inside one criterion.",
+    "Run cargo test --locked -p athena-core verify, cargo test --locked -p athena-core run::, cargo test --locked -p athena-data, then cargo test --locked, cargo clippy --locked --all-targets -- -D warnings and cargo fmt --check."
+  ],
+  "risks": [
+    {
+      "risk": "This loosens D43: a criterion in the group that cites the revert command for its 'passes with the fix' part would count as seen.",
+      "mitigation": "The rule applies only inside the tree-equality gate, only with an exit code, only for criteria in the record's revert_for, and only for that record's command and name. Tests for not-run, other-tree and out-of-group cases bound it; docs state the remaining limit inside one criterion."
+    },
+    {
+      "risk": "A nonzero exit stored with passed = true could be read as a failed check, or as a pass.",
+      "mitigation": "The record is always passed = true, its doc comment and the changelog say so, and the carried lines render it as a revert run. Tests check there is no blocking check or 'failed check' text from it."
+    },
+    {
+      "risk": "About 51 CheckRun literals need the new field, and a missed one breaks the build.",
+      "mitigation": "The compiler reports every missed literal. Run cargo build --tests --locked after the edit to catch literals outside the listed files."
+    },
+    {
+      "risk": "Editing the filter line in judge() breaks the admission test that searches verify.rs for it.",
+      "mitigation": "Keep the existing filter line unchanged and add a separate block; cargo test --locked runs the admission test."
+    },
+    {
+      "risk": "Group criterion numbers might not match judge()'s index + 1.",
+      "mitigation": "The reading's Criterion numbers are the brief numbers the planner's demonstrations use (Demonstration.criterion, 'from 1'), and judge() indexes criteria from 0. The run-level test cites a record in a real group and checks it is judged met, so an off-by-one fails it."
+    },
+    {
+      "risk": "check_minutes in status.rs sums all measured check durations, so the revert run adds to the job's check time.",
+      "mitigation": "Accepted: it is real time spent checking. A dependents entry records it, and the status tests run."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "seen-running rule (D43) for behavior criteria",
+      "dependent": "crates/athena-core/src/verify.rs judge(): `ran` and the seen-commands filter (lines 365-382), per-criterion unseen check (499-509), blocking_checks (384)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core verify (new tests for criteria 1 to 3 plus the existing a_passing_check_reused_from_ci_on_the_same_commit_counts_as_run, a_placeholder_record_without_an_exit_code_does_not_count_as_run, a_command_neither_run_nor_recorded_is_unseen_and_a_recorded_one_needs_the_same_text)",
+      "reason": null
+    },
+    {
+      "name": "the filter text `c.reused && c.exit_code.is_none()` in verify.rs",
+      "dependent": "crates/athena-core/src/admission.rs test ci_reuse_replay_the_seen_commands_filter_turns_up_in_a_search_and_must_be_named (1078-1143)",
+      "kind": "rule",
+      "test": "cargo test --locked -p athena-core admission",
+      "reason": "The existing filter line stays byte for byte; the revert rule is a separate block."
+    },
+    {
+      "name": "D43 behavior-criteria rule",
+      "dependent": "docs/decisions.md D43 (line 968) and its amendments (2710-2720)",
+      "kind": "rule",
+      "test": "cargo test --locked -p athena-core verify",
+      "reason": "D43's finding text and the no-command rule are unchanged. The rule gains a second, per-criterion source of seen commands, like the CI-reuse amendment, and the job-planning.md paragraph states it."
+    },
+    {
+      "name": "CheckRun list passed to judge and stored in verification.json",
+      "dependent": "crates/athena-core/src/run/verification.rs: inputs.checks built at 74-77, demonstration_records call at 134, judge call at 368, Verification.checks at 388",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core run:: (the new record test plus a_planned_fails_without_demonstration_is_run_on_a_reverted_copy_and_shown_to_the_verifier and a_demonstration_that_still_passes_without_the_fix_is_recorded_as_passing)",
+      "reason": null
+    },
+    {
+      "name": "judge() input checks",
+      "dependent": "crates/athena-core/src/run/send_back.rs:262 (second caller of judge) and its CheckRun literal at 247",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core run::",
+      "reason": "It runs before any demonstration exists, so its list never holds a revert record; it needs only the new field in the literal."
+    },
+    {
+      "name": "CheckRun record saved and replayed by the resume path",
+      "dependent": "crates/athena-core/src/run/mod.rs 1496-1660 (check_runs, recorded_checks at 1649, replay_stage at 1658) and its placeholder literal at 1608",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core run::",
+      "reason": "Revert records are appended in the verification stage, after recorded_checks is saved and after the replay stage. A resumed job takes the saved checks and runs the demonstrations again, so a record is never doubled."
+    },
+    {
+      "name": "verification.checks `passed` flag and the carried check lines",
+      "dependent": "crates/athena-core/src/reading.rs 1584-1593 (pass requires all checks passed), 1880-1895 (carried check lines), 1933 (failed-check carry text)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core reading: new test beside carry_bounds_the_check_lines (reading.rs ~6221) that a revert record carries as 'fails-without-1: revert run (exit code 101)' and adds no 'failed check' text; existing test with 'fmt: passed (exit code 0, 12 tests ran)' (6192) unchanged",
+      "reason": null
+    },
+    {
+      "name": "verification.checks `passed` flag read as failure",
+      "dependent": "crates/athena-core/src/introspect.rs 939-949 failure_details, literal at 1738; crates/athena-core/src/routing.rs literal at 553",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core introspect",
+      "reason": "failure_details lists only !passed checks, and a revert record is always passed."
+    },
+    {
+      "name": "check durations read from verification.checks",
+      "dependent": "crates/athena-core/src/status.rs test_check_seconds (597-608), check_minutes (759-769), literal at 2841; crates/athena-core/src/code_health.rs 465-473; crates/athena-cli/tests/status_durations.rs literal at 22",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core status && cargo test --locked -p athena-cli --test status_durations",
+      "reason": "The test-duration readers look for the check named `test`, so fails-without-N changes nothing there. check_minutes sums every measured duration, so it now includes the revert run, which is time the job really spent checking."
+    },
+    {
+      "name": "verification.checks length used as the passed-check count",
+      "dependent": "crates/athena-core/src/run/close.rs landing_body 618-632 ('N checks passed' uses verification.checks.len()); also called at close.rs 116 and 505",
+      "kind": "code",
+      "test": "New test in a new #[cfg(test)] mod tests in close.rs: measured_check_count(&[ordinary passed check, revert record with revert_for [2]]) == 1, and with two ordinary checks == 2. Run cargo test --locked -p athena-core run::close",
+      "reason": null
+    },
+    {
+      "name": "CheckRun struct literals",
+      "dependent": "crates/athena-core/src/checks.rs (CheckRun literals in run_check, skipped, placeholders, baseline_runs, tests) and crates/athena-core/src/gh/tests.rs (one literal)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core checks gh::",
+      "reason": "A new field without a default in a literal is a build error, so each literal gets `revert_for: Vec::new()`. Baseline and CI-reused checks are never revert records, so behavior is unchanged."
+    },
+    {
+      "name": "CheckRun record shape and records round-trip",
+      "dependent": "crates/athena-data/src/records.rs: CheckRun (785), Baseline.checks (2621-2643), Verification",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-data (new round-trip and old-shape tests; existing a_reused_check_record_round_trips_and_validates)",
+      "reason": null
+    },
+    {
+      "name": "verifier brief view of demonstration runs",
+      "dependent": "crates/athena-context/src/briefs.rs: CheckResultView, DemonstrationRunView and the 'Checks Athena ran on this tree' section",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-context and run::tests::a_planned_fails_without_demonstration_is_run_on_a_reverted_copy_and_shown_to_the_verifier",
+      "reason": "The view still comes from demonstration_view and demonstration_entry, which are unchanged. check_result_view is applied to check_runs before the revert records are appended, so the brief holds one entry per run."
+    },
+    {
+      "name": "reading and plan refusal rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": "cargo test --locked -p athena-core --test refusal_corpus",
+      "reason": "The plan changes no reading or plan check, parser or stop list; the corpus never calls judge()."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A unit test in verify.rs builds a revert record (name fails-without-1, command ['cargo','test','--locked','-p','athena-core','verify'], exit_code Some(101), passed true, revert_for holding the number of the criterion under test, which is 2 for criteria[1]). It passes it through judge_recorded with candidate_tree and checks_tree both 'abc'. The criterion cites 'cargo test --locked -p athena-core verify'. This is the input shape of job 20261104-081830-js1p: exit 101, failing on the base.",
+      "command": "cargo test --locked -p athena-core verify",
+      "observes": "criteria[1].commands_verified and met are true, and there is no 'cited but not seen running' finding.",
+      "fails_without": "Without the rule in judge(), exit 101 fails the `exit_code == Some(0)` filter at verify.rs 378. The command is unseen, commands_verified is false, met is forced false and the Major D43 finding appears.",
+      "seam": "Entry point judge() in crates/athena-core/src/verify.rs, called through the existing test helper judge_recorded (verify.rs 1635; it takes the recorded checks, both trees and the cited commands). The fixture is a CheckRun literal built by a new `revert_check(exit, for)` helper added in plan step 9. The helper judge_recorded exists. The real rule runs inside judge; nothing in the double decides seen-running."
+    },
+    {
+      "criterion": 2,
+      "method": "A unit test cites the record name 'fails-without-1' against the same fixture, trees 'abc' on both sides.",
+      "command": "cargo test --locked -p athena-core verify",
+      "observes": "commands_verified true, met true, and d43_finding(&j) is None (d43_finding exists at verify.rs 1830).",
+      "fails_without": "The name is in neither `commands_run` nor any check command, so it is unseen. The criterion is forced unmet with the Major finding.",
+      "seam": "judge() through judge_recorded (exists) with the revert_check fixture added in plan step 9."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests, each with commands_verified false, met forced false and a Major 'cited but not seen running: `...`' finding. Cases: (a) a command nobody ran or recorded; (b) a revert record whose exit_code is None, cited by name and by command; (c) a revert record with the right command and name but checks_tree 'def' (and a case with None) while candidate_tree is 'abc'; (d) a name no record carries; (e) the new out-of-group case: the revert record's revert_for is [3] and the criterion under test (number 2) cites that record's command and name, which stay unseen; (f) the same record cited by criterion 3 is seen.",
+      "command": "cargo test --locked -p athena-core verify",
+      "observes": "Each of (a) to (e) gives commands_verified false and the Major finding at Severity::Major with the cited text. (f) gives true. Cases (a) to (d) already hold on today's code; they are regression guards that fail only if the new rule drops its exit-code or tree gate. Case (e) is the one negative case the new rule can break: it fails if the rule is job-wide.",
+      "fails_without": "For (b) and (c): if the rule ignored the exit-code test or the tree gate, they would come out seen and met. For (e): if the rule added the command to the job-wide `ran`, criterion 2 would count the run and be met, so the test fails. (a) and (d) pass today; they guard against over-counting.",
+      "seam": "judge() through judge_recorded (exists), with the revert_check fixture (plan step 9). The tree gate is exercised by passing a different checks_tree, an existing parameter of judge_recorded."
+    },
+    {
+      "criterion": 4,
+      "method": "A run-level test in run/tests.rs uses run_demonstration_job(repo_with_planning(3), demonstration_plan('cargo test --locked demo'), Some(README_TEST), None). The existing mapper `demo_seam::install` (run/checks.rs, test-only) maps only the argv to `sh -c`, and the scratch copy, revert, process and record building are production code. The test reads job.finished.verification.unwrap().checks. A second test uses 'cargo test --locked && echo done', which is not a plain command.",
+      "command": "cargo test --locked -p athena-core run::",
+      "observes": "Stored checks hold a record named fails-without-1 with revert_for == [criterion numbers of the group], passed true, command ['cargo','test','--locked','demo'], exit_code Some(1) and an output_tail containing the failing test text. The verifier prompt of the same job still holds 'fails-without-1: not a check', so the shown run and the stored record come from one pass, and the prompt shows the run once. In the second test the checks hold no record with a non-empty revert_for, and the prompt says 'not run'. A third assertion checks the judged criterion: a criterion citing the record is met with commands_verified true through the production verification stage when the fake verifier cites it.",
+      "fails_without": "Without the change to demonstration_records and verification_stage, the stored checks lack the record and the first assertion fails.",
+      "seam": "Production entry point Athena::dispatch via the existing helpers run_demonstration_job and finished_job (run/tests.rs ~3069 and ~1216). Fakes: the existing fake agents script and demo_seam::install. These exist (read in round 1). The new test only reads Finished.verification, which is public. Plan step 10 adds the tests."
+    },
+    {
+      "criterion": 5,
+      "method": "Unit tests in records.rs: a CheckRun with revert_for [1, 2] serialises with the key, parses back equal, and validates inside a Baseline through AnyRecord::parse and check_record_file, modelled on a_reused_check_record_round_trips_and_validates. Another test serialises an ordinary record and asserts the text has no 'revert_for', and parses a JSON string written without the field, modelled on a_check_run_written_before_reuse_was_marked_loads_as_not_reused (records.rs ~4501).",
+      "command": "cargo test --locked -p athena-data",
+      "observes": "The revert record round-trips and validates. The old shape loads with an empty revert_for (not a revert run), and an ordinary record serialises as before.",
+      "fails_without": "Without #[serde(default, skip_serializing_if = \"Vec::is_empty\")], the old JSON fails to parse and the ordinary record gains a key. The tests fail.",
+      "seam": "CheckRun serde, AnyRecord::parse and check_record_file in crates/athena-data/src/records.rs. They exist; plan step 2 adds the tests."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the workspace gates. They include the admission test ci_reuse_replay_the_seen_commands_filter_turns_up_in_a_search_and_must_be_named (admission.rs 1078), which still finds the unchanged filter line in verify.rs, and the refusal corpus.",
+      "command": "cargo test --locked && cargo clippy --locked --all-targets -- -D warnings && cargo fmt --check",
+      "observes": "All tests pass, with no clippy warning and no fmt diff.",
+      "fails_without": "A missed `revert_for: Vec::new()` in any CheckRun literal fails the build. Editing the filter line fails the admission test.",
+      "seam": "Full workspace runs; no seam."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the diff of the two docs. CHANGELOG.md `## [Unreleased]` gets a Fixed entry naming the root cause (the revert run was shown but not recorded, so D43 never saw it), the fix, the `passed` meaning and that scope is per criterion. docs/design/job-planning.md gets a paragraph after the 'fails without the fix' text (lines 332-341) stating in prose that the recorded run counts as seen running, by command or record name, only for the criteria whose planned demonstration names that run, never for other criteria and never for a run that did not finish or is from another tree. The paragraph also says plainly that within one such criterion the code cannot tell the 'fails without' half from the 'passes with' half, so that split remains a verifier-judged matter.",
+      "command": "git diff -- CHANGELOG.md docs/design/job-planning.md",
+      "observes": "The Unreleased entry exists and the design paragraph states the scope, matching what the tests in criterion 3 enforce.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "The outcome is the test of criterion 1 plus criterion 2: a revert record fails-without-1 with exit 101 cited by command and by name by a criterion in its group gives commands_verified true. Criterion 4's run-level test shows production writes that same shape.",
+      "command": "cargo test --locked -p athena-core verify",
+      "observes": "commands_verified true and no D43 finding for that shape. Before the change the same input was unmet with commands_verified false.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: Within one criterion that names a fails-without demonstration, the code cannot tell whether a cited command supports the 'fails without the fix' part or the 'passes with the fix' part, because the reading has no fails_without field (out of scope). The plan scopes the count to the criteria in the group. Is criterion-level scope enough, or should adding that field be a follow-up job?"
+  ],
+  "producer_section_sha256": "41498aca4b02a99496a6e486e3e5fe1037961c03396bdcb3d0f4ee916c78da08"
+}

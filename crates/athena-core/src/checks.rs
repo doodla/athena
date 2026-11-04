@@ -297,6 +297,7 @@ pub fn skipped_run(spec: &CheckSpec, note: String) -> CheckRun {
         note: Some(note),
         failed_tests: Vec::new(),
         reused: false,
+        revert_for: Vec::new(),
     }
 }
 
@@ -327,6 +328,7 @@ pub fn runs_from_record(specs: &[CheckSpec], record: &CiRecord, sha: &str) -> Ve
                 note: Some(format!("result reused from the {origin} for {sha}")),
                 failed_tests: Vec::new(),
                 reused: true,
+                revert_for: Vec::new(),
             })
         })
         .collect()
@@ -467,6 +469,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
                 note: Some(format!("could not start {program}: {e}")),
                 failed_tests: Vec::new(),
                 reused: false,
+                revert_for: Vec::new(),
             });
         }
     };
@@ -541,6 +544,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
         note,
         failed_tests,
         reused: false,
+        revert_for: Vec::new(),
     })
 }
 
@@ -565,6 +569,7 @@ pub fn baseline_runs(specs: &[CheckSpec], ctx: &CheckContext<'_>) -> Vec<CheckRu
                 note: Some(format!("baseline check could not run: {e}")),
                 failed_tests: Vec::new(),
                 reused: false,
+                revert_for: Vec::new(),
             },
         })
         .collect()
@@ -718,6 +723,7 @@ mod tests {
             note: None,
             failed_tests: failed_tests.iter().map(|s| s.to_string()).collect(),
             reused: false,
+            revert_for: Vec::new(),
         }
     }
 
@@ -1197,6 +1203,7 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored
             note,
             failed_tests: Vec::new(),
             reused: false,
+            revert_for: Vec::new(),
         }
     }
 
