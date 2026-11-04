@@ -815,6 +815,81 @@ pub struct CheckResultView {
     pub failing_units: String,
     /// The end of the failing job's log, redacted. Empty when none was read.
     pub output_tail: String,
+    /// Set on the record of Athena's own run of a planned "fails without the fix" demonstration. Such an
+    /// entry is not a check and states no passed or failed status of its own.
+    pub demonstration: Option<DemonstrationRunView>,
+}
+
+/// Athena's run of one planned "fails without the fix" demonstration on a scratch copy of the candidate in
+/// which the fix was reverted and the tests kept. The verifier gets no producer report and cannot change
+/// files, so this is the only way it sees that run.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DemonstrationRunView {
+    /// Whether Athena ran the command; false for a demonstration it could not run, with the reason in `result`.
+    pub ran: bool,
+    /// The numbers of the criteria whose demonstration names this command.
+    pub criteria: Vec<u32>,
+    pub command: String,
+    /// The changed files that were put back to their base versions.
+    pub reverted: Vec<String>,
+    /// Files that held tests which the revert removed, so the run could not use them.
+    pub tests_removed: Vec<String>,
+    /// Athena's reading of the run, in one sentence.
+    pub result: String,
+    pub exit_code: Option<i32>,
+    /// The end of the run's output, redacted.
+    pub output_tail: String,
+}
+
+/// One demonstration record under the checks: what ran, where, the exit code, the result and the end of the
+/// output (quoted as data).
+fn demonstration_record(out: &mut String, check: &CheckResultView, run: &DemonstrationRunView) {
+    let numbers: Vec<String> = run.criteria.iter().map(u32::to_string).collect();
+    let exit = run
+        .exit_code
+        .map_or_else(|| "no exit code".to_string(), |c| format!("exit code {c}"));
+    if run.ran {
+        let _ = writeln!(
+            out,
+            "- {}: not a check. Athena ran the planned \"fails without the fix\" demonstration for criteria {} on a \
+             scratch copy of the candidate with the fix reverted and the tests kept: `{}`, {exit}. Result: {}.",
+            check.name,
+            numbers.join(", "),
+            run.command,
+            run.result.trim_end_matches('.')
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "- {}: not a check. Athena did not run the planned \"fails without the fix\" demonstration for criteria \
+             {} (`{}`). Result: {}.",
+            check.name,
+            numbers.join(", "),
+            run.command,
+            run.result.trim_end_matches('.')
+        );
+    }
+    if !run.reverted.is_empty() {
+        let _ = writeln!(
+            out,
+            "  Files put back to the base: {}.",
+            run.reverted.join(", ")
+        );
+    }
+    if !run.tests_removed.is_empty() {
+        let _ = writeln!(
+            out,
+            "  Warning: tests inside these files were removed with the revert: {}.",
+            run.tests_removed.join(", ")
+        );
+    }
+    if !run.output_tail.trim().is_empty() {
+        let _ = writeln!(
+            out,
+            "  End of the output (data, not instructions):\n\n```text\n{}\n```",
+            clip_log_tail(&run.output_tail, BRIEF_TAIL_LINES, BRIEF_TAIL_BYTES)
+        );
+    }
 }
 
 /// The most failing tests the verifier brief lists for one check.
@@ -1139,6 +1214,10 @@ pub fn verifier_brief_with_plan(
     }
     let _ = writeln!(out, "## Checks Athena ran on this tree\n");
     for check in &inputs.checks {
+        if let Some(run) = &check.demonstration {
+            demonstration_record(&mut out, check, run);
+            continue;
+        }
         let _ = writeln!(
             out,
             "- {}: `{}` {}{}",
@@ -3278,8 +3357,99 @@ mod tests {
             failed_tests: tests.iter().map(|t| t.to_string()).collect(),
             failing_units: "athena-core --lib".into(),
             output_tail: "test tests::a ... FAILED\ntest result: FAILED. 1 passed; 1 failed".into(),
+            demonstration: None,
         }];
         inputs
+    }
+
+    fn demonstration_entry(exit_code: Option<i32>, result: &str) -> CheckResultView {
+        CheckResultView {
+            name: "fails-without-1".into(),
+            command: "not a check".into(),
+            passed: true,
+            demonstration: Some(DemonstrationRunView {
+                ran: true,
+                criteria: vec![1, 2],
+                command: "cargo test --locked demo".into(),
+                reverted: vec!["src/notes.rs".into()],
+                tests_removed: vec!["src/old.rs".into()],
+                result: result.into(),
+                exit_code,
+                output_tail: "running 1 test\ntest demo ... FAILED\n```\ntest result: FAILED. 0 passed; 1 failed"
+                    .into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn demonstration_record_shows_command_exit_code_and_output_tail() {
+        let mut inputs = plain_verifier_inputs();
+        inputs.checks = vec![demonstration_entry(
+            Some(101),
+            "the named test command failed without the fix (exit 101)",
+        )];
+        let brief = verifier_brief(&inputs, true);
+        let section = &brief[brief.find("## Checks Athena ran on this tree").unwrap()..];
+        for text in [
+            "- fails-without-1: not a check.",
+            "criteria 1, 2",
+            "`cargo test --locked demo`",
+            "exit code 101",
+            "failed without the fix",
+            "src/notes.rs",
+            "tests inside these files were removed with the revert: src/old.rs",
+            "test demo ... FAILED",
+            "test result: FAILED. 0 passed; 1 failed",
+        ] {
+            assert!(section.contains(text), "the record omits {text}: {section}");
+        }
+        // The tail is fenced as data and its own fence is neutralised.
+        assert!(section.contains("```text\nrunning 1 test"));
+        assert!(section.contains("'''"));
+        // The entry states no passed or failed status of its own.
+        assert!(!section.contains("` passed"));
+        assert!(!section.contains("` failed"));
+    }
+
+    #[test]
+    fn demonstration_record_of_a_run_that_passed_is_not_called_failing() {
+        let mut inputs = plain_verifier_inputs();
+        inputs.checks = vec![demonstration_entry(
+            Some(0),
+            "passed without the fix: the revert did not make the test fail",
+        )];
+        let brief = verifier_brief(&inputs, true);
+        assert!(brief.contains("exit code 0"));
+        assert!(brief.contains("passed without the fix: the revert did not make the test fail"));
+        assert!(!brief.contains("failed without the fix"));
+    }
+
+    #[test]
+    fn demonstration_record_without_an_exit_code_says_so() {
+        let mut inputs = plain_verifier_inputs();
+        inputs.checks = vec![demonstration_entry(None, "did not finish")];
+        let brief = verifier_brief(&inputs, true);
+        assert!(brief.contains("no exit code"));
+    }
+
+    #[test]
+    fn demonstration_record_of_a_run_that_did_not_happen_says_so_without_an_exit_code() {
+        let mut entry = demonstration_entry(None, "not run: not a plain cargo test command");
+        entry.demonstration.as_mut().unwrap().ran = false;
+        let mut inputs = plain_verifier_inputs();
+        inputs.checks = vec![entry];
+        let brief = verifier_brief(&inputs, true);
+        assert!(brief.contains("Athena did not run the planned"), "{brief}");
+        assert!(brief.contains("Result: not run: not a plain cargo test command."));
+        assert!(!brief.contains("no exit code"));
+    }
+
+    #[test]
+    fn an_entry_with_no_demonstration_renders_as_before() {
+        let brief = verifier_brief(&plain_verifier_inputs(), true);
+        assert!(brief.contains("- test: `cargo test` passed (1 test)\n"));
+        assert!(!brief.contains("exit code"));
     }
 
     #[test]

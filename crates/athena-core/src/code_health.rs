@@ -154,6 +154,42 @@ pub fn measure_source(text: &str) -> Result<Measure> {
     })
 }
 
+/// The top-level `#[cfg(test)]` modules of a source file, as 1-based inclusive line ranges from the first
+/// attribute to the closing brace or the `;`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TestModules {
+    /// Modules with a body: `#[cfg(test)] mod tests { .. }`.
+    pub bodied: Vec<(u32, u32)>,
+    /// Modules declared without a body, whose code is in another file: `#[cfg(test)] mod x;`. Each has the
+    /// module's name.
+    pub declared: Vec<(u32, u32, String)>,
+}
+
+/// Finds the top-level test modules of a Rust source file, the one definition of a test module that
+/// [`measure_source`] and the demonstration revert share.
+pub fn test_module_ranges(text: &str) -> Result<TestModules> {
+    let file = syn::parse_file(text).context("the file does not parse as Rust")?;
+    let mut found = TestModules::default();
+    for item in &file.items {
+        let syn::Item::Mod(m) = item else { continue };
+        if !is_cfg_test(&m.attrs) {
+            continue;
+        }
+        let start = m.attrs.first().map_or_else(
+            || line_of(m.mod_token.span),
+            |a| line_of(a.pound_token.span),
+        );
+        match &m.content {
+            Some((brace, _)) => found.bodied.push((start, end_line_of(brace.span.close()))),
+            None => {
+                let end = m.semi.as_ref().map_or(start, |semi| end_line_of(semi.span));
+                found.declared.push((start, end, m.ident.to_string()));
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// Whether a tracked path is production source the check measures: Rust under a `src/` directory, and not a
 /// file that only holds tests.
 pub fn is_measured(path: &str) -> bool {
@@ -811,6 +847,19 @@ pub(crate) mod tests {
         assert_eq!(measure.lines, 1 + 5 + 12 + 1, "of {total} lines");
         assert_eq!(measure.longest_fn, 12);
         assert_eq!(measure.longest_fn_name, "long");
+    }
+
+    #[test]
+    fn test_module_ranges_finds_bodied_and_declared_top_level_test_modules() {
+        let source = "fn a() {}\n\
+                      #[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n\
+                      mod plain {\n    #[cfg(test)]\n    mod nested {}\n}\n\
+                      #[cfg(test)]\n#[path = \"x.rs\"]\nmod x_tests;\n\
+                      /// Docs.\n#[cfg(test)]\nmod more { }\n";
+        let found = test_module_ranges(source).unwrap();
+        assert_eq!(found.bodied, vec![(2, 6), (14, 16)]);
+        assert_eq!(found.declared, vec![(11, 13, "x_tests".to_string())]);
+        assert!(test_module_ranges("fn (").is_err());
     }
 
     #[test]

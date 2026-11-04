@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The verifier now sees Athena's recorded "fails without the fix" run. Root cause: the verifier gets no
+  producer report and cannot change files, so a criterion that needs a recorded run of the new test failing on
+  the old code could never be shown to it, and correct changes were rejected on that alone. After the producer
+  finishes, Athena runs each planned demonstration that names a failure without the fix: in a scratch copy of
+  the candidate (removed afterwards) the changed non-test files go back to their base versions, the tests
+  stay (including inline `#[cfg(test)]` modules and declared test modules), and the named plain `cargo test`
+  command runs once per distinct command, at most three. The command, exit code and output tail appear under
+  "Checks Athena ran on this tree", with a sentence saying whether the test failed without the fix or still
+  passed. The record is not a check and fails nothing; the recorded fmt, clippy and test checks still decide
+  the verdict. Files whose tests had to be removed with the revert are named in the record.
 - The steward writes a short owner brief into each proposal it raises above its limit: `question` (one yes/no
   line), `if_yes`, `if_no`, `cost`, and `recommendation` with a one-line reason. It is the optional `brief`
   field of a work item, so older records still parse, and a brief with an empty field is refused. The decisions
