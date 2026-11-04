@@ -20,6 +20,7 @@ fn test_run(seconds: f64) -> CheckRun {
         note: None,
         failed_tests: Vec::new(),
         reused: false,
+        revert_for: Vec::new(),
     }
 }
 

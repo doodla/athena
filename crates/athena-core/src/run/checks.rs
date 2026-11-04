@@ -202,8 +202,10 @@ impl Athena {
     }
 
     /// Runs the accepted plan's "fails without the fix" demonstrations and returns one record each, to go
-    /// to the verifier under the checks. The verifier gets no producer report and cannot change files, so
-    /// it could never see this run otherwise.
+    /// to the verifier under the checks, plus one stored [`CheckRun`] for each run that happened
+    /// ([`crate::verify::revert_record`]), for the verification record's checks. The verifier gets no
+    /// producer report and cannot change files, so it could never see this run otherwise; the stored record
+    /// is what lets the verdict count the run as seen running (D43).
     ///
     /// Each distinct plain `cargo test ...` command runs once (at most [`crate::verify::MAX_DEMONSTRATION_RUNS`]) in a
     /// scratch copy of the candidate, `<job_dir>/revert`, where the changed non-test files are back at their
@@ -219,13 +221,13 @@ impl Athena {
         plan: Option<&JobPlan>,
         (base, candidate): (&str, &str),
         capability_env: &std::collections::BTreeMap<String, String>,
-    ) -> Vec<CheckResultView> {
+    ) -> (Vec<CheckResultView>, Vec<CheckRun>) {
         let Some(plan) = plan else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let groups = crate::verify::demonstration_groups(&plan.demonstrations);
         if self.nested.is_some() || groups.is_empty() || !demo_runs_here() {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         let dir = job_dir.join("revert");
         let outcome = self.demonstration_runs(
@@ -239,15 +241,18 @@ impl Athena {
         let _ = crate::pin::remove_tree(&dir);
         match outcome {
             Ok(records) => records,
-            Err(e) => groups
-                .iter()
-                .map(|g| {
-                    crate::verify::demonstration_not_run(
-                        g,
-                        &format!("the scratch copy could not be made or run: {e:#}"),
-                    )
-                })
-                .collect(),
+            Err(e) => (
+                groups
+                    .iter()
+                    .map(|g| {
+                        crate::verify::demonstration_not_run(
+                            g,
+                            &format!("the scratch copy could not be made or run: {e:#}"),
+                        )
+                    })
+                    .collect(),
+                Vec::new(),
+            ),
         }
     }
 
@@ -259,8 +264,10 @@ impl Athena {
         groups: &[crate::verify::DemonstrationGroup],
         (base, candidate): (&str, &str),
         capability_env: &std::collections::BTreeMap<String, String>,
-    ) -> Result<Vec<CheckResultView>> {
-        use crate::verify::{demonstration_not_run, demonstration_view};
+    ) -> Result<(Vec<CheckResultView>, Vec<CheckRun>)> {
+        use crate::verify::{
+            demonstration_name, demonstration_not_run, demonstration_view, revert_record,
+        };
         let jc = ctx.jc;
         let mut records: Vec<Option<CheckResultView>> = Vec::new();
         let mut to_run = Vec::new();
@@ -281,8 +288,9 @@ impl Athena {
             }
         }
         if to_run.is_empty() {
-            return Ok(records.into_iter().flatten().collect());
+            return Ok((records.into_iter().flatten().collect(), Vec::new()));
         }
+        let mut stored: Vec<CheckRun> = Vec::new();
         let (snapshot, _, _) =
             self.verifier_snapshot(dir, base, candidate, ctx.pin_dir.as_deref())?;
         let changed: Vec<(char, String)> = self
@@ -328,7 +336,7 @@ impl Athena {
         for slot in records.iter_mut().filter(|s| s.is_none()) {
             let Some(g) = ran.next() else { break };
             let spec = crate::capability::CheckSpec {
-                name: format!("fails-without-{}", g.criteria.first().copied().unwrap_or(0)),
+                name: demonstration_name(g),
                 run: mapped_argv(g.argv.as_deref().unwrap_or_default()),
                 kind: athena_data::config::CheckKind::Test,
                 skip_when_only: None,
@@ -350,8 +358,9 @@ impl Athena {
                 shown.command = g.command.clone();
             }
             *slot = Some(record);
+            stored.push(revert_record(g, &run));
         }
-        Ok(records.into_iter().flatten().collect())
+        Ok((records.into_iter().flatten().collect(), stored))
     }
 
     fn baseline_checks(

@@ -245,6 +245,7 @@ mod left_to_athena_tests {
             note: None,
             failed_tests: Vec::new(),
             reused: false,
+            revert_for: Vec::new(),
         };
         let output = VerdictOutput {
             verdict: VerdictValue::Pass,

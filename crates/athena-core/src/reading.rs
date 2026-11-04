@@ -1889,6 +1889,11 @@ fn carried_work(job: &JobRecords, redactor: &Redactor) -> Result<CarriedWork> {
             let tests = c
                 .tests_ran
                 .map_or(String::new(), |n| format!(", {n} tests ran"));
+            // A revert run is Athena's "fails without the fix" demonstration: a nonzero exit is the
+            // expected result, so it is neither passed nor failed.
+            if !c.revert_for.is_empty() {
+                return format!("{}: revert run ({exit}{tests})", c.name);
+            }
             let result = if c.passed { "passed" } else { "failed" };
             format!("{}: {result} ({exit}{tests})", c.name)
         })
@@ -4297,6 +4302,7 @@ mod tests {
             note: None,
             failed_tests: Vec::new(),
             reused: false,
+            revert_for: Vec::new(),
         }
     }
 
@@ -6223,6 +6229,24 @@ mod tests {
         let carried = carry_of(&job);
         assert_eq!(carried.checks.len(), CARRIED_CHECK_LINES);
         assert_eq!(carried.checks[0], "c0: passed (exit code 0)");
+    }
+
+    #[test]
+    fn carry_shows_a_revert_run_as_a_revert_run_not_a_pass_or_a_failure() {
+        let mut revert = check("fails-without-1", true, "test demo ... FAILED");
+        revert.exit_code = Some(101);
+        revert.revert_for = vec![1];
+        let job = job_with_checks(vec![check("fmt", true, ""), revert]);
+        let carried = carry_of(&job);
+        assert_eq!(
+            carried.checks[1],
+            "fails-without-1: revert run (exit code 101)"
+        );
+        assert!(
+            !carried.checks.iter().any(|c| c.contains("failed")),
+            "{:?}",
+            carried.checks
+        );
     }
 
     const GREETING_SUMMARY: &str = "Retry n1p0 follows";

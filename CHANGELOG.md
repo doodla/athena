@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A criterion that cites Athena's own "fails without the fix" run now counts that run as seen running. Root
+  cause: Athena ran each planned demonstration and showed it to the verifier, but did not write it to the
+  verification record's checks, so the verdict's seen-running rule (D43) could not count it, and a Behavior
+  criterion citing it was forced unmet. Each run is now stored as a check (`fails-without-N`, the plan's
+  command, exit code, tests ran, output tail) with a new `revert_for` field listing the criterion numbers it
+  demonstrates; the field is absent for ordinary checks and in older records. The record's `passed` is always
+  true: the run is not a pass/fail check, a nonzero exit is the expected result, and it never blocks a
+  verdict. The record's command, or its name, counts as seen running only for the criteria in `revert_for`,
+  only for the candidate's own tree, and only if the run finished. A run that still passed without the fix
+  counts the same way (it ran; the verifier judges the result); a run that did not finish counts for nothing.
+  Within one such criterion the code cannot tell the "fails without" part from the "passes with" part. The
+  carried check lines of a retry read `fails-without-1: revert run (exit code 101)`, and the pull request
+  body's "N checks passed" does not count revert runs.
 - In `hard` planning mode, a job judged easy is now planned when a Behavior criterion asks for a failing run
   without the fix (for example "a test fails without the fix", "tests fail without the change" or "the new test
   fails on the base"). Root cause: the planning gate looked only at the reading's `hard_reason`, so such a job

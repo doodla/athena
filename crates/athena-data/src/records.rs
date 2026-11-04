@@ -807,6 +807,15 @@ pub struct CheckRun {
     /// (D43, D115). Absent in records written before this field, which load as `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reused: bool,
+    /// The criterion numbers (1-based) whose planned "fails without the fix" demonstration this record is.
+    /// Empty for every ordinary check; absent in records written before this field.
+    ///
+    /// For such a record Athena ran the criterion's test on a copy of the tree with the fix reverted, so a
+    /// nonzero exit code is the expected result and `passed` is always `true`, meaning "not a pass/fail
+    /// check" (it never blocks a verdict). The verdict counts the record's command, and its name, as seen
+    /// running only for the criteria listed here (D43).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revert_for: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4487,6 +4496,7 @@ mod tests {
             note: None,
             failed_tests: Vec::new(),
             reused: false,
+            revert_for: Vec::new(),
         };
         Baseline {
             job: job(),
@@ -4527,6 +4537,39 @@ mod tests {
             panic!("a baseline")
         };
         assert!(!back.checks[0].reused && back.checks[1].reused);
+    }
+
+    #[test]
+    fn a_check_run_written_before_revert_runs_were_marked_loads_with_no_marker() {
+        let old = sample_baseline().checks[0].clone();
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(
+            !json.contains("revert_for"),
+            "an ordinary record serialises as before: {json}"
+        );
+        let parsed: CheckRun = serde_json::from_str(&json).expect("the old shape loads");
+        assert!(parsed.revert_for.is_empty());
+        assert_eq!(parsed, old);
+    }
+
+    #[test]
+    fn a_revert_check_record_round_trips_and_validates() {
+        let mut b = sample_baseline();
+        b.checks[1].name = "fails-without-1".into();
+        b.checks[1].passed = true;
+        b.checks[1].exit_code = Some(101);
+        b.checks[1].revert_for = vec![1, 2];
+        let record = AnyRecord::Baseline(Box::new(b));
+        let json = record.to_json();
+        assert!(json.contains("revert_for"), "{json}");
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), record);
+        let path = format!("{}/baseline.json", job().dir());
+        assert!(check_record_file(&path, json.as_bytes()).is_ok());
+        let AnyRecord::Baseline(back) = AnyRecord::parse("x", json.as_bytes()).unwrap() else {
+            panic!("a baseline")
+        };
+        assert!(back.checks[0].revert_for.is_empty());
+        assert_eq!(back.checks[1].revert_for, [1, 2]);
     }
 
     #[test]

@@ -339,6 +339,18 @@ it is built. Two changes follow.
   `before the fix` or `on the base`, or with `without` right after that word. Content criteria and a bare
   "never fails" do not count. The producer is not escalated by this: only `hard_reason` chooses the producer
   model.
+- **Recorded revert runs count as seen running, for the "fails without the fix" part only.** Athena stores each
+  demonstration run in the verification record's checks, named `fails-without-N`, with the plan's command, the
+  exit code, the count of tests that ran and the output tail, and a `revert_for` list of the criterion numbers
+  the demonstration is for. The record's `passed` is always true, because the run is not a pass/fail check: a
+  nonzero exit is the expected result and it never blocks a verdict. The seen-running rule for Behavior
+  criteria (D43) counts the record's command, or its record name, as a command that ran, but only for the
+  criteria in `revert_for`. It does not count for any other criterion, for a run that did not finish (no exit
+  code), for a run recorded on a different tree than the candidate, or for a command the plan did not name.
+  A run that still passed without the fix counts for its own criteria too, since it did run; the verifier is
+  shown "passed without the fix" and judges the result. The rule works per criterion, not per half of a
+  criterion: the reading has no field saying which cited command supports "fails without" and which supports
+  "passes with", so a criterion in the group that cites the revert command for its other half is also counted.
 - **Later harm beside the landed share.** `athena status` reports, for planned and for unplanned dispatched
   jobs separately, how many landings were later cited as the cause of a failure, a revert or a fix job, next to
   that group's landed share (and as `keep_rule.later_harm` in `--json`). All three are read from records that

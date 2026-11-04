@@ -41,7 +41,7 @@ impl Athena {
             mut vsnap,
             prepared,
             tool_config_from_base,
-            check_runs,
+            mut check_runs,
             cleanup,
             replay_record,
             verify_dir,
@@ -131,13 +131,19 @@ impl Athena {
         // nothing; the recorded check results above decide. It runs before the disk gate below, so the gate
         // measures the space left after the extra build, and it never fails the job.
         let job_dir = self.state.job_dir(&id);
-        inputs.checks.extend(self.demonstration_records(
+        //
+        // Each run is also stored in the verification record's checks, marked with the criteria it is for
+        // (`revert_for`), so the verdict counts it as seen running for those criteria (D43). The stored
+        // records are appended after the verifier's input is built, so the brief shows each run once.
+        let (demonstration_views, revert_runs) = self.demonstration_records(
             ctx,
             &job_dir,
             closing.plans.last(),
             (p.as_str(), c.as_str()),
             &capability_env,
-        ));
+        );
+        inputs.checks.extend(demonstration_views);
+        check_runs.extend(revert_runs);
         // The verifier sees the accepted plan's demonstrations and planned files, never its approach or
         // reasons (review F5). Without a plan the brief is as it always was.
         let verifier_plan = closing.plans.last().map(VerifierPlan::from_plan);
