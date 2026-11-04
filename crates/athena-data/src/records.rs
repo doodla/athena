@@ -1865,11 +1865,53 @@ pub struct WorkItem {
     /// Where the finding came from. For a blind spot, the data that could not be read.
     pub source: Reference,
     pub evidence: Vec<Reference>,
+    /// The steward's plain-language brief for the owner. Written only when the steward raises a proposal
+    /// above its limit; records from before it existed have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<OwnerBrief>,
+}
+
+/// The five short fields the steward writes so the owner can decide a proposal without reading its evidence.
+/// Each is one line in plain words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerBrief {
+    /// One yes/no line.
+    pub question: String,
+    /// What happens if the owner says yes.
+    pub if_yes: String,
+    /// What happens if the owner says no.
+    pub if_no: String,
+    /// What saying yes costs.
+    pub cost: String,
+    /// The steward's advice, with a one-line reason.
+    pub recommendation: String,
+}
+
+impl OwnerBrief {
+    /// Why this brief is not acceptable, if it is not: every field holds text.
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, text) in [
+            ("question", &self.question),
+            ("if_yes", &self.if_yes),
+            ("if_no", &self.if_no),
+            ("cost", &self.cost),
+            ("recommendation", &self.recommendation),
+        ] {
+            if text.trim().is_empty() {
+                return Err(format!("a brief's {name} is not empty"));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl WorkItem {
     /// Why this record is not acceptable, if it is not.
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(brief) = &self.brief {
+            brief.validate()?;
+        }
         if self.role.trim().is_empty() || self.key.trim().is_empty() || self.title.trim().is_empty()
         {
             return Err("a work item names its role, key and title".into());
@@ -3745,6 +3787,59 @@ mod tests {
             rung: crate::roles::Ladder::Implementation,
             source: Reference::path("records/"),
             evidence: vec![],
+            brief: None,
+        }
+    }
+
+    fn sample_brief() -> OwnerBrief {
+        OwnerBrief {
+            question: "Should the steward retry a failed check once?".into(),
+            if_yes: "A failed check runs a second time.".into(),
+            if_no: "A failed check stops the job at once.".into(),
+            cost: "About one more minute per failure.".into(),
+            recommendation: "Yes: most failures here pass on the second run.".into(),
+        }
+    }
+
+    #[test]
+    fn a_work_item_brief_is_optional_round_trips_and_has_no_empty_field() {
+        // An old record has no brief key and still parses.
+        let old = AnyRecord::WorkItem(Box::new(sample_work_item()));
+        let old_json = old.to_json();
+        assert!(!old_json.contains("brief"), "{old_json}");
+        assert_eq!(
+            check_record_file(&old.canonical_path(), old_json.as_bytes()).unwrap(),
+            Some(old)
+        );
+        // A work item with a brief round-trips through the file check.
+        let mut with = sample_work_item();
+        with.kind = WorkItemKind::Proposal;
+        with.evidence.push(Reference::job(&job()));
+        with.brief = Some(sample_brief());
+        let record = AnyRecord::WorkItem(Box::new(with.clone()));
+        let json = record.to_json();
+        assert!(json.contains("\"if_yes\""), "{json}");
+        assert_eq!(
+            check_record_file(&record.canonical_path(), json.as_bytes()).unwrap(),
+            Some(record)
+        );
+        // A brief with an empty field is refused, whichever field it is.
+        for field in 0..5 {
+            let mut bad = with.clone();
+            let b = bad.brief.as_mut().unwrap();
+            let slot = match field {
+                0 => &mut b.question,
+                1 => &mut b.if_yes,
+                2 => &mut b.if_no,
+                3 => &mut b.cost,
+                _ => &mut b.recommendation,
+            };
+            *slot = "  ".into();
+            let bad = AnyRecord::WorkItem(Box::new(bad));
+            assert!(
+                check_record_file(&bad.canonical_path(), bad.to_json().as_bytes()).is_err(),
+                "field {field}"
+            );
         }
     }
 

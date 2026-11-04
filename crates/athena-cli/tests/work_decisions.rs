@@ -45,6 +45,7 @@ fn work_item(id: &str, kind: WorkItemKind) -> AnyRecord {
             Reference::job(&JobId::parse(CITED_JOB).unwrap()),
             Reference::path("records/jobs"),
         ],
+        brief: None,
     }))
 }
 

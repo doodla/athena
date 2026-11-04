@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The steward writes a short owner brief into each proposal it raises above its limit: `question` (one yes/no
+  line), `if_yes`, `if_no`, `cost`, and `recommendation` with a one-line reason. It is the optional `brief`
+  field of a work item, so older records still parse, and a brief with an empty field is refused. The decisions
+  page shows these five lines first and puts the rung, source, evidence paths and record link in a collapsed
+  section; a proposal without a brief shows its title and "No brief written yet". The page only escapes and
+  lays out the stored text. The page's word limit per card is now 160, and the steward prompt limit is 1000
+  characters, to fit the brief.
 - `cargo run -p xtask -- repin` sets `claude_version` in `athena.toml` to the installed Claude Code's reported
   version, changing nothing else in the file. The pin is still exact; the version-mismatch refusal now names
   both versions and says to run this command (D154).

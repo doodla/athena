@@ -317,6 +317,25 @@ pub struct StewardItemOutput {
     pub evidence: Vec<StewardRefOutput>,
     /// What to ask Athena to do, when the rung is at or below your limit.
     pub request: Option<String>,
+    /// The owner's brief. Required for a proposal above your limit; null for any other item.
+    #[serde(default)]
+    pub brief: Option<StewardBriefOutput>,
+}
+
+/// The five short plain-language fields that let the owner decide a proposal. Each is one line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StewardBriefOutput {
+    /// One yes/no line.
+    pub question: String,
+    /// What happens if the owner says yes.
+    pub if_yes: String,
+    /// What happens if the owner says no.
+    pub if_no: String,
+    /// What saying yes costs.
+    pub cost: String,
+    /// Yes or no, with a one-line reason.
+    pub recommendation: String,
 }
 
 /// The audience's report: one rating and the findings behind it. Athena validates both before it records them.
@@ -933,7 +952,7 @@ mod tests {
         assert_eq!(item["additionalProperties"], json!(false));
         let required = item["required"].as_array().unwrap();
         for field in [
-            "kind", "key", "title", "rung", "source", "evidence", "request",
+            "kind", "key", "title", "rung", "source", "evidence", "request", "brief",
         ] {
             assert!(required.contains(&json!(field)), "{field}");
         }
