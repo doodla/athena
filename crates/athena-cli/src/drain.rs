@@ -256,7 +256,8 @@ pub struct Limits {
     pub budget_usd: f64,
     /// The rating, from 1 to 5, at or above which the target is met.
     pub target_rating: u8,
-    /// The most jobs to start. A retry of an item is a job.
+    /// The most jobs to start. A retry of an item is a job. A re-read that only needs accepting does not
+    /// count toward the limit.
     pub max_jobs: u32,
 }
 
@@ -1554,6 +1555,12 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 RunStep::Passed(job, at)
             }
             _ if run.needs_accepting => {
+                // The re-read only found the reading needs accepting: no job ran, so the slot taken
+                // above goes back. The re-read's cost stays against the budget.
+                {
+                    let mut st = self.st();
+                    st.started = st.started.saturating_sub(1);
+                }
                 line.outcome = "needs accepting".into();
                 self.note(format!(
                     "item {} is left queued: {}",

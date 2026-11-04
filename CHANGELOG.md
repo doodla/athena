@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A drain re-read that ended as needing acceptance used up a `--job-limit` slot although no job ran, so a
+  limit of 1 stopped the drain before the next runnable item. Root cause: the slot is taken before the
+  re-read and the needs-accepting path never gave it back. That path now returns the slot; the re-read's cost
+  still counts against the budget. The `--job-limit` help and the `Limits::max_jobs` doc say so.
 - The firstmate study showed Reopened as a state that ends the task, but teardown sends the reopened backlog
   row back to Queued. Root cause: the model gave Reopened the terminal kind and no way out. Reopened is now a
   waiting state with a new transition (t12) to Queued, a new claim (c45) citing the teardown script's Queued

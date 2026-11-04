@@ -1492,6 +1492,76 @@ fn a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure() {
 }
 
 #[test]
+fn a_run_that_needs_accepting_does_not_use_up_the_job_limit() {
+    struct Unaccepted;
+    impl Steps for Unaccepted {
+        fn caps(&self) -> anyhow::Result<Caps> {
+            Stub::default().caps()
+        }
+        fn queue(&self) -> anyhow::Result<QueueView> {
+            Ok(QueueView {
+                items: vec![
+                    Item {
+                        read: true,
+                        ..Item::queued("a", "title of a")
+                    },
+                    Item {
+                        read: true,
+                        ..Item::queued("b", "title of b")
+                    },
+                ],
+                ..QueueView::default()
+            })
+        }
+        fn previous_rating(&self) -> Option<u8> {
+            None
+        }
+        fn read(&self, _: ReadOf<'_>) -> Read {
+            panic!("a read job is not read again")
+        }
+        fn approve(&self, _: &str) -> Approval {
+            Approval::default()
+        }
+        fn run(&self, job: &str) -> Run {
+            Run {
+                outcome: (job == "b").then_some(OutcomeState::Landed),
+                reason: "the reading needs accepting".into(),
+                cost: 0.1,
+                needs_accepting: job == "a",
+                held: false,
+            }
+        }
+        fn land(&self, _: &str) -> Landing {
+            Landing::Landed {
+                changed: vec!["README.md".into()],
+            }
+        }
+        fn rate(&self) -> Rate {
+            Rate::default()
+        }
+        fn check_page(&self) -> Check {
+            Check::pass("stub")
+        }
+        fn check_cap(&self) -> f64 {
+            0.0
+        }
+    }
+    let report = drain::drain(
+        &Unaccepted,
+        Limits {
+            max_jobs: 1,
+            ..limits(5.0)
+        },
+        &Quiet,
+    )
+    .unwrap();
+    // `a` only needs accepting, so it gives its slot back and `b` still gets to run under a limit of 1.
+    assert_eq!(report.jobs[0].outcome, "needs accepting");
+    assert_eq!(report.landed, 1);
+    assert_ne!(report.stop, Stop::JobLimit);
+}
+
+#[test]
 fn a_landing_failure_is_a_failure_and_no_rating_is_taken_as_success() {
     let stub = Stub {
         items: vec!["a"],
