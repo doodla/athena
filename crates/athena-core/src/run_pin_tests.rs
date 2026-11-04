@@ -970,9 +970,10 @@ fn when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget() {
     // $2.60 for the job,$0.50 for the producer, and a verifier run that costs $1.00 against a $2.00 cap:
     // the first run is allowed, the rerun is not.
     let tight = config(true)
-        .replace("job_usd = 12.00", "job_usd = 2.60")
-        .replace("producer_usd = 3.00", "producer_usd = 0.50")
-        .replace("reader_usd = 0.50", "reader_usd = 0.10");
+        .replace("job_usd = 50.00", "job_usd = 2.60")
+        .replace("producer_usd = 10.00", "producer_usd = 0.50")
+        .replace("verifier_usd = 5.00", "verifier_usd = 2.00")
+        .replace("reader_usd = 2.00", "reader_usd = 0.10");
     let (finished, runs) = run_with(&tight, |runs| faulty_verifier(runs, 1, 1.0));
     assert_eq!(runs.len(), 1, "no rerun without budget");
     assert_eq!(finished.state, OutcomeState::Rejected);
@@ -991,12 +992,12 @@ fn when_the_budget_runs_out_before_the_rerun_the_reason_reports_the_budget() {
 
 #[test]
 fn admission_refuses_a_job_short_of_the_whole_planning_reserve() {
-    // The shipped caps (reader 0.50, planner and critic 0.75 over 3 rounds, producer 3.00, verifier 2.00)
-    // need 10.00 before the reader runs; the recorded budget of 8.00 is $2.00 short. The old per-invocation
-    // check let the reader run at 8.00.
+    // The shipped reader (2.00), producer (10.00) and verifier (5.00) caps with planner and critic caps of 0.75
+    // over 3 rounds need 21.50 before the reader runs; a recorded budget of 20.00 is $1.50 short. The old
+    // per-invocation check let the reader run at 20.00.
     let planned = format!(
         "{}\n[job_plan]\nenabled = true\nplanner_usd = 0.75\ncritic_usd = 0.75\nmax_rounds = 3\n",
-        config(true).replace("job_usd = 12.00", "job_usd = 8.00")
+        config(true).replace("job_usd = 50.00", "job_usd = 20.00")
     );
     let (dir, git) = repo(&planned);
     let state = tempfile::tempdir().unwrap();
@@ -1019,15 +1020,15 @@ fn admission_refuses_a_job_short_of_the_whole_planning_reserve() {
             .downcast_ref::<crate::reading::BudgetShort>()
             .is_some()
     );
-    assert!(text.contains("$2.00 short"), "{text}");
-    assert!(text.contains("$10.00"), "{text}");
+    assert!(text.contains("$1.50 short"), "{text}");
+    assert!(text.contains("$21.50"), "{text}");
     assert!(text.contains("[budget] job_usd"), "{text}");
     assert!(text.contains("athena.toml"), "{text}");
     assert_eq!(*invocations.lock().unwrap(), 0, "no agent was invoked");
     assert_eq!(git.head().unwrap(), head, "nothing was committed");
 
-    // The same caps at the shipped 12.00 are admitted: the driver is invoked.
-    let (dir, _git) = repo(&planned.replace("job_usd = 8.00", "job_usd = 12.00"));
+    // The same caps at the shipped 50.00 are admitted: the driver is invoked.
+    let (dir, _git) = repo(&planned.replace("job_usd = 20.00", "job_usd = 50.00"));
     let state = tempfile::tempdir().unwrap();
     let counter = Arc::new(Mutex::new(0u32));
     let again = counter.clone();

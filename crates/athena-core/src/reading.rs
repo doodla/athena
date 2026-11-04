@@ -4061,11 +4061,11 @@ mod tests {
 
     #[test]
     fn shipped_budget_covers_the_reserve() {
-        // Shipped caps: reader 0.50, planner and critic 0.75 over 3 rounds, producer 3.00, verifier 2.00.
+        // Shipped caps: reader 2.00, planner and critic 3.00 over 5 rounds, producer 10.00, verifier 5.00.
         let config = shipped_config();
         let reserve = budget_reserve(&config, ReserveStage::Admission);
-        assert!(close(reserve, 10.0), "{reserve}");
-        // The shipped job budget of 12.00 covers it; the recorded 8.00 is $2.00 short.
+        assert!(close(reserve, 47.0), "{reserve}");
+        // The shipped job budget of 50.00 covers it; a recorded 8.00 is $39.00 short.
         assert!(config.budget.job_usd >= reserve);
         // The config-load check and the runtime reserve are one sum, and the shipped file passes the check.
         assert!(close(config.budget_required(), reserve));
@@ -4076,9 +4076,9 @@ mod tests {
             reserve,
             stage: ReserveStage::Admission,
         };
-        assert!(close(short.shortfall(), 2.0));
+        assert!(close(short.shortfall(), 39.0));
         let text = short.to_string();
-        assert!(text.contains("$2.00 short"), "{text}");
+        assert!(text.contains("$39.00 short"), "{text}");
         assert!(text.contains("[budget] job_usd"), "{text}");
         assert!(text.contains("budget left"), "{text}");
         // A reserve that left out the critic and later rounds would be smaller than the real one.
@@ -4125,10 +4125,13 @@ mod tests {
         // A changed cap changes the reserve with no code change.
         config.budget.verifier_usd += 1.0;
         let wider = budget_reserve(&config, ReserveStage::Run);
-        assert!(close(wider, 6.0), "{wider}");
+        assert!(close(wider, 16.0), "{wider}");
         // With planning off, admission is the reader, the producer and the verifier.
         config.job_plan = None;
-        assert!(close(budget_reserve(&config, ReserveStage::Admission), 6.5));
+        assert!(close(
+            budget_reserve(&config, ReserveStage::Admission),
+            18.0
+        ));
     }
 
     #[test]

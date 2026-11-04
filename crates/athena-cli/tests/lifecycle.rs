@@ -1004,18 +1004,21 @@ fn a_listed_criterion_covered_change_to_athena_toml_lands() {
     // M12 (allows): a listed, criterion-covered change to athena.toml.
     let fx = Fixture::new();
     let mut scenario = Scenario::default();
-    let raised = with_job_usd(&test_config(), "9.25");
+    let raised = with_job_usd(&test_config(), "51.00");
     scenario.reading = reading(
         &[("athena.toml", "modify")],
         &[
-            ("content", "athena.toml raises job_usd to 9.25"),
+            ("content", "athena.toml raises job_usd to 51.00"),
             ("behavior", "the tests still pass"),
         ],
     );
     scenario.edits = vec![("athena.toml".into(), Some(raised))];
     let athena = fx.athena(scenario.script());
     let proposal = athena
-        .ask("raise the job budget to nine dollars", &Lines::default())
+        .ask(
+            "raise the job budget to fifty-one dollars",
+            &Lines::default(),
+        )
         .unwrap();
     let f = finished(
         athena
@@ -1023,7 +1026,7 @@ fn a_listed_criterion_covered_change_to_athena_toml_lands() {
             .unwrap(),
     );
     assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
-    assert!(fx.file("athena.toml").unwrap().contains("job_usd = 9.25"));
+    assert!(fx.file("athena.toml").unwrap().contains("job_usd = 51.00"));
 }
 
 #[test]
@@ -1216,7 +1219,11 @@ fn a_killed_invocation_is_recorded_with_bounds() {
             );
             assert_eq!(inv.tokens.output.lower(), Some(20.0));
             assert_eq!(inv.cost.value(), None);
-            assert_eq!((inv.cost.lower(), inv.cost.upper()), (Some(0.0), Some(3.0)));
+            // The upper bound is the producer's cap in athena.toml.
+            assert_eq!(
+                (inv.cost.lower(), inv.cost.upper()),
+                (Some(0.0), Some(10.0))
+            );
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -1689,9 +1696,11 @@ fn a_criterion_missing_from_the_report_counts_as_unmet() {
 #[test]
 fn a_job_over_budget_is_refused_before_its_next_invocation() {
     // M13 (blocks): a job over budget fails before its next invocation.
-    let fx = Fixture::with_config(&with_job_usd(&test_config(), "5.60"));
+    // Admission needs 17.00 (reader, producer, verifier). The reader costs 2.70, which leaves 14.90 against
+    // the 15.00 the producer and verifier need.
+    let fx = Fixture::with_config(&with_job_usd(&test_config(), "17.60"));
     let scenario = Scenario {
-        cost: 0.7,
+        cost: 2.7,
         ..Scenario::default()
     };
     let calls = scenario.invocations.clone();

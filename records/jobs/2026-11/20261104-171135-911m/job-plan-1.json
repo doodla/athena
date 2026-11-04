@@ -1,0 +1,302 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261104-171135-911m",
+  "round": 1,
+  "at": "2026-11-04T17:14:38.750922253Z",
+  "invocation_seq": 2,
+  "approach": "Edit nine values in athena.toml (reader_usd 2.00, producer_usd 10.00, verifier_usd 5.00, job_usd 50.00, producer_timeout_s 5400, verifier_timeout_s 3600, planner_usd 3.00, critic_usd 3.00, max_rounds 5). Config::budget_required (config.rs:807) then gives 2 + 5*(3+3) + 10 + 5 = 47.00, and 50.00 covers it. Then fix every test that reads athena.toml and pins the old numbers. Those are the repository-config tests in config.rs (lines 855-936), plus tests in admission.rs, reading.rs, run_pin_tests.rs, run/tests.rs and athena-cli/tests (job_plan.rs, lifecycle.rs, drain.rs) that string-replace \"job_usd = 12.00\" or compute thresholds from the old caps. Add one config.rs test that pins the new values and the sum. The schema code and check logic are untouched. Add a CHANGELOG entry. Run the workspace tests and clippy, and fix any further pinned test they show.",
+  "decisions": [
+    {
+      "choice": "Edit only values in athena.toml; leave Config::budget_required / check_budget unchanged.",
+      "reason": "The sum is already computed in one place (config.rs:789-813) and shared with the runtime reserve (reading.rs:98), so new caps change both with no code edit. Out of scope forbids schema or non-test changes.",
+      "rejected": [
+        {
+          "option": "Raise only job_usd to 47.00 (exact sum)",
+          "why": "The user chose headroom; 50.00 covers 47.00 and the reading fixes it."
+        },
+        {
+          "option": "Change check logic or add a min-budget command",
+          "why": "Out of scope; the invariant is already enforced by check_budget."
+        }
+      ]
+    },
+    {
+      "choice": "Leave config.rs test job_plan_defaults_are_off_and_bounded (lines 1157-1168) unchanged.",
+      "reason": "It parses unplanned(REPO_CONFIG) plus an empty [job_plan], so it pins the code defaults (config.rs:214-220: max_rounds 3, 0.75, 600), not athena.toml. Changing the file does not break it, and the schema stays untouched.",
+      "rejected": [
+        {
+          "option": "Update it to 3.00 / 5",
+          "why": "That would make it fail, because defaults are code and the schema is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Adjust tests in files beyond the five listed deliverables (reading.rs, run_pin_tests.rs, run/tests.rs, lifecycle.rs, drain.rs) as test-only edits.",
+      "reason": "Criterion 3 requires the workspace tests to pass. These tests include athena.toml with include_str! and pin the old numbers or replace the string 'job_usd = 12.00' (run_pin_tests.rs:973,999,1030; admission.rs:1328; reading.rs:4062-4132; run/tests.rs:941-1051; job_plan.rs:84-87,148,180; lifecycle.rs:1007,1692; drain.rs:3034,3057,3611,4141).",
+      "rejected": [
+        {
+          "option": "Edit only the five listed files",
+          "why": "The other tests would fail and criterion 3 would not hold."
+        },
+        {
+          "option": "Make those tests build their own fixed budget config instead of reading athena.toml",
+          "why": "Larger refactor than the retry needs; the retry only re-pins the numbers."
+        }
+      ]
+    },
+    {
+      "choice": "Raise work_everything() budget_usd in drain.rs (3611) and job_plan.rs:180 from 50.0 to 100.0.",
+      "reason": "The drain reserves read + run, where run = job_usd (drain.rs:3406-3412, 1445). That is 2 + 50 = 52, which does not fit a drain budget of 50, so items would not be worked.",
+      "rejected": [
+        {
+          "option": "Keep 50.0",
+          "why": "The real-steps drain tests would work nothing."
+        }
+      ]
+    },
+    {
+      "choice": "Add one new config.rs test that pins the nine values and asserts job_usd >= budget_required() == 47.00 with check_budget ok.",
+      "reason": "Gives criteria 2 and 5 a direct check. The old tests only compared against the old numbers.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "athena.toml",
+      "action": "modify",
+      "purpose": "Change the nine values: reader_usd 2.00, producer_usd 10.00, verifier_usd 5.00, job_usd 50.00, producer_timeout_s 5400, verifier_timeout_s 3600, planner_usd 3.00, critic_usd 3.00, max_rounds 5. No key added or removed.",
+      "governance": true,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Test module only: update the tests at 855-936 to the new values and replace the 'job_usd = 12.00' string; add the_repository_budget_caps_cover_their_sum.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Update test a_job_usd_below_the_stage_caps_is_a_configuration_violation (replace 'job_usd = 50.00' with 46.00; assert_ne message and $1.00 short).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "Re-pin the budgets: 15.025 with reader_usd replaced from 2.00 to 0.01, 17.50, drain budget 100.0, and the comments.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under [Unreleased] (Changed) naming the nine values and that job_usd 50.00 covers the 47.00 sum.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Test module only: update shipped_budget_covers_the_reserve and the two reserve tests for the new caps (reserve 47.00, 6-dollar rounds).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Update the string replaces for job_usd and the caps, and the expected $ amounts.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Recompute the rows and the reader cost in the planning reserve tests (941-1051).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "Re-pin a_listed_criterion_covered_change_to_athena_toml_lands and a_job_over_budget_is_refused_before_its_next_invocation.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Re-pin job_usd 7.5 to 51.0, work_everything budget to 100.0, and the caps assertion to (2.0, 50.0).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Edit athena.toml: [budget] reader_usd = 2.00, producer_usd = 10.00, verifier_usd = 5.00, job_usd = 50.00, producer_timeout_s = 5400, verifier_timeout_s = 3600; [job_plan] planner_usd = 3.00, critic_usd = 3.00, max_rounds = 5. Touch no other line or comment.",
+    "In config.rs tests: the_repository_config_plans_hard_jobs_only... assert 3.0 / 3.0 / max_rounds 5 (timeouts stay 600); the_repository_budget_covers_two_reading_and_two_planning_rounds assert job_usd 50.0 (need = 4 + 12 + 15 = 31); change with_job_usd to replace 'job_usd = 50.00' and update its message.",
+    "In config.rs tests: job_usd_below_the_reserve... (a) 46.99 required 47.0, text parts '$46.99', '$0.01 short', '$47.00'; (b) exact 47.00; (d) 8.00 still parses; (e) planning off 16.99 below / 17.00 at; (f) one more round makes required 53.0, set job_usd 53.0. rounds_count_only_when_planning_is_enabled: use 47.00; required 17.0, planning_usd(2) 12.0, critic_usd 3.0. Leave job_plan_defaults_are_off_and_bounded alone. Add the_repository_budget_caps_cover_their_sum, asserting the nine values, the unchanged reader/check/planner/critic timeouts, budget_required() == 47.0, job_usd >= it, and check_budget ok.",
+    "admission.rs test: replace 'job_usd = 50.00' with 'job_usd = 46.00' (assert_ne message, $1.00 short); confirm admission's configuration check accepts the shipped file.",
+    "reading.rs tests: shipped_budget_covers_the_reserve (reserve 47.0; short example left 8.0 gives $39.00 short; update comments); every_stage_counts... (wider 16.0 after verifier +1, planning-off admission 18.0); required_budget_follows_the_configured_caps needs no change (it is relative).",
+    "run_pin_tests.rs: replace 'job_usd = 12.00' with 'job_usd = 50.00' in the replaces. when_the_budget_runs_out...: replace 'job_usd = 50.00' with 2.60, producer_usd 10.00 with 0.50, reader_usd 2.00 with 0.10, and add verifier_usd 5.00 with 2.00. admission_refuses...: job_usd 20.00 gives '$1.50 short' and '$21.50', then admitted at 50.00; fix comments.",
+    "run/tests.rs: update round_one_critic_check_follows_the_shared_reserve rows and its comment (job_usd 50.00, reader 0.01; reserve with 0.75/0.75 caps is 18.75 for 3 rounds and 15.75 for 1; rows as in dependents), and dispatch_holds_a_job_that_cannot_afford_every_planning_round (reader spend 31.5, '$1.00 short', comments).",
+    "job_plan.rs: with_job_usd(.., \"15.025\") and replace 'reader_usd = 2.00' with 'reader_usd = 0.01' (fix the comment: caps $10 and $5); a_short_job_is_skipped: job_usd \"17.50\" and the comment to reader 2.00, producer 10.00, verifier 5.00, 17.00 in all; drain limits budget_usd 100.0. Check the rest of the file for old numbers.",
+    "lifecycle.rs: raised config \"51.00\" with criterion text and assertion contains 'job_usd = 51.00' (and the request wording); a_job_over_budget...: with_job_usd \"17.60\" and Scenario cost 2.7.",
+    "drain.rs: with_job_usd \"51.0\" at 3034 and 3057; work_everything budget_usd 100.0; caps assertion (2.0, 50.0) with its comment.",
+    "Run `cargo test --locked --workspace`, then `cargo clippy --locked --workspace --all-targets`, then `cargo fmt --all --check` (fmt is one of Athena's checks). Fix each remaining test that still pins the old values by recomputing from the new caps. Edit test code only.",
+    "Add a CHANGELOG.md entry under [Unreleased] (### Changed): the nine cap values, and that job_usd 50.00 covers the required 47.00 so admission's budget check passes. Then review git diff: athena.toml has nine value-only lines; config.rs hunks are all inside #[cfg(test)]."
+  ],
+  "risks": [
+    {
+      "risk": "Other tests pin the old values and only fail on the workspace run.",
+      "mitigation": "The tests I read are listed, but I did not read every test (for example the later part of job_plan.rs after line 1130, other drain.rs tests with budgets, tests in athena-gate). The step that runs the full workspace tests and fixes each failure covers the rest. The producer must change only test numbers or expectations, never production code."
+    },
+    {
+      "risk": "Rewriting numeric thresholds could produce tests that pass but no longer check the boundary.",
+      "mitigation": "Compute each new value from the formulas in the plan (required = 47.00; Critic reserve in run/tests.rs is 0.75 + 1.5*(rounds-1) + 15). Keep the old test's relationship (one cent short, exactly enough) so each still shows the boundary, not just that the test passes."
+    },
+    {
+      "risk": "String replaces on the config silently match nothing.",
+      "mitigation": "Replace each literal 'job_usd = 12.00' with 'job_usd = 50.00' and keep the assert_ne guard, so a missed replace fails the test loudly."
+    },
+    {
+      "risk": "Larger fake reader costs trip a different budget check than the one under test.",
+      "mitigation": "Runtime fake costs (reader 2.7, 31.5) are test inputs only; ask/go in the old tests already exceeded the reader cap (4.0 against 0.50), so the cap is not enforced on the fake."
+    },
+    {
+      "risk": "Scope creep into governance files.",
+      "mitigation": "Do not edit defaults.toml, workflows, or the unlisted timeout keys; criterion 1's diff review confirms only nine values change."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "[budget]/[job_plan] values in athena.toml",
+      "dependent": "crates/athena-data/src/config.rs tests (855-936, 1163)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-data (the 855-936 tests are updated; 1157-1168 reads code defaults, so is unaffected and left alone)",
+      "reason": null
+    },
+    {
+      "name": "admission configuration check that job_usd covers the stage caps",
+      "dependent": "crates/athena-core/src/admission.rs:616 and test at 1327 (BASE_CONFIG replace of 'job_usd = 12.00' to 9.00, expects $1.00 short)",
+      "kind": "rule",
+      "test": "a_job_usd_below_the_stage_caps_is_a_configuration_violation, updated to replace 'job_usd = 50.00' with 46.00 (required 47.00, so $1.00 short)",
+      "reason": null
+    },
+    {
+      "name": "runtime budget reserve and the stage caps",
+      "dependent": "crates/athena-core/src/reading.rs budget_reserve (98) and tests 4062-4164 (reserve 10.0, 8.00 short by 2.00, wider 6.0, planning off 6.5)",
+      "kind": "code",
+      "test": "shipped_budget_covers_the_reserve, every_stage_counts_only_what_is_still_to_run..., required_budget_follows_the_configured_caps, updated to 47.00, a $39.00-short example, 16.0 and 17.0 / 18.0",
+      "reason": null
+    },
+    {
+      "name": "job_usd = 12.00 string and shipped caps",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs (config() at 81; replaces at 973, 999, 1030)",
+      "kind": "code",
+      "test": "when_the_budget_runs_out_before_the_rerun... (replace job_usd=50.00 with 2.60, producer_usd=10.00 with 0.50, reader_usd=2.00 with 0.10, and verifier_usd=5.00 with 2.00 so the verifier cap and 2.60 budget keep their old relation); admission_refuses_a_job_short_of_the_whole_planning_reserve (job_usd 20.00 gives $1.50 short of $21.50 for explicit 3 rounds of 0.75; admitted at 50.00)",
+      "reason": null
+    },
+    {
+      "name": "budget numbers behind the planning reserve checks",
+      "dependent": "crates/athena-core/src/run/tests.rs (294, repo_with_planning 283, tests 941-1051)",
+      "kind": "code",
+      "test": "round_one_critic_check_follows_the_shared_reserve (rows (3,34.24,false,'$3.00 short'), (3,31.25,false,'$0.01 short'), (3,31.24,true), (1,34.25,false,'$0.01 short'), (1,34.24,true)); dispatch_holds_a_job_that_cannot_afford_every_planning_round (reader spend 31.5 leaves 18.5 against 19.5, so '$1.00 short')",
+      "reason": null
+    },
+    {
+      "name": "test_config budget values",
+      "dependent": "crates/athena-cli/tests/job_plan.rs (84-87, 148, 180, 1085)",
+      "kind": "code",
+      "test": "a_cap_between_the_producer_alone... (job_usd 15.025, reader_usd 2.00 replaced with 0.01); a_short_job_is_skipped... (job_usd 17.50 so the second read is $0.10 short of 17.00); drain Limits budget 100.0; with_athena_toml_planning_hard_jobs_only... re-run to confirm",
+      "reason": null
+    },
+    {
+      "name": "test_config job_usd",
+      "dependent": "crates/athena-cli/tests/lifecycle.rs (1007, 1692) and tests/common/mod.rs with_job_usd (96)",
+      "kind": "code",
+      "test": "a_listed_criterion_covered_change_to_athena_toml_lands (raise to 51.00; 9.25 would now be refused as below 17.00); a_job_over_budget_is_refused_before_its_next_invocation (job_usd 17.60 and reader cost 2.7 so 14.9 is left against 15.00)",
+      "reason": null
+    },
+    {
+      "name": "drain caps read/run and drain budget",
+      "dependent": "crates/athena-cli/tests/drain.rs (3034, 3057, 3611, 4141) and crates/athena-cli/src/drain.rs Caps (3406-3412; fits at 1445, 1924, 2592)",
+      "kind": "code",
+      "test": "the_default_plan_budget_affords_a_read... expects (2.0, 50.0); the reread tests use 51.0 instead of 7.5; work_everything budget 100.0",
+      "reason": null
+    },
+    {
+      "name": "include_str!(athena.toml) consumers that only parse it",
+      "dependent": "athena-gate BUILTIN_CONFIG (lib.rs:33), athena-score, athena-agent env.rs:158, athena-cap-*, hestia.rs, scope_guard.rs, code_health.rs, routing.rs, introspect.rs, invocation.rs:376",
+      "kind": "code",
+      "test": null,
+      "reason": "I searched them for job_usd, the caps and the timeout values and found no assertion on the changed numbers; the workspace test run (criterion 3) confirms."
+    },
+    {
+      "name": "producer_timeout_s 5400 and verifier_timeout_s 3600",
+      "dependent": "crates/athena-core/src/reading.rs:308-322 (reading forecast refused above producer_timeout_s / verifier_timeout_s)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The tests at reading.rs:4230-4263 pass explicit timeouts (3000, 2400, 10000) to build_sized and do not read athena.toml, so they are unaffected by the new file values."
+    },
+    {
+      "name": "documentation and prompt-set budgets",
+      "dependent": "CHANGELOG.md; docs/system-facts.md and the budget lines in tests/budgets.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "system-facts.md carries no cap values (searched), and the prompt-set budgets measure the always-loaded prompt sets, not athena.toml."
+    },
+    {
+      "name": "none changed",
+      "dependent": "Host merge/CI settings",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "athena.toml is repository config; no host setting, branch rule or CI workflow is touched."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of athena.toml. Exactly nine value-only changed lines and nothing added or removed. The new config.rs test the_repository_budget_caps_cover_their_sum asserts each value by parsing REPO_CONFIG, including timeouts 5400/3600 and the unchanged reader_timeout_s 300, check_timeout_s 1800, planner/critic_timeout_s 600.",
+      "command": "git diff -- athena.toml",
+      "observes": "Only the nine listed keys change value; the new test passes, which also fails if reader_timeout_s, check_timeout_s, planner_timeout_s or critic_timeout_s moved.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Run the athena-data tests. The updated tests parse the real athena.toml through the production entry points Config::parse and Config::check_budget, via the existing REPO_CONFIG = include_str!(athena.toml) constant (config.rs:838). The budget-threshold test has with_job_usd replace 'job_usd = 50.00' with 46.99 (required $47.00, $0.01 short), 47.00 (accepted) and 16.99/17.00 (planning off); the more-rounds case needs 53.00.",
+      "command": "cargo test --locked -p athena-data",
+      "observes": "All tests pass, including Config::parse(REPO_CONFIG).check_budget() is_ok, the 47.00 requirement and the refusal one cent below it.",
+      "fails_without": "With athena.toml at the new values but config.rs tests unchanged, the_repository_config_plans_hard_jobs_only_with_the_designs_caps (asserts 0.75 / 3) and the_repository_budget_covers_two_reading_and_two_planning_rounds (asserts job_usd 12.0) fail. With job_usd left at 40.00, the new test and job_usd_below_the_reserve_is_refused_by_the_budget_check (which asserts check_budget ok on REPO_CONFIG, config.rs:909) fail.",
+      "seam": "Config::parse and Config::check_budget with the REPO_CONFIG fixture; exists today (config.rs:838, 819). The new test is added in step 3."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the whole workspace tests, then `cargo clippy --locked --workspace --all-targets`. Fakes are the existing scripted agent fakes (Scenario, costing(), CountingPinner). Each updated test drives production code: Athena::ask/go, drain::drain/plan, admission checks and budget_reserve. They read athena.toml by include_str!; edited numbers appear only as expected values.",
+      "command": "cargo test --locked --workspace",
+      "observes": "Every test passes; clippy exits 0 with no warnings.",
+      "fails_without": "Without the test edits, these fail on the new athena.toml: admission a_job_usd_below_the_stage_caps_is_a_configuration_violation (replace of 12.00 hits nothing, so assert_ne fails), reading shipped_budget_covers_the_reserve (expects 10.0), run_pin_tests admission_refuses_a_job_short_of_the_whole_planning_reserve, run/tests round_one_critic_check_follows_the_shared_reserve and dispatch_holds_a_job_that_cannot_afford_every_planning_round, lifecycle a_job_over_budget_is_refused_before_its_next_invocation, job_plan tests, and drain tests using real_steps.",
+      "seam": "Existing: Athena::ask / go via Fixture::with_config and with_job_usd (tests/common/mod.rs:96), run/tests.rs repo_with_planning, drain::drain with RealSteps. No new seam."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff. Every hunk lies after the `#[cfg(test)]` line at config.rs:833; no hunk touches the lines before it (schema, budget_required, check_budget).",
+      "command": "git diff -- crates/athena-data/src/config.rs",
+      "observes": "No hunk above the cfg(test) module; the schema and check logic are unchanged.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "The new test parses REPO_CONFIG and asserts budget_required() == 47.00 within 1e-9 and equals reader + max_rounds*(planner+critic) + producer + verifier, that job_usd >= that, and that check_budget() is ok. The same invariant is exercised on the athena-core side by reading.rs shipped_budget_covers_the_reserve through budget_reserve(ReserveStage::Admission) and admission's configuration check (admission.rs:616) on BASE_CONFIG.",
+      "command": "cargo test --locked -p athena-data the_repository_budget_caps_cover_their_sum",
+      "observes": "The sum is 47.00, job_usd is 50.00, check_budget is ok; admission passes on the shipped file.",
+      "fails_without": "If job_usd were below 47.00 (for example the failed first attempt's 40.00), check_budget returns BudgetBelowReserve and the test fails; the admission test in athena-core also sees the shipped file refused.",
+      "seam": "Config::budget_required / check_budget with the REPO_CONFIG fixture; exists. The new test is added in step 3."
+    }
+  ],
+  "open_questions": [
+    "User: the brief lists five deliverables, but criterion 3 (workspace tests pass) needs test-only edits in five more files (reading.rs, run_pin_tests.rs, run/tests.rs, lifecycle.rs, drain.rs). Is that accepted? The plan assumes yes.",
+    "User: the plan edits drain.rs and job_plan.rs to raise the drain budget to 100.0 for real-steps tests, because read + run is now 52 against a budget of 50. Is a test-only change acceptable here, or should the drain's run cap be reconsidered?"
+  ],
+  "producer_section_sha256": "49ec2c58d2e1839c809acbcfaa8eb7d8df4f1f785eee3b3744d85ae9906c4a84"
+}

@@ -1,0 +1,185 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261010-225741-yvk0",
+  "base_commit": "43223b50d5adf516cd3a555918b3d2293e469994",
+  "base_fingerprint": "sha256:77b160096abee10fa81e9e8b1c7da506fbea490d810f9280d8397ec41277457a",
+  "previous_job": "20261104-103213-f1cw",
+  "candidate_commit": "f8faf253db7344a7a552d79640a953956f941628",
+  "candidate_tree": "c0c8de8d96407272423fecebfff335d3efebd125",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 312533
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 189381
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 81893
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 13984
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23656
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 81299
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 59992
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 63362
+    },
+    {
+      "path": "docs/decisions.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 349544
+    },
+    {
+      "path": "docs/enforcement.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 22995
+    }
+  ],
+  "fingerprint": "sha256:2c65c77a274159fcd98b23d4565e5c3a8738f996211cb0c784926efac6c76a0c",
+  "violations": [],
+  "producer_report": {
+    "summary": "When a job's request names commit hashes (7 to 40 hex characters with a digit and a letter, at most 8), the producer and verifier snapshots now get one read-only text file, `ATHENA-COMMITS.txt`. For each named commit in the base's history it holds the full hash, date, subject, visible paths and their diff. The core builds it from the user's repository with the same `classify()` filter as `HISTORY.txt`. `records/`, `athena-exclude` paths, submodule entries, commit bodies and authors are never written. No object, ref, alternate or remote enters the snapshot, and the file is listed in the snapshot's `.git/info/exclude`, so it never reaches a candidate, change list or prepared tree. Unknown or non-commit hashes, commits outside the base's history and hidden-only commits get one shared note; the job is not refused. The brief gains a sentence naming the file only when the request names a hash, so no-hash briefs and snapshots are unchanged. The sentence says to read the file by its path, because a directory-wide Grep skips excluded files. In athena-git: `Snapshot::add_commit_views`, `CommitViews`, `COMMITS_FILE`, `Git::diff_text` and `Git::date_and_subject`. In athena-context: `commit_hashes_in` and `COMMITS_FILE`. In athena-core: `verifier_snapshot_for` is used at the three agent-read call sites, and the 4-argument `verifier_snapshot` stays as a wrapper for the scratch snapshot in checks.rs. docs/decisions.md could not be edited in place because it is append-only, so I added D155. I added row M34 to docs/enforcement.md and a CHANGELOG entry. fmt, clippy, the full test suite and the policy scan all pass.",
+    "files": [
+      "crates/athena-git/src/snapshot.rs",
+      "crates/athena-git/src/lib.rs",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/run/producer.rs",
+      "crates/athena-core/src/run/verification.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run_pin_tests.rs",
+      "docs/decisions.md",
+      "docs/enforcement.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-git",
+        "result": "pass",
+        "note": "66 tests, includes the new commit-view tests (first run had one wrong assertion in my own test; fixed and rerun inside the full run)"
+      },
+      {
+        "command": "cargo test --locked -p athena-core a_request_naming_a_commit",
+        "result": "pass",
+        "note": "core wiring test: no hash gives neither agent the file; a named hash gives both, status clean, 1 and 2 commits, file absent from the candidate tree"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean after the final edits"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "first run flagged cloned_ref_to_slice_refs in my tests; fixed, rerun clean"
+      },
+      {
+        "command": "cargo test --locked --no-fail-fast -q",
+        "result": "pass",
+        "note": "whole workspace, all test binaries ok (904 in athena-core, 88 in athena-cli, etc.). An earlier run failed the append-only decisions log test after I edited D08; fixed by appending D155 instead"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 tests ok, including the boundary-word scan and the enforcement-map test-name check"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new athena-git test builds a user repo with an extra commit, creates a producer snapshot with that commit requested, and checks the commit's visible changes (subject, paths, diff) are readable inside the snapshot. Run `cargo test -p athena-git`.",
+        "status": "met",
+        "evidence": "Test `named_commit_is_readable_in_a_producer_snapshot` in crates/athena-git/src/snapshot.rs builds a user repo plus an extra commit and a later one, creates a SnapshotRepo::Base snapshot, calls add_commit_views, and asserts the file holds the full hash, `subject Add the feature`, paths src/feature.rs and src/main.rs, `+++ b/src/feature.rs`, the added line, the removed line and a 10-character date. A second case uses a 7-character abbreviation of an ancestor. `cargo test -p athena-git` passed (66 tests)."
+      },
+      {
+        "criterion": "A test commits a change to an athena-exclude path and to records/ in a requested commit. It checks that neither the content nor the path name appears anywhere in the snapshot, including the history view. Run `cargo test`.",
+        "status": "met",
+        "evidence": "Test `hidden_paths_never_appear_in_the_commit_view`: the requested commit changes src/main.rs plus FRONT.md, private/notes.md and records/jobs/y.json, each with a marker. It builds Base and BaseAndCandidate snapshots, then checks every file name and byte under the snapshot dir including .git, plus `git log --all -p` and `git cat-file --batch-all-objects --batch`. No marker or hidden path name is found. FRONT.md and the words records/private are asserted absent from ATHENA-COMMITS.txt only, because the visible root .gitattributes names FRONT.md. A PlainWithHistory HISTORY.txt is checked too. A control runs unfiltered `git show` on the same commits and finds all markers and names, so the assertions can fail. A hidden-only commit is omitted and its subject is absent. Passed in `cargo test --locked --no-fail-fast -q`."
+      },
+      {
+        "criterion": "A test checks that the snapshot has no path back to the user's repository (no alternates, no remotes) and that the user's refs and objects are unchanged after creation. Run `cargo test`.",
+        "status": "met",
+        "evidence": "Test `commit_view_gives_the_snapshot_no_path_to_the_users_repository`: no objects/info/alternates or http-alternates, `git remote` empty, config without url or alternate, no file under the snapshot holds the user's directory path, the snapshot's git cannot resolve the real commit hashes, and it has one commit. The user's for-each-ref, cat-file --batch-all-objects --batch-check output, HEAD and .git/config are identical before and after. Passed in the full run."
+      },
+      {
+        "criterion": "When no commit is requested, snapshots are unchanged: the producer gets one commit, the verifier two, and no extra history file is present. Run `cargo test`.",
+        "status": "met",
+        "evidence": "athena-git test `no_requested_commit_leaves_snapshots_unchanged` (empty list returns an empty CommitViews, no ATHENA-COMMITS.txt, .git/info/exclude bytes unchanged, rev-list count 1 and 2, clean status). athena-context tests `commit_hashes_in_picks_only_hashes` and `producer_and_verifier_briefs_name_the_commit_view` (no sentence without a hash; the stored-copy test `a_verifier_brief_without_a_plan_is_byte_identical_to_the_stored_copy` still passes). Core test `a_request_naming_a_commit_gives_the_producer_and_verifier_its_view_and_one_without_gives_neither` covers a whole job with and without a hash, and asserts the two COMMITS_FILE constants are equal. All passed in the full run."
+      },
+      {
+        "criterion": "A requested hash that doesn't exist or isn't an ancestor/known commit yields a clear result (omitted with a note, or a refusal) without panicking, and the test says which. Run `cargo test`.",
+        "status": "met",
+        "evidence": "Test `unknown_or_unreachable_hashes_are_omitted_with_a_note` (comment states: omission with a note, never a refusal). Inputs: a nonexistent hash, a side-branch commit, an orphan-branch commit, a blob's abbreviation and a non-hex token. Result is Ok, shown is empty, omitted holds all five, the file has `Not available:` and no diff. `only_the_first_requested_commits_are_used` checks 9 hashes: first 8 shown, `Ignored: 1 more` in the file. Passed in the full run."
+      },
+      {
+        "criterion": "`cargo fmt --check` and `cargo clippy` are clean, and `cargo test` passes.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked --no-fail-fast -q` on the final tree; all exited 0."
+      },
+      {
+        "criterion": "docs/decisions.md D08 (or a new decision) records the change with alternatives and tradeoffs, and no longer says agents never see real history.",
+        "status": "met",
+        "evidence": "docs/decisions.md is append-only (athena-cli test `the_decision_log_is_well_formed_and_only_appended_to` failed when I edited D08), so D08 is unchanged and I appended D155 at the end. D155 records the case, decision, six alternatives (alternates or remote, rewrite into the snapshot, full history, refusing on an unknown hash, a patch file per commit, committing the view), tradeoffs and limits, and states the exception to D08's rule that agents never see the real history. It avoids the phrases the supersession parser reads. The decisions test passes. D08's old sentence cannot be removed."
+      },
+      {
+        "criterion": "docs/enforcement.md and CHANGELOG.md describe the read-only history access and what stays hidden. The brief text in crates/athena-context/src/briefs.rs tells agents where to find the commit view.",
+        "status": "met",
+        "evidence": "New row M34 in docs/enforcement.md and an Added entry under Unreleased in CHANGELOG.md. Both state what the view holds, what stays hidden (records/, athena-exclude paths, submodule entries, bodies, authors, commits outside the base's history) and the limits. The test names in M34 are checked by `every_test_named_in_the_enforcement_map_exists`, which passed. In briefs.rs, `commit_view_paragraph` adds a sentence naming ATHENA-COMMITS.txt, saying to read it by its path and that an absent file means Athena could not build the view, to the producer brief (both forms) and the verifier brief, only when the request names a hash. `producer_and_verifier_briefs_name_the_commit_view` asserts all three forms."
+      }
+    ],
+    "open_issues": [
+      "Criterion 7 asks that D08 no longer say agents never see real history. D08 is pinned by the append-only guard and cannot be edited, so D155 states the exception instead. The decision view and docs/decision-links.toml are not updated: I used no phrase the parser reads, so D08 still shows as active. Whether to confirm a link for D08 is for the user.",
+      "docs/system-facts.md still says the producer snapshot has no history. It is not a listed deliverable, so I left it unchanged. Should that line be updated here or in a follow-up?",
+      "Hashes in the reading's acceptance criteria but not in the request text are not detected. This follows the reading; say if they should count.",
+      "Departure from the plan: the plan listed `--pathspec-from-file` for Git::diff_text. `git diff` does not support it, so paths go on the command line in chunks of 100. Behavior is the same.",
+      "Departure from the plan: the plan said to treat a view error in the producer snapshot as a warning line. I did so; in the verifier path the error is also a warning, and verifier_snapshot_for returns the note to print instead of passing a UI handle to the shared builder."
+    ],
+    "mistakes": [
+      "I first edited D08 in docs/decisions.md, which is append-only; the athena-cli decisions test failed. I reverted it and added D155.",
+      "My first athena-git tests had a clippy cloned_ref_to_slice_refs violation and one wrong expectation (a kept-directory seed deletes the base's other files, so the change list is not just the added file). Both fixed.",
+      "The first draft of the view header named `records/` and private paths, which would put a hidden path name into the snapshot; reworded before any test run."
+    ],
+    "learnings": [
+      "docs/decisions.md is append-only: athena-cli's `the_decision_log_is_well_formed_and_only_appended_to` pins the first 230046 bytes, so a decision cannot be reworded. A new entry must be appended, with a Provenance bullet and ids ascending.",
+      "The decision-link backtest parses the phrases 'superseded by', 'supersedes' and 'amends' against docs/decision-links.toml; a new entry that uses them without a confirmed link is a finding. D155 avoids them.",
+      "`git diff` does not accept --pathspec-from-file, so Git::diff_text passes literal paths in chunks of 100 after `--` with GIT_LITERAL_PATHSPECS=1.",
+      "Test `Tweak` closures in run_pin_tests.rs run while the agent's snapshot still exists, so they can inspect the workdir and its git status; the directory is removed after the job.",
+      "docs/enforcement.md rows are checked by an xtask test that every backticked test name exists, so a new row must name only real tests."
+    ],
+    "desires": [
+      "A way to read a tool-result output file when it is too large; a Grep over the saved file was denied as outside the working directory, so I reran the suite quietly.",
+      "The pre-edit append-only rule for docs/decisions.md in the brief; it cost one full test run."
+    ]
+  }
+}

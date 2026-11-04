@@ -79,11 +79,11 @@ fn an_enabled_job_runs_the_planner_and_critic_before_the_producer_and_commits_th
 #[test]
 fn a_cap_between_the_producer_alone_and_planning_plus_the_producer_stops_the_job_before_the_producer()
  {
-    // Each invocation costs $0.01 (the reader's included). The producer and verifier caps are $3 and $2.
-    // Left before planning: 5.025 - 0.01 = 5.015, enough. Left after planning: 5.025 - 0.03 = 4.995, not.
+    // Each invocation costs $0.01 (the reader's included). The producer and verifier caps are $10 and $5.
+    // Left before planning: 15.025 - 0.01 = 15.015, enough. Left after planning: 15.025 - 0.03 = 14.995, not.
     let config = format!(
         "{}\n[job_plan]\nenabled = true\nplanner_usd = 0.005\ncritic_usd = 0.005\nmax_rounds = 1\n",
-        with_job_usd(&test_config(), "5.025").replace("reader_usd = 0.50", "reader_usd = 0.01")
+        with_job_usd(&test_config(), "15.025").replace("reader_usd = 2.00", "reader_usd = 0.01")
     );
     let fx = Fixture::with_config(&config);
     let scenario = Scenario::default();
@@ -142,10 +142,10 @@ impl athena_cli::drain::Lander for RecordingLander {
 #[test]
 fn a_short_job_is_skipped_with_its_reason_and_the_next_item_runs() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    // No `[job_plan]`: a job needs the reader 0.50, the producer 3.00 and the verifier 2.00, so 5.50 in all.
-    // The budget is 6.00. The first item's reader fails once and costs 0.60 (the pattern of a reader that
-    // returns no reading), so its second read, made by the drain, finds 5.40 left: $0.10 short.
-    let fx = Fixture::with_config(&with_job_usd(&test_config(), "6.00"));
+    // No `[job_plan]`: a job needs the reader 2.00, the producer 10.00 and the verifier 5.00, so 17.00 in all.
+    // The budget is 17.50. The first item's reader fails once and costs 0.60 (the pattern of a reader that
+    // returns no reading), so its second read, made by the drain, finds 16.90 left: $0.10 short.
+    let fx = Fixture::with_config(&with_job_usd(&test_config(), "17.50"));
     let inner = Scenario::default().script();
     let first_reads = Arc::new(AtomicUsize::new(0));
     let counted = first_reads.clone();
@@ -177,7 +177,7 @@ fn a_short_job_is_skipped_with_its_reason_and_the_next_item_runs() {
         lander: &lander,
     };
     let limits = athena_cli::drain::Limits {
-        budget_usd: 50.0,
+        budget_usd: 100.0,
         target_rating: 5,
         max_jobs: 10,
     };

@@ -1,0 +1,371 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261010-225741-yvk0",
+  "round": 1,
+  "at": "2026-11-04T14:14:26.036503988Z",
+  "invocation_seq": 4,
+  "approach": "Add a read-only, filtered commit view to the producer and verifier snapshots, only when the request text names commit hashes. A new `Snapshot::add_commit_views` resolves each named hash in the user's repository and keeps it only if it is an ancestor of the base commit. For each kept commit it writes the full hash, date, subject, visible changed paths and a unified diff limited to visible paths into one file, `ATHENA-COMMITS.txt`, at the snapshot root. Visibility uses the same `classify()` and `visible_to_agents()` filter as `history_text` and `materialize`. The diff is taken with a literal-pathspec list on stdin, so hidden paths never reach the output. No user object, ref, alternate or remote enters the snapshot: the core generates the text and the agent's git still holds only synthetic commits. The file is listed in the snapshot's `.git/info/exclude`, so `git add -A`, the change list, the candidate commit and the verifier's `prepared` tree ignore it. A new `commit_hashes_in(text)` extracts candidate hashes (7 to 40 hex characters, at least one digit and one letter, at most 8). `producer_snapshot` and `verifier_snapshot` call both with the request text. The brief text, D08, enforcement.md and the changelog are updated. With no hash in the request nothing is added, so snapshots are unchanged. Revision 2 drops docs/system-facts.md from the files (it is not a deliverable) and flags the stale line as a question. It also gives criterion 6 a seam and a fails_without. It says why the one-line edits to the other `verifier_snapshot` callers and the core test file cannot be avoided.",
+  "decisions": [
+    {
+      "choice": "Generate a filtered text view (ATHENA-COMMITS.txt) in the core; do not expose any real git objects inside the snapshot.",
+      "reason": "Real objects in an alternates store, a fetched pack or a remote leak hidden-path blobs and trees through the object database, reachable with `git cat-file` or `git log --all`. A generated file reuses the existing classify()/visible_to_agents() filter as `history_text` does, and agents read it with Read and Grep, which every role already has. The user's repository is only read.",
+      "rejected": [
+        {
+          "option": "Alternates or a remote pointing at the user's repository",
+          "why": "Gives a path back to the user's objects, including records/ and athena-exclude content. Criterion 3 forbids it, and so does D08's isolation."
+        },
+        {
+          "option": "Rewrite the named commits into the snapshot's own git (copy trees with hidden paths removed, then commit them)",
+          "why": "Gives real `git show`, but the rewritten commits get new ids, so the hash the request cites would not resolve. It also needs tree surgery across merges, and one unfiltered mistake would put hidden blobs in the object store."
+        },
+        {
+          "option": "Always include full history, or extend HISTORY.txt",
+          "why": "Out of scope: full history is not wanted for every agent, and the HISTORY.txt format must not change."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the view out of the commits and the work tree's tree by listing `/ATHENA-COMMITS.txt` in `.git/info/exclude`, written after the base and candidate commits exist. `copy_files` skips that name at the top level for a resumed directory.",
+      "reason": "The producer's candidate and the verifier's `prepared` tree both come from `git add -A` (work_tree_tree, commit_all). Without the exclude the file would appear as an added file in the candidate, would break the verifier's `tree_now == prepared` check (verification.rs:299, 327), and would break the unchanged-snapshot invariant of criterion 4.",
+      "rejected": [
+        {
+          "option": "Write the file inside `.git/`",
+          "why": "Ripgrep skips hidden directories by default, so Grep would not find it, and the brief would have to name an unusual path."
+        },
+        {
+          "option": "Commit the file into the snapshot's base commit",
+          "why": "It would change the one-commit/two-commit shape and the base tree the change list is measured against."
+        }
+      ]
+    },
+    {
+      "choice": "Accept a hash only if it resolves in the user's repository and is an ancestor of the base commit (`is_ancestor`). Everything else, including a commit that changed only hidden paths, is listed in the file under one shared note: `not available: not in the base commit's history, or changed only paths hidden from agents`. The result is Ok with the hash in `CommitViews.omitted`: no error and no panic.",
+      "reason": "Records-branch and other unreachable commits are excluded by the ancestor rule. One shared note means the file does not confirm that a hidden commit exists. A typo in a quoted hash must not fail the job, and the agent is told why nothing is shown.",
+      "rejected": [
+        {
+          "option": "Refuse the job on an unknown hash",
+          "why": "A mistyped or non-hash token would stop the job over a convenience feature."
+        },
+        {
+          "option": "Silently omit",
+          "why": "The agent could not tell a missing view from an empty one, which is the fault behind the rejected attempts."
+        }
+      ]
+    },
+    {
+      "choice": "Take hashes only from the request text (`ctx.job.request.text`) through a tokenizer: split on non-alphanumerics, keep tokens of 7 to 40 characters, all hex, with at least one digit and one letter, lowercase, deduplicated, at most 8.",
+      "reason": "The reading says history is offered only for hashes the request names. The digit-and-letter rule drops the date part of job ids (20261012), plain numbers and all-hex words such as 'defaced'. Candidates are still checked by rev_parse, so a false positive costs only a note. A hash made only of digits is not detected; the changelog says so.",
+      "rejected": [
+        {
+          "option": "A regex crate over the whole brief",
+          "why": "Adds a dependency and takes in hashes from plan text and other text the user did not write."
+        },
+        {
+          "option": "A new field on the request or config",
+          "why": "Needs a record change, which this job rules out."
+        }
+      ]
+    },
+    {
+      "choice": "One file, ATHENA-COMMITS.txt, at the snapshot root for both roles. It holds the subject only, not the commit body or author. Each commit's diff is cut at 200 KB with a visible truncation line.",
+      "reason": "Mirrors HISTORY.txt (hash, date, subject, paths). A body can name hidden paths and an author is personal data (the `public` default).",
+      "rejected": [
+        {
+          "option": "One patch file per commit",
+          "why": "More paths for the brief to explain and for in-tree name collisions; one file is enough for at most 8 commits."
+        }
+      ]
+    },
+    {
+      "choice": "Change the signature of `verifier_snapshot` to take `ctx: &RunContext<'_>` instead of `pin_dir`, and edit the two callers outside verification.rs (mod.rs:1502, checks.rs:367) by one line each. Add the core wiring test to run_pin_tests.rs.",
+      "reason": "`verifier_snapshot` has the base, the candidate and the pin dir but not the request text, and every caller already holds `ctx` (checked at verification.rs:298, 326, mod.rs:1502, checks.rs:367, all passing `ctx.pin_dir.as_deref()`). The two edits are mechanical and cannot be avoided without hidden state. run_pin_tests.rs holds the only fake-invoker harness that can drive a whole job and see the producer's and the verifier's workdirs, so criterion 4's core half needs it.",
+      "rejected": [
+        {
+          "option": "Keep the old signature and stash the requested hashes in a field on Athena or in a file",
+          "why": "Adds shared state across runs that every caller would have to keep in step; the explicit argument is smaller and safer."
+        },
+        {
+          "option": "Skip the core wiring test and rely on athena-git tests only",
+          "why": "The wiring in producer.rs and verification.rs would then have no behavior evidence, which the behavior-evidence default rejects."
+        }
+      ]
+    },
+    {
+      "choice": "Do not edit docs/system-facts.md; raise its stale 'Producer snapshot ... history absent' line as a question for the user.",
+      "reason": "It is not a listed deliverable and the brief says to keep the change focused. D08, enforcement.md, the changelog and the briefs carry the new rule.",
+      "rejected": [
+        {
+          "option": "Edit docs/system-facts.md in this change",
+          "why": "Widens scope beyond the listed deliverables without the user's agreement."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "purpose": "Add `COMMITS_FILE`, `MAX_REQUESTED_COMMITS`, `commit_hashes_in`, `CommitViews` and `Snapshot::add_commit_views`; skip the top-level view file in `copy_files`; add the tests for criteria 1 to 5.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add one read-only helper `Git::diff_text(from, to, visible_paths)` (literal pathspecs, no external diff or textconv, path list on stdin) and re-export `COMMITS_FILE`, `commit_hashes_in` and `CommitViews`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "In `producer_snapshot`, call `commit_hashes_in` on the request text and `add_commit_views` after `Snapshot::create`; print one UI line naming shown and omitted hashes; a view error is a warning, not a job failure.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "`verifier_snapshot` takes `ctx` and adds the commit view after `Snapshot::create`, before `prepared` is computed; update the two call sites in this file.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "One-line change at the `verifier_snapshot` call (line 1502) to pass `ctx`; forced by the new signature, no other edit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "One-line change at the `verifier_snapshot` call (line 367) to pass `ctx`; forced by the new signature, no other edit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add the core wiring test (criterion 4b): hash and no-hash jobs, producer and verifier workdirs, candidate tree. It is the only place the fake-invoker harness lives.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `COMMITS_FILE` and one sentence in the producer 'Working directory' text (both forms) and the verifier 'The change' text; add the briefs test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "D08: record the commit view with its alternatives and tradeoffs; reword the sentence that says agents lose the real history.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/enforcement.md",
+      "action": "modify",
+      "purpose": "Describe the read-only commit view, what stays hidden, the mechanism and the tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Added entry under Unreleased for outside readers, with the limits (request text only, at most 8 hashes, digit-only hashes not detected).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read the testutil helpers in athena-git (lib.rs:1044 onward) and the tests in snapshot.rs (lines 493 to 960) to reuse `user_repo()` and the lock helpers.",
+    "In snapshot.rs add `COMMITS_FILE = \"ATHENA-COMMITS.txt\"`, `MAX_REQUESTED_COMMITS = 8` and a 200 KB per-commit diff cap. Add `pub fn commit_hashes_in(text: &str) -> Vec<String>` (tokenize on non-alphanumerics; 7 to 40 characters, all hex, at least one digit and one letter; lowercase; deduplicate; first 8). Add `CommitViews { shown, omitted }` and `Snapshot::add_commit_views(&self, user, source_commit, rules_commit, requested) -> Result<CommitViews>`: return an empty result and write nothing for an empty list; refuse if the snapshot has no `.git` or the base tree tracks the file name; for each hash, `rev_parse` then `is_ancestor(hash, source_commit)`; take the changed paths from `diff_tree(parent-or-empty-tree, commit)` (first parent, `--no-renames`, mode 160000 dropped); classify with `rules_commit`; if no visible path remains, treat the commit as omitted; otherwise write the header (full hash, date, subject), the visible path list and the diff text. Append `/ATHENA-COMMITS.txt` to `.git/info/exclude` before writing the file. In `copy_files`, skip the top-level `COMMITS_FILE` along with `.git`.",
+    "In lib.rs add `Git::diff_text(from, to, paths)`: read-only, `--literal-pathspecs`, `--no-ext-diff --no-textconv --no-renames --no-color`, path list on stdin with `--pathspec-from-file=- --pathspec-file-nul`. Add the re-exports.",
+    "In producer.rs `producer_snapshot`, after `Snapshot::create` and before `mount`, compute `commit_hashes_in` on the request text from `ctx.job.request`, call `snapshot.add_commit_views(&self.git, &p, &p, &hashes)`, and print one UI line naming shown and omitted hashes. Treat an error as a warning line.",
+    "In verification.rs change `verifier_snapshot` to take `ctx: &RunContext<'_>` in place of `pin_dir` (use `ctx.pin_dir.as_deref()` inside), and add the same call after `Snapshot::create` and before `tool_config` and `prepared`. Update the call sites in verification.rs (298, 326), mod.rs (1502) and checks.rs (367).",
+    "In briefs.rs add `COMMITS_FILE` and the sentence to the producer Working directory text (plain and retry forms) and the verifier 'The change' text, after the existing 'history are absent by design' wording. Add a core test next to the HISTORY_FILE constant check (planning.rs:610) asserting the briefs constant equals athena-git's.",
+    "Write the athena-git tests for criteria 1 to 5, including the stale-copy and work-tree-tree tests named in dependents, and the briefs test. Read the run_pin_tests.rs fake-invoker harness (about lines 860 to 940 and 1295 to 1330) and add the core test for criterion 4b.",
+    "Edit docs/decisions.md (D08), docs/enforcement.md and CHANGELOG.md. Grep for the old 'agents lose git log' sentence before and after, and check the new text for banned words and email-like text.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix failures; if `system_facts_budgets_match_computed` fails, update the computed line, never the budget."
+  ],
+  "risks": [
+    {
+      "risk": "A hidden path name or content leaks through the diff, for example from a rename, a submodule line, or a textconv or external diff driver set in the user's .gitattributes.",
+      "mitigation": "The path list comes from `diff_tree` with `--no-renames`, is filtered by `classify()`, and is passed as literal pathspecs. `--no-ext-diff` and `--no-textconv` are set. Entries with mode 160000 are dropped. Commit body and author are never written. Criterion 2 checks the file bytes and every object in the snapshot."
+    },
+    {
+      "risk": "The view file leaks into the candidate commit or changes the verifier's `prepared` tree, which would make a verdict discard itself and rerun.",
+      "mitigation": "The path goes into `.git/info/exclude` before the file is written; `git add -A` in `commit_all` and `work_tree_tree` respects it. Tests compare `work_tree_tree()` before and after and check the candidate's tree in the core test."
+    },
+    {
+      "risk": "A real tracked file already named ATHENA-COMMITS.txt in the repository.",
+      "mitigation": "`add_commit_views` returns Refused if the base tree tracks that name rather than overwriting it. The core call turns that into a warning line and the job continues without the view."
+    },
+    {
+      "risk": "Huge commits (generated files, vendored code) make the file very large for Read.",
+      "mitigation": "At most 8 commits and 200 KB of diff per commit, then a visible truncation line; the path list is always complete."
+    },
+    {
+      "risk": "False or missed hash detection in the request text (digit-only hashes missed, odd tokens matched).",
+      "mitigation": "The matcher is conservative and deterministic, tested on dates, job ids, versions and all-hex words. Every candidate is verified with `rev_parse`. A miss leaves today's behavior. The limit is stated in the changelog."
+    },
+    {
+      "risk": "The snapshot lock or the immutable attribute prevents writing the view.",
+      "mitigation": "The view is written during creation, before any lock, in both snapshot builders. The tests create and then lock a snapshot that holds the file."
+    },
+    {
+      "risk": "docs/system-facts.md, read by the planner and critic, keeps saying history is absent from the producer snapshot, which is no longer fully true when a commit is named.",
+      "mitigation": "The line is left alone because it is outside the deliverables. It is raised as a question; D08, enforcement.md, the changelog and the briefs state the exception."
+    },
+    {
+      "risk": "The core wiring test depends on a harness in run_pin_tests.rs that was only located by grep, not read in full.",
+      "mitigation": "Step 7 reads the harness before writing the test; if it cannot expose both workdirs, the test records them through the same fake invoker at the two snapshot builders."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Snapshot::create call with SnapshotRepo::Base for the producer, plus the new add_commit_views call",
+      "dependent": "crates/athena-core/src/run/producer.rs:78 (producer_snapshot), reached from run/mod.rs (produce_and_verify)",
+      "kind": "code",
+      "test": "New run_pin_tests.rs test (hash and no-hash jobs); existing producer tests in run_pin_tests.rs; snapshot.rs test `snapshots_hold_only_what_agents_may_see`.",
+      "reason": null
+    },
+    {
+      "name": "verifier_snapshot signature (takes ctx instead of pin_dir) and the view it adds",
+      "dependent": "Callers: run/mod.rs:1502 (check_and_verify), run/verification.rs:298 and 326 (rerun after a timeout or a changed snapshot), run/checks.rs:367 (demonstration runs). All four have `ctx` in scope and pass `ctx.pin_dir.as_deref()` today.",
+      "kind": "code",
+      "test": "The rerun paths compare `fresh_tree != prepared` (verification.rs:299, 327); the view is excluded from the tree, so the comparison holds. Covered by the no-hash and hash core tests in run_pin_tests.rs and by the snapshot.rs test `commit_view_does_not_change_the_work_tree_tree`, which compares `work_tree_tree()` before and after the call.",
+      "reason": null
+    },
+    {
+      "name": "Producer candidate build from the snapshot's change list",
+      "dependent": "crates/athena-git/src/snapshot.rs `change_list` and `work_tree_tree` (git add -A in a temp index), used by candidate_stage in run/producer.rs",
+      "kind": "code",
+      "test": "snapshot.rs test `commit_view_does_not_change_the_work_tree_tree` asserts `change_list()` is empty after `add_commit_views` and that a producer edit of one file yields exactly one entry.",
+      "reason": null
+    },
+    {
+      "name": "Snapshot::create with SnapshotRepo::Base elsewhere",
+      "dependent": "crates/athena-core/src/run/checks.rs:637 and crates/athena-core/src/steward.rs:255",
+      "kind": "code",
+      "test": null,
+      "reason": "They never call add_commit_views and `create` is unchanged for them, so their snapshots are identical to today's."
+    },
+    {
+      "name": "Reader, planner and critic snapshots (SnapshotRepo::None and PlainWithHistory) and HISTORY.txt",
+      "dependent": "crates/athena-core/src/run/planning.rs:138, 289; crates/athena-core/src/reading.rs:530; `history_text` in snapshot.rs",
+      "kind": "code",
+      "test": null,
+      "reason": "Not touched. `add_commit_views` returns Refused for a snapshot with no `.git`, and these call sites do not call it. The HISTORY.txt format is out of scope and unchanged; existing tests near snapshot.rs:849 and 899 keep covering it."
+    },
+    {
+      "name": "BaseThenDir seeding copies the kept work tree (copy_files)",
+      "dependent": "crates/athena-git/src/snapshot.rs `copy_files` (resumed-retry snapshot), reached through producer_snapshot with ctx.resume / seed_commit",
+      "kind": "code",
+      "test": "New snapshot.rs test `a_kept_directory_with_a_stale_commit_view_does_not_carry_it_into_the_new_snapshot`: the kept dir holds ATHENA-COMMITS.txt and the new snapshot's change list stays empty.",
+      "reason": null
+    },
+    {
+      "name": "Producer and verifier brief wording ('history are absent by design')",
+      "dependent": "crates/athena-context/src/briefs.rs:451, 460, 1187; existing tests near briefs.rs:2717 and ~2478; budget test `system_facts_budgets_match_computed` and crates/athena-cli/tests/budgets.rs",
+      "kind": "rule",
+      "test": "The new briefs test `producer_and_verifier_briefs_name_the_commit_view`, and `cargo test -p athena-cli --test budgets`, which the full `cargo test` runs.",
+      "reason": "The old sentences stay and a sentence is added. These briefs are per-job text, outside the always-loaded sets whose budgets are tested (system-facts.md, 'Prompt sets and budgets'), so the budget lines do not move."
+    },
+    {
+      "name": "System fact 'Producer snapshot ... history absent' in docs/system-facts.md and its embedded copy SYSTEM_FACTS in briefs.rs:1416",
+      "dependent": "The planner and critic briefs; boundary-word and personal-data scans (xtask/tests/policy.rs, athena.toml [personal_data])",
+      "kind": "rule",
+      "test": null,
+      "reason": "The file is not edited in this plan (not a deliverable); the line stays as it is, and the user is asked whether to update it. No budget line or scan input changes."
+    },
+    {
+      "name": "Host merge, CI and PR landing flow",
+      "dependent": "docs/system-facts.md 'Host merge rules', 'Land'; crates/athena-core/src/gh.rs",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The change touches no pull-request, branch or landing code. The view file is excluded from every candidate commit, so the pull request content is unchanged."
+    },
+    {
+      "name": "Records and config",
+      "dependent": "check_record_file, AnyRecord and the round-trip test; athena.toml and defaults.toml",
+      "kind": "rule",
+      "test": null,
+      "reason": "No record type, field, config key or workflow is added or changed (the brief says none is needed)."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Athena-git unit test `named_commit_is_readable_in_a_producer_snapshot` in snapshot.rs. Build the user repo with `user_repo()` plus a later commit that adds src/feature.rs and edits src/main.rs. Call `Snapshot::create(.., SnapshotRepo::Base)`, then `snap.add_commit_views(&git, &head, &head, &[short hash of the extra commit])`. Read `ATHENA-COMMITS.txt` from the snapshot dir and assert the subject, the date, the paths `src/feature.rs` and `src/main.rs`, and the diff lines (`+++ b/src/feature.rs`, an added source line). Assert `CommitViews.shown` holds the full hash. A second case takes the hash from `commit_hashes_in(\"two fix attempts on commit <hash> were rejected\")`.",
+      "command": "cargo test -p athena-git named_commit_is_readable_in_a_producer_snapshot",
+      "observes": "The file exists and contains the subject, the visible paths and the diff of the requested commit.",
+      "fails_without": "Without `add_commit_views` (or with it writing nothing) the file is missing and the read fails. The test does not compile against the pre-change crate.",
+      "seam": "Production entry point `Snapshot::add_commit_views` (added by plan step 2) after `Snapshot::create` (exists, snapshot.rs:59). Fixture: real temporary git repositories from `testutil::repo_with` and `commit_all` (exist, lib.rs:1044 and 1062), injected as the `user: &Git` argument. No double; a real git runs."
+    },
+    {
+      "criterion": 2,
+      "method": "Athena-git unit test `hidden_paths_never_appear_in_the_commit_view`. The requested commit changes src/main.rs (visible), FRONT.md (athena-exclude by the fixture's .gitattributes), private/notes.md (excluded by private/.gitattributes) and records/jobs/y.json, each hidden file holding a unique marker string. After `create` with `Base` and with `BaseAndCandidate`, plus `add_commit_views`, walk every file under the snapshot dir including `.git`. Because loose objects are zlib-compressed, also run `git log --all --stat -p` and `git cat-file --batch-all-objects --batch` inside the snapshot with `snap.git()`. Assert that no marker and no hidden path name (`FRONT.md`, `private/notes.md`, `records/jobs/y.json`, `records/`) appears in file bytes or git output. Also assert that HISTORY.txt from a `PlainWithHistory` snapshot of the same repo omits them. A second case: a requested commit that changed only hidden paths is listed under the 'not available' note and its subject is not in the file.",
+      "command": "cargo test -p athena-git hidden_paths_never_appear_in_the_commit_view",
+      "observes": "No marker content and no hidden path name anywhere in the snapshot or its git output, while the visible part of the same commit is present, so the test is not vacuous.",
+      "fails_without": "With a plain unfiltered `git show <hash>` as the diff, the markers and path names would appear in the file and the assertions would fail. The test first builds that unfiltered output in the user repo and asserts the markers are present there, which shows the content is reachable without the filter.",
+      "seam": "Production entry points `Snapshot::create` (exists) and `Snapshot::add_commit_views` (step 2). Fixture: a `user_repo()`-style temporary repository with `.gitattributes` exclude rules, injected as `user`. The classifier is the real `classify()` (exists, attrs.rs:46); nothing is stubbed."
+    },
+    {
+      "criterion": 3,
+      "method": "Athena-git unit test `commit_view_gives_the_snapshot_no_path_to_the_users_repository`. After `create` plus `add_commit_views`, assert `.git/objects/info/alternates` is absent, `snap.git().run([\"remote\"])` is empty, and `.git/config` has no `url`, `alternates` or the user's path. Assert that `git rev-parse --verify <requested hash>^{commit}` run in the snapshot FAILS. Record the user repo's `for-each-ref`, the object list (`cat-file --batch-all-objects --batch-check`), `.git/config` bytes and HEAD before and after, and assert they are identical. The existing test `snapshot_git_cannot_reach_the_users_history_or_hidden_content` (snapshot.rs:555) stays and passes.",
+      "command": "cargo test -p athena-git commit_view_gives_the_snapshot_no_path_to_the_users_repository",
+      "observes": "The snapshot has no alternates or remote and cannot resolve the real hash. The user's refs, objects and config are identical before and after.",
+      "fails_without": "If the implementation fetched or linked the real objects (alternates, a remote or `git fetch`), the alternates/remote assertion and the 'hash does not resolve' assertion would fail.",
+      "seam": "Production entry points `Snapshot::create` (exists) and `Snapshot::add_commit_views` (step 2). Fixture: a temporary repository from `testutil` (exists). The before/after reads go through the same real `Git` value; no double."
+    },
+    {
+      "criterion": 4,
+      "method": "Two parts. (a) Athena-git test `no_requested_commit_leaves_snapshots_unchanged`: `commit_hashes_in(\"Add the reader. Jobs 20261012-075824-1x28 and 2026-10-12, version 1.2.3\")` returns an empty list. `add_commit_views(.., &[])` returns an empty `CommitViews`, writes no `ATHENA-COMMITS.txt` and leaves `.git/info/exclude` untouched. A `Base` snapshot has `git rev-list --count HEAD` = 1, a `BaseAndCandidate` snapshot has 2, and `git status --porcelain` is empty. The existing `verifier_snapshots_carry_base_then_candidate` (snapshot.rs:607) and `snapshots_hold_only_what_agents_may_see` stay unchanged. (b) Core test in run_pin_tests.rs, following the fake-agent pattern near lines 866 and 1303 (the closure receives `spec.workdir`). A job whose request has no hash asserts that neither the producer's nor the verifier's workdir has `ATHENA-COMMITS.txt`. A second job whose request names a real ancestor hash (taken from the test repo's `git log`) asserts both workdirs have it and that the candidate commit's tree lacks it (`git ls-tree`).",
+      "command": "cargo test --locked",
+      "observes": "With no named hash: one commit for the producer, two for the verifier, no extra file and an empty change list. With one: the file is in both workdirs and not in the candidate.",
+      "fails_without": "If the file were written unconditionally, the no-hash assertions fail. If it were not excluded, the candidate-tree assertion and `git status --porcelain` fail.",
+      "seam": "(a) `Snapshot::create`, `commit_hashes_in` and `add_commit_views` (steps 2 and 3). (b) Production entry points `Athena::producer_snapshot` (producer.rs:78) and `Athena::verifier_snapshot` (verification.rs:424) reached through the job run. The double is the existing fake agent invoker in run_pin_tests.rs, injected as the invoker the run is built with. It only records `spec.workdir` and inspects files after the production code has built the snapshot, so no logic under test is in the double. The harness exists today (found by grep at run_pin_tests.rs:866 and 1303; step 7 reads its body before the test is written); the wiring in steps 4 and 5 adds the call."
+    },
+    {
+      "criterion": 5,
+      "method": "Athena-git unit test `unknown_or_unreachable_hashes_are_omitted_with_a_note`. Inputs: a well-formed hash that does not exist (`deadbeef12`), an abbreviation of a real commit on a side branch not reachable from the base commit, and a commit on an orphan `athena/records`-style branch. Assert `add_commit_views` returns Ok (no panic, no error), `CommitViews.omitted` holds all three, `shown` is empty, and `ATHENA-COMMITS.txt` exists with the 'not available' note and no diff. The doc comment states that the chosen behavior is omission with a note, not refusal. A further case with 9 distinct valid hashes asserts that only the first 8 are used and the file notes the rest are ignored.",
+      "command": "cargo test -p athena-git unknown_or_unreachable_hashes_are_omitted_with_a_note",
+      "observes": "An Ok result, the omitted list, and the note text in the file for each bad hash.",
+      "fails_without": "Without the `rev_parse` and `is_ancestor` guard, an unreachable commit's diff would be written (the side-branch case fails) and an unknown hash would surface a git error instead of Ok.",
+      "seam": "Production entry point `Snapshot::add_commit_views` (step 2), which uses the existing `Git::rev_parse` (lib.rs:289) and `Git::is_ancestor` (lib.rs:353). Fixture: a temporary repository with a side branch and an orphan branch made through `git.run`, injected as `user`. No double."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs, each as its own command: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. The test run includes the new tests of criteria 1 to 5, the existing snapshot and briefs tests that pin unchanged behavior (`snapshots_hold_only_what_agents_may_see`, `verifier_snapshots_carry_base_then_candidate`, the 'history are absent by design' assertions near briefs.rs:2717), `system_facts_budgets_match_computed`, and `cargo test -p athena-core --test refusal_corpus`. This plan adds no refusal or matching rule over text Athena judges (the hash tokenizer only chooses what to show, and every candidate is re-checked by rev_parse), so it adds no corpus case. I read refusal_corpus.rs for hash or commit cases and found none.",
+      "command": "cargo test --locked",
+      "observes": "All three commands exit 0: no formatting diff, no clippy warning, no failing test.",
+      "fails_without": "A new test that fails (for example the view file leaking into the candidate tree or hidden content in the snapshot), an unformatted file, a clippy warning, a changed brief that breaks an existing wording assertion, or a budget line out of date makes the matching command exit non-zero.",
+      "seam": "Production entry points are the workspace's own cargo checks, run on the working tree after all plan steps. The fixtures are the test suites in crates/athena-git, athena-core, athena-context and athena-cli, plus xtask policy tests (all exist; the new tests are added by steps 2 to 7). Nothing is injected or doubled."
+    },
+    {
+      "criterion": 7,
+      "method": "Content check of docs/decisions.md D08. The new bullets say that, when the request names commit hashes, producers and verifiers also get a filtered text view of those commits. They list the alternates/remote and rewritten-history options as rejected, with the leak and hash-mismatch reasons, and state the tradeoffs (request-text-only detection, digit-only hashes missed, subject only). The tradeoff sentence saying agents lose `git log` of the real history is reworded so it no longer says agents never see real history. Step 8 greps the exact old sentence before and after.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "The diff removes or rewords the old sentence and adds the new decision text, searchable with `ATHENA-COMMITS.txt`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Content check plus one brief test. (1) docs/enforcement.md gains a paragraph under the snapshot-isolation rows: what the view holds (hash, date, subject, visible paths, visible diff), what stays hidden (records/, athena-exclude paths, commit bodies and authors, commits not in the base's history), the mechanism (`classify()` filter, no alternates or remote) and the tests that prove it. (2) CHANGELOG.md gets an Added entry under Unreleased, written for outside readers, including the limits (request text only, at most 8 hashes, digit-only hashes not detected). (3) briefs.rs: the producer 'Working directory' text (briefs.rs:451 and 460) and the verifier 'The change' text (1187) gain one sentence after the existing 'history are absent by design' wording, so the assertions near briefs.rs:2717 still hold. The sentence says that when the request names a commit, `ATHENA-COMMITS.txt` in the snapshot root shows its visible changes, to be read with Read and Grep. The new test `producer_and_verifier_briefs_name_the_commit_view` asserts the file name in the producer brief (plain and retry form) and the verifier brief, using a `COMMITS_FILE` constant in briefs.rs with a core test that it equals athena-git's (as for HISTORY_FILE at planning.rs:610).",
+      "command": "cargo test -p athena-context producer_and_verifier_briefs_name_the_commit_view",
+      "observes": "The brief test finds the file name in all three brief forms. The doc diffs are checked by reading.",
+      "fails_without": "Without the brief sentence the new brief test fails; the docs parts are read-only checks.",
+      "seam": "Production entry points: the producer brief builder at briefs.rs ~441 to 466 and the verifier brief builder at ~1185 (both exist). The test calls them with the same input structs the existing brief tests use (exist). No double."
+    }
+  ],
+  "open_questions": [
+    "User: docs/system-facts.md says the producer snapshot has no history; with this change a named commit appears there as a filtered text file. It is not a listed deliverable, so the plan leaves it unchanged. Should that line be updated here or in a follow-up?",
+    "User: Should hashes named only in the reading's acceptance criteria (not in the request text) also count? The plan takes the request text only, as the reading says.",
+    "Host: Does the host's git support `--pathspec-from-file` and `--pathspec-file-nul` (git 2.25 or later)? The plan uses them to avoid long argument lists; if the host's git is older, step 3 must pass the paths as arguments in chunks."
+  ],
+  "producer_section_sha256": "9ee8fbdb97a91d7d42311ee79c82f406520b24c797d7ee1981fed81ba057c037"
+}
