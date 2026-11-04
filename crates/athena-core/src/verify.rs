@@ -14,8 +14,8 @@
 use crate::reading::REPLAY_HOLD_PERCENT;
 use athena_context::outputs::{SeverityOutput, VerdictOutput, VerdictValue};
 use athena_data::records::{
-    Baseline, CheckRun, Criterion, CriterionKind, CriterionResult, Finding, FindingSource,
-    PRE_EXISTING_NOTE, Replay, Severity, Verdict, Verification,
+    Baseline, CheckRun, Criterion, CriterionKind, CriterionResult, Demonstration, Finding,
+    FindingSource, PRE_EXISTING_NOTE, Replay, Severity, Verdict, Verification,
 };
 
 /// A candidate that passed verification: the only input landing accepts.
@@ -690,11 +690,661 @@ fn is_non_code_path(path: &str) -> bool {
     })
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// The "fails without the fix" demonstration run by Athena
+//
+// The verifier gets no producer report and cannot change files, so it can never see a planned "fails without
+// the fix" run. Athena runs it: in a scratch copy of the candidate the fix is put back to its base version,
+// the tests are kept, and the named test command runs. These are the pure parts; `run/checks.rs` does the
+// copying and the run.
+
+/// The most distinct commands whose demonstration Athena runs for one job.
+pub const MAX_DEMONSTRATION_RUNS: usize = 3;
+
+/// The planned demonstrations of one command: every criterion that names it, and the command to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DemonstrationGroup {
+    /// The criterion numbers, in plan order.
+    pub criteria: Vec<u32>,
+    /// The command as written in the plan, backticks removed and spaces single.
+    pub command: String,
+    /// The program and arguments when the command is a plain `cargo test ...`; `None` otherwise.
+    pub argv: Option<Vec<String>>,
+}
+
+/// `command` as program and arguments, when it is a plain `cargo test ...`: backticks removed, split on
+/// white space, and no shell metacharacter or quote. Anything else is not run.
+pub fn demonstration_command(command: &str) -> Option<Vec<String>> {
+    let words: Vec<String> = command
+        .replace('`', "")
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    let plain = words.len() >= 2
+        && words[0] == "cargo"
+        && words[1] == "test"
+        && !words
+            .iter()
+            .any(|w| w.chars().any(|c| "|&;<>()$\\\"'*?{}[]~#!".contains(c)));
+    plain.then_some(words)
+}
+
+/// The planned demonstrations that name a failure without the fix, grouped by distinct command so that each
+/// command runs once. A demonstration without a non-blank `fails_without` is not one.
+pub fn demonstration_groups(demonstrations: &[Demonstration]) -> Vec<DemonstrationGroup> {
+    let mut groups: Vec<DemonstrationGroup> = Vec::new();
+    for d in demonstrations {
+        if d.fails_without
+            .as_deref()
+            .is_none_or(|f| f.trim().is_empty())
+        {
+            continue;
+        }
+        let command = d.command.replace('`', "");
+        let command = command.split_whitespace().collect::<Vec<_>>().join(" ");
+        match groups.iter_mut().find(|g| g.command == command) {
+            Some(group) => {
+                if !group.criteria.contains(&d.criterion) {
+                    group.criteria.push(d.criterion);
+                }
+            }
+            None => groups.push(DemonstrationGroup {
+                criteria: vec![d.criterion],
+                argv: demonstration_command(&command),
+                command,
+            }),
+        }
+    }
+    groups
+}
+
+/// Whether a path is test code that the revert keeps: a `tests` or `test` directory, `tests.rs`,
+/// `*_tests.rs`, `*_test.rs` or `test_*`.
+pub fn is_test_path(path: &str) -> bool {
+    let mut parts: Vec<&str> = path.split('/').collect();
+    let name = parts.pop().unwrap_or_default();
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+    parts.iter().any(|p| *p == "tests" || *p == "test")
+        || stem == "tests"
+        || stem.ends_with("_tests")
+        || stem.ends_with("_test")
+        || stem.starts_with("test_")
+}
+
+/// The files `mod <module>;` can mean when declared in the Rust file `parent`.
+pub fn declared_module_paths(parent: &str, module: &str) -> Vec<String> {
+    let (dir, file) = parent.rsplit_once('/').unwrap_or(("", parent));
+    let stem = file.strip_suffix(".rs").unwrap_or(file);
+    let base = if matches!(stem, "lib" | "main" | "mod") {
+        dir.to_string()
+    } else if dir.is_empty() {
+        stem.to_string()
+    } else {
+        format!("{dir}/{stem}")
+    };
+    let join = |tail: &str| {
+        if base.is_empty() {
+            tail.to_string()
+        } else {
+            format!("{base}/{tail}")
+        }
+    };
+    vec![
+        join(&format!("{module}.rs")),
+        join(&format!("{module}/mod.rs")),
+    ]
+}
+
+/// A Rust file with its fix reverted and its tests kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevertedFile {
+    pub text: String,
+    /// The names of the bodiless `#[cfg(test)] mod x;` declarations carried over from the candidate.
+    pub declared: Vec<String>,
+}
+
+/// The base text of a Rust file with the candidate's test modules in place of the base's own: the base's
+/// `#[cfg(test)] mod` blocks and bodiless declarations are dropped, the candidate's are appended. `None`
+/// when either text does not parse; the caller then reverts the whole file.
+pub fn revert_keeping_tests(base: &str, candidate: &str) -> Option<RevertedFile> {
+    use crate::code_health::test_module_ranges;
+    let (b, c) = (
+        test_module_ranges(base).ok()?,
+        test_module_ranges(candidate).ok()?,
+    );
+    let ranges = |m: &crate::code_health::TestModules| -> Vec<(usize, usize)> {
+        let mut all: Vec<(usize, usize)> = m
+            .bodied
+            .iter()
+            .map(|(s, e)| (*s as usize, *e as usize))
+            .chain(
+                m.declared
+                    .iter()
+                    .map(|(s, e, _)| (*s as usize, *e as usize)),
+            )
+            .collect();
+        all.sort_unstable();
+        all
+    };
+    let (base_lines, cand_lines): (Vec<&str>, Vec<&str>) =
+        (base.lines().collect(), candidate.lines().collect());
+    let inside = |ranges: &[(usize, usize)], line: usize| {
+        ranges.iter().any(|(s, e)| (*s..=*e).contains(&line))
+    };
+    let (base_ranges, cand_ranges) = (ranges(&b), ranges(&c));
+    let mut text = String::new();
+    for (i, line) in base_lines.iter().enumerate() {
+        if !inside(&base_ranges, i + 1) {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    for (s, e) in &cand_ranges {
+        text.push('\n');
+        for line in cand_lines.iter().take(*e).skip(s.saturating_sub(1)) {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    Some(RevertedFile {
+        text,
+        declared: c.declared.into_iter().map(|(_, _, name)| name).collect(),
+    })
+}
+
+/// What to do to the scratch copy of the candidate to take the fix out and keep the tests.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RevertPlan {
+    /// Files to write, with their new bytes.
+    pub write: Vec<(String, Vec<u8>)>,
+    /// Files the candidate added; they are removed.
+    pub remove: Vec<String>,
+    /// Every path that was put back or removed.
+    pub reverted: Vec<String>,
+    /// Paths whose tests went with the revert.
+    pub tests_removed: Vec<String>,
+}
+
+/// Plans the revert. `changed` is the candidate's change from the base, each as its status letter (`A`, `M`,
+/// `D` or `T`) and path; `base_of` and `candidate_of` read a path's bytes at the base and the candidate.
+/// Test files, files holding a declared test module, and `Cargo.toml` and `Cargo.lock` stay as the candidate
+/// has them; the checks run `--locked`, so a manifest cannot go back without failing for another reason.
+pub fn revert_plan(
+    changed: &[(char, String)],
+    base_of: &dyn Fn(&str) -> Option<Vec<u8>>,
+    candidate_of: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> RevertPlan {
+    let text_of = |bytes: Option<Vec<u8>>| bytes.and_then(|b| String::from_utf8(b).ok());
+    let has_tests = |text: &str| {
+        crate::code_health::test_module_ranges(text).map_or_else(
+            |_| text.contains("#[cfg(test)]"),
+            |m| !m.bodied.is_empty() || !m.declared.is_empty(),
+        )
+    };
+    // Files that hold a test module declared by a changed file are test code.
+    let mut declared_files: Vec<String> = Vec::new();
+    for (status, path) in changed {
+        if *status == 'D' || !path.ends_with(".rs") {
+            continue;
+        }
+        if let Some(text) = text_of(candidate_of(path))
+            && let Ok(modules) = crate::code_health::test_module_ranges(&text)
+        {
+            for (_, _, name) in &modules.declared {
+                for candidate_path in declared_module_paths(path, name) {
+                    if changed.iter().any(|(_, p)| *p == candidate_path) {
+                        declared_files.push(candidate_path);
+                    }
+                }
+            }
+        }
+    }
+    let mut plan = RevertPlan::default();
+    for (status, path) in changed {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        if matches!(name, "Cargo.toml" | "Cargo.lock")
+            || is_test_path(path)
+            || declared_files.contains(path)
+        {
+            continue;
+        }
+        let candidate_text = text_of(candidate_of(path));
+        match status {
+            'A' => {
+                plan.remove.push(path.clone());
+                plan.reverted.push(path.clone());
+                if candidate_text.as_deref().is_some_and(has_tests) {
+                    plan.tests_removed.push(path.clone());
+                }
+            }
+            'D' => {
+                if let Some(bytes) = base_of(path) {
+                    plan.write.push((path.clone(), bytes));
+                    plan.reverted.push(path.clone());
+                }
+            }
+            _ => {
+                let Some(base_bytes) = base_of(path) else {
+                    continue;
+                };
+                let kept = match (&candidate_text, text_of(Some(base_bytes.clone()))) {
+                    (Some(candidate), Some(base)) if path.ends_with(".rs") => {
+                        revert_keeping_tests(&base, candidate)
+                    }
+                    _ => None,
+                };
+                match kept {
+                    Some(file) => {
+                        let squeeze = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+                        if candidate_text.as_deref().map(squeeze) == Some(squeeze(&file.text)) {
+                            continue;
+                        }
+                        plan.write.push((path.clone(), file.text.into_bytes()));
+                    }
+                    None => {
+                        if path.ends_with(".rs") && candidate_text.as_deref().is_some_and(has_tests)
+                        {
+                            plan.tests_removed.push(path.clone());
+                        }
+                        plan.write.push((path.clone(), base_bytes));
+                    }
+                }
+                plan.reverted.push(path.clone());
+            }
+        }
+    }
+    plan
+}
+
+/// Athena's record of one demonstration run, as an entry under the checks that is not a check: it states no
+/// pass or fail of its own, so the recorded fmt, clippy and test checks still decide the verdict. The result
+/// comes from the exit code and the count of tests that ran, never from the clipped tail.
+pub fn demonstration_view(
+    group: &DemonstrationGroup,
+    run: &CheckRun,
+    plan: &RevertPlan,
+) -> athena_context::briefs::CheckResultView {
+    let output_has = |text: &str| run.output_tail.contains(text);
+    let result = match (run.exit_code, run.tests_ran) {
+        (None, _) => format!(
+            "the run did not finish{}",
+            run.note
+                .as_ref()
+                .map_or(String::new(), |n| format!(" ({n})"))
+        ),
+        (Some(0), Some(n)) if n > 0 => {
+            "passed without the fix: the revert did not make the test fail".to_string()
+        }
+        (Some(0), _) => "the command ran no tests without the fix, so it shows nothing".to_string(),
+        (Some(code), _) => {
+            let cause = if output_has("could not compile") || output_has("error[E") {
+                ": the test did not compile"
+            } else {
+                ""
+            };
+            format!("the named test command failed without the fix (exit {code}){cause}")
+        }
+    };
+    demonstration_entry(
+        group,
+        result,
+        run.exit_code,
+        run.output_tail.clone(),
+        plan,
+        true,
+    )
+}
+
+/// The record of a demonstration that did not run, with the reason.
+pub fn demonstration_not_run(
+    group: &DemonstrationGroup,
+    reason: &str,
+) -> athena_context::briefs::CheckResultView {
+    demonstration_entry(
+        group,
+        format!("not run: {reason}"),
+        None,
+        String::new(),
+        &RevertPlan::default(),
+        false,
+    )
+}
+
+fn demonstration_entry(
+    group: &DemonstrationGroup,
+    result: String,
+    exit_code: Option<i32>,
+    output_tail: String,
+    plan: &RevertPlan,
+    ran: bool,
+) -> athena_context::briefs::CheckResultView {
+    athena_context::briefs::CheckResultView {
+        name: format!(
+            "fails-without-{}",
+            group.criteria.first().copied().unwrap_or(0)
+        ),
+        command: "not a check".into(),
+        passed: true,
+        demonstration: Some(athena_context::briefs::DemonstrationRunView {
+            ran,
+            criteria: group.criteria.clone(),
+            command: group.command.clone(),
+            reverted: plan.reverted.clone(),
+            tests_removed: plan.tests_removed.clone(),
+            result,
+            exit_code,
+            output_tail,
+        }),
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use athena_context::outputs::{CriterionVerdictOutput, FindingOutput};
     use athena_data::{Quantity, Unit};
+
+    fn demo(criterion: u32, command: &str, fails_without: Option<&str>) -> Demonstration {
+        Demonstration {
+            criterion,
+            method: "run".into(),
+            command: command.into(),
+            observes: "it".into(),
+            fails_without: fails_without.map(String::from),
+            seam: None,
+        }
+    }
+
+    #[test]
+    fn demonstration_command_accepts_only_a_plain_cargo_test() {
+        assert_eq!(
+            demonstration_command("`cargo test -p athena-core  demo`").unwrap(),
+            ["cargo", "test", "-p", "athena-core", "demo"]
+        );
+        assert!(demonstration_command("cargo test --locked").is_some());
+        for refused in [
+            "cargo build",
+            "cargo test && rm -rf x",
+            "cargo test | cat",
+            "cargo test 'a b'",
+            "cat README.md",
+            "cargo test $(id)",
+            "",
+        ] {
+            assert!(demonstration_command(refused).is_none(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn demonstrations_are_grouped_by_command_and_need_a_fails_without() {
+        let groups = demonstration_groups(&[
+            demo(1, "cargo test --locked", Some("fails")),
+            demo(2, "`cargo test  --locked`", Some("fails")),
+            demo(3, "cargo test --locked", None),
+            demo(4, "cat README.md", Some("  ")),
+            demo(5, "cat README.md", Some("empty")),
+        ]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].criteria, [1, 2]);
+        assert_eq!(groups[0].command, "cargo test --locked");
+        assert!(groups[0].argv.is_some());
+        assert_eq!(groups[1].criteria, [5]);
+        assert!(groups[1].argv.is_none());
+    }
+
+    #[test]
+    fn is_test_path_knows_the_test_file_forms() {
+        for yes in [
+            "crates/a/tests/x.rs",
+            "tests/x.rs",
+            "src/run/tests.rs",
+            "src/notes_tests.rs",
+            "src/notes_test.rs",
+            "src/test_notes.rs",
+        ] {
+            assert!(is_test_path(yes), "{yes}");
+        }
+        for no in ["src/notes.rs", "src/latest.rs", "src/contest/x.rs"] {
+            assert!(!is_test_path(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn declared_module_paths_follow_the_parent_file() {
+        assert_eq!(
+            declared_module_paths("crates/a/src/lib.rs", "x_tests"),
+            ["crates/a/src/x_tests.rs", "crates/a/src/x_tests/mod.rs"]
+        );
+        assert_eq!(
+            declared_module_paths("crates/a/src/gh/mod.rs", "t"),
+            ["crates/a/src/gh/t.rs", "crates/a/src/gh/t/mod.rs"]
+        );
+        assert_eq!(
+            declared_module_paths("src/notes.rs", "t"),
+            ["src/notes/t.rs", "src/notes/t/mod.rs"]
+        );
+    }
+
+    const BASE_SRC: &str = "pub fn n() -> u32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn old() {}\n}\n";
+    const FIXED_SRC: &str = "pub fn n() -> u32 {\n    2\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn new() {\n        assert_eq!(n(), 2);\n    }\n}\n";
+
+    #[test]
+    fn revert_keeping_tests_takes_the_fix_out_and_keeps_the_candidates_tests() {
+        let file = revert_keeping_tests(BASE_SRC, FIXED_SRC).unwrap();
+        assert!(file.text.contains("    1\n"), "{}", file.text);
+        assert!(!file.text.contains("    2\n"));
+        assert!(file.text.contains("fn new()"));
+        assert!(!file.text.contains("fn old()"), "the base's own tests go");
+        assert_eq!(file.text.matches("mod tests").count(), 1);
+        assert!(file.declared.is_empty());
+        // A base with no test module still gets the candidate's.
+        let bare = revert_keeping_tests("pub fn n() -> u32 {\n    1\n}\n", FIXED_SRC).unwrap();
+        assert!(bare.text.contains("fn new()") && bare.text.contains("    1\n"));
+        // A candidate with no test module leaves none.
+        let none = revert_keeping_tests(BASE_SRC, "pub fn n() -> u32 {\n    2\n}\n").unwrap();
+        assert!(!none.text.contains("mod tests"));
+        // A file that does not parse is not handled here.
+        assert!(revert_keeping_tests(BASE_SRC, "fn (").is_none());
+        assert!(revert_keeping_tests("fn (", FIXED_SRC).is_none());
+    }
+
+    #[test]
+    fn revert_keeping_tests_carries_a_bodiless_test_declaration_over() {
+        let base = "pub fn n() -> u32 {\n    1\n}\n";
+        let candidate = "pub fn n() -> u32 {\n    2\n}\n#[cfg(test)]\nmod n_tests;\n";
+        let file = revert_keeping_tests(base, candidate).unwrap();
+        assert!(
+            file.text.contains("#[cfg(test)]\nmod n_tests;"),
+            "{}",
+            file.text
+        );
+        assert!(file.text.contains("    1\n"));
+        assert_eq!(file.declared, ["n_tests"]);
+    }
+
+    fn bytes_of<'a>(files: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<Vec<u8>> + 'a {
+        move |path| {
+            files
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map(|(_, t)| t.as_bytes().to_vec())
+        }
+    }
+
+    #[test]
+    fn revert_plan_reverts_the_fix_and_keeps_tests_manifests_and_declared_modules() {
+        let changed: Vec<(char, String)> = [
+            ('M', "Cargo.toml"),
+            ('M', "README.md"),
+            ('M', "src/lib.rs"),
+            ('M', "src/notes.rs"),
+            ('A', "src/helper.rs"),
+            ('A', "src/inline.rs"),
+            ('A', "src/n_tests.rs"),
+            ('A', "src/odd_name.rs"),
+            ('A', "tests/it.rs"),
+            ('D', "src/gone.rs"),
+        ]
+        .into_iter()
+        .map(|(s, p)| (s, p.to_string()))
+        .collect();
+        let base = [
+            ("README.md", "old\n"),
+            ("src/lib.rs", "mod notes;\n"),
+            ("src/notes.rs", BASE_SRC),
+            ("src/gone.rs", "gone\n"),
+        ];
+        let candidate = [
+            ("README.md", "new\n"),
+            (
+                "src/lib.rs",
+                "mod notes;\nmod helper;\n#[cfg(test)]\nmod odd_name;\n#[cfg(test)]\nmod n_tests;\n",
+            ),
+            ("src/notes.rs", FIXED_SRC),
+            ("src/helper.rs", "pub fn h() {}\n"),
+            ("src/inline.rs", FIXED_SRC),
+            ("src/n_tests.rs", "#[test]\nfn t() {}\n"),
+            ("src/odd_name.rs", "#[test]\nfn o() {}\n"),
+            ("tests/it.rs", "#[test]\nfn i() {}\n"),
+        ];
+        let plan = revert_plan(&changed, &bytes_of(&base), &bytes_of(&candidate));
+        assert_eq!(
+            plan.reverted,
+            [
+                "README.md",
+                "src/lib.rs",
+                "src/notes.rs",
+                "src/helper.rs",
+                "src/inline.rs",
+                "src/gone.rs"
+            ]
+        );
+        assert_eq!(plan.remove, ["src/helper.rs", "src/inline.rs"]);
+        assert_eq!(plan.tests_removed, ["src/inline.rs"]);
+        let written = |p: &str| {
+            plan.write
+                .iter()
+                .find(|(path, _)| path == p)
+                .map(|(_, b)| String::from_utf8(b.clone()).unwrap())
+        };
+        assert_eq!(written("README.md").as_deref(), Some("old\n"));
+        assert_eq!(written("src/gone.rs").as_deref(), Some("gone\n"));
+        let lib = written("src/lib.rs").unwrap();
+        assert!(lib.contains("mod odd_name;") && lib.contains("mod n_tests;"));
+        assert!(
+            !lib.contains("mod helper;"),
+            "the fix's declaration is reverted"
+        );
+        let notes = written("src/notes.rs").unwrap();
+        assert!(notes.contains("    1\n") && notes.contains("fn new()"));
+        for kept in [
+            "Cargo.toml",
+            "src/n_tests.rs",
+            "src/odd_name.rs",
+            "tests/it.rs",
+        ] {
+            assert!(written(kept).is_none() && !plan.remove.iter().any(|p| p == kept));
+        }
+    }
+
+    #[test]
+    fn revert_plan_reverts_a_file_that_does_not_parse_whole_and_names_it() {
+        let changed = vec![('M', "src/broken.rs".to_string())];
+        let plan = revert_plan(
+            &changed,
+            &bytes_of(&[("src/broken.rs", "old\n")]),
+            &bytes_of(&[("src/broken.rs", "fn (\n#[cfg(test)]\n")]),
+        );
+        assert_eq!(plan.tests_removed, ["src/broken.rs"]);
+        assert_eq!(
+            plan.write,
+            [("src/broken.rs".to_string(), b"old\n".to_vec())]
+        );
+    }
+
+    fn demo_group() -> DemonstrationGroup {
+        DemonstrationGroup {
+            criteria: vec![2, 3],
+            command: "cargo test --locked demo".into(),
+            argv: demonstration_command("cargo test --locked demo"),
+        }
+    }
+
+    fn demo_result(run: &CheckRun) -> String {
+        demonstration_view(&demo_group(), run, &RevertPlan::default())
+            .demonstration
+            .unwrap()
+            .result
+    }
+
+    #[test]
+    fn demonstration_view_classifies_by_exit_code_and_tests_ran() {
+        let run = |exit_code, tests_ran, tail: &str| CheckRun {
+            exit_code,
+            tests_ran,
+            output_tail: tail.into(),
+            ..check(false)
+        };
+        let failed = demo_result(&run(
+            Some(101),
+            Some(1),
+            "test result: FAILED. 0 passed; 1 failed",
+        ));
+        assert_eq!(
+            failed,
+            "the named test command failed without the fix (exit 101)"
+        );
+        assert!(
+            demo_result(&run(Some(101), Some(0), "error[E0425]: cannot find"))
+                .ends_with(": the test did not compile")
+        );
+        assert!(
+            demo_result(&run(Some(101), Some(0), "error: could not compile `x`"))
+                .contains("did not compile")
+        );
+        // Passing: the tail holds only trailing `0 passed` summaries, but the full output counted a test.
+        let passed = demo_result(&run(
+            Some(0),
+            Some(1),
+            "test result: ok. 0 passed; 0 failed",
+        ));
+        assert_eq!(
+            passed,
+            "passed without the fix: the revert did not make the test fail"
+        );
+        assert!(demo_result(&run(Some(0), Some(0), "")).contains("ran no tests"));
+        assert!(demo_result(&run(None, None, "")).starts_with("the run did not finish"));
+    }
+
+    #[test]
+    fn demonstration_view_is_not_a_check_and_names_the_run() {
+        let plan = RevertPlan {
+            reverted: vec!["src/a.rs".into()],
+            tests_removed: vec!["src/b.rs".into()],
+            ..Default::default()
+        };
+        let run = CheckRun {
+            output_tail: "tail".into(),
+            ..check(false)
+        };
+        let view = demonstration_view(&demo_group(), &run, &plan);
+        assert_eq!(view.name, "fails-without-2");
+        assert_eq!(view.command, "not a check");
+        assert!(view.passed);
+        let record = view.demonstration.unwrap();
+        assert_eq!(record.criteria, [2, 3]);
+        assert_eq!(record.exit_code, Some(101));
+        assert_eq!(record.reverted, ["src/a.rs"]);
+        assert_eq!(record.tests_removed, ["src/b.rs"]);
+        assert_eq!(record.output_tail, "tail");
+        let not_run = demonstration_not_run(&demo_group(), "no scratch copy")
+            .demonstration
+            .unwrap();
+        assert_eq!(not_run.result, "not run: no scratch copy");
+        assert!(!not_run.ran && record.ran);
+        assert_eq!(not_run.exit_code, None);
+    }
 
     fn finding_at(severity: Severity, location: Option<&str>, summary: &str) -> Finding {
         Finding {

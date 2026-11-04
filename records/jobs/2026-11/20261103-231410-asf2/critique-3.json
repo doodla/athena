@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-231410-asf2",
+  "round": 3,
+  "at": "2026-11-04T04:02:53.427973099Z",
+  "invocation_seq": 10,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/code_health.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/code_health.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan says the verifier's builds are not invalidated by sharing CARGO_TARGET_DIR. That is likely wrong for the workspace crates.",
+      "evidence": "env.rs sets CARGO_TARGET_DIR to {job_dir}/target/verify for both the scratch copy and the verifier snapshot. Cargo hashes path packages by their path relative to the workspace root, so the reverted crates in <job_dir>/revert get the same artifact and fingerprint slots as the verifier's snapshot and overwrite them. The verifier's next cargo command then rebuilds the workspace crates. The result stays correct because fingerprints mismatch, but it costs time. This is an estimate from how cargo behaves, not measured here. Fix: Rewrite the Risk and Dependents text: third-party builds are reused, but workspace crates are rebuilt by the verifier after the demonstration. Count that in the wall-time estimate. Optionally check that the verifier run after a demonstration still passes, which the criterion 1 job already does with fakes.",
+      "location": "Decision 8 / Dependents entry 'checks' environment and target directory reused'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The revert rules cover changed files and added files, but not files the candidate deleted or renamed.",
+      "evidence": "Step 4 lists only these cases: 'reverts each changed non-test, non-manifest path… removal for added files'. `diff_tree(base, candidate)` also returns deletions, and a rename shows as a delete plus an add. Fix: State that a non-test file the candidate deleted is restored from `show_file(base, path)`, and that a rename is handled as a delete plus an add. Add one unit or job-level case for a deleted file.",
+      "location": "Step 4 (revert rules)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test for 'scratch directory cannot be made' does not say how it forces the failure. A permission-based trick does not work when the tests run as root.",
+      "evidence": "The behavior-evidence default says file modes that root bypasses are not proof, and Athena's checks may run as root. Fix: Force the error in a way root cannot bypass, for example by putting a regular file at <job_dir> so that <job_dir>/revert cannot be created. Then assert a 'not run' entry and that no directory is left behind.",
+      "location": "Demonstrations, Criterion 4 (outer fn with an inner error)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Any athena binary built with the test-support feature never runs the stage, and nothing signals it.",
+      "evidence": "A binary built by `cargo test` or `cargo build --all-targets` has dev-dependency features unified, so test-support is on and `demonstration_records` returns nothing. The documented release build (`cargo build --release --locked -p athena-cli`, athena-v0.md:1403) is unaffected. Fix: Add a code comment at the gate saying this, so that a future reader does not run a test-support binary in production expecting demonstrations.",
+      "location": "Decision 10 (demo_seam gating)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan names, and it exists as described. `verifier_snapshot` is at verification.rs:405 and builds a base-plus-candidate snapshot. The three 'not a check' entries are at verification.rs:88-127, right before the `verifier_environment_problem` disk gate at line 138. `take_baseline` is at checks.rs:92. `ci_seam` is under `cfg(any(test, feature = \"test-support\"))` at run/mod.rs:1166. `Scan::test_ranges` and `visit_item_mod` are in code_health.rs:89-117. `run_check` (checks.rs:424-506) counts `tests_ran` on the full output for `CheckKind::Test` and adds cargo flags only when the program is cargo. `diff_tree` and `show_file` are in athena-git. `CheckResultView` derives Default, and the plan's dependents list names all of its readers. The test-support gating is safe for production: the workspace uses resolver 3, and the documented release build is `cargo build --release --locked -p athena-cli` (athena-v0.md:1403), which leaves dev-dependency features off. The criterion 1 test would fail without the behavior, because the mapped script exits 1 only when README.md has really been reverted in the scratch copy. Criterion 2 is covered by the job-level test plus unit tests of the classifier, including one where the test summary falls outside the output tail. The verdict path (`check_runs`, `judge`) is untouched. The open question (only plain `cargo test` commands run) is a reasonable default. Athena's own finding about code_health.rs is answered in decision 11 and is acceptable. What remains is minor: an overstated claim about the shared target directory, revert rules that do not cover files the candidate deleted or renamed, and no stated way to force the scratch-copy failure in the cleanup test."
+}

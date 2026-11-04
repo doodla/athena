@@ -1,0 +1,160 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261103-231410-asf2",
+  "base_commit": "1c848ebf7b5a8f67c3ae0f652b444435d7b46122",
+  "base_fingerprint": "sha256:e2a167c032ce19935de7ea7967e353bcf2a72c3ac627563c9ad379108b5225d4",
+  "previous_job": "20261010-154013-a9gz",
+  "candidate_commit": "c4d7cdd2d0caf5807822fc784e4488547621a5cd",
+  "candidate_tree": "3251586d11a1f2e61849a8371749fb147f4be203",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 306572
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 184989
+    },
+    {
+      "path": "crates/athena-core/src/code_health.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 56537
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16138
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 134395
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21275
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 95083
+    }
+  ],
+  "fingerprint": "sha256:ca2fa4a110c0f9f500588b608474b7c0f649545e722dc7cf08a49fe497558283",
+  "violations": [],
+  "producer_report": {
+    "summary": "The verifier's brief now carries Athena's own run of each planned 'fails without the fix' demonstration. The suite, clippy and fmt all pass. The real `cargo test` path only runs in production, so no test runs it end to end. Job-level tests map the command to `sh -c`.\n\nAfter the checks and before the disk gate, `verification_stage` calls the new `Athena::demonstration_records` (run/checks.rs). It takes the accepted plan's demonstrations that have a non-blank `fails_without` and groups them by distinct command. Only a plain `cargo test ...` command runs, at most 3 distinct commands, each once.\n\nEach run happens in a scratch copy of the candidate under `<job_dir>/revert`, removed on every path. In the copy:\n- Changed non-test files go back to their base versions.\n- The candidate's inline `#[cfg(test)] mod` blocks and bodiless `#[cfg(test)] mod x;` declarations are carried over.\n- Declared module files and test files are kept.\n- Added non-test files are removed.\n- `Cargo.toml` and `Cargo.lock` stay as the candidate has them.\n- Files whose tests had to go with the revert are listed and named in the brief.\n\nThe record is a 'not a check' entry under 'Checks Athena ran on this tree'. It shows the command, exit code and output tail, with one sentence:\n- Non-zero exit: 'failed without the fix', plus 'did not compile' when the output says so.\n- Exit 0 with tests run: 'passed without the fix: the revert did not make the test fail'.\n- Exit 0 with no tests, no exit code, or not run: each has its own sentence.\n\nNothing goes into `check_runs` or `judge`, so a failing demonstration cannot fail the verdict.\n\nRoot cause: the verifier gets no producer report and cannot change files, so it could never see that run. In builds with cfg(test) or the `test-support` feature, the stage returns nothing unless a test installed `demo_seam`. The CLI integration tests, which use the fake planner, therefore run no real cargo.\n\nFiles changed: briefs.rs (view types and rendering), verify.rs (pure revert, grouping and classification helpers), run/checks.rs, run/verification.rs, run/tests.rs, CHANGELOG.md, and code_health.rs. I added `code_health::test_module_ranges` to code_health.rs because it holds the one definition of a test module. It is not on the expected deliverables list.",
+    "files": [
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/code_health.rs",
+      "crates/athena-core/src/verify.rs",
+      "crates/athena-core/src/run/checks.rs",
+      "crates/athena-core/src/run/verification.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --locked --lib -- demonstration inline_test_module test_module_ranges revert is_test_path declared_module",
+        "result": "pass",
+        "note": "20 tests: the job-level demonstration tests, the verify.rs unit tests and the code_health test."
+      },
+      {
+        "command": "cargo test -p athena-context --locked demonstration",
+        "result": "pass",
+        "note": "The four demonstration_record tests plus the existing seam, plan and critic tests that match the filter."
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "Boundary-word scan. It ran before the final small edits, and the policy test is also in the full run below."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "The first run found dead-code warnings on demo_seam::Guard and install. I gated them with cfg(test) and the rerun was clean."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Run after cargo fmt --all."
+      },
+      {
+        "command": "cargo test --locked --no-fail-fast --quiet",
+        "result": "pass",
+        "note": "The whole workspace, including athena-cli, refusal_corpus and xtask policy. Every result line said ok. I ran it twice: the first output was too large to read back."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core` (filtered to the new test): a test where a plan has one demonstration with fails_without and the reverted copy makes the named test fail; the verifier brief it builds contains that demonstration's recorded run (command, non-zero exit code, output tail) under 'Checks Athena ran on this tree'.",
+        "status": "met",
+        "evidence": "`cargo test -p athena-core --lib a_planned_fails_without_demonstration_is_run_on_a_reverted_copy_and_shown_to_the_verifier` passes. The test runs a planned job through Athena::go, with the demo_seam mapper running a script through sh -c in the scratch copy. The verifier prompt it captures has, under '## Checks Athena ran on this tree', the entry fails-without-1 with `cargo test --locked demo`, 'exit code 1', 'failed without the fix (exit 1)', 'Files put back to the base: README.md' and the output tail ('test demo ... FAILED', 'test result: FAILED. 0 passed; 1 failed'). The job still lands. `a_fix_with_an_inline_test_module_keeps_the_test_in_the_reverted_copy` also passes and shows an inline test module surviving the revert."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core` (filtered to the new test): a test where reverting does not make the named test fail; the brief's record says the test passed without the fix, and it is not presented as a failing run.",
+        "status": "met",
+        "evidence": "`cargo test -p athena-core --lib a_demonstration_that_still_passes_without_the_fix_is_recorded_as_passing` passes. The verifier prompt has 'exit code 0' and 'passed without the fix: the revert did not make the test fail', and does not contain 'failed without the fix'. The job lands. verify::tests::demonstration_view_classifies_by_exit_code_and_tests_ran covers the other classes, including a tail that holds only '0 passed' while tests_ran is Some(1)."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-context`: briefs.rs renders the demonstration record in the brief; a rendering test checks the text appears with command, exit code and output tail.",
+        "status": "met",
+        "evidence": "`cargo test -p athena-context demonstration` passes. demonstration_record_shows_command_exit_code_and_output_tail checks the command in backticks, 'exit code 101', the result sentence, the criteria, the reverted and tests-removed files, and the fenced tail with its inner fence neutralised. It also checks that no 'passed' or 'failed' status is printed. The same filter also passes the exit-0 record, the no-exit-code record, the did-not-run record, and an old-style entry that renders as before."
+      },
+      {
+        "criterion": "The demonstration runs in a scratch copy: Grep/diff of verification.rs (or the checks stage) shows the candidate tree and the candidate commit are not modified, and the scratch copy is removed afterwards.",
+        "status": "met",
+        "evidence": "In run/checks.rs, `demonstration_records` calls the inner `demonstration_runs`, then always calls `pin::remove_tree(<job_dir>/revert)`, as `take_baseline` does. The inner function writes only inside the directory `verifier_snapshot` creates, through `scratch_target`, which refuses symlink paths. The job repository gets only read calls (diff_tree, show_file). The job-level test asserts `<job_dir>/revert` is gone and that HEAD's README still holds the producer's text. verification.rs only adds the call."
+      },
+      {
+        "criterion": "The record is an entry that fails nothing ('not a check'), so the final verdict still rests on the recorded fmt, clippy and test checks.",
+        "status": "met",
+        "evidence": "The entry is a CheckResultView with command 'not a check' and passed true. `verification_stage` pushes it only to `inputs.checks`, never to `check_runs`, `Verification.checks` or `judge`. The job-level test lands with a demonstration that exits 1, and `demonstration_view_is_not_a_check_and_names_the_run` checks the name, command and passed fields."
+      },
+      {
+        "criterion": "Outcome-check/tested: `cargo fmt --check`, `cargo clippy` and `cargo test` pass as recorded under 'Checks Athena ran on this tree'.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked --no-fail-fast --quiet` myself, and all three passed."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry saying the verifier now sees Athena's recorded 'fails without the fix' run.",
+        "status": "met",
+        "evidence": "A new first bullet under '## [Unreleased]' / '### Added' reads 'The verifier now sees Athena's recorded \"fails without the fix\" run'. It names the root cause (no producer report, no file changes) and describes the scratch-copy revert, the one-run-per-distinct-command rule with a cap of three, and the not-a-check status."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan: `code_health::test_module_ranges` walks the file's top-level items directly instead of adding a `test_decls` field to `Scan`. This also gives top-level-only modules, so a nested test module inside a non-test module is not carried over. `Scan`, `measure_source` and `test_ranges` are unchanged. code_health.rs is still not on the expected deliverables list, so the scope check will flag it. The reason is in the summary.",
+      "Departure from the plan: `DemonstrationRunView` has an extra `ran` flag, so a demonstration that did not run is worded 'Athena did not run ...' and not as a run with no exit code.",
+      "Departure from the plan: `demo_seam::install` and `Guard` exist only under cfg(test). A `test-support` build has the seam's reader but never a mapper, so it never runs a demonstration, and clippy has no dead code to flag.",
+      "Real `cargo test` runs only in production builds. No test runs the real command form end to end; only the parse and classification unit tests cover it.",
+      "Open question for the user: should a demonstration whose command is not a plain `cargo test` (for example `cargo build`, or shell syntax) only be recorded as 'not run', as now, or should more command forms run?",
+      "A job resumed at the verifier stage reruns the demonstrations. This costs time but is correct."
+    ],
+    "mistakes": [
+      "First clippy run failed on dead-code warnings: demo_seam::Guard and install are used only by this crate's tests. I gated them with cfg(test).",
+      "My first version of the not-a-plain-command job test asserted no 'exit code' text. It failed because the record said 'no exit code'. I added a `ran` flag so a demonstration that did not run is worded differently, and fixed the test.",
+      "I ran the full suite twice, because the first output was unreadable. That is a time cost, not a correctness issue."
+    ],
+    "learnings": [
+      "The test capability `Docs` in run/tests.rs has id \"study\", so skipping the stage for study jobs would have hidden it from the tests. I do not skip it.",
+      "A job with a behavior criterion and a fake verifier that cites no commands is rejected by `judge`. The job-level demonstration tests therefore use a content criterion with a demonstration that has fails_without. Admission accepts that.",
+      "`run_check` for CheckKind::Test sets passed=false on a zero-test run, but the exit code stays 0. The classifier uses exit_code and tests_ran, as planned.",
+      "Shell-style tools (grep, tail) are not on the producer's Bash list. A tool result saved outside the working directory cannot be read back.",
+      "`syn::ItemMod` has a `semi` field. It gives the end line of a bodiless `#[cfg(test)] mod x;` declaration."
+    ],
+    "desires": [
+      "A way to read oversized tool results inside the working directory. The first full-suite output was saved outside it and could not be read, so I reran the suite quietly.",
+      "A safe real-cargo check of the revert path. Real `cargo test` runs only in production builds, so no test covers it end to end."
+    ]
+  }
+}

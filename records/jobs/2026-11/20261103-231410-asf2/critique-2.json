@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-231410-asf2",
+  "round": 2,
+  "at": "2026-11-04T03:59:17.167756416Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/code_health.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/code_health.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out the shared fake planner and the CLI integration tests. Those jobs would now run real cargo, and the test seam cannot reach them.",
+      "evidence": "The shared fake planner gives every criterion a demonstration with command \"cargo test --locked\" and a non-blank fails_without (fake.rs:366-368). CLI integration tests that run planned jobs with fake agents also build plans like this: lifecycle.rs:2647-2650, introspection.rs:742-746, job_plan.rs:410-416. In run/tests.rs, behavior_plan (tests.rs:668-678) uses the same command, and the existing test at tests.rs:861 lands a job with it. Once this change lands, all of these jobs will run real `cargo test --locked` in a scratch copy of their fixture repository before the verifier starts. A #[cfg(test)] seam in athena-core is not compiled into the athena-cli integration tests. The plan's dependents list says only that jobs with no plan are unchanged. Fix: Add these readers to the dependents list, each with the test that covers it. Decide what the stage does for these callers and test that outcome. One option: expose the seam like ci_seam, under #[cfg(any(test, feature = \"test-support\"))], so the fake setup can install it. Another: have the fake planner emit no fails_without. Either way, state the effect on the brief text those tests read (job_plan.rs:345-348) and on their running time.",
+      "location": "Dependents list; Decision 9 (demo_seam is #[cfg(test)] in run/checks.rs); crates/athena-agent/src/fake.rs:354-368",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "When the revert drops the parent's declaration of a new test file, its tests disappear without the record saying so.",
+      "evidence": "The repository declares test modules without a body in non-test files: lib.rs:108-109 `#[cfg(test)] mod run_pin_tests;`, gh/mod.rs:109-110 and athena-gate/src/lib.rs:387-388. Scan records only modules that have a body (code_health.rs:111-119). Suppose a candidate adds a new `*_tests.rs` file. The file is kept, but reverting its parent removes the declaration, so the new tests are never compiled. The run then reports 'ran no tests', and tests_removed does not name the file. This contradicts Decision 2. Fix: Also carry over the candidate's `#[cfg(test)] mod x;` declarations when reverting a file, or list the orphaned test file in tests_removed. Add a unit test for this case.",
+      "location": "Decision 1/2; Risks bullet 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Identical demonstration commands are run more than once.",
+      "evidence": "Planners often use `cargo test --locked` for several criteria; the fake planner and lifecycle.rs both do. The plan would run the same full suite up to 3 times on the same reverted tree. Fix: Run each distinct command once and attach its record to every criterion that names it.",
+      "location": "Decision 5 (up to 3 demonstrations run)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "code_health.rs is outside the listed deliverables. This is Athena's own finding, weighed here.",
+      "evidence": "Reusing Scan is a sound reason to touch the file, but the scope check will flag it. Fix: Keep the change and justify it in the change description as reuse of the single definition of a test module.",
+      "location": "Files: crates/athena-core/src/code_health.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Wrong line reference for base_script.",
+      "evidence": "base_script is defined at run/tests.rs:215, not line 250. Fix: Correct the line reference.",
+      "location": "Risks, last bullet; Demonstration 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly and puts the fix in the right place: a new stage in verification_stage, run before the disk gate, adds 'not a check' entries to inputs.checks and leaves check_runs and judge untouched. It also answers the round-1 findings. The revert keeps inline tests by reusing Scan, results are classified from tests_ran rather than the clipped tail, and the scratch copy is always removed, following take_baseline. I confirmed the named code exists: verifier_snapshot (verification.rs:405), the 'not a check' entries (verification.rs:88-127), take_baseline and baseline_checks (checks.rs:92-159), run_check (checks.rs:424-540) and Scan (code_health.rs:87-123). The demonstrations for criteria 1-3 cover their criteria and would fail without the change. One major gap remains. The shared fake planner (fake.rs:366-368) and several CLI integration fixtures plan `cargo test --locked` with a fails_without. With this change those jobs would run real cargo in scratch copies, a #[cfg(test)] seam cannot reach the CLI integration tests, and the dependents list omits these callers. Smaller issues: test-module declarations without a body are dropped silently, identical commands are not deduplicated, and code_health.rs is outside the deliverables. Verdict: revise."
+}

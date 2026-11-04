@@ -3037,4 +3037,219 @@ mod produce_and_verify_order_tests {
         assert_eq!(*left_over.fake.ci_head.borrow(), None);
         assert!(left_over.warnings().is_empty(), "{:?}", left_over.lines);
     }
+
+    // -----------------------------------------------------------------------------------------------------
+    // Athena's run of the planned "fails without the fix" demonstration
+
+    /// A plan whose one demonstration names this command and a failure without the fix.
+    fn demonstration_plan(command: &str) -> serde_json::Value {
+        let mut plan = good_plan();
+        plan["demonstrations"] = json!([{
+            "criterion": 1,
+            "method": "run the demo test",
+            "command": command,
+            "observes": "the demo test passes",
+            "fails_without": "the demo test fails"
+        }]);
+        plan
+    }
+
+    /// What a demonstration job showed: the job, the verifier's prompt, whether `<job_dir>/revert` is left,
+    /// and the README at the repository's head after the job.
+    struct DemoJob {
+        finished: Box<Finished>,
+        verifier_prompt: String,
+        revert_left: bool,
+        head_readme: String,
+    }
+
+    /// Runs a planned job over `repo` with `plan`. When `runs` is set, a mapper makes every demonstration
+    /// command run `sh -c <that script>` in the scratch copy; otherwise none is installed. When `also_edit`
+    /// is set, the fake producer writes that file as well as the README.
+    fn run_demonstration_job(
+        repo: &tempfile::TempDir,
+        plan: serde_json::Value,
+        runs: Option<&str>,
+        also_edit: Option<(&str, &str)>,
+    ) -> DemoJob {
+        let state = tempfile::tempdir().unwrap();
+        let calls = Calls::default();
+        let inner = planning_script(vec![plan], vec![accepting_critique()], calls.clone());
+        let extra = also_edit.map(|(p, t)| (p.to_string(), t.to_string()));
+        let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            if spec.role == Role::Producer
+                && let Some((path, text)) = &extra
+            {
+                turn.edits.push((path.clone(), Some(text.clone())));
+                turn.structured.as_mut().unwrap()["files"] = json!(["README.md", path]);
+            }
+            turn
+        });
+        let athena = athena_with(
+            repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let _seam = runs.map(|body| {
+            let body = body.to_string();
+            crate::run::checks::demo_seam::install(std::rc::Rc::new(move |_argv: &[String]| {
+                vec!["sh".to_string(), "-c".to_string(), body.clone()]
+            }))
+        });
+        let (id, finished) = finished_job(&athena);
+        let revert_left = athena.state.job_dir(&id).join("revert").exists();
+        let calls = calls.lock().unwrap().clone();
+        let verifier_prompt = prompts_of(&calls, Role::Verifier)[0].to_string();
+        let head_readme = String::from_utf8(
+            Git::at(repo.path())
+                .show_file("HEAD", "README.md")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        DemoJob {
+            finished,
+            verifier_prompt,
+            revert_left,
+            head_readme,
+        }
+    }
+
+    /// Passes only when the README has the producer's text, as the demo test passes only with the fix.
+    const README_TEST: &str = "if grep -q 'A demo' README.md; then \
+         echo 'test result: ok. 1 passed; 0 failed'; \
+         else echo 'running 1 test'; echo 'test demo ... FAILED'; \
+         echo 'test result: FAILED. 0 passed; 1 failed'; exit 1; fi";
+
+    #[test]
+    fn a_planned_fails_without_demonstration_is_run_on_a_reverted_copy_and_shown_to_the_verifier() {
+        let repo = repo_with_planning(3);
+        let job = run_demonstration_job(
+            &repo,
+            demonstration_plan("cargo test --locked demo"),
+            Some(README_TEST),
+            None,
+        );
+        assert_eq!(
+            job.finished.state,
+            OutcomeState::Landed,
+            "a failing demonstration fails nothing: {}",
+            job.finished.reason
+        );
+        let prompt = &job.verifier_prompt;
+        let section = &prompt[prompt.find("## Checks Athena ran on this tree").unwrap()..];
+        for text in [
+            "fails-without-1: not a check",
+            "`cargo test --locked demo`",
+            "exit code 1",
+            "failed without the fix (exit 1)",
+            "Files put back to the base: README.md",
+            "test demo ... FAILED",
+            "test result: FAILED. 0 passed; 1 failed",
+        ] {
+            assert!(section.contains(text), "the record omits {text}: {section}");
+        }
+        assert!(!job.revert_left, "the scratch copy is removed");
+        assert!(
+            job.head_readme.contains("A demo"),
+            "the candidate keeps the producer's text: {}",
+            job.head_readme
+        );
+    }
+
+    #[test]
+    fn a_demonstration_that_still_passes_without_the_fix_is_recorded_as_passing() {
+        let repo = repo_with_planning(3);
+        let job = run_demonstration_job(
+            &repo,
+            demonstration_plan("cargo test --locked demo"),
+            Some("echo 'test result: ok. 1 passed; 0 failed'"),
+            None,
+        );
+        assert_eq!(
+            job.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            job.finished.reason
+        );
+        let prompt = &job.verifier_prompt;
+        assert!(prompt.contains("fails-without-1: not a check"), "{prompt}");
+        assert!(prompt.contains("exit code 0"), "{prompt}");
+        assert!(
+            prompt.contains("passed without the fix: the revert did not make the test fail"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("failed without the fix"), "{prompt}");
+        assert!(!job.revert_left);
+    }
+
+    #[test]
+    fn a_demonstration_with_a_command_that_is_not_a_plain_cargo_test_is_recorded_as_not_run() {
+        let repo = repo_with_planning(3);
+        let mut plan = demonstration_plan("cargo test --locked demo");
+        plan["demonstrations"][0]["command"] = "cargo test --locked && echo done".into();
+        // The mapper is installed, so only the command form keeps the demonstration from running.
+        let job = run_demonstration_job(&repo, plan, Some("exit 1"), None);
+        let prompt = &job.verifier_prompt;
+        assert!(
+            prompt.contains("not run: not a plain cargo test command"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Athena did not run the planned"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("exit code"), "{prompt}");
+        assert!(!prompt.contains("no exit code"), "{prompt}");
+        assert!(!job.revert_left);
+    }
+
+    #[test]
+    fn a_fix_with_an_inline_test_module_keeps_the_test_in_the_reverted_copy() {
+        const BASE: &str = "pub fn n() -> u32 {\n    1\n}\n";
+        const FIXED: &str = "pub fn n() -> u32 {\n    2\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn n_is_two() {\n        assert_eq!(n(), 2);\n    }\n}\n";
+        let repo = repo_with_planning(3);
+        commit_file(&repo, "src/notes.rs", BASE);
+        let mut plan = demonstration_plan("cargo test --locked n_is_two");
+        plan["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "path": "src/notes.rs", "action": "modify", "purpose": "Fix n." }));
+        // Fails when the base's `1` is back and the candidate's test module is still in the file.
+        let script = "if grep -q 'mod tests' src/notes.rs && grep -q '^    1$' src/notes.rs; then \
+             echo 'test result: FAILED. 0 passed; 1 failed'; exit 1; fi; \
+             echo 'test result: ok. 1 passed; 0 failed'";
+        let job = run_demonstration_job(&repo, plan, Some(script), Some(("src/notes.rs", FIXED)));
+        let prompt = &job.verifier_prompt;
+        assert!(prompt.contains("exit code 1"), "{prompt}");
+        assert!(
+            prompt.contains("failed without the fix (exit 1)"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("src/notes.rs"), "{prompt}");
+        assert!(
+            !prompt.contains("tests inside these files were removed"),
+            "{prompt}"
+        );
+        assert!(!job.revert_left);
+    }
+
+    #[test]
+    fn a_planned_job_without_a_demo_runner_records_no_demonstration() {
+        let repo = repo_with_planning(3);
+        // Nothing installs the seam, so a test build does not run cargo for the demonstration.
+        let job =
+            run_demonstration_job(&repo, demonstration_plan("cargo test --locked"), None, None);
+        assert_eq!(
+            job.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            job.finished.reason
+        );
+        assert!(!job.verifier_prompt.contains("fails-without-"));
+        assert!(!job.revert_left);
+    }
 }

@@ -1,0 +1,282 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261103-231410-asf2",
+  "round": 1,
+  "at": "2026-11-04T03:53:20.764982917Z",
+  "invocation_seq": 5,
+  "approach": "After the checks and replay and before the verifier's disk gate, `verification_stage` asks a new `Athena` method in run/checks.rs for demonstration records. For each demonstration of the accepted plan (`closing.plans.last()`) that has a non-blank `fails_without`, at most 3, it makes a scratch copy of the candidate with `verifier_snapshot` in `<job_dir>/revert`. In that copy it puts the base version (`git show_file` of the snapshot's base commit) back for every changed file that is not a test file (`diff_tree(base, candidate)`) and removes files the candidate added. Test files are kept. It then runs the demonstration command with `run_check`. The command must be a plain `cargo test ...`, otherwise the record says \"not run\". The copy is removed afterwards. Each run becomes one `CheckResultView` entry, named `fails-without-<criterion>` with command \"not a check\", pushed after the other extra entries like `criteria-left-to-athena-checks`. It has a new `demonstration` sub-record (criterion, reverted files, exit code, output tail) that briefs.rs renders under 'Checks Athena ran on this tree' with the command, the exit code, a result sentence and the output tail. The sentence is one of: failed without the fix (the expected result); did not build without the fix (a compile error, not a test failure); passed without the fix (the revert did not make it fail); ran no tests; did not finish. Pure helpers (command parsing, test-path rule, result sentence) live in verify.rs. The final verdict (`judge`, `check_runs`) is untouched.",
+  "decisions": [
+    {
+      "choice": "Read the planned revert as: in a copy of the candidate, put the base version back for every changed non-test file and keep the test files (test paths: a `tests` or `test` directory component, `tests.rs`, `*_tests.rs`, `*_test.rs`, `test_*`).",
+      "reason": "The plan has no machine-readable revert, and adding a field or changing the planner prompt is out of scope (the prompts have no token headroom). Reverting all changed source files is the revert the planner describes in `fails_without` for a test-first change. It uses only data Athena has: the base and candidate commits, read via `git show_file` and `diff_tree`, both existing APIs.",
+      "rejected": [
+        {
+          "option": "Add a `revert` field to `Demonstration`",
+          "why": "Out of scope. It changes the plan record schema, the planner prompt and admission."
+        },
+        {
+          "option": "Ask a model to work out the revert from `fails_without`",
+          "why": "The result would not be measured, and it costs money and time. The request asks for a direct run."
+        },
+        {
+          "option": "Give the verifier a way to revert and run itself",
+          "why": "Out of scope. The verifier's snapshot is locked on purpose."
+        }
+      ]
+    },
+    {
+      "choice": "Reuse `Athena::verifier_snapshot` for the scratch copy under `<job_dir>/revert`, and reuse the checks' environment builder (`athena_agent::env::build`) and `run_check` with `CheckKind::Command`.",
+      "reason": "The snapshot gives the candidate's work tree, the base commit as HEAD~1 and the base tool config exactly as the checks saw them. `run_check` gives timeout, kill switch, redaction and the failing-tail rule. `CARGO_TARGET_DIR` is `{job_dir}/target/verify`, so third-party dependencies are reused. Workspace crates get separate artifacts because their path differs. The candidate tree, the commit and the verifier snapshot are never written.",
+      "rejected": [
+        {
+          "option": "Revert inside the verifier's snapshot and restore it afterwards",
+          "why": "The verifier snapshot must stay the same (`prepared` tree is checked after the run). A crash would leave it dirty."
+        },
+        {
+          "option": "A separate CARGO_TARGET_DIR for the scratch copy",
+          "why": "It would force a cold build of every dependency, and the disk is already the scarce resource (`disk.rs` gates)."
+        }
+      ]
+    },
+    {
+      "choice": "Record the run as a `CheckResultView` with `command` \"not a check\" and `passed: true` plus an optional `demonstration` sub-record, and render it in briefs.rs in its own branch that never writes the word passed or failed for the entry.",
+      "reason": "It follows the existing 'not a check' pattern (`ci-result`, `producer-report-gaps`, `criteria-left-to-athena-checks`), so nothing is added to `check_runs`, `Verification.checks` or `judge`. The entry fails nothing. The branch gives the record the shape 'the test failed without the fix' that the verifier needs.",
+      "rejected": [
+        {
+          "option": "Push a `CheckRun` into `check_runs`",
+          "why": "A failing run would fail the verdict, and the record would go into `Verification.checks`, which `judge` and `mark_pre_existing` read."
+        },
+        {
+          "option": "Put everything into `detail` as free text",
+          "why": "The renderer would print `failed` or `passed` next to a 'failing' run, which is the wrong signal, and the output tail would not be fenced as data."
+        }
+      ]
+    },
+    {
+      "choice": "Only a plain `cargo test ...` command is run. Backticks are stripped and the command is split on whitespace. Any shell metacharacter or quote gives 'not run: not a plain cargo test command'. At most 3 demonstrations are run; the rest are named as not run.",
+      "reason": "This is the form the verifier's grant allows and admission checks (`plan_findings` evaluates the command against the verifier policy). It stops a planner-written command from running arbitrary shell. The cap bounds wall time (each run is limited by `check_timeout_s`).",
+      "rejected": [
+        {
+          "option": "Run any command that the verifier grant allows",
+          "why": "Needs the full policy parser here; `cargo build` or `git` commands cannot 'fail without the fix' in a useful way."
+        }
+      ]
+    },
+    {
+      "choice": "Run the demonstrations before `verifier_environment_problem` in `verification_stage`, skip them in a nested run (`self.nested.is_some()`), and let the method never fail: every problem becomes a 'not run: <reason>' entry.",
+      "reason": "The disk gate then measures the space left after the extra build, and a low disk still holds the job. A fault in the scratch copy must not reject correct work, because the record only informs the verifier.",
+      "rejected": [
+        {
+          "option": "Run them inside `check_and_verify` next to the checks",
+          "why": "Needs the plan and happens before the replay stage frees the build; the verification stage already holds the plan."
+        }
+      ]
+    },
+    {
+      "choice": "Test seam for the process: a `#[cfg(test)]` module `demo_seam` in run/checks.rs that maps the parsed argv to the argv actually run. Tests map `cargo test ...` to an `sh -c` check on README.md. The revert, the scratch copy and the process are real.",
+      "reason": "A real `cargo test` in a unit test would build the workspace. Mapping only the program keeps the logic under test (what is reverted, what is run, how the result is read) in production code. The existing `check_seam` in run/mod.rs cannot be reused because it fakes the finished `CheckRun` and would hide the revert. Keeping the seam in checks.rs avoids touching mod.rs.",
+      "rejected": [
+        {
+          "option": "Reuse `check_seam` to return a canned CheckRun",
+          "why": "The revert would not be exercised. The test would pass without the scratch-copy logic."
+        },
+        {
+          "option": "Run the real cargo in the test",
+          "why": "Slow, needs the toolchain and network or a vendored cache in the fixture repository."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `DemonstrationRunView` (criterion, reverted files, exit code, output tail) and an optional `demonstration` field on `CheckResultView`. Render it in its own branch in the 'Checks Athena ran on this tree' loop (command, exit code, result sentence from `detail`, reverted files, fenced clipped tail). Update the full literal at ~3273 and add rendering tests (`demonstration_record_*`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add the pure helpers: `demonstration_command` (plain `cargo test` parse), `is_test_path`, `demonstration_view` (classifies a `CheckRun` into the result sentences) and `demonstration_not_run`; unit tests for each form (failed, passed, ran no tests, did not build, did not finish, rejected command, test paths).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "Add `Athena::demonstration_records` (scratch copy via `verifier_snapshot`, revert of changed non-test files, `run_check` per demonstration, removal of the copy on every path) and the `#[cfg(test)] demo_seam` module.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Call `demonstration_records` with the accepted plan after the `criteria-left-to-athena-checks` entry and before `verifier_environment_problem`; push the entries to `inputs.checks`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the two job-level tests: a demonstration that fails on the reverted copy is shown in the verifier prompt, and one that still passes is recorded as passing without the fix.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an 'Added' entry under [Unreleased]: the verifier now sees Athena's recorded 'fails without the fix' run.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "briefs.rs: add `DemonstrationRunView` and the optional `demonstration` field on `CheckResultView` (derive Default stays); render it in the checks loop in its own branch (no 'passed'/'failed' word for it; reuse `clip_log_tail`); update the literal at ~3273; add `demonstration_record_*` tests for a failing exit, a passing exit and an old-style entry.",
+    "verify.rs: add `demonstration_command`, `is_test_path`, `demonstration_view` (from a `CheckRun`, the reverted paths and criterion; uses `count_tests` on the tail to spot 'ran no tests'; checks for 'could not compile'), `demonstration_not_run`, and their unit tests.",
+    "run/checks.rs: add the `#[cfg(test)] pub(super) mod demo_seam` (thread-local `Rc<dyn Fn(&[String]) -> Vec<String>>`, `install` returning a guard, `current`) and `Athena::demonstration_records(&self, ctx, plan, base, candidate, capability_env) -> Vec<CheckResultView>`: return empty if nested or no eligible demonstration; build the scratch copy in `<job_dir>/revert` with `verifier_snapshot`; list `diff_tree(base, candidate)` in it; for each non-test path write back `show_file(base, path)` or remove an added file; build the env with `athena_agent::env::build` (snapshot = the scratch directory); run each parsed command through `run_check` (`CheckKind::Command`, timeout `check_timeout_s`); map to views; `remove_tree` the copy on every path.",
+    "verification.rs: after the `criteria-left-to-athena-checks` block and before `verifier_environment_problem`, call `self.demonstration_records(...)` with `closing.plans.last()`, `p`, `c`, `capability_env`, and extend `inputs.checks`. Do not touch `check_runs`, `judge` or `Verification`.",
+    "run/tests.rs: add the two job-level tests (use `repo_with_planning`, `run_planned_behavior`, `behavior_plan`, `demo_seam::install` through `super::checks::demo_seam`; check the path from tests.rs); assert the verifier prompt text, that the job lands, and that `<job_dir>/revert` is gone.",
+    "CHANGELOG.md: add the entry under '## [Unreleased]' / '### Added'.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-core`, `cargo test -p athena-context`, `cargo test -p athena-core --test refusal_corpus` and `cargo test --locked`. The files crates/athena-cli/src/drain.rs, crates/athena-cli/tests/drain.rs and crates/athena-cli/src/main.rs stay untouched."
+  ],
+  "risks": [
+    {
+      "risk": "Reverting every changed non-test file can make the test crate fail to compile (the tests use new functions) and for a Rust change with inline `#[cfg(test)]` tests the new tests vanish with the revert. Then the record is 'did not build' or 'ran no tests' and not a clean failing test.",
+      "mitigation": "The record names the cause. A non-zero exit with 'could not compile' in the output is reported as 'did not build without the fix (not a test failure)'. The reverted file list is shown, so the verifier can judge. Tests that live inside a source file are reverted with it, so the filtered run finds no test (exit 0, 'running 0 tests'); that is reported as 'ran no tests', never as a failing run."
+    },
+    {
+      "risk": "Cold builds of the workspace crates at the scratch path add wall time and disk use before the verifier (an estimate, not measured: minutes per demonstration).",
+      "mitigation": "Cap of 3 demonstrations, each bounded by `check_timeout_s`; the target directory is shared with the checks so dependencies are reused; the copy is removed after the runs; the disk gate runs after them."
+    },
+    {
+      "risk": "A failure to make the scratch copy or to remove it could fail or leak a directory.",
+      "mitigation": "The method returns 'not run: <reason>' entries instead of errors, and removes the scratch directory on every path. A kill-switch stop still comes through `run_check` as a note."
+    },
+    {
+      "risk": "The command comes from a model-written plan and runs on the candidate's code.",
+      "mitigation": "Only `cargo test` with no shell metacharacters or quotes is run, with the checks' scrubbed environment (`env_clear` in `run_check`) and the candidate-only tree; the planner's command was already checked against the verifier's grant at admission."
+    },
+    {
+      "risk": "The tests map `cargo test` to `sh -c`, so the real `cargo test` form is covered only by the parse and classification unit tests.",
+      "mitigation": "The tests assert the classification sentences, not the toolchain. The `sh` check proves the revert changed the file; unit tests cover the cargo-specific forms from sample output text."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "The final verdict rule and the 'cited command was seen to run' rule",
+      "dependent": "crates/athena-core/src/verify.rs `judge` / `VerdictInputs.checks` / `ran` set (D43, D115 command-seen rule)",
+      "kind": "rule",
+      "test": null,
+      "reason": "They read `check_runs` (`CheckRun`), not `VerifierInputs.checks`. The demonstration entry is only a view and is never added to `check_runs`, so a failing demonstration cannot fail the verdict, and it does not count as a command the core 'saw run'. The verifier cites the command it ran itself, as before. Read at verify.rs:494-530."
+    },
+    {
+      "name": "CheckResultView (new optional `demonstration` field) and the 'Checks Athena ran on this tree' section",
+      "dependent": "crates/athena-context/src/briefs.rs `verifier_brief_with_plan` loop and the `RUN_ONLY_FAILING_TESTS` condition (`!c.passed && !c.failed_tests.is_empty()`)",
+      "kind": "code",
+      "test": "cargo test -p athena-context demonstration_record; the existing test at briefs.rs:3445 and the CI-reuse test at briefs.rs:3273 (updated literal) cover the old entries. A demonstration entry has `passed: true` and no failed_tests, so the RUN_ONLY_FAILING_TESTS text is not triggered by it.",
+      "reason": null
+    },
+    {
+      "name": "CheckResultView struct shape",
+      "dependent": "crates/athena-core/src/verify.rs `check_result_view` (builds CheckResultView from a CheckRun)",
+      "kind": "code",
+      "test": null,
+      "reason": "It uses `..Default::default()`, so the new field defaults to None and its output is unchanged. The other 3 literals in verification.rs also use `..Default::default()`."
+    },
+    {
+      "name": "The verifier brief text and the recorded input names",
+      "dependent": "crates/athena-core/src/run/verification.rs: `VerifierInputs::names_with_plan` -> `Verification.inputs`, and the recorded `brief-verifier.md`",
+      "kind": "code",
+      "test": "cargo test -p athena-core a_planned_fails_without_demonstration_is_run_on_a_reverted_copy_and_shown_to_the_verifier",
+      "reason": "`names()` lists input kinds, not check entries, so `Verification.inputs` is unchanged and no record schema or `check_record_file`/`AnyRecord` entry changes. `brief-verifier.md` is written from the same brief function and so gains the entry, which is the intent."
+    },
+    {
+      "name": "`verification_stage` (new call before the disk gate)",
+      "dependent": "crates/athena-core/src/run/mod.rs `check_and_verify` and every mode that reaches `verification_stage`: normal run, job resumed at the verifier (`recorded_checks`), nested run (`self.nested`), study capability, a job with no plan",
+      "kind": "code",
+      "test": "The existing run/tests.rs suite (no plan, so no demonstration), plus the two new job-level tests.",
+      "reason": "The new method returns an empty list when there is no plan, no demonstration with a fails_without, or `self.nested.is_some()`; so a no-plan job (the default `repo()` fixture, every existing run/tests.rs test) is unchanged. A resumed job runs the demonstrations again, which costs time but is correct. It reads the plan from `closing.plans`, the base and candidate commits from `built`, `jc.config.budget.check_timeout_s`, `ctx.pin_dir`, `ctx.redactor`, `state.registry()` and `state.job_dir`, and writes no record."
+    },
+    {
+      "name": "Disk and time use before the verifier starts",
+      "dependent": "crates/athena-core/src/disk.rs `verifier_environment_problem` / `athena.toml` `min_free_gb`, `budget.check_timeout_s`, `budget.verifier_timeout_s` (host settings)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The demonstrations run before the disk gate, so the gate still measures free space after them, and a low disk holds the job as today. Each run is bounded by `check_timeout_s`; the cap of 3 runs bounds the total. `verifier_timeout_s` is not consumed, because the runs happen before the verifier starts. The scratch directory is removed after the runs."
+    },
+    {
+      "name": "The form of `Demonstration.command` and `fails_without`",
+      "dependent": "crates/athena-core/src/admission.rs `plan_findings` (fails_without and verifier-allowed command rules for behavior demonstrations)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not changed. The runner reads what admission already guarantees (a command the verifier policy allows; a non-blank fails_without for behavior criteria) and treats anything else (a content criterion's `cat README.md`, a command with shell syntax) as not run. No parser, stem list or reading rule is added or changed, so there is no refusal_corpus input form to map; `cargo test -p athena-core --test refusal_corpus` is unaffected."
+    },
+    {
+      "name": "The checks' environment and target directory reused for the scratch run",
+      "dependent": "crates/athena-agent/src/env.rs `build` (`CARGO_TARGET_DIR` = `{job_dir}/target/verify`) and the producer's `remove_produce` cleanup",
+      "kind": "code",
+      "test": null,
+      "reason": "Read only, with `snapshot` set to the scratch directory. The target directory is shared with the checks, so the verifier's own builds are not invalidated: workspace crates at another path get their own artifacts."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A job-level test through `Athena::go` on the fixture repository from run/tests.rs (`repo_with_planning`, `run_planned_behavior`). The plan is `behavior_plan(seam)` with command `cargo test --locked demo` and a fails_without. The fake producer edits README.md from '# Demo' to '# Demo\\n\\nA demo.\\n'. `demo_seam` maps the argv to `sh -c 'test \"$(cat README.md)\" != \"# Demo\"'`, which passes on the candidate and fails (exit 1) once README.md is put back to the base.",
+      "command": "cargo test -p athena-core a_planned_fails_without_demonstration_is_run_on_a_reverted_copy_and_shown_to_the_verifier",
+      "observes": "The prompt captured for `Role::Verifier` contains, under '## Checks Athena ran on this tree', an entry named `fails-without-1` with the command, 'exit code 1', the sentence 'failed without the fix', the reverted file `README.md` and the output tail. The scratch directory `<job_dir>/revert` does not exist afterwards. The job is Landed.",
+      "fails_without": "Without the new stage the verifier prompt has no `fails-without-1` entry and the assertion on its text fails. If the revert did not happen, README.md would still be the candidate's, the `sh` test would exit 0 and the assertion on exit code 1 would fail.",
+      "seam": "Production entry point: `Athena::go` -> `check_and_verify` -> `verification_stage` -> new `Athena::demonstration_records` in run/checks.rs (a guard `self.nested.is_none()` and a plan with a non-blank fails_without). Fixture: `repo_with_planning`, `run_planned_behavior`, `behavior_plan` (exist, run/tests.rs lines 283, 632, 668). Fake: `FakeAgentDriver` script via `planning_script` records every prompt (exists). The new seam `demo_seam::install(Rc<dyn Fn(&[String]) -> Vec<String>>)` is added in plan step 3 (`#[cfg(test)]` in run/checks.rs); it is injected by the test as `check_seam` is today (a thread-local guard). The scratch copy, the revert and the process are real."
+    },
+    {
+      "criterion": 2,
+      "method": "The same job-level test with `demo_seam` mapping the argv to `sh -c true`, which exits 0 on the reverted copy, so the revert does not make the test fail.",
+      "command": "cargo test -p athena-core a_demonstration_that_still_passes_without_the_fix_is_recorded_as_passing",
+      "observes": "The verifier prompt contains the `fails-without-1` entry with 'exit code 0' and the sentence 'passed without the fix' and 'did not make it fail'. It does not contain 'failed without the fix' for that entry. The job still lands, because the record fails nothing. Unit tests in verify.rs (`demonstration_view_*`) also cover 'ran no tests' (exit 0 and `test result: ok. 0 passed`), 'did not build' (exit 101 with 'could not compile') and 'did not finish' (no exit code).",
+      "fails_without": "Without the classification the entry would be shown as a failing run or with no sentence, and the assertion on 'passed without the fix' fails.",
+      "seam": "Same entry point, fixtures and `demo_seam` as criterion 1 (added in step 3). The classification function `verify::demonstration_view` is real code in verify.rs (step 2); no double contains it."
+    },
+    {
+      "criterion": 3,
+      "method": "A rendering test in briefs.rs calls `verifier_brief_with_plan` with a `VerifierInputs` whose `checks` hold one entry with a `demonstration` sub-record (criterion 1, command, exit code 101, reverted files, a multi-line output tail with a ``` fence in it), and one with exit code 0. A second test checks that an old-style entry (`..Default::default()`) renders exactly as before.",
+      "command": "cargo test -p athena-context demonstration_record",
+      "observes": "The text under '## Checks Athena ran on this tree' has the command in backticks, 'exit code 101', the result sentence, the reverted files and the clipped tail in a fenced block (the inner fence turned to ''' by `clip_log_tail`). The entry does not print 'passed' or 'failed' as its own status. The existing test at briefs.rs:3445 still passes.",
+      "fails_without": "Without the rendering branch the exit code and tail do not appear in the brief and the assertions fail.",
+      "seam": "Production entry point: `athena_context::briefs::verifier_brief_with_plan` (exists, briefs.rs ~1075). No double: the test builds the input struct directly. The `demonstration` field and `DemonstrationRunView` are added in step 1."
+    },
+    {
+      "criterion": 4,
+      "method": "Content check by reading the diff of crates/athena-core/src/run/checks.rs and verification.rs, plus the criterion 1 test, which asserts that the candidate commit and the verifier snapshot's prepared tree are unchanged (the existing check `tree_now == prepared` still passes) and that `<job_dir>/revert` is gone.",
+      "command": "git diff -- crates/athena-core/src/run/checks.rs crates/athena-core/src/run/verification.rs",
+      "observes": "The only writes are inside the directory made by `verifier_snapshot(&job_dir.join(\"revert\"), ...)`. It is removed with `crate::pin::remove_tree` on every path, including an early error. Nothing calls `git` with a write on the candidate or the job's repository. The word `vsnap` is not written to.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Content check by reading the diff, plus the criterion 1 and 2 tests, which land the job (Landed) with a failing demonstration run and with a passing one.",
+      "command": "git diff -- crates/athena-core/src/run/verification.rs",
+      "observes": "The entry is pushed only to `inputs.checks` with `command: \"not a check\"`, `passed: true`. It is not added to `check_runs`, `Verification.checks` or `VerdictInputs.checks`. `judge` is not edited. The criterion 1 test's job lands even though the demonstration exits 1.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "The recorded Athena checks on the final tree.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three pass. The producer also runs `cargo test -p athena-core --test refusal_corpus` as a no-regression check; the plan adds no parser, stem list or reading rule, so no corpus case is added.",
+      "fails_without": "A compile error, a clippy warning (such as an unused import or a needless clone) or a failing test fails the matching check.",
+      "seam": "Whole workspace, no double. Entry points are the commands themselves; `Checked`'s existing construction in run/mod.rs is unchanged, so no other crate needs edits (the new field has a Default; the one full struct literal in briefs.rs:3273 is updated in step 1)."
+    },
+    {
+      "criterion": 7,
+      "method": "Content check of CHANGELOG.md.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "Under '## [Unreleased]' / '### Added' there is an entry saying the verifier now sees Athena's recorded 'fails without the fix' run: Athena applies the planned revert to a scratch copy of the candidate, runs the named test and shows the command, exit code and output tail under 'Checks Athena ran on this tree'. It names the root cause: the verifier gets no producer report and cannot change files.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: Should a demonstration whose command is not a plain `cargo test` (for example `cargo build` or a command with shell syntax) only be recorded as 'not run', as planned, or should the runner support more command forms?"
+  ],
+  "producer_section_sha256": "43bcdcf1cc253511bf47a66eb76e781caa113adf6a24fa6fbf56fc2951a304d2"
+}
