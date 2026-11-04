@@ -454,8 +454,10 @@ impl Athena {
     ///    `base_fingerprint`), the base has the governed content that run tested. The run is read on the
     ///    job's CI branch for the candidate commit. The squash's changed paths go to `resolve`, so a landing
     ///    that edited a workflow file, which controlled the checker, is not trusted.
-    /// 2. The push run for the content commit on the repository's default branch, read from the local
-    ///    `origin/HEAD`, when its governed content is the base's.
+    /// 2. The push run for the tip of the repository's default branch (the local `origin/<branch>` ref,
+    ///    the branch named by `origin/HEAD`), when the tip's governed-content fingerprint equals the
+    ///    base's. The host holds a different (squash) commit for the base's content, so the lookup is by
+    ///    fingerprint, not by the base's own commit. A tip with other content reads nothing.
     ///
     /// The `config` route is used: it never skips a check by path, so a reused baseline holds the same
     /// checks a local one does.
@@ -504,17 +506,26 @@ impl Athena {
             Err(e) => why.push(format!("the base's landing could not be read: {e:#}")),
         }
         match crate::reconcile::local_default_branch(&self.git, "origin") {
-            // The commit looked up is the base's own content: the base itself, or the commit under its
-            // records that the host has. Checked again here, so a run is never taken for other content.
-            Some(branch) if fingerprint(&self.git, &content, &content).ok() == Some(own) => {
-                match self.green_run(&route, &content, &[], &branch) {
-                    Ok(hit) => return Ok(hit),
-                    Err(reason) => why.push(format!("{branch}: {reason}")),
+            // The default branch holds its own commit for the base's content (a squash), so its tip is
+            // looked up, not the base's commit. Its run is taken only when the tip has the base's
+            // governed content.
+            Some(branch) => {
+                let tracking = format!("refs/remotes/origin/{branch}");
+                match self.git.rev_parse(&tracking) {
+                    Ok(Some(tip)) if fingerprint(&self.git, &tip, &tip).ok() == Some(own) => {
+                        match self.green_run(&route, &tip, &[], &branch) {
+                            Ok(hit) => return Ok(hit),
+                            Err(reason) => why.push(format!("{branch}: {reason}")),
+                        }
+                    }
+                    Ok(Some(tip)) => why.push(format!(
+                        "{branch}: its tip {tip} has other governed content than the base"
+                    )),
+                    Ok(None) | Err(_) => why.push(format!(
+                        "{branch}: its tip is not known here, so its run is not read"
+                    )),
                 }
             }
-            Some(branch) => why.push(format!(
-                "{branch}: the commit under the base's records has other governed content"
-            )),
             None => why.push("origin/HEAD is not set, so the default branch is not read".into()),
         }
         Err(Some(why.join("; ")))
