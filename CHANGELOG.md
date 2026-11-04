@@ -9,11 +9,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
-- The agent caps in `athena.toml` are lifted: `reader_usd` 2.00, `producer_usd` 10.00, `verifier_usd` 5.00,
-  `[job_plan]` `planner_usd` 3.00, `critic_usd` 3.00 and `max_rounds` 5, with `producer_timeout_s` 5400 and
-  `verifier_timeout_s` 3600. `job_usd` is raised to 50.00, so it covers the 47.00 that the caps require
-  (reader + max_rounds × (planner + critic) + producer + verifier) and admission's budget check passes. The
-  tests that pinned the old values are updated; the schema and the check are unchanged.
+- Per-agent budgets and timeouts in `athena.toml` are lifted, as the owner directed on 4 Nov. Old and new
+  values:
+  - `[budget]` `reader_usd` 0.50 -> 2.00
+  - `[budget]` `producer_usd` 3.00 -> 10.00
+  - `[budget]` `verifier_usd` 2.00 -> 5.00
+  - `[budget]` `job_usd` 12.00 -> 50.00
+  - `[budget]` `producer_timeout_s` 3000 -> 5400
+  - `[budget]` `verifier_timeout_s` 2400 -> 3600
+  - `[job_plan]` `planner_usd` 0.75 -> 3.00
+  - `[job_plan]` `critic_usd` 0.75 -> 3.00
+  - `[job_plan]` `max_rounds` 3 -> 5
+
+  `job_usd` of 50.00 covers the 47.00 stage-cap reserve (reader + producer + verifier + max_rounds × (planner +
+  critic) = 2 + 10 + 5 + 5 × 6), so admission accepts the job. No keys were added or removed, and no tests or
+  code changed; the admission rule is unchanged.
 
 ### Fixed
 
