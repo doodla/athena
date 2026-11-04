@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- A design note, `docs/design/warm-baseline-build.md`, for keeping a warm baseline build of main (keyed by a
+  hash of `rust-toolchain.toml` and `Cargo.lock`, refreshed in the background) so checks stop starting from
+  an empty target directory. It cites throughput review 20261029-155931-wfkr, predicts 8.0 minutes saved per
+  landed job, and says how the next review measures it. Design only; nothing is implemented.
+
 ### Fixed
 
 - A criterion that cites Athena's own "fails without the fix" run now counts that run as seen running. Root
