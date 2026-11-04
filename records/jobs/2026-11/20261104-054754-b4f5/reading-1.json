@@ -1,0 +1,145 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261104-054754-b4f5",
+  "n": 1,
+  "at": "2026-11-04T05:50:47.060813199Z",
+  "invocation_seq": 1,
+  "base_commit": "3cf91f7bb6c6fe3c7e8e90237f6a366993807019",
+  "config_sha256": "a0762fb382bf4b87767786f20cd107125b627e247aa2dd5e73d862e9946068ae",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make the decisions page read approve/reject decisions from main",
+  "summary": "Retry of 20261103-201526-t4qv with the root cause named: decisions.html reads work items from athena/records, but approve-work and reject-work decisions are recorded under records/work-decisions/ on main (for example 2026-10/20261030-081746-a1he.json, which settles 20261017-204324-jtd2). The page therefore never sees a decision and lists every proposal. The fix makes xtask/src/decisions.rs also read decisions from main's tree so decided proposals drop off. The audience is the owner reading the page.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "The fix is at the data source the page reads, not by moving a filter; the cause is named in the CHANGELOG."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The test runs locate() and render() over a records branch plus a main tree with real-shape decisions."
+    },
+    {
+      "id": "tested",
+      "how": "cargo test, clippy and fmt --check must pass."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that decided proposals are absent from the rendered page."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in decisions.rs plus the changelog."
+    },
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read xtask/src/decisions.rs. read_snapshot(git, tip) lists records/work-items, records/work-decisions and records/roles only under the athena/records tip, using ls_tree_under and check_record_file. It builds a decided set from WorkDecision records and retains only undecided proposals. locate() resolves the tip with resolve_tip in crates/athena-git, then calls read_snapshot. render() shows the cards. crates/athena-data/src/records.rs (around line 2979) writes decisions to records/work-decisions/<month>/<id>.json. No record schema or allow-list changes, so check_record_file and AnyRecord stay as they are.",
+    "Root cause, to be stated in the CHANGELOG entry and the producer report: the decided filter in read_snapshot already worked, but its input was incomplete. Decisions are committed to main, not to athena/records, so the decided set was empty and no proposal was dropped. .github/workflows/pages.yml checks out main and fetches athena/records, so main's tree (HEAD) is available to the renderer without a workflow change.",
+    "Fix choice: also read WorkDecision records from main's tree (HEAD of the checkout) and union them into the decided set. Copying decisions to the records branch is not chosen because it would change approve-work/reject-work behavior. If HEAD has no records/work-decisions, the result is the same as today.",
+    "The earlier attempt's 'Nothing waiting for you' empty state, the within-limit filter, and the stale-page theory are not carried over. The user's retry names a different cause, and that cause is addressed here. Job 20261103-201526-t4qv findings: the unnamed root cause is fixed by this reading; the in_limit duplication finding no longer applies because no limit logic is added; the test that also passed on old code is fixed by requiring a test that fails on old code. Its two changed files, xtask/src/decisions.rs and CHANGELOG.md, are redone from the base. The attempt's other work is dropped.",
+    "The test builds a temp git repo with RecordsWriter or plain git: work item on athena/records, decision on main, and calls locate() then render(). A real-shape fixture is used, modeled on records/work-decisions/2026-10/20261030-081746-a1he.json."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in xtask/src/decisions.rs builds a temp git repo where a proposal work item is on the athena/records branch and its Approved (and a second, Rejected) WorkDecision is under records/work-decisions/ on main only, runs locate() and render(), and asserts the proposal's id is absent and no '<article' appears. Run: cargo test -p xtask decisions.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A companion test with an undecided proposal in the same layout asserts it is still listed as one card, so the fix does not hide everything. Run: cargo test -p xtask decisions.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The new decided-on-main test fails on the base code. The verifier checks this by reading read_snapshot in the base (git show of the base file), where decisions come only from the records tip, and by inspecting that the test's decision is absent from that tip. Run: cargo test -p xtask decisions on the candidate.",
+      "kind": "behavior"
+    },
+    {
+      "text": "xtask/src/decisions.rs read_snapshot() reads work decisions from main's tree as well as from the records branch, and the module doc says decisions are read from both places and why.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has one entry that names the root cause (decisions are recorded on main while the page read only athena/records) and says only what the diff does, with no claim about the workflow or other behavior.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo test, cargo clippy --all-targets and cargo fmt --check all pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "xtask/src/decisions.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "xtask/src/site.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "docs/architecture.md",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Editing records/ files or recording new decisions",
+    "athena.toml, defaults.toml, rust-toolchain.toml, .gitattributes, setup.sh and .github/ workflows",
+    "The 'Nothing waiting for you' empty state and the within-limit (steward limit) filter from job 20261103-201526-t4qv; they are dropped",
+    "The docs and design work from job 20261030-081751-edsg",
+    "Changing approve-work or reject-work behavior or the record schemas in crates/athena-data",
+    "Redesigning the card layout or the 160-word brief limit"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.68,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 420.0,
+        "p50": 1600.0,
+        "p90": 3900.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7130434782608696,
+      "p_verification_passes": 0.6692307692307692,
+      "p_user_intervenes": 0.08919540229885056,
+      "cost_usd": {
+        "p10": 0.5591729794694095,
+        "p50": 1.3355031999999998,
+        "p90": 3.7121098207173193
+      },
+      "wall_time_s": {
+        "p10": 541.9690476993549,
+        "p50": 1958.5548144798731,
+        "p90": 4195.377337984085
+      }
+    }
+  },
+  "departures": null
+}
