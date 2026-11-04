@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261103-231410-asf2",
+  "round": 1,
+  "at": "2026-11-04T03:55:07.544656154Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Reverting whole non-test files deletes inline #[cfg(test)] tests, and this repository keeps most tests inline. For a typical change in this repo the record can only say 'ran no tests', so the verifier still sees no failing run.",
+      "evidence": "Grep for `mod tests` / `#[cfg(test)]` finds inline test modules in about 93 source files (verify.rs, briefs.rs, drain.rs, checks.rs, disk.rs, gh/mod.rs and more). Only 31 files sit under crates/*/tests/. The plan's own criterion 3 test (briefs.rs) and its verify.rs unit tests are inline, so they would vanish with the revert. drain.rs, from the motivating jobs, also has inline tests. The plan admits this in Risk 1 and only labels the outcome; it does not fix it. The request's goal is that the verifier sees the failing run, and for the most common layout here it would not. Fix: Keep the candidate's test code when reverting a Rust source file. For each changed .rs file, put back the base file but carry over the candidate's `#[cfg(test)] mod ...` block(s), found by parsing, e.g. with `syn` if it is already a dependency, or by a brace-matched scan from the `#[cfg(test)]` attribute. An equivalent option: revert at hunk level and keep hunks inside test modules. Add a test in which the fixture's changed file holds both the fix and an inline test, and show that the reverted copy keeps the test. If the planner keeps whole-file revert, the record should at least say the test was removed with the reverted file (name the file), not just 'ran no tests'.",
+      "location": "Plan Decision 1 (test-path rule) and Risk 1; crates/athena-core/src/* inline test modules",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'Ran no tests' is worked out from the clipped output tail. A run that did execute the named test can be misread as running none.",
+      "evidence": "In crates/athena-core/src/checks.rs:501, `tests_ran` is computed from the full output only for `CheckKind::Test`. A `Command` run gets `None`, and the record keeps only a tail (TAIL_BYTES = 4096). A filtered `cargo test -p athena-core name` prints a summary for each test binary (lib, then external_calls_guard, refusal_corpus, then doc-tests). The tail can hold only the trailing '0 passed' summaries, so a test that passed without the fix would be reported as 'ran no tests'. Fix: Count tests on the full output. Run the demonstration as `CheckKind::Test`, which also brings --no-fail-fast and the failing test names, or capture `count_tests(&output)` before clipping. Add a unit test where the matching binary's summary falls outside the tail.",
+      "location": "Plan step 2 (`demonstration_view` uses `count_tests` on the tail) and step 3 (`CheckKind::Command`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A compile error without the fix is labeled 'not a test failure'. That may lead the verifier to reject a correct test-first change, which is the problem this job is meant to remove.",
+      "evidence": "When a new test calls a new function, the named test command exits non-zero on the reverted copy. That is a genuine 'fails without the fix'. Calling it 'not a test failure' invites the verifier to treat the criterion as unshown. Fix: Word the sentence neutrally: 'the named test command failed without the fix: the test did not compile (exit N)'. It then still counts as a failing run, and the cause stays visible.",
+      "location": "Plan Risk 1 / result sentences ('did not build without the fix (not a test failure)')",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The scratch copy repeats the verifier snapshot setup that `take_baseline` already uses. Following that pattern makes cleanup clearer.",
+      "evidence": "crates/athena-core/src/run/checks.rs:92-118 (`take_baseline`) makes a scratch snapshot, builds the env with `Side::Verify`, runs checks through `run_check`, and calls `pin::remove_tree` on the directory whatever the outcome. `remove_tree` unlocks the directory and makes it writable before removing it (pin.rs:221). Fix: Structure `demonstration_records` like `take_baseline`: an inner function that returns Result, and an outer one that always calls remove_tree and turns errors into 'not run' entries.",
+      "location": "Plan step 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the request and the accepted reading. The code it relies on exists: `verifier_snapshot`, `diff_tree`/`show_file`, `run_check`, `env::build`, `pin::remove_tree`, `count_tests`, the 'not a check' entries in verification.rs, and the fixtures `repo_with_planning`, `run_planned_behavior` and `behavior_plan`. The record never reaches `check_runs` or `judge`, so it fails nothing. Every other `CheckResultView` literal except briefs.rs:3273 uses `..Default::default()`, which the dependents list covers. The job-level demonstrations use a real revert and a real process behind an argv-mapping seam, so they would fail without the behavior. One problem needs a revise: the revert rule puts the base version back for each changed non-test file. In this repository most tests are inline `#[cfg(test)]` modules (about 93 source files have them), so the revert removes the very test the demonstration names, and the record can only say 'ran no tests'. For a typical change here, the verifier would still never see a failing run, which is the problem the request asks to fix. The planner should carry the candidate's test modules over into the reverted files, or revert at hunk level. Smaller points: count tests on the full output, not the clipped tail, and word a compile failure as a failing run."
+}

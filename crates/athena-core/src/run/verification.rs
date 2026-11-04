@@ -125,6 +125,19 @@ impl Athena {
                 ..Default::default()
             });
         }
+        // Athena runs each planned "fails without the fix" demonstration itself, on a scratch copy of the
+        // candidate with the fix reverted, and records the run here: the verifier gets no producer report and
+        // cannot change files, so it could never see that run. Each record is not a check and fails
+        // nothing; the recorded check results above decide. It runs before the disk gate below, so the gate
+        // measures the space left after the extra build, and it never fails the job.
+        let job_dir = self.state.job_dir(&id);
+        inputs.checks.extend(self.demonstration_records(
+            ctx,
+            &job_dir,
+            closing.plans.last(),
+            (p.as_str(), c.as_str()),
+            &capability_env,
+        ));
         // The verifier sees the accepted plan's demonstrations and planned files, never its approach or
         // reasons (review F5). Without a plan the brief is as it always was.
         let verifier_plan = closing.plans.last().map(VerifierPlan::from_plan);
