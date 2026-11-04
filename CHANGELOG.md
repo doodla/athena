@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- The firstmate study no longer calls Reopened a terminal state. Root cause: model.json marked `reopened` as
+  terminal-success and the intro repeated that Done and Reopened both end the task, but teardown sends the
+  backlog row back to Queued. Reopened is now a waiting state with a move back to Queued, and the intro and
+  glossary say only Done ends the task.
+
 ### Added
 
 - The verifier now sees Athena's recorded "fails without the fix" run. Root cause: the verifier gets no

@@ -860,7 +860,7 @@ mod tests {
     fn the_real_study_gives_every_transition_a_summary_and_both_deciders() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let html = render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap();
-        assert_eq!(html.matches("<p class=\"summary\">").count(), 11);
+        assert_eq!(html.matches("<p class=\"summary\">").count(), 12);
         assert_eq!(html.matches("<p class=\"leadin\">").count(), 5);
         assert!(html.contains("<dt>agent</dt>") && html.contains("<dt>code</dt>"));
     }
@@ -957,15 +957,17 @@ mod tests {
     }
 
     #[test]
-    fn reopened_no_longer_carries_the_bare_terminal_success_tag_and_it_is_explained() {
+    fn reopened_is_a_waiting_state_that_returns_to_queued_and_only_done_ends_the_task() {
         let html = render(&real_study()).unwrap();
         assert!(!html.contains("terminal-success"));
         assert!(!html.contains("model-limit"));
         let at = html.find("<strong>reopened</strong>").unwrap();
         assert!(
             html[at..]
-                .starts_with("<strong>reopened</strong> <span class=\"tag\">ends the task</span>")
+                .starts_with("<strong>reopened</strong> <span class=\"tag\">waiting</span>")
         );
+        assert!(html.contains("Only Done carries the tag"));
+        assert!(!html.contains("Done and Reopened both carry"));
         assert!(html.contains("Reopened is not a failure"));
     }
 
@@ -1132,7 +1134,7 @@ mod tests {
         let html = render(&load(&root.join(STUDY_DIR)).unwrap()).unwrap();
         assert!(html.contains("<h3>When things go wrong, and what is not limited</h3>"));
         assert!(!html.contains("guard_evaluated_by"));
-        assert_eq!(html.matches("<dd>No guard applies</dd>").count(), 3);
+        assert_eq!(html.matches("<dd>No guard applies</dd>").count(), 4);
         assert!(!html.contains("none (checked by"));
     }
 
