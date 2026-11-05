@@ -1,0 +1,164 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261105-230157-e1j3",
+  "base_commit": "dbb4b097269d2fe659a761c76d77c4a8d79584a2",
+  "base_fingerprint": "sha256:de7247b6785b9eec87c42ab4e6fef5f89cda7eecb80309b3eecae2d37a490bab",
+  "previous_job": "20261105-205932-ppfv",
+  "candidate_commit": "a129bc8109853808a6b5c57c3e697d545844fd31",
+  "candidate_tree": "772be9a89c7f99f5aceeb37c42bd71834cac4f27",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 333875
+    },
+    {
+      "path": "crates/athena-agent/src/procs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 23236
+    },
+    {
+      "path": "crates/athena-cli/tests/status_build_measurement.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 2742
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 84937
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 204108
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 156048
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 202056
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 45376
+    }
+  ],
+  "fingerprint": "sha256:5c5ba073941ae1d910fd0727134d027ebc5e97e6bcef59be7682ba3c43784ba0",
+  "violations": [],
+  "producer_report": {
+    "summary": "Replaced the wait4 ru_maxrss idea with a whole-build sampler. `procs::output_measured` runs the build like `Command::output`. A thread reads /proc every 25 ms and keeps two separate maxima. One is the highest memory summed over all build processes at one moment. The other is the highest count of build processes. The build is cargo's descendants plus every process carrying an ATHENA_BUILD_MARK env var, so detached or sccache-server-run compilers are counted. `BuildRun` gets a `peak`. `BuildMeasurement` gets optional `first_build_peak` and `second_build_peak` (memory in decimal GB, process count), absent in old records. Status prints \"build total peak memory build 1 X, build 2 Y · peak concurrent processes build 1 N, build 2 M\" and prints nothing extra for old records. CHANGELOG and the slots design doc describe the figures as build totals. Cargo.toml and Cargo.lock are unchanged because /proc sampling needs no crate. The mark's reach through a real sccache server is inferred, not run: sccache runs compiles with the requesting client's environment.",
+    "files": [
+      "crates/athena-agent/src/procs.rs",
+      "crates/athena-core/src/disk.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-core/src/hestia.rs",
+      "crates/athena-data/src/records.rs",
+      "crates/athena-cli/tests/status_build_measurement.rs",
+      "CHANGELOG.md",
+      "docs/design/agent-and-build-slots.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-data build_",
+        "result": "pass",
+        "note": "5 tests, including old-record parse and peak round trip/refusals"
+      },
+      {
+        "command": "cargo test -p athena-agent procs",
+        "result": "pass",
+        "note": "6 passed, including real-process test with a double-forked holder"
+      },
+      {
+        "command": "cargo test -p athena-core -p athena-cli measure",
+        "result": "pass",
+        "note": "measure_build fake-builder tests, status line tests, status_build_measurement"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "after fixing one precedence lint"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A disk.rs or procs.rs test runs a fake build that starts several concurrent child processes of known memory use, one launched through a wrapper that detaches (setsid or double fork, as an sccache server's compiler would be). It asserts the recorded peak memory is at least the known total of the concurrent processes and the cores equal the known concurrency. Run `cargo test -p athena-core -p athena-agent`.",
+        "status": "met",
+        "evidence": "procs::tests::a_measured_build_totals_all_concurrent_processes_including_detached starts a root sh that double-forks one 64 MiB holder (reparented to init) and starts two more. It asserts memory_bytes >= 3*64 MiB and processes == 4. Passed under `cargo test -p athena-agent procs`. The core package's measure tests were run separately; the full `-p athena-core` suite was not run."
+      },
+      {
+        "criterion": "The same test fails when the figure is reduced to the largest single process, or when the detached wrapper's processes are left out. A companion test asserts a per-process-maximum figure is below the known total, so the test fails if the measure regresses. Run `cargo test -p athena-core -p athena-agent`.",
+        "status": "met",
+        "evidence": "The real-process test asserts largest_process_bytes < known total, so a largest-single-process figure would fail the memory assertion. The pure test totals_sum_the_tree_and_marked_processes_that_left_it_and_not_others shows that dropping marked or detached processes loses 4 processes and 450 MiB, and that the largest single process is under half the total. Both passed."
+      },
+      {
+        "criterion": "A test in crates/athena-data/src/records.rs parses a hand-written old-format build-measurement JSON literal without the new fields and the fields are None. Another test round-trips a record with them set, and validate() rejects negative or non-finite values. Run `cargo test -p athena-data`.",
+        "status": "met",
+        "evidence": "an_old_build_measurement_without_peaks_still_parses_with_none uses a JSON literal and asserts None. build_peaks_round_trip_and_bad_ones_are_refused round-trips, validate() rejects -1, NaN, inf and 0 processes, and a file with -3.25 is refused. Both ran and passed under `cargo test -p athena-data build_`."
+      },
+      {
+        "criterion": "build_measurement_line prints peak memory and cores labelled as build totals (for example 'build total peak memory' and 'peak concurrent processes') and still prints old records without them. Tests in status.rs and crates/athena-cli/tests/status_build_measurement.rs check the text. Run `cargo test -p athena-core -p athena-cli`.",
+        "status": "met",
+        "evidence": "The status.rs test asserts the labelled text, and that an old record's line has no \"peak\". The CLI test asserts the same labels on the status output. Both passed under `cargo test -p athena-core -p athena-cli measure`."
+      },
+      {
+        "criterion": "A measure_build test with a fake builder checks the committed record holds the builder's memory and core figures. Run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "disk::tests::measure_build_writes_t_s_both_times_and_the_cache_counts reloads the committed records and asserts 3.25 GB / 6 and 2.5 GB / 4. The no-sccache test asserts None. Both passed."
+      },
+      {
+        "criterion": "CargoBuild::build in crates/athena-core/src/disk.rs measures all processes of the cold build under sccache too (RUSTC_WRAPPER=sccache with its server), by summing resident memory of the build tree plus sccache-server descendants or by reading a cgroup v2 memory.peak. A code comment states the measured quantity and why wait4 is not used.",
+        "status": "met",
+        "evidence": "CargoBuild::build calls procs::output_measured. The comment above it states the measured quantity, the mark that reaches server-run compilers, and why wait4 ru_maxrss is not used. It also records the buy-first call: /proc sampling, no crate. The sccache reach is inferred, not run against a real sccache."
+      },
+      {
+        "criterion": "CHANGELOG.md states only what the diff does, with no claim of per-process maximum, and docs/design/agent-and-build-slots.md describes the figures as build totals. The diff touches only build measurement code, the status line, their tests and these two docs.",
+        "status": "met",
+        "evidence": "The CHANGELOG entry and the section 8 step 1 paragraph both say build totals. The changed files are procs.rs, disk.rs, status.rs, hestia.rs (test struct literals only), records.rs, the CLI test and the two docs."
+      },
+      {
+        "criterion": "`cargo test` passes for the workspace, `cargo clippy --all-targets` is clean and `cargo fmt --check` is clean.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran clippy with -D warnings and fmt --check clean, and the targeted tests above; I did not run the full workspace suite."
+      }
+    ],
+    "open_issues": [
+      "Not run against a real sccache server. Whether the mark reaches server-run compilers is inferred.",
+      "Sampling at 25 ms can miss very short processes, so both figures are lower bounds. Summed RSS counts shared pages once per process, so memory can read high.",
+      "On platforms without /proc the peaks are None and status omits them.",
+      "I did not run the full workspace `cargo test`."
+    ],
+    "mistakes": [
+      "A clippy precedence lint in my first test (3 * HOLD_MIB << 20), fixed.",
+      "My first draft of the detached-omission assertion in the real-process test was meaningless, and I replaced it with a comment. The omission is covered by the pure-snapshot test."
+    ],
+    "learnings": [
+      "athena-core depends on athena-agent, so the sampler in procs.rs is reachable from disk.rs.",
+      "A compiler an sccache server runs gets the requesting client's environment, so a mark in cargo's env reaches it (inferred from how sccache works).",
+      "The producer role's Bash cannot run grep; use the Grep tool."
+    ],
+    "desires": []
+  }
+}

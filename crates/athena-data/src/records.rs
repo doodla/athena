@@ -2267,6 +2267,18 @@ pub enum SccacheFigures {
     },
 }
 
+/// The whole-build peaks of one cold build: totals over every process of the build, not the figures of one
+/// process.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildPeak {
+    /// The highest resident memory, summed over all processes of the build at one moment, in decimal
+    /// gigabytes.
+    pub memory_gb: f64,
+    /// The highest number of build processes alive at one moment.
+    pub processes: u32,
+}
+
 /// `athena.build-measurement/1`: the size and time of a cold workspace build, measured by
 /// `athena measure-build` in two separate worktrees with different target directories. Measurements are
 /// never edited; the latest is the newest.
@@ -2288,6 +2300,13 @@ pub struct BuildMeasurement {
     /// Wall time of the second cold build, in seconds.
     pub second_build_seconds: f64,
     pub sccache: SccacheFigures,
+    /// Peak memory and process count of the first cold build; absent in records made before they were
+    /// measured, or where the platform gave no process list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_build_peak: Option<BuildPeak>,
+    /// The same for the second cold build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_build_peak: Option<BuildPeak>,
 }
 
 impl BuildMeasurement {
@@ -2306,6 +2325,17 @@ impl BuildMeasurement {
         }
         if self.commit.trim().is_empty() || self.cargo_lock_hash.trim().is_empty() {
             return Err("a build measurement names its commit and its Cargo.lock hash".into());
+        }
+        for peak in [self.first_build_peak, self.second_build_peak]
+            .into_iter()
+            .flatten()
+        {
+            if !good(peak.memory_gb) {
+                return Err("a build's peak memory is a finite, non-negative size".into());
+            }
+            if peak.processes == 0 {
+                return Err("a build's peak process count is at least one".into());
+            }
         }
         Ok(())
     }
@@ -4195,7 +4225,79 @@ mod tests {
             first_build_seconds: 61.5,
             second_build_seconds: 12.25,
             sccache,
+            first_build_peak: None,
+            second_build_peak: None,
         }
+    }
+
+    #[test]
+    fn an_old_build_measurement_without_peaks_still_parses_with_none() {
+        let old = r#"{
+            "schema": "athena.build-measurement/1",
+            "id": "20261029-090000-5abc",
+            "at": "2026-10-29T09:00:00Z",
+            "commit": "0123456789abcdef0123456789abcdef01234567",
+            "cargo_lock_hash": "89abcdef0123456789abcdef0123456789abcdef",
+            "target_bytes": 4096,
+            "source_bytes": 1024,
+            "first_build_seconds": 61.5,
+            "second_build_seconds": 12.25,
+            "sccache": "not_installed"
+        }"#;
+        let parsed = check_record_file(
+            "records/build-measurements/2026-10/20261029-090000-5abc.json",
+            old.as_bytes(),
+        )
+        .unwrap()
+        .unwrap();
+        let AnyRecord::BuildMeasurement(m) = parsed else {
+            panic!("a build measurement parses as one");
+        };
+        assert_eq!(m.first_build_peak, None);
+        assert_eq!(m.second_build_peak, None);
+        assert_eq!(m.sccache, SccacheFigures::NotInstalled);
+        // Records without peaks are written without the keys, so old files stay byte-for-byte as they were.
+        assert!(!AnyRecord::BuildMeasurement(m).to_json().contains("peak"));
+    }
+
+    #[test]
+    fn build_peaks_round_trip_and_bad_ones_are_refused() {
+        let mut m = build_measurement_with("20261029-090000-5abc", SccacheFigures::NotInstalled);
+        m.first_build_peak = Some(BuildPeak {
+            memory_gb: 3.25,
+            processes: 6,
+        });
+        m.second_build_peak = Some(BuildPeak {
+            memory_gb: 2.5,
+            processes: 4,
+        });
+        assert!(m.validate().is_ok());
+        let record = AnyRecord::BuildMeasurement(Box::new(m.clone()));
+        let parsed = check_record_file(&record.canonical_path(), record.to_json().as_bytes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed, record);
+
+        for bad_memory in [-1.0, f64::NAN, f64::INFINITY] {
+            let mut bad = m.clone();
+            bad.second_build_peak = Some(BuildPeak {
+                memory_gb: bad_memory,
+                processes: 4,
+            });
+            assert!(bad.validate().is_err(), "{bad_memory}");
+        }
+        let mut none = m.clone();
+        none.first_build_peak = Some(BuildPeak {
+            memory_gb: 1.0,
+            processes: 0,
+        });
+        assert!(none.validate().is_err());
+        // A negative value written into a file is refused when the file is read.
+        let negative = record
+            .to_json()
+            .replace("\"memory_gb\": 3.25", "\"memory_gb\": -3.25");
+        assert_ne!(negative, record.to_json());
+        assert!(check_record_file(&record.canonical_path(), negative.as_bytes()).is_err());
     }
 
     #[test]

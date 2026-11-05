@@ -9,6 +9,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena measure-build` now records the whole-build peak memory and the peak number of concurrent processes of
+  each cold build, and `athena status` prints them as "build total peak memory" and "peak concurrent
+  processes" for build 1 and build 2. While cargo runs, a sampler reads `/proc` every 25 ms and sums the resident
+  memory of all processes of the build at that moment: cargo's descendants plus every process carrying the
+  build's `ATHENA_BUILD_MARK` environment variable, which reaches compilers that an `sccache` server runs for the
+  build. The record keeps the highest sum and the highest count. A process that lives under 25 ms can be missed,
+  and shared pages are counted once per process, so the memory figure can read high. The fields are optional in
+  `athena.build-measurement/1`, so older records still read and print without them. Not measured here: agent
+  memory. The mark's reach through a real `sccache` server is inferred from how `sccache` passes the client's
+  environment; the tests use a process that detaches itself, not `sccache`.
+- Drain life-cycle commands, so no one finds, stops or restarts a drain by matching text in the process list.
+  Root cause: Athena kept no record of its own drain, so a person found it with `pkill -f`, `pgrep` or a wait
+  loop whose pattern also appeared in the command doing the matching; the command matched itself, killed its own
+  shell or never fired, and the queue sat idle or ran on an old build (recorded three times). Now `athena
+  drain` writes a pid file, `drain.pid` in the state directory next to `drain.stop`, when it starts and removes it
+  when it ends. The file holds the pid, a process start marker (field 22 of `/proc/<pid>/stat` on Linux, `ps -o
+  lstart=,stat= -p <pid>` elsewhere), the build and the start time. Every command finds the drain only through
+  that file: a missing file, an unreadable one, a process that has exited (a zombie counts as exited) and a pid
+  that another process now holds are each reported as "no drain is running" with the reason, and no process is
+  ever signalled. A second `athena drain` while one is running is refused. New: `athena drain-status` (exit 0
+  running, 2 not running; `--json`), `athena drain-stop --wait [--timeout SECS]` (the same stop at the next job
+  boundary, then waits until the drain has exited, with a progress line every 30 seconds and no limit unless
+  `--timeout` is given), and `athena drain-restart --budget USD [--rating-threshold N] [--job-limit N]
+  [--timeout SECS]`, which rebuilds with `./setup.sh` first (a failed build leaves the running drain alone and
+  starts nothing), asks the running drain to stop and waits for it to exit, builds again if the old drain landed
+  code meanwhile and left the installed binary behind the checkout, starts the new drain in the background in its
+  own process group (output in `drain.log` in the state directory) and prints the pid and build it started. A
+  stopped drain does not keep its remaining limits, so `drain-restart` takes them as `drain` does. Not
+  an exact detach: the new drain is not in its own session.
+- A drain now refuses to start when its build is older than the landed code, and dispatches nothing. The check
+  is the one `athena status` already shows as a stale-build line (a change under `crates/`, `xtask/`,
+  `Cargo.toml`, `Cargo.lock` or `setup.sh` since the build's commit), which other commands still only print as a
+  warning; the refusal names both commits and says to run `./setup.sh`. A drain that replaces itself after its own
+  rebuild keeps its pid and its pending stop. Estimate, not measured: about 5% of drain starts are newly refused.
+  One-time transition: a drain started by a build from before the pid file existed has no pid file, so
+  `drain-status` says no drain is running and `drain-restart` cannot see it (it says so, writes no stop file and
+  starts a new drain beside it). Before the first restart after upgrading, run `athena drain-stop` and let that
+  drain finish. Tested on Linux; the macOS `ps` path is covered only by a test of its output parser. The tracked
+  resume command for interrupted jobs is a separate change and not part of this one.
 - Warm target directories owned by build slots (`docs/design/agent-and-build-slots.md`, build job 5). Each
   build slot now owns `<state>/build-slots/<n>/target`, which outlives every job. A local check's
   `CARGO_TARGET_DIR` is linked to its slot's directory for that one command only, so third-party crates stay

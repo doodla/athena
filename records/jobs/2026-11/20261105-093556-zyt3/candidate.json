@@ -1,0 +1,155 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261105-093556-zyt3",
+  "base_commit": "e2da35340f60b0599f2cd5a1a5eba7293a21ef80",
+  "base_fingerprint": "sha256:de7247b6785b9eec87c42ab4e6fef5f89cda7eecb80309b3eecae2d37a490bab",
+  "previous_job": "20261105-205932-ppfv",
+  "candidate_commit": "bfda3de4973633714747b3274ceae2d244c63b77",
+  "candidate_tree": "a8bebe286ef2eedc1bd419f68e263a0933c59dc4",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 335702
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 193446
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 388131
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 84428
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 57461
+    },
+    {
+      "path": "docs/architecture.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 9412
+    }
+  ],
+  "fingerprint": "sha256:85ed5803b1acb6555e5dea5290292508dad9d449c46c08cab6856a78fed511d4",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: the reading gate accepted bug-fix readings whose criteria only described the wanted output. They required neither a diagnosis of where the wrong items enter and why they are not excluded, nor a test that fails on the base tree. Jobs 20261103-201526-t4qv and 20261103-231808-3gkq each moved a filter on that basis.\n\nThe fix is a new check, `check_root_cause_diagnosis`, added as one `step!` in `refusing_check` after the code-survey check. It applies to a reading with a capability, no question, class code or tests, and a behavior criterion, for a job that reads as a bug fix. Such a job has a repair word (fix, fixes, fixing, bug, bugs) or 'still shows/showed/shown/lists/listed' in the request prose outside the bullets. It can also be a retry or follow-up of a bug-fix job, or of a job rejected with a finding such as 'still shown' or 'passes on the base'.\n\nThe check then needs two criteria in the reader's own words:\n- **Root cause:** a criterion that says 'root cause', says where the wrong items enter or why they are not excluded, and names a place (a backticked name or a file path).\n- **Test:** a Behavior criterion that names a test and passes `asks_for_failing_run_without_the_fix`. That is the same predicate Athena uses to plan the job and run the revert demonstration. I made it `pub(crate)` in `run/mod.rs`, with its body untouched.\n\nI added:\n- `ROOT_CAUSE_GUIDE` and a seventh reading rule in `briefs.rs`, composed after `CODE_SURVEY_GUIDE`. No prompt file was touched.\n- 10 unit tests and 14 corpus cases, including the new `bug-fix-request` form, which now makes the corpus cover the new step.\n- A CHANGELOG Fixed entry and a paragraph in `docs/architecture.md`.\n\nWhether the test uses real approved and rejected data cannot be decided from text, so that part is prose-only in the guide. The 8% share is an estimate, because the snapshot has no records and no replay was run.",
+    "files": [
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/tests/refusal_corpus.rs",
+      "crates/athena-context/src/briefs.rs",
+      "CHANGELOG.md",
+      "docs/architecture.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --lib root_cause_diagnosis",
+        "result": "pass",
+        "note": "10 new unit tests"
+      },
+      {
+        "command": "cargo test -p athena-core --test refusal_corpus",
+        "result": "pass",
+        "note": "12 pass, including the coverage test and root_cause_diagnosis_refusal_is_declared_intended"
+      },
+      {
+        "command": "cargo test -q -p athena-core -p athena-context",
+        "result": "pass",
+        "note": "athena-core lib 980 passed (1 ignored); athena-context 110 passed"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -q --locked",
+        "result": "pass",
+        "note": "Full workspace run, once; every test result ok"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed, so no banned boundary word in the changed files"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core`: a new unit test in crates/athena-core/src/reading.rs builds the reading for a request like 'The page lists proposals that were already decided; fix it' with criteria that only describe the wanted page content, and check_root_cause_diagnosis refuses it, naming the missing root-cause criterion and the missing base-failing test criterion; the same reading with both criteria is accepted. The refusal test fails on the base tree because the function does not exist and the reading is accepted.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core` (980 passed). The tests are `root_cause_diagnosis_refuses_a_symptom_only_reading` and `root_cause_diagnosis_accepts_both_criteria` in reading.rs. The first asserts the error contains 'a root-cause criterion' and 'a Behavior criterion for a test that fails on the base tree', and that `refusing_check` names `check_root_cause_diagnosis`. The second asserts the same reading with both criteria is accepted. On the base tree the function does not exist, so these tests would not compile."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core --test refusal_corpus`: a corpus case in crates/athena-core/tests/refusal_corpus.rs shaped like the 20261103-201526-t4qv reading is refused by check_root_cause_diagnosis, and the corpus coverage test passes with the new step! line in refusing_check.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core --test refusal_corpus`: 12 passed. The case `bug-fix-reading-without-diagnosis` expects Refuse(\"check_root_cause_diagnosis\"), and `corpus_cases_get_the_expected_outcome` and `every_acceptance_check_has_a_refusing_corpus_case` pass with the new step! line. There are 14 new cases and a new form tag `bug-fix-request`. The case source says it is a reconstruction, not the verbatim request."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core`: a non-bug request (add a feature), a docs reading, a decline and a reading with a question are not refused by the new check.",
+        "status": "met",
+        "evidence": "`root_cause_diagnosis_does_not_apply` in reading.rs passed in the `cargo test -p athena-core` run. Both `check_root_cause_diagnosis` and the full gate give Ok on a feature request, a bullet that says 'fails with a clear message', 'fixed/broken/wrong' prose, class tests, class docs with 'Fix', a decline, a question, content-only criteria, and 'prefix'/'fixture'. It also covers a retry of a feature job, and the bug-fix reading is refused in the same test. Corpus Accept cases cover the same shapes."
+      },
+      {
+        "criterion": "crates/athena-core/src/reading.rs doc comment on the new check names the root cause (reading did not require a diagnosis of where wrong items enter, nor a test that fails on the base), cites jobs 20261103-201526-t4qv and 20261103-231808-3gkq, and states 'expected 8% of newly refused readings'.",
+        "status": "met",
+        "evidence": "Read the `///` block above `pub fn check_root_cause_diagnosis`. It names the root cause, cites both jobs and both introspections, and states 'expected 8% of newly refused readings', labelled an estimate. The test `root_cause_diagnosis_doc_comment_names_the_cause` asserts these strings and that `replay_declaration_of` gives Some(8). It passed."
+      },
+      {
+        "criterion": "crates/athena-context/src/briefs.rs gains a reader guide constant, composed beside CODE_SURVEY_GUIDE, telling the reader to add a root-cause criterion and a base-failing test criterion for bug-fix jobs; its brief test asserts the section contains it. The prompt files under the token budget are not edited.",
+        "status": "met",
+        "evidence": "Added `ROOT_CAUSE_GUIDE` and a seventh `READING_RULES` line naming `check_root_cause_diagnosis`. `reader_brief` prints the guide right after `CODE_SURVEY_GUIDE`. The new test `the_reader_brief_tells_the_reader_to_diagnose_a_bug_fix` asserts the section contains the guide, that it follows the code survey guide, and that it holds key phrases. It passed in the athena-context run (110 passed). `git status` shows no file under crates/athena-context/prompts changed."
+      },
+      {
+        "criterion": "CHANGELOG.md has a Fixed entry that names the root cause and the new gate.",
+        "status": "met",
+        "evidence": "Read the new first entry under `### Fixed` in `[Unreleased]`. It names the root cause, both jobs, both introspections, `check_root_cause_diagnosis`, the guide, the shared predicate, the signals, the limit, the held stored readings and the estimated share. `root_cause_diagnosis_refusal_is_declared_intended` asserts these strings and passed."
+      },
+      {
+        "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test`: all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test -q --locked` on the final tree, and all passed."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan (names a test): a `cargo` span also names a test when it has a filter argument with `_` or `::` after skipping flags and the arguments of `-p`, `--test`, `--bin`, `--features` and `-F`. So `cargo test -p athena-core decided_proposals_are_not_listed` counts. A bare `cargo test` does not. The plan counted a backticked identifier that does not start with 'cargo'.",
+      "Departure from the plan (copied bullets): `copies_a_bullet` strips the bullet marker from a criterion before comparing, so a criterion copied with its '1. ' still counts as copied. The plan compared normalised text only.",
+      "Departure from the plan (corpus file-path case): the case is named `bug-fix-reading-naming-a-file-path-in-plain-text` and uses xtask/src/site.rs, which I added to the corpus `repo_files()` so `check_reading_references` does not refuse it.",
+      "The 8% share is an estimate, as the CHANGELOG and the doc comment say; no replay was run because the snapshot has no records. The introspection fix requests, retries and 'still' requests the check also covers may push the real share past 8%. The trigger word lists are consts, so they can be narrowed.",
+      "The limit is stated in the doc comment and CHANGELOG: a first attempt worded only as an outcome ('Show only open proposals') has no repair word and is accepted. Its retry is caught through the earlier job's request and findings."
+    ],
+    "mistakes": [
+      "None found. All new tests passed on the first run."
+    ],
+    "learnings": [
+      "`refusing_check` lists one `step!` per check, and `refusal_corpus.rs` fails when a step has no corpus case where that check refuses. A new check therefore needs a corpus case in the same change.",
+      "`check_reading_text`, which the replay and stored-reading checks use, passes no attempt. The retry signal of the new check therefore applies only to the live gate. Stored readings use the request-prose signal only.",
+      "In the corpus, `base_reading` turns request bullets into Content criteria that keep the marker, such as '1. '. A criterion copied with its marker has to be compared against the bullet body, so `copies_a_bullet` strips the marker.",
+      "`check_reading_references` refuses a reading whose criteria name a repo path missing from the corpus `repo_files()`. A plain-text path case therefore needs that path added to `repo_files()`; I added `xtask/src/site.rs`.",
+      "`asks_for_failing_run_without_the_fix` accepts 'before the fix' but not 'before the change', so 'the test fails before the change' is refused by the gate. This matches what Athena's revert run does."
+    ],
+    "desires": [
+      "The real requests and readings of jobs 20261103-201526-t4qv and 20261103-231808-3gkq. The snapshot has no records, so the corpus case is a reconstruction and the 8% share is an estimate.",
+      "A way to read the saved output of a long cargo test run; Read and Grep cannot reach the tool-results file and pipes are not allowed, so I reran with -q."
+    ]
+  }
+}

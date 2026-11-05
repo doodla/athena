@@ -1,0 +1,182 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261105-230157-e1j3",
+  "n": 1,
+  "at": "2026-11-05T23:02:28.342678765Z",
+  "invocation_seq": 1,
+  "base_commit": "8864f6bbd1db7b5e8e5bfe679c7059a37a8be058",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Measure whole-build peak memory and cores in measure-build",
+  "summary": "Retry of job 20261105-180320-62j6: keep its optional record fields, status line, docs and tests, but replace the per-process wait4 ru_maxrss measure. Peak memory becomes the highest summed memory of all build processes at one moment, and cores the highest concurrent build process count. Both include sccache-server-spawned compilers, and status labels them as build totals.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run a fake build with known concurrency and check the recorded figures."
+    },
+    {
+      "id": "tested",
+      "how": "Workspace test, clippy and fmt criterion."
+    },
+    {
+      "id": "root-cause",
+      "how": "Replaces the wrong quantity rather than relabelling it."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Test fails if the measure shrinks to a single process or omits the wrapper."
+    },
+    {
+      "id": "small",
+      "how": "Change limited to measurement code, status line, tests and docs."
+    },
+    {
+      "id": "buy-first",
+      "how": "Adopt a maintained process-inspection crate if it fits, else /proc sampling or cgroup, recorded in a code comment."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the maintainer sizing agent and build slots (docs/design/agent-and-build-slots.md section 7.2) needs the whole-build peak, and judges it from `athena status`.",
+    "Measured quantity: scope = every process of the cold build including compilers run by an sccache server or a detached wrapper; aggregation = maximum over time of the SUM of resident memory of concurrent processes, not a per-process maximum; cores = maximum number of build processes running at the same moment. Consumer = section 7.2 slot sizing.",
+    "Code survey: read crates/athena-core/src/disk.rs (BuildRun line 789, CargoBuilder trait line 803, CargoBuild::build line 818 running `sccache --zero-stats` and RUSTC_WRAPPER=sccache, measure_build line 981, fake builder in tests near line 1537), crates/athena-core/src/status.rs (build_measurement_line line 1132), crates/athena-data/src/records.rs (BuildMeasurement line 2275, validate), crates/athena-core/src/hestia.rs (fake BuildRun at lines 3769 and 3901). Entry is `athena measure-build` -> Athena::measure_build -> CargoBuilder::build, twice (first and second cold build). Records validation is the existing BuildMeasurement validate and the existing AnyRecord round-trip test; no new record file is added, so check_record_file needs no change. The property is measured directly by sampling the build's processes (summing memory from /proc or reading a cgroup v2 memory.peak), not through wait4 ru_maxrss of the cargo child.",
+    "Previous job 20261105-180320-62j6 findings: (1) sccache compilers escape wait4 -> fixed by measuring all processes of the build including sccache-server children, tested with a detaching wrapper; (2) largest-single-process figure -> fixed by summing concurrent processes and labelling status as build totals; (3) procs.rs was an unplanned file -> its wait4/ChildUsage wrapper is dropped or replaced, so procs.rs is a deliverable that may be edited back; (4) old-record test built JSON from the serializer -> the test uses a hand-written old-format JSON literal; (5) agent memory not measured -> stays out of scope, the design doc note says a later step measures it. Cargo.toml and Cargo.lock change only if a process-inspection crate is adopted (buy-first), else stay unchanged.",
+    "The sampler needs a pure, testable core (a function from process snapshots to total memory and count) so the fake-build test can use real child processes with known memory and concurrency without needing sccache installed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A disk.rs or procs.rs test runs a fake build that starts several concurrent child processes of known memory use, one launched through a wrapper that detaches (setsid or double fork, as an sccache server's compiler would be). It asserts the recorded peak memory is at least the known total of the concurrent processes and the cores equal the known concurrency. Run `cargo test -p athena-core -p athena-agent`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The same test fails when the figure is reduced to the largest single process, or when the detached wrapper's processes are left out. A companion test asserts a per-process-maximum figure is below the known total, so the test fails if the measure regresses. Run `cargo test -p athena-core -p athena-agent`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test in crates/athena-data/src/records.rs parses a hand-written old-format build-measurement JSON literal without the new fields and the fields are None. Another test round-trips a record with them set, and validate() rejects negative or non-finite values. Run `cargo test -p athena-data`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "build_measurement_line prints peak memory and cores labelled as build totals (for example 'build total peak memory' and 'peak concurrent processes') and still prints old records without them. Tests in status.rs and crates/athena-cli/tests/status_build_measurement.rs check the text. Run `cargo test -p athena-core -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A measure_build test with a fake builder checks the committed record holds the builder's memory and core figures. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CargoBuild::build in crates/athena-core/src/disk.rs measures all processes of the cold build under sccache too (RUSTC_WRAPPER=sccache with its server), by summing resident memory of the build tree plus sccache-server descendants or by reading a cgroup v2 memory.peak. A code comment states the measured quantity and why wait4 is not used.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md states only what the diff does, with no claim of per-process maximum, and docs/design/agent-and-build-slots.md describes the figures as build totals. The diff touches only build measurement code, the status line, their tests and these two docs.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo test` passes for the workspace, `cargo clippy --all-targets` is clean and `cargo fmt --check` is clean.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-agent/src/procs.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/tests/status_build_measurement.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Measuring agent memory (a later step)",
+    "Build steps 2 to 8 of the slots design (landing stage, slot queue, shared target dirs)",
+    "Changes to athena.toml, defaults.toml or workflows",
+    "Editing existing records under records/",
+    "Running sccache as a separate one-off measurement"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.9,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2400.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.672289156626506,
+      "p_user_intervenes": 0.08416485900216919,
+      "cost_usd": {
+        "p10": 0.5589752168523268,
+        "p50": 1.3542264000000002,
+        "p90": 4.041956025405321
+      },
+      "wall_time_s": {
+        "p10": 551.0606552888167,
+        "p50": 1990.6219011185412,
+        "p90": 4200.534630923807
+      }
+    }
+  },
+  "departures": "Higher than the reference: concurrent-process fixtures and sccache-aware sampling add judgment and verifier effort."
+}
