@@ -11,7 +11,9 @@
 //! - `ATHENA_STATE_DIR` inside the job's own directory, so an Athena that an agent or a check runs keeps
 //!   its state (kill switch, locks, scratch repositories) there and never in the user's (D56);
 //! - the capability's environment, with `{job_dir}`, `{side}` and `{athena_home}` filled in. A build directory outside the
-//!   job's own directory is refused, so one job's checks never run another job's build (D46).
+//!   job's own directory is refused, so one job's checks never run another job's build (D46). A check's build
+//!   directory may be a link to its build slot's warm directory for one command ([`BuildLink`]); the path is
+//!   still inside the job's directory.
 
 use crate::NESTED_ENV;
 use athena_data::config::Agents;
@@ -132,6 +134,54 @@ pub fn check_build_dirs(env: &BTreeMap<String, String>, job_dir: &Path) -> Resul
         }
     }
     Ok(())
+}
+
+/// A job's build directory, linked to a build slot's warm directory for the length of one command.
+///
+/// The link is at the path the environment names (`CARGO_TARGET_DIR`, `{job_dir}/target/<side>`), so the
+/// command builds in the slot's directory while the path still lies inside the job's own directory and passes
+/// [`check_build_dirs`], which reads paths lexically and follows no link (D46 is not relaxed). Dropping the
+/// value removes the link only; the slot's directory and what it holds stay.
+#[derive(Debug)]
+pub struct BuildLink {
+    link: PathBuf,
+}
+
+impl BuildLink {
+    /// Links `link` to `slot_target`. `link` must lie inside `job_dir` ([`check_build_dirs`]'s rule). Whatever
+    /// is at `link` now (a leftover directory or link of an earlier command) is removed first.
+    pub fn create(job_dir: &Path, link: &Path, slot_target: &Path) -> Result<BuildLink, String> {
+        let env = BTreeMap::from([(BUILD_DIR_VARS[0].to_string(), link.display().to_string())]);
+        check_build_dirs(&env, job_dir)?;
+        let fail = |what: &str, e: std::io::Error| format!("{what} {}: {e}", link.display());
+        if let Ok(meta) = std::fs::symlink_metadata(link) {
+            let removed = if meta.is_dir() {
+                std::fs::remove_dir_all(link)
+            } else {
+                std::fs::remove_file(link)
+            };
+            removed.map_err(|e| fail("removing", e))?;
+        }
+        if let Some(parent) = link.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| fail("creating the directory of", e))?;
+        }
+        std::os::unix::fs::symlink(slot_target, link).map_err(|e| fail("linking", e))?;
+        Ok(BuildLink {
+            link: link.to_path_buf(),
+        })
+    }
+
+    /// The path of the link.
+    pub fn path(&self) -> &Path {
+        &self.link
+    }
+}
+
+impl Drop for BuildLink {
+    fn drop(&mut self) {
+        // A link only: `remove_file` on a symbolic link never touches what it points to.
+        let _ = std::fs::remove_file(&self.link);
+    }
 }
 
 /// Resolves `.` and `..` lexically.
@@ -317,6 +367,47 @@ mod tests {
             env_for(a, Side::Produce)["CARGO_TARGET_DIR"],
             env_for(a, Side::Verify)["CARGO_TARGET_DIR"]
         );
+    }
+
+    #[test]
+    fn a_build_link_points_a_job_path_at_the_slot_and_leaves_the_slot_when_dropped() {
+        let temp = tempfile::tempdir().unwrap();
+        let job_dir = temp.path().join("jobs/j");
+        let slot = temp.path().join("build-slots/0/target");
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(slot.join("kept"), b"third party").unwrap();
+        let path = job_dir.join("target/verify");
+        // A leftover real directory at the path is replaced by the link.
+        std::fs::create_dir_all(path.join("old")).unwrap();
+        {
+            let link = BuildLink::create(&job_dir, &path, &slot).unwrap();
+            assert_eq!(link.path(), path);
+            assert_eq!(std::fs::read_link(&path).unwrap(), slot);
+            // What a command writes through the job's path lands in the slot.
+            std::fs::write(path.join("written"), b"x").unwrap();
+            assert!(slot.join("written").is_file());
+            // The lexical check still passes: the path is inside the job's directory.
+            let env =
+                BTreeMap::from([("CARGO_TARGET_DIR".to_string(), path.display().to_string())]);
+            check_build_dirs(&env, &job_dir).unwrap();
+        }
+        assert!(
+            std::fs::symlink_metadata(&path).is_err(),
+            "the link is gone"
+        );
+        assert!(slot.join("kept").is_file() && slot.join("written").is_file());
+    }
+
+    #[test]
+    fn a_build_link_outside_the_job_directory_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let job_dir = temp.path().join("jobs/j");
+        let slot = temp.path().join("build-slots/0/target");
+        std::fs::create_dir_all(&slot).unwrap();
+        let outside = temp.path().join("jobs/other/target/verify");
+        let error = BuildLink::create(&job_dir, &outside, &slot).unwrap_err();
+        assert!(error.contains("not inside this job's directory"), "{error}");
+        assert!(std::fs::symlink_metadata(&outside).is_err());
     }
 
     #[test]

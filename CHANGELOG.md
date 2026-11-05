@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Warm target directories owned by build slots (`docs/design/agent-and-build-slots.md`, build job 5). Each
+  build slot now owns `<state>/build-slots/<n>/target`, which outlives every job. A local check's
+  `CARGO_TARGET_DIR` is linked to its slot's directory for that one command only, so third-party crates stay
+  compiled for the next job that wins the slot. After the command, `cargo clean -p` for each workspace member
+  removes the workspace crates' output and keeps the rest; if cleaning fails, the slot directory is deleted.
+  A slot directory over the new `[drain.pipeline] slot_max_gb` (default 8, at least 1) is deleted and rebuilt cold
+  before its next use. Not yet measured: the second build's wall time in a slot; `athena.toml` is unchanged,
+  so the smaller-output settings are still a separate step.
 - Build slots for local checks (`docs/design/agent-and-build-slots.md`, build job 3). `[drain.pipeline]
   max_check_slots` is now enforced: each local check takes one of that many slots from a counting queue of lock
   files under the state directory (`crates/athena-core/src/slots.rs`), in strict class order with first in first

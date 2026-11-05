@@ -416,6 +416,42 @@ Each change is one focused job with its own tests, lands on its own, and reads i
    `athena status`; target 5 to 6 GB per slot against the measured cold figure from job 1), and the wall time of the
    second build in the same slot (the record's two build times).
    Depends on: 1 (the cold figure to compare with) and 3.
+   **Built** (local checks only; `athena.toml` not touched). What was chosen where the note left room:
+   - `<state>/build-slots/<n>/target` exists for each of the `max_check_slots` slots from the first local check of a
+     run (`StateDir::ensure_slot_targets`). Nothing removes it when a job ends, and closing a job's directory
+     does not reach it. A slot's number is the `<n>` of its `slots/slot-<n>.lock`, so one lock holder owns one
+     directory and two commands never share one.
+   - After the slot is won, the job's `CARGO_TARGET_DIR` path (`{job_dir}/target/verify`) becomes a symbolic link to
+     the slot's directory for that one command (`athena_agent::env::BuildLink`), and is removed when the command
+     ends, on every path. The lexical check in `env.rs` (`check_build_dirs`, which resolves `.` and `..` and
+     follows no link) is unchanged and passes, since the link lies inside the job's directory; `BuildLink::create`
+     runs the same check on the link path before it links. If the slot's directory cannot be readied or linked, a
+     warning line is written and the check builds in the job's own directory, cold, as before.
+   - After the command, and before the verifier's snapshot is restored, `cargo clean --offline --target-dir <slot>
+     -p <member>` runs for every workspace member found by `cargo metadata --no-deps`
+     (`slots::clean_workspace_output`), which removes workspace-crate output and keeps third-party output. If the
+     clean fails, the whole slot directory is deleted and made again, so a later job never builds on output it
+     cannot trust. A snapshot with no `Cargo.toml` has nothing to clean.
+   - Finding while building it: `cargo clean` refuses a target directory without a `CACHEDIR.TAG` file, and cargo
+     writes that file only into a directory it creates itself. A slot directory made empty by Athena therefore
+     gets the tag when it is made (`state.rs`); a first version without it deleted the slot after every command.
+   - `slot_max_gb` (`[drain.pipeline]`, default 8, at least 1; 10^9 bytes) is read before each command: a slot
+     directory whose allocated size (each hard-linked file once) is over it is deleted whole and made again
+     empty, and a line `disk       build slot <n> target directory held ...: deleted` says so. The check is
+     before use, not after, so a directory over the limit stays on disk until the slot is next won. The default
+     8 GB sits above the estimate of 5 to 6 GB in section 5.3; it is a guess, not a measurement.
+   - The in-flight bound in `disk.rs` (`in_flight_limit`) already counts `max_check_slots x T`, so it uses
+     slots, not jobs, and needed no change. `Figures` still takes T from the latest cold-build measurement; T is
+     not yet measured per slot.
+   What was measured, and what was not. Tests show the behavior: two jobs one after the other get the same
+   `build-slots/0/target` and the second sees the first's third-party output; after a command a real
+   `cargo build` of a one-crate workspace leaves no `alpha` output in the slot while a planted third-party file
+   stays; a directory over the limit is deleted and a smaller one is kept (in a test the gigabyte is shrunk, so
+   no test writes one). **Not measured:** the wall time of the second build in the same slot, and the size of a
+   slot after real jobs. `athena measure-build` still builds cold in its own worktree and records one build
+   time, and no record carries the time of a build in a warm slot, so the "second build" effect named above
+   cannot yet be read from `records/`. The check's own `duration` in `verification.json` is the only time kept.
+   Recording a warm-slot build time and the slot's `target_bytes` after a job is left to a later job.
 6. **Raise the agent bound and record group size.**
    Touches: `crates/athena-data/src/config.rs` (`MAX_CONCURRENCY_CEILING` from 8 to 16); `crates/athena-core/src/plan.rs`
    (record how many items each plan group held); `athena.toml` `[parallel] max_concurrency` and
