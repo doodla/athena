@@ -63,6 +63,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The checks stage no longer compiles the same failing tree again for each planned "fails without the fix"
+  demonstration. A demonstration whose tests did not compile is reused for the later demonstrations with the
+  same build scope (`verify::build_scope`), recorded with a duration of 0 s. This removes the cause of the
+  checks median rising from 0.2 to 0.6 minutes per landed job; the evidence is in
+  `docs/design/checks-stage-slowdown.md`.
 - The baseline now waits for the default branch's run when it is still in progress. Right after a landing,
   main's run for the base's content is usually still going, and the baseline made one read, found it
   unfinished, and fell back to a 20-minute local run (`main: no usable CI result ... on main`; 3 of the last

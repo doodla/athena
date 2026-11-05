@@ -429,6 +429,8 @@ impl Athena {
         .map_err(anyhow::Error::msg)?;
         let registry = self.state.registry();
         let timeout = std::time::Duration::from_secs(jc.config.budget.check_timeout_s);
+        // Build scope, run name and result of each demonstration that failed to compile.
+        let mut failed_builds: Vec<(Vec<String>, String, CheckRun)> = Vec::new();
         let mut ran = to_run.into_iter();
         for slot in records.iter_mut().filter(|s| s.is_none()) {
             let Some(g) = ran.next() else { break };
@@ -438,17 +440,39 @@ impl Athena {
                 kind: athena_data::config::CheckKind::Test,
                 skip_when_only: None,
             };
-            let run = run_check(
-                &spec,
-                &CheckContext {
-                    dir: snapshot.dir(),
-                    env: &env,
-                    timeout,
-                    registry: &registry,
-                    job: ctx.id().as_str(),
-                    redactor: ctx.redactor,
+            // The scratch tree is the same for every command, so a build that failed there fails again for
+            // any command with the same build scope: take that result instead of compiling again.
+            let scope = crate::verify::build_scope(g.argv.as_deref().unwrap_or_default());
+            let run = match failed_builds.iter().find(|(s, _, _)| *s == scope) {
+                Some((_, first, earlier)) => CheckRun {
+                    duration: athena_data::Quantity::measured(
+                        0.0,
+                        athena_data::Unit::Seconds,
+                        "not built again",
+                    ),
+                    note: Some(format!(
+                        "the same build failed in {first}; the tests were not compiled again"
+                    )),
+                    ..earlier.clone()
                 },
-            )?;
+                None => {
+                    let run = run_check(
+                        &spec,
+                        &CheckContext {
+                            dir: snapshot.dir(),
+                            env: &env,
+                            timeout,
+                            registry: &registry,
+                            job: ctx.id().as_str(),
+                            redactor: ctx.redactor,
+                        },
+                    )?;
+                    if crate::verify::failed_to_build(&run) {
+                        failed_builds.push((scope, spec.name.clone(), run.clone()));
+                    }
+                    run
+                }
+            };
             let mut record = demonstration_view(g, &run, &revert);
             // The record names the command as the plan wrote it, not the one a test seam mapped it to.
             if let Some(shown) = record.demonstration.as_mut() {
