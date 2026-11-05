@@ -360,6 +360,9 @@ Each change is one focused job with its own tests, lands on its own, and reads i
    `build` line of `athena status`. Replaces every **estimate** in section 7 (T, peak memory) with a measured number
    and answers whether `sccache` gives a nonzero hit count (`SccacheFigures` in that record).
    Depends on: nothing.
+   Built: `BuildMeasurement` has the optional fields `first_peak_resident_bytes`, `first_cores_used`,
+   `second_peak_resident_bytes` and `second_cores_used`, taken from `wait4` on the cargo process; the `build` line of
+   `athena status` prints them. Agent memory is not part of this record.
 2. **End the landing stage at the first landing record.**
    Touches: `crates/athena-core/src/status.rs` (`landing_record_time`: `.min()` instead of `.max()`; tests with two
    records that list the same job commit). First, confirm in the pull request's merge time that the first record is

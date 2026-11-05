@@ -791,6 +791,10 @@ pub struct BuildRun {
     pub seconds: f64,
     /// The compile-cache counts of this build alone; `None` when no cache was in use.
     pub sccache: Option<SccacheCounts>,
+    /// Peak resident memory of the largest process in the cargo tree, in bytes.
+    pub peak_resident_bytes: Option<u64>,
+    /// Cores used: CPU time of the cargo tree divided by the wall time.
+    pub cores_used: Option<f64>,
 }
 
 /// The part of a measurement that runs cargo and `sccache`. [`Athena::measure_build`] does everything else
@@ -841,11 +845,25 @@ impl CargoBuilder for CargoBuild {
                 .env_remove("RUSTC_WRAPPER")
                 .env_remove("CARGO_BUILD_RUSTC_WRAPPER");
         }
+        // Spawned and reaped with wait4 so the kernel reports the peak resident set and CPU time of the
+        // whole cargo tree; stderr is drained first so a full pipe cannot stall the build.
+        cargo
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
         let started = std::time::Instant::now();
-        let out = cargo.output().context("running `cargo build`")?;
+        #[allow(clippy::zombie_processes)] // reaped by wait4 inside wait_with_usage
+        let mut child = cargo.spawn().context("running `cargo build`")?;
+        let mut stderr_bytes = Vec::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            std::io::Read::read_to_end(&mut pipe, &mut stderr_bytes)
+                .context("reading `cargo build` output")?;
+        }
+        let (status, usage) = athena_agent::procs::wait_with_usage(child.id())
+            .context("waiting for `cargo build`")?;
         let seconds = started.elapsed().as_secs_f64();
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
             let tail: Vec<&str> = stderr.lines().rev().take(20).collect();
             anyhow::bail!(
                 "`cargo build` failed in {}:\n{}",
@@ -867,7 +885,12 @@ impl CargoBuilder for CargoBuild {
         } else {
             None
         };
-        Ok(BuildRun { seconds, sccache })
+        Ok(BuildRun {
+            seconds,
+            sccache,
+            peak_resident_bytes: Some(usage.peak_resident_bytes),
+            cores_used: (seconds > 0.0).then(|| usage.cpu_seconds / seconds),
+        })
     }
 }
 
@@ -1047,6 +1070,10 @@ impl Athena {
             first_build_seconds: first.seconds,
             second_build_seconds: second.seconds,
             sccache,
+            first_peak_resident_bytes: first.peak_resident_bytes,
+            first_cores_used: first.cores_used,
+            second_peak_resident_bytes: second.peak_resident_bytes,
+            second_cores_used: second.cores_used,
         };
         measurement.validate().map_err(|e| anyhow::anyhow!(e))?;
         let record = AnyRecord::BuildMeasurement(Box::new(measurement.clone()));
@@ -1507,6 +1534,8 @@ mod tests {
     /// Bytes the fake writes into the first and the second target directory.
     const TARGET_WRITTEN: [usize; 2] = [3000, 7000];
     const SECONDS: [f64; 2] = [61.5, 12.25];
+    const PEAK_BYTES: [u64; 2] = [3_500_000_000, 2_500_000_000];
+    const CORES: [f64; 2] = [5.75, 3.5];
 
     impl FakeBuilder {
         fn new(installed: bool, counts: [Option<SccacheCounts>; 2]) -> FakeBuilder {
@@ -1551,6 +1580,8 @@ mod tests {
             Ok(BuildRun {
                 seconds: SECONDS[n],
                 sccache: self.counts[n],
+                peak_resident_bytes: Some(PEAK_BYTES[n]),
+                cores_used: Some(CORES[n]),
             })
         }
     }
@@ -1617,6 +1648,13 @@ mod tests {
         assert!(measured.source_bytes >= 100 + 250 + 12);
         assert_eq!(measured.first_build_seconds, 61.5);
         assert_eq!(measured.second_build_seconds, 12.25);
+        // The builder's memory and core figures are in the returned and the committed record.
+        for m in [&measured, &records[0]] {
+            assert_eq!(m.first_peak_resident_bytes, Some(PEAK_BYTES[0]));
+            assert_eq!(m.second_peak_resident_bytes, Some(PEAK_BYTES[1]));
+            assert_eq!(m.first_cores_used, Some(CORES[0]));
+            assert_eq!(m.second_cores_used, Some(CORES[1]));
+        }
         assert_eq!(
             measured.sccache,
             SccacheFigures::Measured {
@@ -1747,6 +1785,10 @@ mod tests {
             first_build_seconds: 60.0,
             second_build_seconds: 10.0,
             sccache: SccacheFigures::NotInstalled,
+            first_peak_resident_bytes: None,
+            first_cores_used: None,
+            second_peak_resident_bytes: None,
+            second_cores_used: None,
         }
     }
 

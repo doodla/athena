@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena measure-build` also records the peak resident memory and the cores used of each cold build, and the
+  `build` line of `athena status` prints them. Step 1 of `docs/design/agent-and-build-slots.md` section 8. The
+  figures come from the kernel's resource report for the whole cargo process tree (`wait4`: the largest resident
+  set of any one process, and CPU time divided by wall time). They are four optional fields of
+  `athena.build-measurement/1` (`first_peak_resident_bytes`, `first_cores_used`, `second_peak_resident_bytes`,
+  `second_cores_used`); records written before still read and print without them.
 - Drain life-cycle commands, so no one finds, stops or restarts a drain by matching text in the process list.
   Root cause: Athena kept no record of its own drain, so a person found it with `pkill -f`, `pgrep` or a wait
   loop whose pattern also appeared in the command doing the matching; the command matched itself, killed its own

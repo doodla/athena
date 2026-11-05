@@ -2288,6 +2288,19 @@ pub struct BuildMeasurement {
     /// Wall time of the second cold build, in seconds.
     pub second_build_seconds: f64,
     pub sccache: SccacheFigures,
+    /// Peak resident memory, in bytes, of the largest process in the first cold build's cargo tree. Absent
+    /// in records written before it was measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_peak_resident_bytes: Option<u64>,
+    /// Cores the first cold build used: CPU time of the cargo tree divided by its wall time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_cores_used: Option<f64>,
+    /// Peak resident memory, in bytes, of the second cold build (see `first_peak_resident_bytes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_peak_resident_bytes: Option<u64>,
+    /// Cores the second cold build used (see `first_cores_used`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_cores_used: Option<f64>,
 }
 
 impl BuildMeasurement {
@@ -2303,6 +2316,13 @@ impl BuildMeasurement {
         let good = |v: f64| v.is_finite() && v >= 0.0;
         if !good(self.first_build_seconds) || !good(self.second_build_seconds) {
             return Err("a build measurement's times are finite, non-negative seconds".into());
+        }
+        if [self.first_cores_used, self.second_cores_used]
+            .into_iter()
+            .flatten()
+            .any(|c| !good(c))
+        {
+            return Err("a build measurement's cores used are finite and non-negative".into());
         }
         if self.commit.trim().is_empty() || self.cargo_lock_hash.trim().is_empty() {
             return Err("a build measurement names its commit and its Cargo.lock hash".into());
@@ -4195,6 +4215,59 @@ mod tests {
             first_build_seconds: 61.5,
             second_build_seconds: 12.25,
             sccache,
+            first_peak_resident_bytes: None,
+            first_cores_used: None,
+            second_peak_resident_bytes: None,
+            second_cores_used: None,
+        }
+    }
+
+    #[test]
+    fn an_old_build_measurement_without_memory_or_cores_still_reads() {
+        let old = build_measurement_with("20261029-090000-5abc", SccacheFigures::NotInstalled);
+        let json = AnyRecord::BuildMeasurement(Box::new(old.clone())).to_json();
+        // None is not written, so this is the shape records had before the fields existed.
+        assert!(
+            !json.contains("peak_resident") && !json.contains("cores_used"),
+            "{json}"
+        );
+        let path = "records/build-measurements/2026-10/20261029-090000-5abc.json";
+        let Some(AnyRecord::BuildMeasurement(parsed)) =
+            check_record_file(path, json.as_bytes()).unwrap()
+        else {
+            panic!("an old build measurement parses as one");
+        };
+        assert_eq!(*parsed, old);
+        assert_eq!(parsed.first_peak_resident_bytes, None);
+        assert_eq!(parsed.first_cores_used, None);
+        assert_eq!(parsed.second_peak_resident_bytes, None);
+        assert_eq!(parsed.second_cores_used, None);
+    }
+
+    #[test]
+    fn a_build_measurement_with_memory_and_cores_round_trips_and_bad_cores_are_refused() {
+        let mut m = build_measurement_with("20261029-090000-5abc", SccacheFigures::NotInstalled);
+        m.first_peak_resident_bytes = Some(3 << 30);
+        m.first_cores_used = Some(5.5);
+        m.second_peak_resident_bytes = Some(2 << 30);
+        m.second_cores_used = Some(4.25);
+        let record = AnyRecord::BuildMeasurement(Box::new(m.clone()));
+        let parsed = check_record_file(&record.canonical_path(), record.to_json().as_bytes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed, record);
+        let AnyRecord::BuildMeasurement(parsed) = parsed else {
+            panic!("a build measurement parses as one");
+        };
+        assert_eq!(parsed.first_peak_resident_bytes, Some(3 << 30));
+        assert_eq!(parsed.second_cores_used, Some(4.25));
+        for bad in [f64::NAN, f64::INFINITY, -0.5] {
+            let mut first = m.clone();
+            first.first_cores_used = Some(bad);
+            assert!(first.validate().is_err(), "{bad}");
+            let mut second = m.clone();
+            second.second_cores_used = Some(bad);
+            assert!(second.validate().is_err(), "{bad}");
         }
     }
 

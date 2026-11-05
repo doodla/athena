@@ -21,6 +21,10 @@ fn measurement() -> BuildMeasurement {
             first: SccacheCounts { hits: 0, misses: 9 },
             second: SccacheCounts { hits: 4, misses: 5 },
         },
+        first_peak_resident_bytes: Some(3_500_000_000),
+        first_cores_used: Some(5.75),
+        second_peak_resident_bytes: Some(2_500_000_000),
+        second_cores_used: Some(3.5),
     }
 }
 
@@ -54,6 +58,8 @@ fn status_prints_the_latest_build_measurement_line() {
         "T 4.1 GB",
         "S 2.5 MB",
         "build 1 61.50s, build 2 12.25s",
+        "peak memory build 1 3.5 GB, build 2 2.5 GB",
+        "cores used build 1 5.75, build 2 3.50",
         "sccache build 1 0 hits / 9 misses, build 2 4 hits / 5 misses",
         "commit 0123456789ab",
     ] {
