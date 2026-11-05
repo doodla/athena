@@ -111,6 +111,7 @@ pub mod run;
 mod run_pin_tests;
 pub mod scope_guard;
 pub mod scoring;
+pub mod slots;
 pub mod snapshot;
 pub mod state;
 pub mod status;

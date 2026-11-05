@@ -1,0 +1,118 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-180325-s9pg",
+  "round": 1,
+  "at": "2026-11-05T18:18:28.132356892Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/close.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/close.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/send_back.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/send_back.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/routing.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/routing.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/checks.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/checks.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/verify.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/verify.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/introspect.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/introspect.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/status_durations.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/status_durations.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "A slot-wait hold would be labelled 'environment: low disk' in the drain, which corrupts the design's low-disk metric",
+      "evidence": "drain.rs:1616-1621: `_ if run.held => { line.outcome = if run.reason.starts_with(BUDGET_SHORT) { BUDGET_SHORT } else { athena_core::disk::LOW_DISK } ...` and the note falls back to 'free disk space is below the minimum'. The plan only adds `|| downcast_ref::<SlotWait>()` at :3711, so every SlotWait hold gets outcome `environment: low disk`. Design section 8 step 3 measures the effect partly by 'the count of jobs closed with reason text \"low disk\"'. The dependents entry names :1616 but plans no change there, and its test is 'if one is cheap'. Fix: In drain.rs, choose the held outcome from the reason: BUDGET_SHORT, BUILD_SLOT_WAIT when the reason starts with it, otherwise LOW_DISK. Fix the fallback note too. Add a drain test, next to the LowDisk one in crates/athena-cli/tests/drain.rs, that checks a SlotWait error is held with outcome `environment: build slot wait` and counts as neither a failure nor an environment stop of the run. Update the module doc at drain.rs:215-226.",
+      "location": "Files: crates/athena-cli/src/drain.rs; Dependents entry for drain.rs:3711 and drain.rs:1616",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list says two hold readers show the slot-wait text and are tested, but no step changes them and no demonstration asserts it",
+      "evidence": "run/mod.rs:402 only checks `crate::disk::read_hold` (LowDisk). Without it, `go` on a held job falls through to 'job {id} was interrupted: its process died'. status.rs:1709 sets `line.hold` from `read_hold` only. The Files entries for run/mod.rs and status.rs and steps 7-8 change neither site, and the criterion 4 demonstration never calls `go` on the held job or reads the status line. Fix: Add a step that teaches run/mod.rs:402 (with wording that fits a slot wait, not 'once space is free') and status.rs:1709 to read the slot-wait marker, or a shared `read_any_hold`. Add both assertions to a_check_that_waits_past_build_wait_s_holds_the_job.",
+      "location": "Dependents: 'hold marker file ... read_hold returns None for it' (run/mod.rs:402-407, status.rs:1709)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The named early return happens before the slot is taken, so the test passes even if the guard leaks",
+      "evidence": "checks.rs:33-37: the disk gate returns LowDisk before the slot. Decision 3 and step 6 place the slot after the gate. So a `low_once_*` fake never takes a slot, and try_acquire succeeds whether or not Drop releases it. The other option, 'a failing restore_to', names no hook. check_seam's `Fake` is `Rc<dyn Fn(&CheckSpec) -> CheckRun>` (run/mod.rs:1201), so it cannot return an error after the slot is taken. Fix: Use a path that returns after acquire: install a check_seam fake that panics, run `go` under `std::panic::catch_unwind(AssertUnwindSafe(..))`, then assert `SlotQueue::try_acquire` succeeds. Or add a small test-only hook that makes restore_to fail. State that the test fails if the guard is forgotten.",
+      "location": "Demonstrations: Criterion 5 (the_build_slot_is_free_after_an_early_return)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The test is not two jobs, and its order assertion depends on timing",
+      "evidence": "The acceptance asks for 'a test where two jobs need local checks with one slot: the second waits and then runs'. The plan uses one `go` plus a bare SlotQueue holder that releases about 500 ms after signalling ready. If `go` takes over 500 ms to reach its checks (reading, producer and snapshot setup), 'released' comes before 'ran' even without the slot. Then queued_s is about 0 and the `>= 0.3` assertion fails at random. The order assertion therefore does not reliably fail without the behaviour. Fix: Run two real jobs: two threads each calling `Athena::go`, each installing its own thread-local check_seam. The first job's fake blocks on a channel until the test sees the second job's ticket in `slots/queue/`. At minimum, have the holder release only after it sees the job's ticket in the queue folder, not after a fixed sleep. Keep the queued_s > 0 assertion on the waiting job.",
+      "location": "Demonstrations: Criterion 1 (two_jobs_with_one_build_slot)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Free space checked before a wait of up to 30 minutes is stale when the build starts",
+      "evidence": "Design section 4 allows a wait of up to build_wait_s (1800 s). The gate runs once, before the first acquire (checks.rs:33). The verifier gate at verification.rs:165 runs only after the checks, so a build that queued and then ran out of disk fails as if the work were at fault, which the gate exists to prevent. Fix: Keep the reading's order but re-run the gate after an acquire that actually waited (queued > 0), or record the stale-gate trade-off explicitly in the design note as planned.",
+      "location": "Risks: 'The disk gate runs once, before the first slot wait'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The listed CheckRun literal sites do not match a grep",
+      "evidence": "grep `revert_for:` finds 1 in routing.rs, but `CheckRun \\{` finds 2 there. checks.rs has 17 `CheckRun {` matches and 7 `revert_for:`. gh/tests.rs has a `CheckRun` type mention only. Some literals may use struct-update syntax, so 'grep revert_for:' is not the full list. Fix: Rely on the compiler to list the missed literals instead of fixed line numbers. The Files list can say 'every CheckRun literal the compiler reports'.",
+      "location": "Files: crates/athena-core/src/routing.rs, checks.rs line numbers",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The core design is sound and matches design sections 4 and 8 step 3. The slot is an exclusive std file lock that dies with the process. Ticket files are created under a temporary name, locked, then renamed, which gives class order, first-in-first-out and ageing without a sweeper. A Drop guard in SnapExec::exec covers every return path. The timeout hold reuses the hold_for_disk path, and queued_s is optional with serde defaults. I checked that SnapExec::exec, hold_for_disk, the hold marker functions, PipelineConfig (which refuses unknown keys), CheckRun (also refuses unknown keys) and the drain classification at drain.rs:3711 exist as described. No config schema file needs updating. Four places need revising. (1) drain.rs:1617-1621 labels every hold that is not a short budget as `environment: low disk`. A slot wait would therefore be recorded as low disk, which corrupts the design's own low-disk count. (2) The hold readers at run/mod.rs:402 and status.rs:1709 read only the low-disk marker. The dependents list says they are tested, but no step changes them. (3) The criterion 5 test forces an early return through the disk gate, which runs before the slot is taken, so it cannot catch a leaked guard. (4) The criterion 1 test uses one job plus a bare holder that releases on a timer, not two jobs, so its order assertion can pass without the slot and its queued_s assertion can fail at random. Athena's out-of-deliverable findings are mechanical `queued_s: None` edits and the drain.rs change, which is required. I agree they are minor."
+}

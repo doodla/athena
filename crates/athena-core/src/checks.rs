@@ -298,6 +298,7 @@ pub fn skipped_run(spec: &CheckSpec, note: String) -> CheckRun {
         failed_tests: Vec::new(),
         reused: false,
         revert_for: Vec::new(),
+        queued_s: None,
     }
 }
 
@@ -329,6 +330,7 @@ pub fn runs_from_record(specs: &[CheckSpec], record: &CiRecord, sha: &str) -> Ve
                 failed_tests: Vec::new(),
                 reused: true,
                 revert_for: Vec::new(),
+                queued_s: None,
             })
         })
         .collect()
@@ -470,6 +472,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
                 failed_tests: Vec::new(),
                 reused: false,
                 revert_for: Vec::new(),
+                queued_s: None,
             });
         }
     };
@@ -545,6 +548,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
         failed_tests,
         reused: false,
         revert_for: Vec::new(),
+        queued_s: None,
     })
 }
 
@@ -570,6 +574,7 @@ pub fn baseline_runs(specs: &[CheckSpec], ctx: &CheckContext<'_>) -> Vec<CheckRu
                 failed_tests: Vec::new(),
                 reused: false,
                 revert_for: Vec::new(),
+                queued_s: None,
             },
         })
         .collect()
@@ -724,6 +729,7 @@ mod tests {
             failed_tests: failed_tests.iter().map(|s| s.to_string()).collect(),
             reused: false,
             revert_for: Vec::new(),
+            queued_s: None,
         }
     }
 
@@ -1204,6 +1210,7 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored
             failed_tests: Vec::new(),
             reused: false,
             revert_for: Vec::new(),
+            queued_s: None,
         }
     }
 

@@ -327,6 +327,12 @@ impl StateDir {
             .join(format!("{}.json", job.as_str()))
     }
 
+    /// Where the build-slot lock files and the waiting queue live ([`crate::slots`]). One directory per
+    /// repository, shared by every Athena command that runs on it.
+    pub fn slots_dir(&self) -> PathBuf {
+        self.root.join("slots")
+    }
+
     /// Removes a closed job's snapshots and build directories, keeping nothing that matters. Call it only
     /// after the closing commit has succeeded. It measures the directory's allocated size just before
     /// removal and returns it with the error, if any; the caller reports both with [`report_clean`].
@@ -756,6 +762,14 @@ mod tests {
             !state.job_dir(&job()).join("target").exists(),
             "an empty build parent goes too"
         );
+    }
+
+    #[test]
+    fn the_slots_directory_is_under_the_state_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        assert_eq!(state.slots_dir(), temp.path().join("slots"));
+        assert!(!state.slots_dir().exists(), "asking creates nothing");
     }
 
     #[test]

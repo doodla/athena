@@ -1,0 +1,198 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261105-180325-s9pg",
+  "n": 1,
+  "at": "2026-11-05T18:10:31.285215279Z",
+  "invocation_seq": 3,
+  "base_commit": "3ed05c530c1ee14685843f46da95931f4a037dac",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Enforce max_check_slots as a counting build-slot queue for local checks",
+  "summary": "Add a lock-file counting semaphore (new slots.rs) of max_check_slots entries that SnapExec::exec takes around each local check and releases on drop or process death. Add build_wait_s/build_age_promote_s config, the resumable \"environment: build slot wait\" hold, and a queued_s field plus a \"build wait\" status line, as design section 8 step 3 says. Audience: the maintainer running the drain.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Implementation and tests are Rust, using std file locks as state.rs does."
+    },
+    {
+      "id": "tested",
+      "how": "New slots.rs tests; cargo test passes and clippy is clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests exercise waiting, release on crash, and the queued_s output."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is measured by queued_s summed in the 'build wait' status line."
+    },
+    {
+      "id": "small",
+      "how": "Only step 3; steps 4 to 7 out of scope."
+    },
+    {
+      "id": "mechanism",
+      "how": "The limit is enforced by lock files, not prose."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/run/checks.rs (SnapExec::exec runs the disk gate once, then run_check per check; the entry point), crates/athena-core/src/state.rs (lock_file, try_lock_job use std File::try_lock; the lock dies with the process), crates/athena-core/src/disk.rs (LowDisk hold, write_hold/read_hold) and crates/athena-data/src/config.rs (PipelineConfig.max_check_slots, validated 1..=MAX_CHECK_SLOTS_CEILING). The slot is taken after refuse_if_stopped and the disk gate, before run_check, and held until the snapshot is restored.",
+    "Code survey: the effect is measured directly by a queued_s field on each check in verification.json (CheckRun in crates/athena-data/src/records.rs, optional so old records still read; its round-trip/AnyRecord tests must still pass) and a 'build wait' line in the throughput section of crates/athena-core/src/status.rs. No new record file type is added.",
+    "Only the local-check part of step 3 is in scope; the producer wrapper (step 4), landing rebuild (step 7) and slot-owned target directories (step 5) are later steps. Priority classes and ageing are implemented in slots.rs as the design says, with check/rerun as the only class used now.",
+    "A limit of 1 reproduces today's one-build behaviour. Test hooks may use the existing check_seam and a tempdir state; a 'process dies' test uses a child process (or a separate File handle dropped) holding a slot, since OS file locks release on exit.",
+    "athena.toml and defaults.toml need no change: new config fields have in-code defaults (build_wait_s 1800, build_age_promote_s 600)."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "`cargo test -p athena-core` passes including a new slots test where two jobs need local checks with max_check_slots = 1: the second waits while the first holds the slot, then runs after release (asserted by order and a nonzero queued_s for the second).",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo test -p athena-core` includes a test where a slot holder's process dies (a child process holding the slot lock is killed, or a holder is dropped on panic/error) and a waiter then acquires the slot with no manual cleanup or sweeper.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test with max_check_slots = 2 shows at most 2 holders at once and a third request waits.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows a check request waiting past build_wait_s returns a resumable hold with reason `environment: build slot wait`, uses no attempt, and is not recorded as a work failure.",
+      "kind": "behavior"
+    },
+    {
+      "text": "crates/athena-core/src/slots.rs exists and SnapExec::exec in crates/athena-core/src/run/checks.rs acquires a guard from it before run_check and drops it after the snapshot restore, on every return path (guard released by Drop).",
+      "kind": "content"
+    },
+    {
+      "text": "PipelineConfig in crates/athena-data/src/config.rs gains build_wait_s (default 1800) and build_age_promote_s (default 600) with validation and tests; unknown keys are still refused.",
+      "kind": "content"
+    },
+    {
+      "text": "Each check in verification.json carries an optional queued_s (old records still deserialize), and `cargo test` covers a 'build wait' line in the status throughput section that sums it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo clippy --all-targets` and `cargo fmt --check` are clean, and the whole `cargo test` passes with the default max_check_slots = 1.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No change to athena.toml, defaults.toml, workflows, or records/; CHANGELOG.md gets an entry for the change.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/slots.rs",
+      "action": "create",
+      "p": 0.98
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.75
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Producer cargo wrapper and build-slot subcommand (step 4)",
+    "Landing rebuild slot use (step 7)",
+    "Slot-owned warm target directories (step 5)",
+    "Changes to athena.toml or defaults.toml",
+    "Changing the sample metrics in records/"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2400.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6731707317073171,
+      "p_user_intervenes": 0.0850877192982456,
+      "cost_usd": {
+        "p10": 0.5585115284133847,
+        "p50": 1.350416949991646,
+        "p90": 4.0128694064198305
+      },
+      "wall_time_s": {
+        "p10": 545.8859023585438,
+        "p50": 1981.8403672560003,
+        "p90": 4204.664048558651
+      }
+    }
+  },
+  "departures": "Larger than the reference: new module, config, record field, status line, and concurrency tests across several crates.",
+  "hard_reason": "Adds a gate that holds work (a build-slot limit with a wait timeout and a new hold reason) and changes how checks run in the pipeline.",
+  "producer_effort": "high"
+}

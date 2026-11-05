@@ -1958,6 +1958,7 @@ mod produce_and_verify_order_tests {
             failed_tests: Vec::new(),
             reused: false,
             revert_for: Vec::new(),
+            queued_s: None,
         }
     }
 
@@ -2335,6 +2336,330 @@ mod produce_and_verify_order_tests {
         );
         assert_eq!(athena.state.read_resume(&first), None);
         assert_eq!(crate::disk::read_hold(&athena.state, &first), None);
+    }
+
+    /// A queue over the build slots of `athena`'s state directory, with one slot, as a default repository has.
+    fn slot_queue(athena: &Athena) -> crate::slots::SlotQueue {
+        crate::slots::SlotQueue::new(
+            athena.state.slots_dir(),
+            1,
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(600),
+        )
+        .with_poll(std::time::Duration::from_millis(10))
+    }
+
+    /// Waits until `queue` has `n` requests waiting, for at most 10 s.
+    fn wait_until_waiting(queue: &crate::slots::SlotQueue, n: usize) {
+        let start = std::time::Instant::now();
+        while queue.waiting() < n {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "no {n} request queued for a build slot"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// A slot taken without waiting, retried for a moment: another test's child process, between its fork and
+    /// its exec, can hold a copy of a lock file that was just released, and the lock frees within milliseconds.
+    fn take_slot_soon(queue: &crate::slots::SlotQueue) -> crate::slots::Slot {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(slot) = queue.try_acquire().unwrap() {
+                return slot;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "the build slot was not freed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// The `queued_s` of the first check of a job's closing verification record.
+    fn recorded_queued_s(athena: &Athena, job: &JobId) -> Option<f64> {
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        records.jobs[job.as_str()]
+            .verification
+            .as_ref()
+            .unwrap_or_else(|| panic!("job {job} recorded no verification"))
+            .checks[0]
+            .queued_s
+    }
+
+    #[test]
+    fn two_jobs_with_one_build_slot_run_one_after_the_other() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        let one = athena.ask("describe the demo", &Quiet).unwrap().job;
+        let two = athena
+            .ask("describe the demo once more", &Quiet)
+            .unwrap()
+            .job;
+        let probe = slot_queue(&athena);
+        let log: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+        let inside = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let claimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ended: Vec<std::result::Result<Finished, String>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = [&one, &two]
+                .into_iter()
+                .map(|job| {
+                    let (athena, probe) = (&athena, probe.clone());
+                    let (log, inside, claimed) = (log.clone(), inside.clone(), claimed.clone());
+                    scope.spawn(move || {
+                        // The check that gets the only slot first holds it until the other job's check is
+                        // queued behind it; the other must not run before then.
+                        let _seam =
+                            check_seam::install(std::rc::Rc::new(move |spec: &CheckSpec| {
+                                use std::sync::atomic::Ordering::SeqCst;
+                                if !claimed.swap(true, SeqCst) {
+                                    inside.fetch_add(1, SeqCst);
+                                    log.lock().unwrap().push("first-start");
+                                    wait_until_waiting(&probe, 1);
+                                    log.lock().unwrap().push("first-end");
+                                    inside.fetch_sub(1, SeqCst);
+                                } else {
+                                    assert_eq!(
+                                        inside.load(SeqCst),
+                                        0,
+                                        "the second check ran while the first held the only slot"
+                                    );
+                                    log.lock().unwrap().push("second");
+                                }
+                                passed_run(spec)
+                            }));
+                        athena
+                            .go(job.as_str(), AcceptedBy::User, &Quiet)
+                            .map(finished)
+                            .map_err(|e| format!("{e:#}"))
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for end in &ended {
+            assert!(end.is_ok(), "{end:?}");
+        }
+        assert_eq!(*log.lock().unwrap(), ["first-start", "first-end", "second"]);
+        // Both checks recorded how long they waited; the one that queued behind the other waited longer.
+        let mut waits: Vec<f64> = [&one, &two]
+            .into_iter()
+            .map(|job| recorded_queued_s(&athena, job).expect("the check recorded its wait"))
+            .collect();
+        waits.sort_by(f64::total_cmp);
+        assert!(waits[1] > 0.0 && waits[1] > waits[0], "{waits:?}");
+        assert!(
+            take_slot_soon(&probe).queued() < std::time::Duration::from_secs(10),
+            "both slots are free again"
+        );
+    }
+
+    /// Free space that is low once `<state>/low-now` exists.
+    fn low_once_marked(state: &std::path::Path) -> std::io::Result<u64> {
+        if state.join("low-now").exists() {
+            Ok(3_000_000_000)
+        } else {
+            crate::test_support::plenty_of_space(state)
+        }
+    }
+
+    #[test]
+    fn a_check_that_waited_checks_the_disk_again() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("repo");
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            low_once_marked,
+            counting(counts.clone(), None),
+        );
+        let first = athena.ask("describe the demo", &Quiet).unwrap().job;
+        let checks_run = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ran = checks_run.clone();
+        let _seam = check_seam::install(std::rc::Rc::new(move |spec: &CheckSpec| {
+            ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            passed_run(spec)
+        }));
+        let probe = slot_queue(&athena);
+        let holder = probe.try_acquire().unwrap().expect("the slot is free");
+        let ui = Lines::default();
+        let error = std::thread::scope(|scope| {
+            let probe = &probe;
+            // The disk fills while the job waits behind the holder, which then lets go.
+            scope.spawn(move || {
+                wait_until_waiting(probe, 1);
+                std::fs::write(root.join("low-now"), b"").unwrap();
+                drop(holder);
+            });
+            athena
+                .go(first.as_str(), AcceptedBy::User, &ui)
+                .expect_err("space that fell during the wait holds the job")
+        });
+        let low = error
+            .downcast_ref::<crate::disk::LowDisk>()
+            .copied()
+            .unwrap_or_else(|| panic!("not a low disk hold: {error:#}"));
+        assert_eq!(low.free, 3_000_000_000);
+        assert_eq!(
+            checks_run.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the check did not run on a full disk"
+        );
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("held       environment: low disk")),
+            "{said:#?}"
+        );
+        assert_eq!(counts.all().3, 0, "no verifier ran");
+        take_slot_soon(&probe);
+    }
+
+    #[test]
+    fn a_check_that_waits_past_build_wait_s_holds_the_job() {
+        let repo = repo_with_config("\n[drain.pipeline]\nbuild_wait_s = 1\n");
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            counting(counts.clone(), None),
+        );
+        assert_eq!(
+            JobConfig::at(&athena.git, "HEAD")
+                .unwrap()
+                .config
+                .pipeline()
+                .build_wait_s,
+            1
+        );
+        let first = athena.ask("describe the demo", &Quiet).unwrap().job;
+        let queue = slot_queue(&athena);
+        // Another command holds the only build slot for the whole first run.
+        let holder = queue.try_acquire().unwrap().expect("the slot is free");
+        let ui = Lines::default();
+        let error = athena
+            .go(first.as_str(), AcceptedBy::User, &ui)
+            .expect_err("no build slot came free in time");
+        let wait = error
+            .downcast_ref::<crate::disk::SlotWait>()
+            .copied()
+            .unwrap_or_else(|| panic!("not a slot wait hold: {error:#}"));
+        assert_eq!(wait.limit_s, 1);
+        assert!(wait.waited_s >= 1, "{wait:?}");
+        assert!(wait.text().starts_with("environment: build slot wait"));
+        assert!(crate::disk::is_environment_reason(&wait.text()));
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("held       environment: build slot wait")),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+
+        // Held, not closed and not failed: no outcome, no score, no verification, no attempt used.
+        let (planner, producer, read_before, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 0));
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let held = &records.jobs[first.as_str()];
+        assert_eq!(held.state(), JobState::Dispatched);
+        assert!(held.outcome.is_none() && held.latest_score().is_none());
+        assert!(held.verification.is_none());
+        assert!(held.candidate.is_some());
+        assert!(records.introspections.is_empty());
+        assert_eq!(
+            crate::disk::read_slot_hold(&athena.state, &first),
+            Some(wait)
+        );
+        assert_eq!(crate::disk::read_hold(&athena.state, &first), None);
+        assert_eq!(
+            athena.state.read_resume(&first).map(|m| m.stage),
+            Some(crate::state::ResumeStage::Checks)
+        );
+
+        // `go` on the held job says why it is held, not that its process died; so does the status.
+        let again = athena
+            .go(first.as_str(), AcceptedBy::User, &Quiet)
+            .expect_err("a held job is not run again by go");
+        let again = format!("{again:#}");
+        assert!(again.contains("build slot wait"), "{again}");
+        assert!(!again.contains("was interrupted"), "{again}");
+        let status = athena.status().unwrap();
+        let line = status
+            .open
+            .iter()
+            .find(|l| l.id == first.as_str())
+            .expect("the held job is open work");
+        assert_eq!(line.hold.as_deref(), Some(wait.text().as_str()));
+
+        // The slot is free: the retry resumes the kept candidate at the checks, with no producer run, and lands.
+        drop(holder);
+        let (retry, _) = athena.retry(first.as_str(), &Quiet).unwrap();
+        assert_eq!(retry.reader_error, None);
+        let (_, _, read_after, _) = counts.all();
+        assert!(read_after > read_before, "the reader ran again");
+        let done = finished(
+            athena
+                .go(retry.job.as_str(), AcceptedBy::User, &Quiet)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(counts.all(), (0, 1, read_after, 1), "no producer ran again");
+        assert!(recorded_queued_s(&athena, &retry.job).is_some());
+        assert_eq!(crate::disk::read_any_hold(&athena.state, &first), None);
+    }
+
+    #[test]
+    fn the_build_slot_is_free_after_a_panic_in_the_check_and_after_a_normal_run() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            counting(Arc::new(Counts::default()), None),
+        );
+        let queue = slot_queue(&athena);
+        let first = athena.ask("describe the demo", &Quiet).unwrap().job;
+        {
+            // The fake runs after the slot is taken, so the panic leaves `exec` with the slot held.
+            let _seam = check_seam::install(std::rc::Rc::new(|_: &CheckSpec| -> CheckRun {
+                panic!("the check crashed")
+            }));
+            let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                athena.go(first.as_str(), AcceptedBy::User, &Quiet)
+            }));
+            assert!(died.is_err(), "the check panicked");
+        }
+        drop(take_slot_soon(&queue));
+
+        let second = athena.ask("describe the demo again", &Quiet).unwrap().job;
+        let done = finished(
+            athena
+                .go(second.as_str(), AcceptedBy::User, &Quiet)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert!(recorded_queued_s(&athena, &second).is_some());
+        drop(take_slot_soon(&queue));
     }
 
     #[test]
@@ -2957,6 +3282,7 @@ mod produce_and_verify_order_tests {
             failed_tests: Vec::new(),
             reused: false,
             revert_for: Vec::new(),
+            queued_s: None,
         }
     }
 

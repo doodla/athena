@@ -9,6 +9,13 @@ use super::*;
 /// checks is applied: once, just before the first check starts. A CI result that stands in for the checks, a
 /// resumed job and a skipped check never reach it. Low space comes back as a [`crate::disk::LowDisk`] error
 /// that `check_and_verify` turns into a hold.
+///
+/// Each check also takes a build slot ([`crate::slots`], `[drain.pipeline] max_check_slots` of them) after
+/// that gate and holds it until the snapshot is restored. The slot is a guard: every way out of `exec` (an
+/// error, a panic, a normal return) drops it, and a process that dies loses its lock file, so no path
+/// leaves a slot taken. A wait longer than `build_wait_s` comes back as a [`crate::disk::SlotWait`] error that
+/// `check_and_verify` turns into a hold, and the time waited is stored on the check as `queued_s`. A request
+/// that waited reads the free disk space again, since the earlier reading may be a long wait old.
 pub(super) struct SnapExec<'a> {
     pub(super) athena: &'a Athena,
     pub(super) snapshot: &'a Snapshot,
@@ -25,6 +32,8 @@ pub(super) struct SnapExec<'a> {
     pub(super) min_free_gb: u64,
     /// Whether the disk gate has been applied yet.
     pub(super) gated: std::cell::Cell<bool>,
+    /// The build slots every check takes one of.
+    pub(super) slots: crate::slots::SlotQueue,
 }
 
 impl crate::routing::Exec for SnapExec<'_> {
@@ -35,11 +44,20 @@ impl crate::routing::Exec for SnapExec<'_> {
         {
             return Err(low.into());
         }
+        // The slot lives to the end of this call, past the snapshot restore: it is the guard that frees it.
+        let slot = self.slots.acquire(crate::slots::Class::Check, &|| {
+            self.athena.refuse_if_stopped()
+        })?;
+        if slot.waited()
+            && let Some(low) = self.athena.disk_gate(self.min_free_gb, self.id, self.ui)
+        {
+            return Err(low.into());
+        }
         #[cfg(test)]
         let seamed = check_seam::current().map(|fake| fake(spec));
         #[cfg(not(test))]
         let seamed: Option<CheckRun> = None;
-        let run = match seamed {
+        let mut run = match seamed {
             Some(run) => run,
             None => run_check(
                 spec,
@@ -56,6 +74,7 @@ impl crate::routing::Exec for SnapExec<'_> {
         self.cleanup
             .borrow_mut()
             .extend(self.snapshot.restore_to(self.prepared)?);
+        run.queued_s = Some(slot.queued().as_secs_f64());
         Ok(run)
     }
 

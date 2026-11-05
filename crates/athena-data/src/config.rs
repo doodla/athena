@@ -100,16 +100,26 @@ pub struct DrainConfig {
 }
 
 /// `[drain.pipeline]`: how far the drain overlaps jobs (`docs/design/async-drain.md` section 11). The defaults
-/// are today's behavior. No drain code reads these values yet; later build jobs (section 12) will.
+/// are today's behavior. `max_check_slots`, `build_wait_s` and `build_age_promote_s` are enforced by the
+/// build-slot queue around local checks (`docs/design/agent-and-build-slots.md` sections 4 and 8); the other
+/// values are read by later build jobs (section 12 of the drain design).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipelineConfig {
     /// Producers running at once, from 1 to [`MAX_CONCURRENCY_CEILING`]. Default 1, which keeps today's behavior.
     #[serde(default = "PipelineConfig::default_one")]
     pub max_in_flight: u32,
-    /// Checks running at once, from 1 to [`MAX_CHECK_SLOTS_CEILING`]. Default 1.
+    /// Build slots: local checks (and later other cargo commands) running at once, from 1 to
+    /// [`MAX_CHECK_SLOTS_CEILING`]. Default 1.
     #[serde(default = "PipelineConfig::default_one")]
     pub max_check_slots: u32,
+    /// Seconds a request waits for a build slot before a check's job is held; at least 1. Default 1800, the
+    /// same as `check_timeout_s`.
+    #[serde(default = "PipelineConfig::default_build_wait_s")]
+    pub build_wait_s: u64,
+    /// Seconds a request waits before it moves up one priority class; at least 1. Default 600.
+    #[serde(default = "PipelineConfig::default_build_age_promote_s")]
+    pub build_age_promote_s: u64,
     /// Jobs read and planned ahead of the one starting; at least 1. Default 1.
     #[serde(default = "PipelineConfig::default_one")]
     pub read_ahead: u32,
@@ -128,6 +138,12 @@ impl PipelineConfig {
     fn default_reserve_disk_gb() -> u64 {
         10
     }
+    fn default_build_wait_s() -> u64 {
+        1800
+    }
+    fn default_build_age_promote_s() -> u64 {
+        600
+    }
     fn default_max_conflict_returns() -> u32 {
         2
     }
@@ -138,6 +154,8 @@ impl Default for PipelineConfig {
         PipelineConfig {
             max_in_flight: 1,
             max_check_slots: 1,
+            build_wait_s: 1800,
+            build_age_promote_s: 600,
             read_ahead: 1,
             reserve_disk_gb: 10,
             max_conflict_returns: 2,
@@ -720,6 +738,12 @@ impl Config {
         if !(1..=MAX_CHECK_SLOTS_CEILING).contains(&p.max_check_slots) {
             return Err(ConfigError::DrainPipeline("max_check_slots"));
         }
+        if p.build_wait_s == 0 {
+            return Err(ConfigError::DrainPipeline("build_wait_s"));
+        }
+        if p.build_age_promote_s == 0 {
+            return Err(ConfigError::DrainPipeline("build_age_promote_s"));
+        }
         if p.read_ahead == 0 {
             return Err(ConfigError::DrainPipeline("read_ahead"));
         }
@@ -1128,12 +1152,15 @@ pub(crate) mod tests {
                 p.max_check_slots,
                 p.read_ahead,
                 p.reserve_disk_gb,
-                p.max_conflict_returns
+                p.max_conflict_returns,
+                p.build_wait_s,
+                p.build_age_promote_s
             ),
-            (1, 1, 1, 10, 2)
+            (1, 1, 1, 10, 2, 1800, 600)
         );
         let explicit = "\n[drain.pipeline]\nmax_in_flight = 1\nmax_check_slots = 1\nread_ahead = 1\n\
-                        reserve_disk_gb = 10\nmax_conflict_returns = 2\n";
+                        reserve_disk_gb = 10\nmax_conflict_returns = 2\nbuild_wait_s = 1800\n\
+                        build_age_promote_s = 600\n";
         let parsed = Config::parse(&format!("{REPO_CONFIG}{explicit}")).unwrap();
         assert_eq!(parsed.pipeline(), base.pipeline());
         let empty = Config::parse(&format!("{REPO_CONFIG}\n[drain.pipeline]\n")).unwrap();
@@ -1159,6 +1186,8 @@ pub(crate) mod tests {
             (too_many_slots.as_str(), "max_check_slots"),
             ("read_ahead = 0", "read_ahead"),
             ("max_conflict_returns = 0", "max_conflict_returns"),
+            ("build_wait_s = 0", "build_wait_s"),
+            ("build_age_promote_s = 0", "build_age_promote_s"),
             ("surprise = 1", "surprise"),
         ] {
             let text = format!("{REPO_CONFIG}\n[drain.pipeline]\n{line}\n");
@@ -1172,10 +1201,17 @@ pub(crate) mod tests {
         let base = Config::parse(REPO_CONFIG).unwrap();
         let text = format!(
             "{REPO_CONFIG}\n[drain.pipeline]\nmax_in_flight = 3\nmax_check_slots = 2\nread_ahead = 4\n\
-             reserve_disk_gb = 20\nmax_conflict_returns = 5\n"
+             reserve_disk_gb = 20\nmax_conflict_returns = 5\nbuild_wait_s = 60\nbuild_age_promote_s = 30\n"
         );
         let set = Config::parse(&text).unwrap();
         assert_eq!(set.pipeline().max_in_flight, 3);
+        assert_eq!(
+            (
+                set.pipeline().build_wait_s,
+                set.pipeline().build_age_promote_s
+            ),
+            (60, 30)
+        );
         assert_eq!(set.reading_inputs(), base.reading_inputs());
         assert_eq!(digest(&set), digest(&base));
     }

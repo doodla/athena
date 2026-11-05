@@ -739,6 +739,43 @@ pub struct Throughput {
     pub unlanded_jobs: usize,
     /// Their time spent: invocation wall times plus measured check durations, not the time the job stayed open.
     pub unlanded_minutes: f64,
+    /// Time checks waited for a build slot, over all request jobs; none when no check recorded a wait.
+    pub build_wait: Option<BuildWait>,
+}
+
+/// The time checks waited for a build slot: the sum of `queued_s` over the checks of every request job's
+/// `verification.json` that took a slot (a reused or skipped check has none). The basis is the athena
+/// monotonic clock, which measures each wait.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct BuildWait {
+    /// Checks that took a slot and recorded how long they waited.
+    pub checks: usize,
+    /// The sum of their waits, in seconds.
+    pub total_s: f64,
+    /// The longest single wait, in seconds.
+    pub longest_s: f64,
+}
+
+impl BuildWait {
+    /// Sums `queued_s` over the checks of every request job's verification. None when no check has one.
+    fn of(records: &Records) -> Option<BuildWait> {
+        let waits: Vec<f64> = records
+            .request_jobs()
+            .into_iter()
+            .filter_map(|j| j.verification.as_ref())
+            .flat_map(|v| v.checks.iter())
+            .filter_map(|c| c.queued_s)
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .collect();
+        if waits.is_empty() {
+            return None;
+        }
+        Some(BuildWait {
+            checks: waits.len(),
+            total_s: waits.iter().sum(),
+            longest_s: waits.iter().copied().fold(0.0, f64::max),
+        })
+    }
 }
 
 /// The median of `values`; an even count takes the mean of the two middle values; 0 for none.
@@ -995,6 +1032,7 @@ impl Throughput {
             idle_minutes,
             unlanded_jobs,
             unlanded_minutes,
+            build_wait: BuildWait::of(records),
         })
     }
 
@@ -1024,8 +1062,14 @@ impl Throughput {
                 self.window_with_landing_record, self.window_jobs
             )
         };
+        let build_wait = self.build_wait.map_or_else(String::new, |w| {
+            format!(
+                "\n           build wait {:.1} s over {} check(s), longest {:.1} s\n           basis: queued_s of each check in verification.json, athena monotonic clock; a check that took no build slot is not counted",
+                w.total_s, w.checks, w.longest_s
+            )
+        });
         format!(
-            "throughput {} landed ({days})\n           basis: landed jobs counted by their landing outcome's UTC day\n           median per landed job over the last {} measured: {:.1} min ({stages})\n           basis: invocation wall times, measured check durations, and landing and rebuild from the verifier's end to the later of the outcome and the landing record; {landing_basis}\n           idle between jobs {:.1} min\n           basis: gaps between merged busy intervals of all jobs (invocations, checks placed by estimate before the verifier, landing wait), not the time a job stayed open\n           did not land: {} job(s), {:.1} min\n           basis: time spent (invocation wall times plus measured check durations), not the time from dispatch to close",
+            "throughput {} landed ({days})\n           basis: landed jobs counted by their landing outcome's UTC day\n           median per landed job over the last {} measured: {:.1} min ({stages})\n           basis: invocation wall times, measured check durations, and landing and rebuild from the verifier's end to the later of the outcome and the landing record; {landing_basis}\n           idle between jobs {:.1} min\n           basis: gaps between merged busy intervals of all jobs (invocations, checks placed by estimate before the verifier, landing wait), not the time a job stayed open\n           did not land: {} job(s), {:.1} min\n           basis: time spent (invocation wall times plus measured check durations), not the time from dispatch to close{build_wait}",
             self.landed_total,
             self.window_jobs,
             self.median_minutes,
@@ -1706,7 +1750,7 @@ impl Athena {
             }
             // An interrupted job that was already retried is not resumed again, so its hold is not shown.
             if state == "proposed" || (state == "interrupted" && line.retried_as.is_none()) {
-                line.hold = crate::disk::read_hold(&self.state, job.id()).map(|h| h.text());
+                line.hold = crate::disk::read_any_hold(&self.state, job.id()).map(|h| h.text());
             }
             // Queued requests have not run; they show under open work.
             if recent.len() < 10 && state != "queued" {
@@ -2886,6 +2930,14 @@ pub(crate) mod planning_cost_tests {
     }
 
     fn test_run(seconds: f64, basis: &str) -> athena_data::records::CheckRun {
+        queued_test_run(seconds, basis, None)
+    }
+
+    fn queued_test_run(
+        seconds: f64,
+        basis: &str,
+        queued_s: Option<f64>,
+    ) -> athena_data::records::CheckRun {
         athena_data::records::CheckRun {
             name: "test".into(),
             command: vec!["cargo".into(), "test".into()],
@@ -2898,6 +2950,7 @@ pub(crate) mod planning_cost_tests {
             failed_tests: Vec::new(),
             reused: false,
             revert_for: Vec::new(),
+            queued_s,
         }
     }
 
@@ -3273,6 +3326,66 @@ pub(crate) mod planning_cost_tests {
             verifier,
             landing_and_rebuild: landing,
         }
+    }
+
+    /// A landed job whose verification checks carry the given `queued_s` values, one check per value.
+    fn landed_job_with_waits(text: &str, start: &str, waits: &[Option<f64>]) -> Vec<AnyRecord> {
+        let mut records = timed_job(
+            text,
+            start.parse().unwrap(),
+            minutes(1.0, 0.0, 5.0, 2.0, 3.0, 1.0),
+            OutcomeState::Landed,
+        );
+        for record in &mut records {
+            if let AnyRecord::Verification(v) = record {
+                v.checks = waits
+                    .iter()
+                    .enumerate()
+                    .map(|(n, queued)| {
+                        let mut check = queued_test_run(60.0, "athena monotonic clock", *queued);
+                        check.name = format!("check-{n}");
+                        check
+                    })
+                    .collect();
+            }
+        }
+        records
+    }
+
+    #[test]
+    fn the_throughput_section_sums_build_wait() {
+        let mut all = landed_job_with_waits(
+            "20261029-000000-aaab",
+            "2026-10-29T00:00:00Z",
+            &[Some(12.0), None],
+        );
+        all.extend(landed_job_with_waits(
+            "20261029-010000-aaac",
+            "2026-10-29T01:00:00Z",
+            &[Some(30.0)],
+        ));
+        let text = Throughput::compute(&loaded(all))
+            .expect("landed jobs")
+            .text();
+        let line = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("build wait"))
+            .unwrap_or_else(|| panic!("no build wait line in:\n{text}"));
+        assert!(
+            line.contains("42.0 s over 2 check(s), longest 30.0 s"),
+            "{line}"
+        );
+        let basis = text.lines().skip_while(|l| l != &line).nth(1).unwrap();
+        assert!(basis.contains("athena monotonic clock"), "{basis}");
+        assert!(basis.trim_start().starts_with("basis:"), "{basis}");
+    }
+
+    #[test]
+    fn no_recorded_wait_gives_no_build_wait_line() {
+        let all = landed_job_with_waits("20261029-000000-aaab", "2026-10-29T00:00:00Z", &[None]);
+        let throughput = Throughput::compute(&loaded(all)).expect("a landed job");
+        assert_eq!(throughput.build_wait, None);
+        assert!(!throughput.text().contains("build wait"));
     }
 
     #[test]

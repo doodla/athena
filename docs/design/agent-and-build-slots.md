@@ -19,7 +19,7 @@ Nothing in this table is created by this note. Each row says what the code does 
 | What exists | Where | What this design adds |
 | --- | --- | --- |
 | `athena drain` runs the independent items of one plan group at once, up to `[parallel] max_concurrency` (default 1, ceiling 8 in `MAX_CONCURRENCY_CEILING`; `athena.toml` sets 2). One thread per worker; landing stays one at a time behind one lock | `docs/design/parallel-jobs.md` (opening section, "First slice built"); `crates/athena-data/src/config.rs` (`Parallel`); `athena.toml` (`[parallel]`) | **Extends.** The worker count becomes the agent-slot count and its ceiling is raised (build job 6). A worker no longer implies a build: builds are a separate, smaller pool (section 4) |
-| `[drain.pipeline]` with `max_in_flight`, `max_check_slots` (default 1), `reserve_disk_gb` (default 10), and the disk bound `floor((free - reserve - check_slots x T) / (T + S))` with T = one cold target directory, S = one worktree | `docs/design/async-drain.md` sections 5 and 9; `crates/athena-core/src/disk.rs` (`in_flight_limit`, `start_decision`, `Figures`, `ESTIMATE_T_BYTES` = 6 GB, `ESTIMATE_S_BYTES` = 0.2 GB); `crates/athena-data/src/config.rs` (`PipelineConfig`) | **Reused.** `max_check_slots` is read only inside the disk formula: a search of `crates/` finds it in `config.rs` and `disk.rs` and nowhere in `crates/athena-cli/`, so nothing counts running builds against it. This design turns it into an enforced count (build job 3) |
+| `[drain.pipeline]` with `max_in_flight`, `max_check_slots` (default 1), `reserve_disk_gb` (default 10), and the disk bound `floor((free - reserve - check_slots x T) / (T + S))` with T = one cold target directory, S = one worktree | `docs/design/async-drain.md` sections 5 and 9; `crates/athena-core/src/disk.rs` (`in_flight_limit`, `start_decision`, `Figures`, `ESTIMATE_T_BYTES` = 6 GB, `ESTIMATE_S_BYTES` = 0.2 GB); `crates/athena-data/src/config.rs` (`PipelineConfig`) | **Reused.** `max_check_slots` is read only inside the disk formula: a search of `crates/` finds it in `config.rs` and `disk.rs` and nowhere in `crates/athena-cli/`, so nothing counts running builds against it. Build job 3 turned it into an enforced count (`crates/athena-core/src/slots.rs`; built, see section 8) |
 | Disk guard: `[disk] min_free_gb` (default 10) checked at dispatch, before the producer, before the checks and before the verifier; idle jobs' `target/` is removed first; a low disk holds the job, it does not fail it | `crates/athena-core/src/disk.rs` (module comment); `crates/athena-core/src/run/checks.rs` (`SnapExec::exec` gates once before the first local check; `free_producer_build` removes `target/produce` before the checks) | **Reused** as the last line of defence. The queue (section 4) keeps most starts from reaching it |
 | Each job builds in its own directory: `CARGO_TARGET_DIR = "{job_dir}/target/{side}"`, and a build directory outside the job's directory is refused (D46) | `athena.toml` (`[capabilities.change.env]`); `crates/athena-agent/src/env.rs` (`BUILD_DIR_VARS`, module comment) | **Changes** how a job's directory reaches a slot's warm build (section 5, build job 5) without changing the rule that a job only ever builds in a directory it was given |
 | Agents may run `cargo build`, `check`, `test`, `clippy`, `run`, `doc` through Bash; `cargo` options that set the build configuration or directories are refused | `athena.toml` (`producer_commands`, `verifier_commands`); `crates/athena-agent/src/policy.rs` (`check_cargo`) | **Extends.** The producer's own cargo runs are builds too (the producer is not build-free). They take a build slot per command (build job 4) |
@@ -378,6 +378,24 @@ Each change is one focused job with its own tests, lands on its own, and reads i
    summed by a new "build wait" line in the throughput section of `status --snapshot`; and the count of jobs
    closed with reason text "low disk" (`records/jobs/**/outcome.json`; 6 today).
    Depends on: nothing (a limit of 1 reproduces today's one-build behaviour).
+   **Built** (local-check part only). What was chosen where the note left room:
+   - The slot files are `slots/slot-<n>.lock` under the state directory. A waiting request holds a locked ticket
+     file under `slots/queue/`, created under a temporary name, locked and then renamed into place, so a visible
+     ticket whose lock is free belongs to a dead process and is removed. Only the head ticket (class, then time
+     asked) tries the slot files. Requests poll every 250 ms; there is no daemon.
+   - Ageing moves a request up one class for each `build_age_promote_s` it has waited, down to the top class.
+     Only the check class is requested now; the landing and producer classes exist in `slots.rs` for build jobs 4
+     and 7.
+   - The slot is taken after the first-check disk gate and held until the verifier's snapshot is restored. A
+     check that had to wait runs the disk gate once more before it starts, since the first reading may be a
+     queue wait old.
+   - The slot is per check, not per job. The baseline run and the "fails without" reruns are not wrapped yet.
+   - `athena stop` still ends a wait: the kill switch is read on every poll.
+   - The hold marker for a slot wait shares the file of the low-disk marker with another shape; `athena status`,
+     `athena go` and the drain read either, and the drain reports the outcome `environment: build slot wait`, so
+     the count of "low disk" outcomes above stays a count of disk holds.
+   - `queued_s` is stored only for checks that took a slot; the "build wait" line prints the sum, the number of
+     such checks and the longest wait. The peak number of slots held at once is not recorded yet (build job 4).
 4. **Take a build slot for each producer cargo command.**
    Touches: `crates/athena-agent/src/env.rs` (puts a wrapper directory first on the agent's `PATH`); new
    `crates/athena-cli/src/slot_exec.rs` and its wiring in `crates/athena-cli/src/main.rs` (a `build-slot -- <cmd>`
