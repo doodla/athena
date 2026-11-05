@@ -1,0 +1,196 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261105-170035-1704",
+  "candidate_commit": "337c02d4402bdc9beddbbfc28cc2d819fbc2325b",
+  "verified_fingerprint": "sha256:94ab32af2f3c01dce1d53cbbb44c83699af4305b10fc7a04bd388b02147cc88c",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "not run"
+      },
+      "output_tail": "",
+      "note": "not run: every changed path matches skip_when_only (docs/, *.md)"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "not run"
+      },
+      "output_tail": "",
+      "note": "not run: every changed path matches skip_when_only (docs/, *.md)"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42071534057 for 337c02d4402bdc9beddbbfc28cc2d819fbc2325b",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 4,
+  "criteria": [
+    {
+      "criterion": "Exactly one new file under docs/design/ is added and no other path changes (check with git status and git diff); CHANGELOG.md, athena.toml, defaults.toml and workflows are untouched.",
+      "kind": "content",
+      "met": true,
+      "evidence": "`git diff HEAD~1 --stat` lists only docs/design/many-agents-few-builds.md, with 180 insertions. `git status --short` is clean. CHANGELOG.md, athena.toml, defaults.toml and the workflows are not touched.",
+      "commands": [
+        "git status --short",
+        "git diff HEAD~1 --stat"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The design has an Existing code section that reuses or extends crates/athena-data/src/config.rs, crates/athena-core/src/disk.rs, crates/athena-core/src/run/mod.rs, crates/athena-core/src/state.rs and docs/design/warm-baseline-build.md, saying what each already does and what the design builds on.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Section 2's table covers all five files. I checked its claims against the code. config.rs:241 has MAX_CONCURRENCY_CEILING = 8, and it bounds max_concurrency (line 694) and max_in_flight (line 717). disk.rs has ESTIMATE_T_BYTES = 6 GB and ESTIMATE_S_BYTES = GB/5; its in_flight_limit formula matches the note; start_hold's comment says 'a gate, not a lock'. state.rs:272 has remove_produce, and try_lock_job, produce_dir, remove_target and other_jobs_in_flight exist. run/mod.rs:1817-1824 is the replay cargo build, with CARGO_TARGET_DIR and run_bounded. athena.toml sets CARGO_TARGET_DIR = \"{job_dir}/target/{side}\". Finding (b) of the earlier job is fixed: remove_produce is placed in state.rs.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A measurements section splits job wall time over the last 3 days into model time, local build and test time, and waiting, with numbers. Each figure cites the job record ids or files it came from, unmeasured numbers are labeled estimates, and one line says what the jobs left out of the sample are.",
+      "kind": "content",
+      "met": false,
+      "evidence": "The split and its sources are right. `status --snapshot` prints reading 0.6, planning 4.3, producer 12.8, checks 0.6, verifier 3.5, and landing and rebuild 1007.9; 44 of 47 verification.json files have reused checks (39 with three, 5 with one); the y72x durations match its verification.json. The exclusion line is wrong, though. It says '59 job directories created in the window, 4 have no outcome.json ... the other 55 each carry a measured wall_time_execution'. The snapshot holds about 138 job directories dated 20261103 to 20261105 (my manual count of the listing). Of these, 59 have job.json and 64 have outcome.json with wall_time_execution. The roughly 80 directories with only request.json or invocations (queued or proposed requests, and jobs dropped before dispatch) are not mentioned at all. This is the same finding (c) the retry was meant to fix: the reading asks the note to say what the 'roughly 77 excluded job directories' are. The line describes 4 different ones and gives a wrong total and a wrong measured count.",
+      "commands": [
+        "cargo run -q -p athena-cli -- status --snapshot /root/.local/state/athena/athena-77cba81fd890/jobs/20261105-170035-1704/evidence"
+      ],
+      "commands_verified": false
+    },
+    {
+      "criterion": "The note defines agent slots and build slots separately, including a queue for build slots, and states how a job acquires and releases a build slot around cargo runs. It states whether a lane or target directory is held per job or per cargo run, and that choice is consistent across all sections.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Section 4's table defines agent slot, lane and build slot separately. Section 4.1 gives the ticket queue and the acquire and release steps: a flock'd slots/build-<n>.lock, first come first served by oldest ticket, and the lock drops when the process exits. The note states once that a job 'holds its lane for the whole job and a build slot for one cargo run'. Sections 4.2, 5, 6, 7 and step 5 all use the same choice.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The note proposes a way for jobs to share compiled output, compares at least two alternatives, and gives an expected per-job disk figure against the current 10 to 12 GB.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Section 5 compares options A to E: private target, shared target, sccache, hardlink-seeded third-party baseline, and D with less debug information. It gives per-job figures labeled as estimates: 0.2 GB with no lane, 4.4 GB private plus a 6.6 GB share under D, and 2.8 GB plus 4.2 GB under E, each set against 10 to 12 GB. I checked the arithmetic: 0.6 x 11 = 6.6, (17 - 6.6) / 4.4 = 2.36, (17 - 4.2) / 2.8 = 4.57.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The note states how many agents and how many builds this machine can run at once, with arithmetic from 4 CPUs, 15 GB memory and about 27 GB disk, and says whether MAX_CONCURRENCY_CEILING must be raised.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Section 6 gives 2 builds, from CPU (2 x 2 jobs), memory (2 x 3 GB) and disk. It gives 16 agents, from 15 - 1.5 - 6 = 7.5 GB, then 7.5 / 0.35 = 21, then 21 x 0.75 = 16, and 24 only if each agent uses 0.31 GB or less. The per-run and per-agent memory figures are labeled estimates. On the ceiling, it answers that 16 agents would need it raised, but proposes a separate agent ceiling instead and keeps the ceiling at 8. The arithmetic checks out.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A build order lists small changes, each landable alone. Each names the files or functions it touches (for example config.rs, run/mod.rs, state.rs for remove_produce, disk.rs) and states how its effect will be measured.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Section 8 lists 7 steps. Each names its files and functions (run/mod.rs run_bounded call sites, config.rs near line 694, state.rs beside try_lock_job and remove_produce, disk.rs in_flight_limit, start_decision and reclaim_interrupted_targets, env.rs, hooks.rs, policy.rs), and each gives a measurement or test.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The doc-only change leaves the build green: the recorded check run of cargo test and cargo clippy --all-targets --locked -- -D warnings passes, and the verifier can run cargo test and cargo clippy itself.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's record shows `cargo test --locked` passed, reused from CI run 42071534057 for 337c02d4. The recorded clippy was skipped (skip_when_only, docs-only), so I ran clippy myself and it finished clean with no warnings. I did not rerun the full test suite, as the brief instructs.",
+      "commands": [
+        "cargo test --locked",
+        "cargo clippy --all-targets --locked -- -D warnings"
+      ],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The line on jobs left out of the sample gives the wrong population. It does not describe the roughly 80 directories that hold only a request, which is the earlier job's finding (c) left unfixed.",
+      "evidence": "The note says '59 job directories created in the window, 4 have no outcome.json ... the other 55 each carry a measured wall_time_execution'. In the evidence snapshot, records/jobs/2026-11/2026110[345]-* holds about 138 directories (my manual count); 59 have job.json, 64 have outcome.json with wall_time_execution, and about 96 have request.json. Many hold only request.json or invocations (for example 20261103-004819-814c and 20261104-013524-85wt) and are never mentioned. The reading required the note to say what the roughly 77 excluded directories are (no outcome.json, or still in flight).",
+      "location": "docs/design/many-agents-few-builds.md section 3, paragraph 'What the jobs left out of the sample are'",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "Section 5 says the 10 to 12 GB figure is used for the safe bound, but the lane count comes from the 6 GB code estimate.",
+      "evidence": "'the 10 to 12 GB figure is the one used for the safe bound below'. Then 'option A, produce side only (6 GB, ESTIMATE_T_BYTES): 2 lanes; with the verify side built too (11 GB), 1 lane'. Section 6 then says disk holds 2 lanes at 6 GB. At 10 to 12 GB with the 10 GB reserve, the safe bound is 1 lane. The '2 builds' answer depends on the 6 GB estimate, and the note does not say so plainly.",
+      "location": "docs/design/many-agents-few-builds.md sections 5 and 6",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "Step 4 names hooks.rs for the binary's dispatch on its own file name, but that dispatch is in main.rs.",
+      "evidence": "crates/athena-cli/src/main.rs:499 checks `name == \"pre-commit\" || name == \"commit-msg\"`. hooks.rs holds the handlers. A cargo-name dispatch would touch main.rs too.",
+      "location": "docs/design/many-agents-few-builds.md section 4.1 and step 4",
+      "source": "verifier"
+    },
+    {
+      "severity": "nit",
+      "summary": "The '21 cases in 19 jobs' low-disk failure figure cites 'the brief's failure-class list', which a reader cannot check from the note.",
+      "evidence": "Step 5's measurement column cites the failure-class list but no file or job id.",
+      "location": "docs/design/many-agents-few-builds.md section 8, step 5",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "1 of 8 criteria unmet",
+    "1 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "The note fails. It is well built and mostly accurate. It is one new file in docs/design/. Its Existing-code claims match the code: the ceiling of 8 at config.rs:241, the in_flight_limit formula and the 6 GB and 0.2 GB estimates in disk.rs, remove_produce at state.rs:272, and the replay build in run/mod.rs. The time split (21.2 minutes of model time, 0.6 minutes of checks, a 1007.9-minute landing wait) matches `athena status --snapshot`, and the CI-reuse count of 44 of 47 matches the verification.json files. It settles that a job holds its lane for the whole job and a build slot for one cargo run, and uses that choice in every section. The arithmetic for agents, builds and disk checks out, and the build order is concrete. Clippy, which I ran myself, is clean, and the recorded cargo test passed. It fails on criterion 3: the line on what was left out of the sample is wrong. It counts 59 job directories in the window with 4 excluded. The snapshot holds about 138 directories and 64 measured outcomes, and the roughly 80 directories that hold only a request are never mentioned. That is the earlier job's finding (c), which this retry was meant to fix. Smaller issues: the 2-lane disk answer relies on the 6 GB code estimate while the note says it uses 10 to 12 GB, and step 4 names hooks.rs where the name dispatch is in main.rs. The fix is to rewrite the exclusion line from the real directory count and name the request-only directories."
+}

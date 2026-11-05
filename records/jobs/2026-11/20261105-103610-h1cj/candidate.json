@@ -1,0 +1,115 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261105-103610-h1cj",
+  "base_commit": "43b367459c3d8ceec251c5e37d6844399b54e835",
+  "base_fingerprint": "sha256:8436f7bb95e6a19ee3d2ca343ce7e021e8f516c93a284175912768d27ed45151",
+  "previous_job": "20261105-160232-t9yq",
+  "candidate_commit": "d4907149927d200a0521bd8dbba565745bfc9a3f",
+  "candidate_tree": "051afef36bc23062e18bb8f0c2e36d6b7d8f457c",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 327766
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 248477
+    }
+  ],
+  "fingerprint": "sha256:5e67daf4525b67c7171906715cb6b30d4cf1a0e7d94db584e11fd8a4a4804c26",
+  "violations": [],
+  "producer_report": {
+    "summary": "With a bound of 1 and `Steps::read_ahead()` above 0, `drain_concurrent` now reads (and for hard jobs plans) the next queued items while the current job runs, up to the window. Three code edits in drain.rs. (1) `drain_with` keeps the rest of a truncated first batch and passes it on as `later`, so independent items in the same plan group can be read ahead. (2) The `drain_concurrent` closure calls `run_serial` only when the bound is 1 and `read_ahead()` is 0. Otherwise it calls `run_parallel`. (3) `run_parallel` returns early only on window 0. The module Read-ahead bullet, the docs on `Steps::read_ahead`, `drain_concurrent` and `run_parallel`, and the State comment now match. I added a `World.refuses` field and a `refusing` builder to the test fake. I added four tests: chain, independent items, limit of 1, and a refused look-ahead reading. I rewrote the bound-of-one test as `read_ahead_is_off_with_a_window_of_zero`. I added a CHANGELOG entry under Unreleased. The `drain_concurrent` bound-1 tests in crates/athena-cli/tests/drain.rs still pass, since their stubs keep `read_ahead` at 0.",
+    "files": [
+      "crates/athena-cli/src/drain.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --lib read_ahead",
+        "result": "pass",
+        "note": "28 of 29 passed on the first run. The one failure was my refusal test's count of `read b`, which I corrected."
+      },
+      {
+        "command": "cargo test -p athena-cli --lib read_ahead_of_a_refused",
+        "result": "pass",
+        "note": "passes after the fix"
+      },
+      {
+        "command": "cargo test -p athena-cli -q",
+        "result": "pass",
+        "note": "every test binary reports ok, including crates/athena-cli/tests/drain.rs"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "no warnings"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "no output"
+      },
+      {
+        "command": "cargo test -p xtask --test policy -q",
+        "result": "pass",
+        "note": "17 passed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-cli/src/drain.rs: one job at a time (drain, or drain_concurrent with bound 1), a queue of one running job plus three more queued items, window 3. While the first job is gated in `run`, the log shows `read` for the next items before `land` of the first job. Verified with `cargo test -p athena-cli read_ahead`.",
+        "status": "met",
+        "evidence": "Two tests added: `read_ahead_reads_the_next_items_while_a_single_job_runs` (chain a to d) and `read_ahead_reads_independent_items_while_a_single_job_runs` (one plan group). Both use `drain_concurrent` with bound 1 and window 3, and gate `a` on `read b`, `read c` and `read d`. They assert each of those reads is logged before `end a` and `land a`, and that each item is read once. Both pass in `cargo test -p athena-cli --lib read_ahead`. I did not run them against the old source."
+      },
+      {
+        "criterion": "A new test with look-ahead limit 1 and the same queue: while the first job runs, exactly one later item is read (`world.count(\"read c\") == 0` and `read b` is logged, or the equivalent for the fake's item names), and the next is read only after the held reading is claimed. Verified with `cargo test -p athena-cli read_ahead`.",
+        "status": "met",
+        "evidence": "`read_ahead_with_a_limit_of_one_reads_one_item_ahead` uses window 1 and the chain a to d. It asserts that the `read ` entries before `end a` are exactly [`read a`, `read b`]. It also asserts `end a` is before `read c`, `read c` is before `end b`, each item is read once, and `widest <= 2`. It passes."
+      },
+      {
+        "criterion": "A new test where the look-ahead reading of a queued item is refused (not runnable or an error) while the first job runs: the batch still lands the first job, the refused item is reported as it is today (same line, or same stop or reading-refused outcome as when read at its turn), and the pump's drop note appears in `report.notes`. Verified with `cargo test -p athena-cli read_ahead`.",
+        "status": "met",
+        "evidence": "`read_ahead_of_a_refused_reading_is_reported_as_when_it_starts` uses a new `World.refuses` field and a `refusing` builder. It runs the same queue with window 1 and window 0. With window 1 it asserts `read b` is before `end a`, `end a` is before `land a`, `landed >= 1`, and that `report.notes` has 'the reading made ahead of b was dropped'. It asserts b's (outcome, reason, landing), the stop, the landed count and the notes other than the drop note equal the window-0 report. It also asserts `read b` is logged 3 times with the look-ahead and 2 times without, so the look-ahead is the one extra reading. It passes."
+      },
+      {
+        "criterion": "The existing read-ahead tests still pass, with `read_ahead_is_off_with_a_bound_of_one` rewritten so that window 0 still means no reading ahead for drain and for drain_concurrent(1). Every item is read after the job before it landed, and `plan_ahead` is never called. Verified with `cargo test -p athena-cli` and `cargo clippy --all-targets -- -D warnings`.",
+        "status": "met",
+        "evidence": "The test is rewritten as `read_ahead_is_off_with_a_window_of_zero`. It covers `drain_concurrent` 1 with window 0, `drain` with window 0, `drain_concurrent` 2 with window 0, and `drain` with window 1. Each case asserts `land a < read b`, `land b < read c`, no `plan_ahead b` and no stale note. `cargo test -p athena-cli -q` passes in every binary. `cargo clippy --all-targets --locked -- -D warnings` is clean."
+      },
+      {
+        "criterion": "The module doc in crates/athena-cli/src/drain.rs (the Read-ahead bullet) no longer says nothing is read ahead with one job at a time. It says read-ahead applies there too and is bounded by `Steps::read_ahead`. `cargo fmt --check` passes.",
+        "status": "met",
+        "evidence": "I rewrote the first sentence of the bullet (\"with one job at a time as with several\") and the closing sentences. The closing sentences now say the count of readings is bounded by `Steps::read_ahead`, that `read_ahead` 0 behaves as before, and that `drain` reads at each item's turn because its steps are not `Sync`. I also updated the docs on `Steps::read_ahead`, `drain_concurrent`, `run_parallel` and the State comment. `cargo fmt --all --check` produced no output."
+      },
+      {
+        "criterion": "Only crates/athena-cli/src/drain.rs changes, plus an optional CHANGELOG.md line if the repository's convention requires one. No governance file (athena.toml, defaults.toml, workflows) is changed.",
+        "status": "met",
+        "evidence": "`git status --short` lists only ` M CHANGELOG.md` and ` M crates/athena-cli/src/drain.rs`."
+      }
+    ],
+    "open_issues": [
+      "`athena drain` is unchanged for now, because the real steps keep `read_ahead` at 0. Setting it was out of scope.",
+      "The plain `drain` function still never reads ahead, because its steps are not `Sync`. This is stated in the module doc, the `drain_concurrent` doc and the CHANGELOG.",
+      "I did not run the full workspace `cargo test --locked`. I ran `cargo test -p athena-cli`, clippy, fmt and the policy test; Athena runs the full suite.",
+      "I did not run the new tests against the old source. The criterion 1 and 2 reasoning is that without the `drain_concurrent` change no pump exists, and without the `drain_with` split-off the independent-items test fails."
+    ],
+    "mistakes": [
+      "My first draft of the refusal test asserted `read b` was logged twice. Running it showed 3 (the look-ahead plus two reads at b's turn), so I now assert 2 without read-ahead and 3 with it."
+    ],
+    "learnings": [
+      "`drain_concurrent` with bound 1 takes the `run_parallel` path only when `Steps::read_ahead()` is above 0. With 0 it still uses `run_serial` on the calling thread.",
+      "`run_batches` with one worker still spawns a scoped thread for the worker.",
+      "`drain` takes `&dyn Steps`, which is not `Sync`, so it cannot start the read-ahead thread. It still reads each item at its turn.",
+      "A refused reading at an item's turn is read twice with no read-ahead, because the drain tries a refused item once more. With read-ahead it is read three times (one extra look-ahead reading).",
+      "`drain_with` used to drop the rest of a plan group when it kept one item. It now passes that rest on as `later`, so the pump can read it. The next wave still rebuilds the batches from `tried`, so what is dispatched is unchanged."
+    ],
+    "desires": [
+      "A way to read the persisted large-output file from a cargo test run, or a quiet default for cargo test output."
+    ]
+  }
+}

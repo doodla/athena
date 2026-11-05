@@ -1,0 +1,143 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261105-103610-h1cj",
+  "n": 1,
+  "at": "2026-11-05T16:33:18.031313724Z",
+  "invocation_seq": 1,
+  "base_commit": "fef1c3173b2ac94b78a6ece55d531105a9f500b8",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Read ahead queued items while a single job runs, up to the limit",
+  "summary": "Read-ahead (reading and, for hard jobs, planning the next queued items while a job runs) already exists in crates/athena-cli/src/drain.rs, but only for two or more concurrent jobs. It is off for `drain` and for a bound of 1, so a batch running one job reads each next item only when it reaches it. I will make read-ahead work with one job at a time, limited by `Steps::read_ahead`, so the next job is ready when the slot frees. The audience is the person running a batch and the verifier who runs the tests.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust in drain.rs."
+    },
+    {
+      "id": "tested",
+      "how": "Three new tests; cargo test and clippy must pass."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name the cargo test commands the verifier runs."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the order of read, run, and land calls in the logs, not the existence of wiring."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to one file."
+    },
+    {
+      "id": "strangers",
+      "how": "The module doc and test comments are updated for an outside reader."
+    },
+    {
+      "id": "mechanism",
+      "how": "The look-ahead limit is enforced by the existing `pick_ahead` window check and covered by a test."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that the next job's reading exists before the slot frees, not that code was added."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-cli/src/drain.rs. The entry points are `drain` (calls run_serial) and `drain_concurrent` (calls run_serial when workers == 1, else run_parallel). `drain_with` plans, takes batches_for(...).remove(0), truncates it to one item when one_at_a_time, marks it tried, then calls run(d, vec![now], rest). `run_parallel` returns early to run_batches when `window == 0 || workers < 2`; otherwise it spawns `read_ahead_pump`. `pick_ahead` chooses items in later batches. `read_ahead_pump` calls `Steps::read`, then `plan_ahead`, and stores an `Ahead`. A refused or erroring reading is dropped with a note and is read again by `claim`/`attempts` when the item starts. Reading holds `caps.read` against the budget.",
+    "The change is in drain.rs and its tests only. The module doc, which says nothing is read ahead with one job at a time, must be updated. The existing test `read_ahead_is_off_with_a_bound_of_one` (read_ahead_tests module) asserts the old behavior for bound 1 and must change. Its window-0 case stays valid.",
+    "Design: when only one job runs at a time and `Steps::read_ahead()` > 0, the pump runs beside the single worker. When drain_with truncates a batch to one item, the dropped remainder is passed on in `later` so it can be read ahead. The pump keeps its existing guards: window, job limit, budget fit for a read plus a run, disjoint touched paths, and stop. `Steps::read_ahead()` is the look-ahead limit, so no new config is needed. The default stays 0 in the trait, and the real steps do not turn it on, so athena.toml is not touched.",
+    "No record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are not involved. The change adds no refusal rule and does not tighten any, so no newly-refused-readings percentage applies. A reading refused during look-ahead is not a new refusal: it is reported as today, when the item starts.",
+    "Tests use the existing `World` fake in read_ahead_tests, which logs `read x`, `plan_ahead x`, `land x`, and gates calls. The property is measured through the log order of `Steps` calls and the report, not through stand-ins like flags."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/src/drain.rs: one job at a time (drain, or drain_concurrent with bound 1), a queue of one running job plus three more queued items, window 3. While the first job is gated in `run`, the log shows `read` for the next items before `land` of the first job. Verified with `cargo test -p athena-cli read_ahead`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test with look-ahead limit 1 and the same queue: while the first job runs, exactly one later item is read (`world.count(\"read c\") == 0` and `read b` is logged, or the equivalent for the fake's item names), and the next is read only after the held reading is claimed. Verified with `cargo test -p athena-cli read_ahead`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test where the look-ahead reading of a queued item is refused (not runnable or an error) while the first job runs: the batch still lands the first job, the refused item is reported as it is today (same line, or same stop or reading-refused outcome as when read at its turn), and the pump's drop note appears in `report.notes`. Verified with `cargo test -p athena-cli read_ahead`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The existing read-ahead tests still pass, with `read_ahead_is_off_with_a_bound_of_one` rewritten so that window 0 still means no reading ahead for drain and for drain_concurrent(1). Every item is read after the job before it landed, and `plan_ahead` is never called. Verified with `cargo test -p athena-cli` and `cargo clippy --all-targets -- -D warnings`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The module doc in crates/athena-cli/src/drain.rs (the Read-ahead bullet) no longer says nothing is read ahead with one job at a time. It says read-ahead applies there too and is bounded by `Steps::read_ahead`. `cargo fmt --check` passes.",
+      "kind": "content"
+    },
+    {
+      "text": "Only crates/athena-cli/src/drain.rs changes, plus an optional CHANGELOG.md line if the repository's convention requires one. No governance file (athena.toml, defaults.toml, workflows) is changed.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.98
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Turning read-ahead on in the real steps or setting a non-zero default for `read_ahead` in athena.toml",
+    "Changing how readings are refused, or the refusal rules",
+    "Changing landing, rating, or rebase behavior",
+    "Changes outside crates/athena-cli/src/drain.rs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6723716381418093,
+      "p_user_intervenes": 0.08527472527472527,
+      "cost_usd": {
+        "p10": 0.5584188368931989,
+        "p50": 1.3504122,
+        "p90": 4.016269156491637
+      },
+      "wall_time_s": {
+        "p10": 545.7899865723028,
+        "p50": 1980.2520507261522,
+        "p90": 4206.327679514252
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass chance than the reference because the change touches concurrency in a large file (drain.rs is over 5000 lines) and the old bound-of-one test must be rewritten.",
+  "hard_reason": "It changes the run pipeline (the drain's reading and planning order, and how it spends the budget and the job limit).",
+  "producer_effort": "high"
+}
