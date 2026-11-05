@@ -1,0 +1,141 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261105-170019-3v2x",
+  "n": 1,
+  "at": "2026-11-05T23:42:58.101599834Z",
+  "invocation_seq": 1,
+  "base_commit": "a27cac8f1ce3bf4a4297971f636c7244ed002168",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Count docs-only skipped or CI-reused checks as seen for 'still passes'",
+  "summary": "The verdict's seen-running rule (D43, `judge` in verify.rs) now accepts a check Athena skipped by the docs-only path rule (`skip_when_only` note) as seen, when the change touches only docs. A passing CI-reused check already counts. This unblocks criteria like 'cargo test and cargo clippy still pass' on docs-only changes such as the many-agents design note. Audience: Athena's verifier and the user reading verdicts.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Two new tests plus cargo test and clippy must stay clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria call `judge` and check met and commands_verified."
+    },
+    {
+      "id": "root-cause",
+      "how": "The rule is fixed in the judge's seen-running rule, not by special-casing one job."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test on the new tests."
+    },
+    {
+      "id": "rust",
+      "how": "All code is Rust."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in verify.rs, with minimal plumbing at callers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/verify.rs (`judge`: `ran` is built from checks with exit 0 or reused-without-exit on matching candidate/checks tree, lines ~370-395; unseen commands make a behavior criterion unmet at ~523-554; test helpers `check`, `reused_from_ci`, `judge_recorded`, and the existing test `a_skipped_check_that_was_not_reused_does_not_count_as_run` ~1991), crates/athena-core/src/checks.rs (`skip_note` writes 'not run: every changed path matches skip_when_only (...)' and `skipped_run` yields exit_code None, passed true, reused false), crates/athena-core/src/routing.rs (docs/design kinds skip fmt and clippy when only `docs/` or `*.md` changed), and the caller crates/athena-core/src/run/verification.rs:389 plus send_back.rs:264. The property is measured directly by calling `judge` and reading `criteria[i].met` and `commands_verified`; no reading/refusal rule or record file under crates/ is added, so records validation is not touched.",
+    "`judge` has no changed-path input today. The producer should either add a field such as `changed_paths` to `VerdictInputs` (and set it in verification.rs, send_back.rs and the verify.rs test constructors) and treat a check as seen only when every changed path is docs-only, or rely on the skip note. Preferring the path input, because a skipped record on a code change must not count. Docs-only means the same `docs/` and `*.md` patterns routing uses, ideally via the shared `path_matches` rather than a copy.",
+    "Only a skipped record whose note comes from the `skip_when_only` rule counts; a skip for another reason (for example 'not run: CI was not green') or a failed record still does not. The existing candidate-tree and checks-tree match condition stays.",
+    "The user said the files changed are verify.rs and its tests, so the run caller edits are minimal field plumbing only. No change to athena.toml, defaults.toml or workflows is needed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-core/src/verify.rs has a docs-only change (changed paths only under docs/ or *.md) with clippy skipped by the skip_when_only rule and test reused from GitHub CI. A criterion citing `cargo clippy` and `cargo test` is met, with commands_verified true and no D43 'cited but not seen running' finding. Run `cargo test -p athena-core verify` to check.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test has a code change (a .rs path changed) with clippy recorded as skipped. A criterion citing `cargo clippy` is still unmet, with commands_verified false and the 'cited but not seen running' finding. Run `cargo test -p athena-core verify` to check.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Existing tests still pass, including a_skipped_check_that_was_not_reused_does_not_count_as_run, a_failed_check_reused_from_ci_does_not_count_as_run and the other-tree tests; a skip for a reason other than the docs-only path rule, or a failed check, still does not count. Run `cargo test` and `cargo clippy --all-targets`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The doc comments on `VerdictInputs`/`judge` in verify.rs state the new rule: a check skipped by the docs-only path rule on a docs-only change counts as seen, and name the docs-only definition used.",
+      "kind": "content"
+    },
+    {
+      "text": "The change does not widen what counts as seen for non-docs changes. Run `cargo test -p athena-core` and read the diff with `git diff` to confirm the only new counting path is gated on docs-only changed paths.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Changing which checks routing skips or the skip_when_only patterns",
+    "Changing how CI results are reused (ci_result.rs, checks.rs)",
+    "Re-running or re-landing the many-agents design note",
+    "Any change to athena.toml, defaults.toml, or .github/workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.8
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1900.0,
+        "p90": 4300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6714628297362111,
+      "p_user_intervenes": 0.08380129589632829,
+      "cost_usd": {
+        "p10": 0.5591608,
+        "p50": 1.354814,
+        "p90": 4.0565341
+      },
+      "wall_time_s": {
+        "p10": 554.407803549423,
+        "p50": 1990.6219011185412,
+        "p90": 4209.656916398667
+      }
+    }
+  },
+  "departures": "Hard job: the change loosens the verdict gate, and plumbing a new input through callers adds some risk and cost.",
+  "urgent_reason": "Rejected attempts at docs-only jobs are wasted work; this cuts that redo for docs-only changes.",
+  "hard_reason": "It changes the verdict's seen-running rule (D43) in the gate that judges other jobs, so a mistake could let unverified criteria pass.",
+  "producer_effort": "high"
+}
