@@ -1,0 +1,154 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261104-215733-rf7z",
+  "n": 1,
+  "at": "2026-11-05T01:55:45.416397609Z",
+  "invocation_seq": 1,
+  "base_commit": "bed4c45f99afb0416b043321bcfb90e9c5d13503",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Land in the same step when checks turn green during the poll",
+  "summary": "Make the drain's locked rebase, re-check and land step merge a pull request as soon as its checks go green during the poll, rather than returning Landing::Waiting and retrying about 10 minutes later. Still-pending checks at the end of the poll keep today's Waiting behaviour. The audience is the person running the drain, who loses about 10 minutes per job.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Two new tests, with cargo test and clippy clean."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check that the job lands or waits, by running the tests."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that the job merges in the same step when the checks go green."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in drain.rs."
+    },
+    {
+      "id": "root-cause",
+      "how": "The producer must locate where Waiting is returned despite a green poll."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test."
+    },
+    {
+      "id": "rust",
+      "how": "All code and tests are Rust."
+    },
+    {
+      "id": "strangers",
+      "how": "Comments are written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-cli/src/drain.rs. Drain::land takes the landing lock, runs recheck_after_rebase, then calls Steps::land and maps Landing::Landed, NotLanded or Waiting to a LandStep. PrLander::land calls athena.land_pr with crate::wiring::checks_poll, and landing_from_report maps an open pull request with Checks::Pending to Landing::Waiting. I also read crates/athena-core/src/gh/landing.rs (land_pr) and crates/athena-core/src/gh/early.rs (wait_for_checks). wait_for_checks already stops polling at the first non-pending read, and land_pr merges when the result is Green and merge_via_rest is on. So the stated bug may be in drain.rs or wiring.rs, or already fixed in core; the producer must find where Waiting is returned despite a green poll and reproduce it first.",
+    "The drain.rs test World/Steps fake has a `waiting` set that makes land return Waiting; the new tests extend that fake or call landing_from_report and Drain::land directly. The tests drive a scripted checks sequence (pending then green) with a counting fake and no real sleep.",
+    "No new record or data file under crates/ is added, so the records validation allow-list (check_record_file, AnyRecord) is not touched.",
+    "The fix is confined to crates/athena-cli/src/drain.rs and its tests as the request says. A minimal change to crates/athena-cli/src/wiring.rs or crates/athena-core/src/gh is allowed only if the root cause is there, and then it is a listed deliverable.",
+    "Merging only on green is preserved: a Red or still-Pending result never reaches the merge. This is not a new refusal rule, so no refusal-rate criterion applies."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/src/drain.rs scripts checks that are pending at first and green partway through the poll. It shows the job reports Landing::Landed (the job line is 'landed') in the same land step, with no Landing::Waiting returned and no second land call. Check with `cargo test -p athena-cli drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test scripts checks that are still pending when the poll ends. It shows the result is still Landing::Waiting, the job line still starts 'waiting to merge', and the item is not retried. This is today's behaviour. Check with `cargo test -p athena-cli drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The existing tests a_job_waiting_to_merge_is_not_a_failure_and_the_run_goes_on_to_the_next_job and a_merge_refused_for_rule_violations_while_checks_are_pending_is_reported_as_waiting still pass unchanged. Red checks still give NotLanded. Check with `cargo test -p athena-cli`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo test` passes for the workspace, `cargo clippy --all-targets` is clean and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The diff touches only crates/athena-cli/src/drain.rs, plus any file where the root cause is found. Comments or docs near the Landing::Waiting handling say that a poll which turns green merges in the same step.",
+      "kind": "content"
+    },
+    {
+      "text": "Outcome check: the diff shows the green-during-poll path ending in a merge in one locked step, rather than only adding types or wiring. Each new test would fail on the old code for the green-during-poll case.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Changing the poll length or interval",
+    "Changing the merge gate: merge only when every check is green and merge_via_rest is on",
+    "Changing the rebase and re-check rule",
+    "Changes to athena.toml or defaults.toml"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 3.6
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1900.0,
+        "p90": 4400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6716417910447762,
+      "p_user_intervenes": 0.08680089485458613,
+      "cost_usd": {
+        "p10": 0.5578657992609479,
+        "p50": 1.3460483,
+        "p90": 3.930703829772329
+      },
+      "wall_time_s": {
+        "p10": 544.8930569937622,
+        "p50": 1980.2520507261522,
+        "p90": 4203.0010755803105
+      }
+    }
+  },
+  "departures": "The poll code in athena-core already seems to merge on green, so the root cause is uncertain. That adds some risk to the verification pass rate and a little to the cost.",
+  "urgent_reason": "It cuts about 10 minutes per job of waiting and retrying, which is wasted time in the drain.",
+  "hard_reason": "It changes the drain's landing step (the locked rebase, re-check and merge pipeline), where a mistake could merge a pull request whose checks are not green.",
+  "producer_effort": "high"
+}
