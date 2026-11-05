@@ -56,6 +56,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The baseline now waits for the default branch's run when it is still in progress. Right after a landing,
+  main's run for the base's content is usually still going, and the baseline made one read, found it
+  unfinished, and fell back to a 20-minute local run (`main: no usable CI result ... on main`; 3 of the last
+  10 jobs). The lookup of main's tip now reads that run every 20 s (`routing::CI_POLL`) for at most the
+  existing `ci_wait_s` and reuses it if it passes. It runs locally, as before, if the run fails, was never
+  there (a missing run is not waited for), or is still in progress when the wait runs out. The landed
+  candidate's lookup stays one read. No key or default changed. The module doc of `ci_result.rs` and the
+  comments in `routing.rs` still describe the baseline lookup as one read with no wait; a later change can
+  correct them.
 - Per-agent budgets and timeouts in `athena.toml` are lifted, as the owner directed on 4 Nov. Old and new
   values:
   - `[budget]` `reader_usd` 0.50 -> 2.00
