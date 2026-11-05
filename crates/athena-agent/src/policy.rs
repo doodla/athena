@@ -15,7 +15,9 @@
 //!   `gh workflow list|view`, and `gh api` with GET. Its flags are an allow-list; any word starting `-f` or
 //!   `-F`, `--field`, `--raw-field`, `--input`, and a method other than GET are denied by name;
 //! - every path argument, after resolving `..` and symlinks, must lie inside the snapshot, and outside its
-//!   `.git`; output redirection is confined the same way;
+//!   `.git`; output redirection is confined the same way. The one exception is the job's evidence snapshot
+//!   (`Policy::evidence`): a directory outside the snapshot that the producer and verifier may read and
+//!   never write;
 //! - roles without write access (reader, verifier, steward) may not write at all.
 //!
 //! The file tools are confined the same way. A denial wins even where a permission rule would allow the
@@ -38,6 +40,18 @@ pub struct Policy {
     pub commands: BTreeMap<String, Vec<String>>,
     /// Whether the role may write files (only the producer).
     pub writes: bool,
+    /// The evidence snapshot: a directory outside the snapshot that may be read, never written. Only the
+    /// producer and the verifier have one. Absent in a policy file written before the snapshot existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<PathBuf>,
+}
+
+/// The evidence directory with symlinks resolved, when the policy has one that exists.
+fn evidence_root(policy: &Policy) -> Option<PathBuf> {
+    policy
+        .evidence
+        .as_ref()
+        .and_then(|dir| dir.canonicalize().ok())
 }
 
 /// The hook's answer.
@@ -81,9 +95,11 @@ pub fn evaluate(policy: &Policy, tool: &str, input: &Value, cwd: Option<&Path>) 
     let cwd = cwd.map(Path::to_path_buf).unwrap_or_else(|| root.clone());
     match tool {
         "Read" | "Grep" | "Glob" | "LS" => {
+            let evidence = evidence_root(policy);
+            let evidence = evidence.as_deref();
             for key in ["file_path", "path", "notebook_path"] {
                 if let Some(path) = input.get(key).and_then(Value::as_str)
-                    && let Err(reason) = confine(&root, &cwd, path, false)
+                    && let Err(reason) = confine(&root, &cwd, path, false, evidence)
                 {
                     return deny(reason);
                 }
@@ -98,6 +114,7 @@ pub fn evaluate(policy: &Policy, tool: &str, input: &Value, cwd: Option<&Path>) 
                     &cwd,
                     if prefix.is_empty() { "." } else { prefix },
                     false,
+                    evidence,
                 ) {
                     return deny(reason);
                 }
@@ -118,7 +135,7 @@ pub fn evaluate(policy: &Policy, tool: &str, input: &Value, cwd: Option<&Path>) 
             }
             for key in ["file_path", "notebook_path"] {
                 if let Some(path) = input.get(key).and_then(Value::as_str)
-                    && let Err(reason) = confine(&root, &cwd, path, true)
+                    && let Err(reason) = confine(&root, &cwd, path, true, None)
                 {
                     return deny(reason);
                 }
@@ -392,7 +409,15 @@ fn tokenize_word_prefix(text: &str) -> Result<(String, usize), String> {
 }
 
 /// Resolves `path` against `cwd` and checks it lies inside `root` (and, for writes, outside `.git`).
-fn confine(root: &Path, cwd: &Path, path: &str, write: bool) -> Result<PathBuf, String> {
+/// A read may also lie inside `read_extra`, the evidence snapshot; a write never may. The path is resolved
+/// first (`..` and symlinks), so neither can lead out of either directory.
+fn confine(
+    root: &Path,
+    cwd: &Path,
+    path: &str,
+    write: bool,
+    read_extra: Option<&Path>,
+) -> Result<PathBuf, String> {
     if path.starts_with('~') {
         return Err(format!(
             "{path}: paths outside your working directory are not available"
@@ -422,6 +447,9 @@ fn confine(root: &Path, cwd: &Path, path: &str, write: bool) -> Result<PathBuf, 
     let mut resolved = existing.canonicalize().unwrap_or(existing);
     for part in rest.iter().rev() {
         resolved.push(part);
+    }
+    if !write && read_extra.is_some_and(|extra| resolved.starts_with(extra)) {
+        return Ok(resolved);
     }
     if !resolved.starts_with(root) {
         return Err(format!(
@@ -566,6 +594,7 @@ fn check_segment(
                     policy.role.as_str()
                 ));
             }
+            let evidence = evidence_root(policy);
             let mut skip_mode = program == "chmod";
             for (arg, glob) in args {
                 if arg.starts_with('-') {
@@ -577,7 +606,7 @@ fn check_segment(
                 }
                 let path = if *glob { glob_prefix(arg) } else { arg };
                 let path = if path.is_empty() { "." } else { path };
-                confine(root, cwd, path, writes)?;
+                confine(root, cwd, path, writes, evidence.as_deref())?;
             }
             Ok(())
         }
@@ -636,7 +665,13 @@ fn check_cargo(
                 let value = inline
                     .map(str::to_string)
                     .or_else(|| rest.next().map(|(v, _)| v.to_string()));
-                confine(root, cwd, &value.unwrap_or_default(), false)?;
+                confine(
+                    root,
+                    cwd,
+                    &value.unwrap_or_default(),
+                    false,
+                    evidence_root(policy).as_deref(),
+                )?;
             }
             "--fix" | "--allow-dirty" | "--allow-staged" if !policy.writes => {
                 return Err(format!(
@@ -883,7 +918,7 @@ fn check_redirect(
             policy.role.as_str()
         ));
     }
-    confine(root, cwd, target, !input).map(|_| ())
+    confine(root, cwd, target, !input, evidence_root(policy).as_deref()).map(|_| ())
 }
 
 /// The permission allow rules matching a command list, for `--allowedTools`.
@@ -949,6 +984,7 @@ mod tests {
             root: root.to_path_buf(),
             commands,
             writes,
+            evidence: None,
         }
     }
 
@@ -1229,7 +1265,142 @@ mod tests {
                 ("ls".to_string(), vec!["*".into()]),
             ]),
             writes: false,
+            evidence: None,
         }
+    }
+
+    /// A snapshot directory and a sibling evidence directory with one file in it.
+    fn with_evidence(role: Role) -> (tempfile::TempDir, tempfile::TempDir, Policy) {
+        let dir = snapshot();
+        let evidence = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(evidence.path().join("records")).unwrap();
+        std::fs::write(evidence.path().join("records/a.json"), "{}").unwrap();
+        let mut p = policy(role, dir.path());
+        p.evidence = Some(evidence.path().to_path_buf());
+        (dir, evidence, p)
+    }
+
+    #[test]
+    fn the_evidence_snapshot_may_be_read_by_the_producer_and_the_verifier_and_never_written() {
+        for role in [Role::Producer, Role::Verifier] {
+            let (_dir, evidence, p) = with_evidence(role);
+            let at = evidence.path().join("records/a.json");
+            let at = at.to_str().unwrap();
+            let folder = evidence.path().to_str().unwrap();
+            // Without the exemption the same reads are denied, so the allowance below is the field's.
+            let mut plain = p.clone();
+            plain.evidence = None;
+            for (tool, input) in [
+                ("Read", json!({ "file_path": at })),
+                ("Grep", json!({ "pattern": "x", "path": folder })),
+                ("Glob", json!({ "pattern": format!("{folder}/**/*.json") })),
+            ] {
+                assert!(
+                    matches!(evaluate(&plain, tool, &input, None), Decision::Deny(_)),
+                    "{tool} without the evidence field"
+                );
+                assert_eq!(
+                    evaluate(&p, tool, &input, None),
+                    Decision::NoObjection,
+                    "{role:?} {tool}"
+                );
+            }
+            assert_eq!(
+                bash(&p, &format!("ls {folder}/records")),
+                Decision::NoObjection
+            );
+            assert_eq!(
+                bash(
+                    &p,
+                    &format!("cargo run -p athena-cli -- status --snapshot {folder}")
+                ),
+                Decision::NoObjection
+            );
+            // No write reaches it, even for the role that writes in its own working copy.
+            for tool in ["Write", "Edit", "MultiEdit"] {
+                assert!(
+                    matches!(
+                        evaluate(&p, tool, &json!({ "file_path": at }), None),
+                        Decision::Deny(_)
+                    ),
+                    "{role:?} {tool}"
+                );
+            }
+            for command in [
+                format!("rm {at}"),
+                format!("mv {at} {folder}/b.json"),
+                format!("chmod 644 {at}"),
+                format!("ls > {at}"),
+                format!("ls >> {folder}/new.txt"),
+            ] {
+                assert!(
+                    matches!(bash(&p, &command), Decision::Deny(_)),
+                    "{role:?} {command}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_evidence_exemption_follows_resolved_paths_and_covers_only_that_directory() {
+        let (dir, evidence, p) = with_evidence(Role::Producer);
+        let folder = evidence.path().to_str().unwrap().to_string();
+        let sibling = format!("{folder}-other");
+        std::fs::create_dir_all(&sibling).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "s").unwrap();
+        std::os::unix::fs::symlink(outside.path(), evidence.path().join("link")).unwrap();
+        for file_path in [
+            // A directory that only shares the evidence directory's name as a prefix.
+            format!("{sibling}/x"),
+            // Climbing out of the evidence directory, and a link out of it.
+            format!(
+                "{folder}/../{}",
+                outside.path().file_name().unwrap().to_str().unwrap()
+            ),
+            format!("{folder}/link/secret"),
+            outside.path().join("secret").to_str().unwrap().to_string(),
+        ] {
+            assert!(
+                matches!(
+                    evaluate(&p, "Read", &json!({ "file_path": file_path }), None),
+                    Decision::Deny(_)
+                ),
+                "{file_path}"
+            );
+        }
+        // The working copy is still confined as before.
+        assert!(matches!(
+            evaluate(&p, "Read", &json!({ "file_path": "/etc/hostname" }), None),
+            Decision::Deny(_)
+        ));
+        assert_eq!(
+            evaluate(
+                &p,
+                "Read",
+                &json!({ "file_path": dir.path().join("src/lib.rs") }),
+                None
+            ),
+            Decision::NoObjection
+        );
+    }
+
+    #[test]
+    fn a_policy_file_without_an_evidence_field_still_parses() {
+        let old = json!({
+            "role": "producer",
+            "root": "/work",
+            "commands": { "ls": ["*"] },
+            "writes": true
+        });
+        let p: Policy = serde_json::from_value(old).unwrap();
+        assert_eq!(p.evidence, None);
+        let text = serde_json::to_string(&p).unwrap();
+        assert!(!text.contains("evidence"), "{text}");
+        let mut with = p.clone();
+        with.evidence = Some(PathBuf::from("/e"));
+        let back: Policy = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(back, with);
     }
 
     #[test]

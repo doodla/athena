@@ -1,0 +1,317 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261104-124034-ysc4",
+  "round": 1,
+  "at": "2026-11-04T22:01:58.725200183Z",
+  "invocation_seq": 10,
+  "approach": "Fix at the source in crates/athena-cli/src/drain.rs. `Drain::attempts` ends an item whose last attempt fails, with no pause and no flag, as `ItemEnd::Failed` (drain.rs:1841); `Drain::finish` turns that into `set_stop(Stop::RepeatedFailure, ..)` (drain.rs:2426), which ends the whole batch. Change that arm to `pass_over(&item.job, \"failed twice; left for the scope guard and Hestia: <last reason>\")`, the call the Paused and Flagged arms make, so the next item runs. One thing the code showed that the first plan missed: the drain has no login stop of its own. An expired producer login closes the job as Failed with the reason `environment: producer login expired` (disk.rs:328, run/producer.rs:205-209, `StopCause::of` disk.rs:388). Environment stops do not count as spend on the scope guard's line (scope_guard.rs:78), so the line is never paused or flagged. Today such a job is retried once and then ends the batch only through `RepeatedFailure`. Deleting that arm without a replacement would let an expired login or usage limit run every queued item twice and drain the budget, which breaks the instruction to keep the login stop. So the same arm also checks the last failure's reason with `athena_core::disk::StopCause::of`. For `ProducerAuth`, `UsageLimit` and `LowDisk` it also calls `set_stop(Stop::Environment)` (the Budget arm's pass_over plus set_stop pattern). Those stops are about the machine or account, not the item. `Stop::RepeatedFailure` is replaced by `Stop::Environment` in the same place in `Stop::ALL`, which stays at 9. `Report.failed_item` and the failed-item half of `Drain.stop` are deleted, because no stop now names a single item. The help text, display special case, docs, README line, CHANGELOG and tests follow.",
+  "decisions": [
+    {
+      "choice": "The unflagged, unpaused double failure becomes a pass_over in the `ItemEnd::Failed` arm, with its own reason text 'failed twice; left for the scope guard and Hestia: <last reason>'. `ItemEnd::Failed` stays as the item end.",
+      "reason": "`pass_over` (drain.rs:1391) records the item once per run, and the scope guard's and Hestia's inputs (the job lines and job records) are unchanged. The change is one match arm at the source of the fault.",
+      "rejected": [
+        {
+          "option": "Fold the case into ItemEnd::Flagged with a synthetic reason",
+          "why": "It hides that no flag exists; `Flagged` is documented as the scope guard's flag."
+        },
+        {
+          "option": "Retry a third time before passing over",
+          "why": "Out of scope: ATTEMPTS and the retry policy do not change."
+        }
+      ]
+    },
+    {
+      "choice": "Keep a batch stop for failures that are not about the item: after the second failure, if `StopCause::of(last reason)` is ProducerAuth (expired login), UsageLimit or LowDisk, pass the item over and also `set_stop(Stop::Environment)`. Add `Stop::Environment` where `RepeatedFailure` was (label 'environment stopped', meaning that the login expired, a usage limit was reached or disk is low, so every later item would fail the same way; fix it and run the drain again). CheckTimeout and OtherEnvironment are not batch stops and are just passed over.",
+      "reason": "This answers the brief's instruction to keep the login (and disk) stops. Reading the code shows they exist only because a Failed job with an environment reason reached the RepeatedFailure arm. `StopCause` is the one place that classifies closing reasons (disk.rs:358-366), so no word list is added. The check is one extra condition in the same arm.",
+      "rejected": [
+        {
+          "option": "Delete the arm with no replacement",
+          "why": "An expired login or usage limit would run every queued item twice and spend the budget; the brief says to keep the login stop."
+        },
+        {
+          "option": "Keep Stop::RepeatedFailure and also check the reason",
+          "why": "The name and help text would still say a single item's double failure stops the batch."
+        },
+        {
+          "option": "Detect the environment cause after the first failure",
+          "why": "It changes retry behaviour; the retry policy is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Delete `Stop::RepeatedFailure`, `Report.failed_item` and the failed-item field of `Drain.stop` (`Option<(Stop, Option<String>)>` becomes `Option<Stop>`), plus the display special case, the help line and the note at drain.rs:2913-2928 that explained an overridden repeated-failure stop.",
+      "reason": "Nothing sets them any more. `Stop` and `Report` derive only Serialize and are built fresh each run, so no stored record has to parse. A variant that cannot occur and an always-null JSON key would mislead the operator and the `athena drain --help` list driven by `Stop::ALL`. `Stop::Environment` names no item.",
+      "rejected": [
+        {
+          "option": "Keep RepeatedFailure unused",
+          "why": "It would stay in `Stop::ALL`, the help text and the `--json` output as a stop that cannot happen; `pub` variants raise no dead-code warning, so only discipline would catch the drift."
+        },
+        {
+          "option": "Keep failed_item as an always-null field",
+          "why": "A permanently dead JSON key."
+        }
+      ]
+    },
+    {
+      "choice": "Edit crates/athena-cli/tests/job_plan.rs (two assertion lines) and README.md line 126 although they are not listed deliverables.",
+      "reason": "job_plan.rs:211 and :214 assert `Stop::RepeatedFailure` and `report.failed_item`; once those are removed the file does not compile and `cargo test --locked` fails. Deleting two lines for removed names is the smallest edit that keeps the workspace building. README.md:126 states 'the run ends in `repeated failure` naming it' as documented behaviour, and would be false after the change. Both are consequences of the deliverable change, not new scope.",
+      "rejected": [
+        {
+          "option": "Keep the variant and field so job_plan.rs and README stay valid",
+          "why": "It leaves a stop that cannot occur in the help and JSON, and a README that describes a stop the code never sets (see the decision above)."
+        },
+        {
+          "option": "Leave README.md alone",
+          "why": "The documented behaviour would be wrong after the change."
+        }
+      ]
+    },
+    {
+      "choice": "Do not create docs/design/warm-baseline-build.md and do not touch the CHANGELOG entry of job 20261029-160024-80qj.",
+      "reason": "The accepted reading drops that rejected job's work. The file is not in the base snapshot, and the Out of scope list names it.",
+      "rejected": [
+        {
+          "option": "Create the note to match the deliverables list",
+          "why": "It redoes a different, rejected design job."
+        }
+      ]
+    },
+    {
+      "choice": "In the matrix test, replace the `Before::RepeatedFailure` seed with a `Before::Environment` seed: an item whose run reason is `environment: producer login expired` fails twice, ending the run through the new stop. Counts stay 7*4 ran and 9 skipped. Add a `run_reason: Option<&'static str>` field to the test `Stub` that replaces the default 'ended <outcome>' reason in `Stub::run`.",
+      "reason": "The matrix needs a case where another worker's earlier stop does not hide the reinstall stop. The new Environment stop is the real successor of the old one. `run_reason` is plain data returned as the run's reason; the stop decision stays in drain.rs.",
+      "rejected": [
+        {
+          "option": "Drop the seed and recount to 6*4 and 6 skipped",
+          "why": "It loses the coverage that an earlier batch stop from an item failure is not hidden by the reinstall stop."
+        }
+      ]
+    },
+    {
+      "choice": "Leave docs/decisions.md, docs/spec.toml:1351 ('a repeated failure stops the drain'), defaults.toml 'thrash-stop' and past CHANGELOG entries as they are.",
+      "reason": "Decisions are history. defaults.toml and docs/spec.toml are governance files that are not deliverables, and the thrash-stop text is prose only. The scope guard still pauses and flags thrashing lines.",
+      "rejected": [
+        {
+          "option": "Edit docs/spec.toml:1351",
+          "why": "Not a listed deliverable; a policy test may cross-check the spec. Raised as an open question."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Change the `ItemEnd::Failed` arm of `finish` to `pass_over` (reason 'failed twice; left for the scope guard and Hestia: <last reason>') and, when `StopCause::of(last reason)` is ProducerAuth, UsageLimit or LowDisk, also `set_stop(Stop::Environment)`. Replace `Stop::RepeatedFailure` with `Stop::Environment` (enum doc, `ALL`, `label`, `meaning`). Delete `Report.failed_item`. Make `Drain.stop` an `Option<Stop>`, updating `set_stop`, `sweep` (about 2202-2206), the Needs-reinstall branch (2412) and the end-of-drain block (about 2913-2928, dropping the 'did not pass twice' note). Update the module docs (about lines 32-39, 110, 133), the comments at about 957-962, 1307, 1310, 1831-1835 and 3389, and the `ItemEnd::Failed` doc.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add the criterion 1 test and the login/environment tests; add `Stub.run_reason`; rewrite the 8 tests that asserted the stop (about lines 915-945, 1152-1175, 1280-1304, 1306-1326, 1494-1516, 4524-4539, 6723-6746, 7154-7172); replace the `Before::RepeatedFailure` matrix seed with `Before::Environment`; delete the roughly 34 `assert_ne!(.., Stop::RepeatedFailure)` / `assert_eq!(report.failed_item, ..)` lines and the `failed_item` JSON assertion at about 1576.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Replace the `match (report.stop, &report.failed_item)` at about lines 618-623 with the plain `stopped     {label}: {meaning}` line for every stop.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Replace the 'repeated failure' stop line in the `athena drain` help (about lines 254-255) with the 'environment stopped' line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "Delete the two assertions at lines 209-214 on `Stop::RepeatedFailure` and `failed_item`; the file does not compile without this edit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a `### Fixed` entry under `## [Unreleased]`: an item that fails twice with no pause or flag is passed over and the batch goes on. Name the 4 Nov 12:39pm UTC stop of job 20261029-160024-80qj ($43, 3 job slots left) and the root cause. Note that the `repeated failure` stop and `failed_item` are removed, and that an expired login, usage limit or low disk still stops the batch as `environment stopped`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "Line 126: replace 'the run ends in `repeated failure` naming it' with the pass-over behaviour; edit line 86 only if it names the stop.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read drain.rs around `ItemEnd` (about 1286-1345), `Stop` (950-1038), `Report` (1067), `attempts` (1748-1845), `set_stop` and `Drain.stop` (1142, 1424), `finish` (2395-2471), `sweep` (about 2200) and the end-of-drain block (about 2913-2985).",
+    "In drain.rs, change the `ItemEnd::Failed` arm of `finish`: take `reason = self.last_reason(&item.job, \"its last attempt did not pass\")`, call `pass_over(&item.job, &format!(\"failed twice; left for the scope guard and Hestia: {reason}\"))`, then `if matches!(StopCause::of(&reason), ProducerAuth | UsageLimit | LowDisk) { self.set_stop(Stop::Environment) }`. Import `athena_core::disk::StopCause` (drain.rs already uses `athena_core::disk::LOW_DISK`).",
+    "Replace `Stop::RepeatedFailure` with `Stop::Environment` (doc, `ALL`, `label` 'environment stopped', `meaning`). Delete `Report.failed_item` and its doc. Change `Drain.stop` to `Option<Stop>` and update `set_stop`, `sweep`, the Needs-reinstall branch and the end-of-drain block. Update every comment and module doc that mentions the old stop (lines in the files list).",
+    "Edit display.rs (print every stop with label and meaning) and main.rs (help line for `environment stopped`); delete the two stale assertions in tests/job_plan.rs.",
+    "In tests/drain.rs: add `Stub.run_reason` (read in `Stub::run`); add the criterion 1 test, the three environment/work/check-timeout tests, and rewrite the 8 stop-asserting tests; replace the `Before::RepeatedFailure` seed with `Before::Environment` (counts stay 7*4 and 9 skipped; if the seed's stub cannot be built that way, fall back to a `Stop::Requested` seed and 6*4 / 6 skipped and note it in the change description); delete the `assert_ne!`/`failed_item` lines and the JSON `failed_item` assertion.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked -p athena-cli`, then `cargo test --locked` for the workspace. Run the drain tests twice, once with `-- --test-threads=1`.",
+    "Add the CHANGELOG.md `### Fixed` entry under `## [Unreleased]` and edit README.md:126 (and line 86 only if it names the stop). Do not create docs/design/warm-baseline-build.md and do not touch any other CHANGELOG entry."
+  ],
+  "risks": [
+    {
+      "risk": "tests/drain.rs is about 7900 lines and over 40 lines mention the removed items; a partial edit leaves a compile error or weakens a test.",
+      "mitigation": "Run `cargo test --locked -p athena-cli` after each edit group and fix compile errors one test at a time. The deletions are mechanical; each of the 8 positive assertions is rewritten from a read of its test, not by sed."
+    },
+    {
+      "risk": "With no stop after a work failure, concurrent-stub tests that relied on the stop to end the run may run extra items and become order dependent.",
+      "mitigation": "The concurrent and matrix tests already order with `wait_for`. Run the drain tests twice, once with `-- --test-threads=1` and once with the default, and fix any ordering dependence by `wait_for`, not by sleeps."
+    },
+    {
+      "risk": "The environment check misclassifies: a work failure whose reason text happens to match, or an environment failure whose reason is not on the job line, so the batch is not stopped.",
+      "mitigation": "`StopCause::of` is the single classifier and reads only the `environment:` prefix or an API error 401/429 in a producer-stop detail (disk.rs:343-409), not free prose. The drain reads the reason from `Run.reason`, which is the job's closing reason (`f.reason`, drain.rs:3607-3611). Tests cover the login, work-failure and check-timeout reasons."
+    },
+    {
+      "risk": "Other test files may drain a failing item and expect the old stop (steward.rs, retry.rs).",
+      "mitigation": "Grep found no `drain::Stop` use outside drain.rs, display.rs, main.rs, tests/drain.rs and tests/job_plan.rs. The producer runs the full workspace tests; if a test needed the stop to end its drain, limit its queue to the failing item."
+    },
+    {
+      "risk": "A batch with many failing work items now spends the whole budget instead of stopping at the first double failure.",
+      "mitigation": "This is the requested behaviour. Cost is still bounded by the budget and job-limit stops and by the scope guard's pause and flag on a thrashing line. The pass-over reason names the scope guard and Hestia."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Stop::RepeatedFailure and Report.failed_item removed",
+      "dependent": "crates/athena-cli/src/display.rs:618-623 (`display::drain` matches on `(report.stop, &report.failed_item)`)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli --test drain (display assertions on stop text: 'queue empty', 'budget spent', 'stopped     reinstall needed', plus the new 'stopped     environment stopped' assertion)",
+      "reason": null
+    },
+    {
+      "name": "Stop::ALL and stop labels (RepeatedFailure replaced by Environment)",
+      "dependent": "crates/athena-cli/src/main.rs:254-255 (help text of `athena drain`) and `drain_help_documents_the_flags_and_lists_every_stop_reason` (tests/drain.rs:1881) via `Stop::ALL`; drain.rs `every_stop_reason_has_a_label_and_a_meaning` (about 4254)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli --test drain drain_help_documents_the_flags_and_lists_every_stop_reason; cargo test --locked -p athena-cli --lib every_stop_reason_has_a_label_and_a_meaning",
+      "reason": null
+    },
+    {
+      "name": "Stop::RepeatedFailure / Report.failed_item",
+      "dependent": "crates/athena-cli/tests/job_plan.rs:209-214 (asserts `Stop::RepeatedFailure` and `report.failed_item == None` for a held item)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli --test job_plan: the two assertions are deleted; the surrounding checks on the held line, the lander log and the next item landing remain",
+      "reason": null
+    },
+    {
+      "name": "Stop variants",
+      "dependent": "Grep of crates/ for `Stop::` and `.stop`: only drain.rs, display.rs, main.rs, tests/drain.rs and tests/job_plan.rs; crates/athena-cli/tests/lifecycle.rs and tests/steward.rs do not name drain `Stop`",
+      "kind": "code",
+      "test": null,
+      "reason": "No other file reads the drain `Stop` type; the build (`cargo clippy --all-targets`) proves no other reference remains."
+    },
+    {
+      "name": "Serialized report (failed_item key, stop value)",
+      "dependent": "JSON output of `athena drain --json` (`Report` derives Serialize): key `failed_item` removed, `stop` value 'repeated-failure' replaced by 'environment'; checked at tests/drain.rs:1576",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli --test drain the_json_report_names_the_stop_the_money_the_rating_and_what_is_left (the `failed_item` null assertion is deleted)",
+      "reason": "`Stop` and `Report` derive only Serialize and no Deserialize of either exists in crates/ or docs. No record stores a drain stop. The 'repeated-failure' strings in steward.rs, outputs.rs, records.rs (`WorkItemKind::RepeatedFailure`) and tests/steward.rs belong to Hestia work items, a different enum, and are not touched."
+    },
+    {
+      "name": "Left-over failed item (job records)",
+      "dependent": "athena_core::steward::repeated_failures (steward.rs:722), which reads job records to find repeated failures for Hestia",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli --test steward (unchanged; if a test relied on the old stop to end its drain, the producer limits its queue to the failing item)",
+      "reason": "No record writing changes: a failed item's two jobs are recorded as before, so Hestia sees the same failures. Only the in-memory stop changes."
+    },
+    {
+      "name": "Order of end-of-item checks after the last failure",
+      "dependent": "Scope guard pause and flag checks at the end of `attempts` (drain.rs:1836-1842) and the Paused/Flagged pass-over tests (tests/drain.rs:672-912, 915)",
+      "kind": "rule",
+      "test": "cargo test --locked -p athena-cli --test drain (paused and flagged tests). The order stays: paused, then flagged, then the new pass-over. `drain_still_stops_on_repeated_failure_when_another_item_is_flagged_but_this_one_is_not` (tests/drain.rs:915) is rewritten: a is passed over with the new reason and b (flagged) is passed over by the flag rule.",
+      "reason": null
+    },
+    {
+      "name": "The `ItemEnd::Failed` arm of `finish` and `Drain.stop: Option<Stop>`",
+      "dependent": "Every caller of `Drain::finish`: `take_until_done` (drain.rs:2474, calls `finish` at 2488), reached from `drain` (serial, drain.rs:2712) and `drain_concurrent` (drain.rs:2723, `[parallel] max_concurrency`), and `follow_restart` (drain.rs:3001) which runs `drain` again after a rebuild. State read by the changed arm: the job lines (`last_reason`, drain.rs:1413), the passed-over set (`pass_over`, drain.rs:1391) and `Drain.stop`.",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli --test drain one_items_failure_or_refusal_does_not_stop_its_siblings (rewritten: stop `QueueEmpty`, a passed over, b lands, v refused) and the new serial login test. Both paths reach the one arm. In the concurrent path a work failure now sets no stop, so siblings carry on, as the module docs say. An environment failure sets `Stop::Environment` once, and `set_stop` keeps the first reason found, so another worker's earlier stop stands (matrix test with the `Before::Environment` seed).",
+      "reason": null
+    },
+    {
+      "name": "Closing-reason classification of environment stops (read only; athena-core is not edited)",
+      "dependent": "athena_core::disk::StopCause::of / is_environment_reason (disk.rs:388, 432), read by the scope guard (scope_guard.rs:22, 78) and `athena retry` (`resumable_stop`, disk.rs:441). drain.rs becomes a new reader of `StopCause::of`.",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-core disk (unchanged) and the new drain login test",
+      "reason": "The plan adds a reader and edits no athena-core code. The classification and its tests (disk.rs:1295, 1387) are unchanged."
+    },
+    {
+      "name": "User expectation that a loop stops when the same item fails twice",
+      "dependent": "defaults.toml 'thrash-stop' (lines 100-103), crates/athena-data/src/defaults.rs:164, crates/athena-context/src/briefs.rs:3953, docs/spec.toml:1351 ('a repeated failure stops the drain')",
+      "kind": "rule",
+      "test": null,
+      "reason": "The thrash-stop text is prose only ('no loop code detects it yet'); these are governance files outside the deliverables. The scope guard still pauses and flags thrashing lines; this change removes only the batch-level stop for one item. Raised as an open question."
+    },
+    {
+      "name": "Documented behaviour of a landing that does not merge",
+      "dependent": "README.md:126 ('the run ends in `repeated failure` naming it') and README.md:86 (long line; the producer reads it and edits only if it names the stop)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Line 126 is updated to describe the pass-over; line 86 is edited only if it names the stop."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New integration test in crates/athena-cli/tests/drain.rs, next to the flagged tests (around line 915), named `an_item_that_fails_twice_on_an_unflagged_unpaused_line_is_passed_over_and_the_next_item_runs`. Stub: items [\"a\",\"b\"], outcomes [Rejected, Rejected, Landed], ratings [1], no `paused`, no `flagged`, no `run_reason`. It calls `drain::drain(&stub, limits(5.0), &ui)` with `Stamped::new(&stub)`. It asserts: (a) `stub.log()` is [\"read a\",\"run a\",\"reread a\",\"run a-retry\",\"read b\",\"run b\",\"land b\",\"rate\"] or the exact log the producer sees for that setup, with b running after a's second failure; (b) `report.landed == 1` and the stop is not `Stop::Environment` (it is the stop the rating or empty queue gives); (c) exactly one ui line starting `plan       a passed over: failed twice; left for the scope guard and Hestia`, printed after a's second run and before b's first (using the `runs_before` count as the paused/flagged tests do); (d) `display::drain(&report)` contains no 'repeated failure'; (e) a's two rejected job lines are still in `report.jobs`. The producer also rewrites `the_same_item_failing_twice_is_a_repeated_failure_naming_the_item` (default Stub, a and b both fail) to expect both passed over, stop `QueueEmpty` and b's two runs in the log.",
+      "command": "cargo test --locked -p athena-cli --test drain an_item_that_fails_twice_on_an_unflagged_unpaused_line_is_passed_over_and_the_next_item_runs",
+      "observes": "The batch goes on to b after a's second failure and b lands. a is recorded once as passed over with the reason text. The report has no item-failure stop. The test exits 0.",
+      "fails_without": "With the old `ItemEnd::Failed => set_stop(Stop::RepeatedFailure, ..)` arm the log ends at [\"read a\",\"run a\",\"reread a\",\"run a-retry\"], b never runs, `report.landed == 0` and the 'passed over' ui line is absent, so assertions (a), (b) and (c) fail.",
+      "seam": "Production entry point `drain::drain(steps: &dyn Steps, limits, ui: &dyn Ui)` (drain.rs:2712), driving `Drain::attempts` and `Drain::finish`. Fixtures: the existing `Stub` (implements `Steps`; its outcome queue is injected through the `outcomes` field) and `Stamped` (captures ui lines with run counts) in tests/drain.rs (used at tests/drain.rs:672-945). Both exist. The pass-over decision and the loop are production code; the stub only supplies Rejected/Landed outcomes and empty paused/flagged lists."
+    },
+    {
+      "criterion": 2,
+      "method": "Run the whole workspace tests. Unchanged tests: budget (`a_budget_too_small_for_the_next_call_stops_with_the_rest_still_queued`, `a_rating_that_does_not_fit_the_budget_is_not_taken`), job limit (`the_job_limit_stops_the_loop`), kill switch (the `Stop::Requested` tests in tests/drain.rs and drain.rs), settings (the unreadable-config and `NeedsReinstall` tests, and the matrix `every_landing_path_ends_in_reinstall_for_any_unreadable_config` with its `Before::Environment` seed), disk (the `Held` / `environment: low disk` tests at tests/drain.rs:2604-2837 and :7925), and the paused and flagged pass-over tests at 672-912. Their only edits are deleted `assert_ne!(.., Stop::RepeatedFailure)` and `assert_eq!(report.failed_item, ..)` lines. A new test `an_item_whose_producer_login_expired_twice_stops_the_batch_and_the_next_item_does_not_run` covers the login stop. Stub items [\"a\",\"b\"], `run_reason: Some(\"environment: producer login expired: API Error: 401\")`, outcomes [Failed, Failed]. It asserts the stop is `Stop::Environment`, b is never read (log has no 'read b'), a is passed over once, and `display::drain` prints 'stopped     environment stopped'. A sibling case with `run_reason` 'ended rejected' (a work failure) asserts no `Environment` stop. A third case with `run_reason: Some(\"environment: check timed out\")` asserts it is passed over without a batch stop, so only account-wide causes stop the batch.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass, including the login/environment stop, the disk hold, settings (`NeedsReinstall`), `BudgetSpent`, `JobLimit`, `Requested`, `Rebuilt` and `RebuildFailed` tests, and the paused and flagged pass-over tests.",
+      "fails_without": "If the Failed arm dropped the environment check, the login test would see b read and run and the stop would not be `Environment`. If another stop were broken by narrowing `Drain.stop` to `Option<Stop>`, the `Stop::NeedsReinstall`, `BudgetSpent`, `JobLimit`, `Requested` or `Rebuilt` equality assertions would fail. A leftover reference to the removed items would fail the build.",
+      "seam": "Existing tests and doubles in tests/drain.rs (`Stub`, `Shared`, `RealSteps` with `ConfigLander`, `Fixture`). The new login test uses the production `drain::drain` and `StopCause::of` (disk.rs:388, exists). The one new seam is the `run_reason: Option<&'static str>` field on `Stub`, added in step 5 and read in `Stub::run` (tests/drain.rs:209-261) to set `Run.reason`. It is data only: the decision to stop is made in drain.rs from `StopCause::of`, not in the stub."
+    },
+    {
+      "criterion": 3,
+      "method": "Grep drain.rs for `RepeatedFailure|repeated failure|repeated-failure|failed_item`, expecting no code hit and only prose that explains the new rule. Read the `ItemEnd::Failed` arm of `finish` (drain.rs:2426): it calls `pass_over` and, only for an environment cause, `set_stop(Stop::Environment)`; there is no stop for a single item's failure. Check that the module docs (about lines 32-39, 110, 133), the `attempts` comment at about 1831-1835, the `ItemEnd::Failed` doc, the Stop doc comments and the comment at about 3389 describe the new rule. Then compile drain.rs through its unit tests.",
+      "command": "cargo test --locked -p athena-cli --lib every_stop_reason_has_a_label_and_a_meaning",
+      "observes": "The in-file test compiles and passes with `Stop::Environment` in place of `RepeatedFailure` and with a label and meaning for it. The Grep shows no code path that sets a batch stop for one item's double failure.",
+      "fails_without": "If the old arm remained, the Grep for `Stop::RepeatedFailure` would hit `finish`. If the new variant lacked a label or meaning, the unit test would fail or the build would not compile (exhaustive match).",
+      "seam": "Static reading of drain.rs plus the existing in-file test module (drain.rs:4254 area, exists). No double."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the help test, which runs the real binary `athena drain --help` (`CARGO_BIN_EXE_athena`) and checks it contains the label of every `Stop::ALL` entry. Then Grep main.rs and display.rs for `repeated failure`, expecting no matches. main.rs:254-255 changes from the repeated-failure line to one for 'environment stopped' (login expired, usage limit, low disk); display.rs:618-623 prints every stop through `stop.label()` and `stop.meaning()`.",
+      "command": "cargo test --locked -p athena-cli --test drain drain_help_documents_the_flags_and_lists_every_stop_reason",
+      "observes": "The help lists the nine current stops, and 'repeated failure' appears in neither the help nor `display::drain`. The test passes.",
+      "fails_without": "If `Stop::ALL` listed `Environment` but main.rs lacked its line, the test fails because the help lacks the label. The Grep catches a leftover 'repeated failure' line, which the test alone would not.",
+      "seam": "Real `athena` binary through `std::process::Command`, as the test already does (tests/drain.rs:1881-1891, exists). `Stop::ALL` is the production list."
+    },
+    {
+      "criterion": 5,
+      "method": "Run clippy over all targets with warnings denied, then `cargo fmt --all --check`, over the workspace after all edits.",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Both exit 0: no unused import, parameter or field (for example `item` in `finish`, an unused `Option<String>`, or a test import left over from the deleted assertions), no exhaustive-match error, and no formatting diff.",
+      "fails_without": "A leftover reference to `Stop::RepeatedFailure` or `failed_item` in any test file (tests/drain.rs, tests/job_plan.rs) is a compile error under `--all-targets`. An unused import or parameter left by the removal fails under `-D warnings`. An unformatted edit to the roughly 7900-line tests/drain.rs fails `cargo fmt --all --check`.",
+      "seam": "Cargo tooling over the workspace; no seam."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of CHANGELOG.md and README.md. CHANGELOG.md `### Fixed` under `## [Unreleased]` gets an entry in the style of the nearby ones. It says an item that fails twice with no pause or flag is passed over (one 'passed over' line, the failure stays in the job lines for the scope guard and Hestia) and the next item runs. It names the 4 Nov 12:39pm UTC stop of job 20261029-160024-80qj (with $43 and 3 job slots left) and the root cause: the item-end handler set `Stop::RepeatedFailure` for an item with no pause or flag. It also says the `repeated failure` stop and the report's `failed_item` key are removed, and that a failure caused by an expired login, usage limit or low disk still stops the batch, now as `environment stopped`. README.md:126 no longer says the run ends in `repeated failure`.",
+      "command": "git diff -- CHANGELOG.md README.md",
+      "observes": "The CHANGELOG entry carries the job id, the date and time, the root cause and the stop/key changes. README.md:126 describes the pass-over.",
+      "fails_without": "Without the edits the diff shows no CHANGELOG entry naming the job, and README.md:126 still says the run ends in `repeated failure`.",
+      "seam": "Documentation diff; no seam."
+    }
+  ],
+  "open_questions": [
+    "User: docs/design/warm-baseline-build.md is on the deliverables list, but the accepted reading drops that rejected job's work and lists it as out of scope. This plan does not create it; confirm that is right.",
+    "User: the brief says to keep the login stop, but drain.rs has no login stop of its own: it was the repeated-failure stop reached by a Failed job with an `environment: producer login expired` reason. The plan keeps the effect by adding `Stop::Environment` for login, usage limit and low disk. Confirm that new stop is wanted, or say that those cases should only be passed over.",
+    "User: defaults.toml 'thrash-stop' (prose only) and docs/spec.toml:1351 ('a repeated failure stops the drain') describe the old behaviour after this change. They are governance files and not deliverables; should a later job reword them?"
+  ],
+  "producer_section_sha256": "146200313d403116edc6ae241a3d37f1d5b0a597b6190a6580a55e8f9fd00c5e"
+}

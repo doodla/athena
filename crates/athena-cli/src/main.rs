@@ -251,8 +251,10 @@ Stop reasons:
   target met        a rating taken after a landing reached --rating-threshold, a landing changed the outcome, \
 and the page text passed the source check
   budget spent      spend plus the next call's cap would exceed --budget; the rest stays queued
-  repeated failure  the same item failed twice; it is named (an item on a flagged or paused line is passed over \
-instead and the batch goes on)
+  environment       an item failed twice because the producer's login expired, a usage limit was reached or free \
+disk space is low, so every later item would fail the same way; fix that and run the drain again. An item that \
+fails twice for any other reason is passed over (\"failed twice; left for the scope guard and Hestia\") and the \
+batch goes on to the next item
   queue empty       nothing was left to work; this is not success
   job limit         --job-limit jobs were started
   stop requested    `athena drain-stop` was run; the job in progress was finished and no further job was started
@@ -328,6 +330,10 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         job: Option<String>,
         #[arg(long)]
         json: bool,
+        /// Read the records and history from an evidence snapshot directory (written at dispatch under a
+        /// job's state directory) instead of this repository. Needs no repository and no records/ here.
+        #[arg(long, value_name = "DIR", conflicts_with = "job")]
+        snapshot: Option<PathBuf>,
     },
     /// Record an intervention: anything you did beyond what a lazy user would.
     Intervene {
@@ -1250,7 +1256,21 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::Status { job, json } => {
+        Command::Status {
+            snapshot: Some(dir),
+            json,
+            ..
+        } => {
+            // Handled before `open`: a snapshot is read on its own, with no repository.
+            let view = athena_core::snapshot::status(&dir)?;
+            if json {
+                print_json(&view)?
+            } else {
+                print!("{}", display::snapshot_status(&view))
+            }
+            Ok(0)
+        }
+        Command::Status { job, json, .. } => {
             let athena = open(false)?;
             match job {
                 Some(job) => {

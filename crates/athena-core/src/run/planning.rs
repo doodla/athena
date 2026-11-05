@@ -221,6 +221,7 @@ impl Athena {
                 root: self.state.job_dir(&id),
                 commands: verifier_commands,
                 writes: false,
+                evidence: None,
             },
             &|path| self.git.path_is_tree(&p, path).unwrap_or(false),
         );

@@ -205,14 +205,7 @@ fn a_short_job_is_skipped_with_its_reason_and_the_next_item_runs() {
     assert!(held[0].contains(first.as_str()), "{}", held[0]);
     // The reader ran for it once (the drain's first read); the second read was refused before the reader.
     assert_eq!(first_reads.load(Ordering::SeqCst), 1, "{text}");
-    // It is held, not a failed run, so the drain does not stop on it...
-    assert_ne!(
-        report.stop,
-        athena_cli::drain::Stop::RepeatedFailure,
-        "{text}"
-    );
-    assert_eq!(report.failed_item, None, "{text}");
-    // ...and the next item, which has the budget, is read, run and landed.
+    // It is held, not a failed run, so the next item, which has the budget, is read, run and landed.
     assert_eq!(
         *lander.0.lock().unwrap(),
         [second.as_str().to_string()],
@@ -268,9 +261,18 @@ fn a_send_back_keeps_the_plan_section_and_its_hash_matches_the_plan_record() {
         .show_file("HEAD", &format!("{}/brief-producer.md", proposal.job.dir()))
         .unwrap()
         .unwrap();
+    // The committed brief names the evidence snapshot with a placeholder; the prompt names the real path.
+    let brief = String::from_utf8(brief).unwrap();
+    let id = proposal.job.as_str();
+    let placeholder = format!("<state>/jobs/{id}/evidence");
+    assert!(brief.contains(&placeholder), "{brief}");
+    let real = fx.state.path().join("repo/jobs").join(id).join("evidence");
     assert_eq!(
         prompts[0],
-        format!("{}\n\n{section}", String::from_utf8(brief).unwrap()),
+        format!(
+            "{}\n\n{section}",
+            brief.replace(&placeholder, real.to_str().unwrap())
+        ),
         "the committed brief and the plan record rebuild the prompt"
     );
 }
