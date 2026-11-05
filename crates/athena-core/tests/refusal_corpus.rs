@@ -67,7 +67,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 17] = [
+const INPUT_FORMS: [&str; 18] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -85,6 +85,7 @@ const INPUT_FORMS: [&str; 17] = [
     "code-survey",
     "design-existing-code",
     "boundary-word",
+    "bug-fix-request",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -165,6 +166,7 @@ fn repo_files() -> BTreeSet<String> {
         "docs/design/roadmap.md",
         "crates/athena-core/src/reading.rs",
         "crates/athena-context/prompts/planner.md",
+        "xtask/src/site.rs",
     ]
     .into_iter()
     .map(String::from)
@@ -568,7 +570,224 @@ fn reading_check_cases() -> Vec<Case> {
         "Read the GitHub/env-var settings of owner/repo and update docs/design/roadmap.md.".into();
     out.push(c);
 
+    out.extend(root_cause_cases());
     out.extend(boundary_word_cases());
+    out
+}
+
+/// Bug-fix requests and the criteria that diagnose them. The reconstruction is from the description of jobs
+/// 20261103-201526-t4qv and 20261103-231808-3gkq (a decisions page that lists proposals already decided); the
+/// records of those jobs are not part of the repository snapshot, so no request here is their verbatim text.
+fn root_cause_cases() -> Vec<Case> {
+    const REBUILT: &str = "jobs 20261103-201526-t4qv and 20261103-231808-3gkq, a page that lists decided proposals; \
+                           rebuilt from the job brief, not verbatim";
+    const SURVEY: &str =
+        "Code survey: read crates/athena-core/src/reading.rs, the gate every reading passes";
+    const PAGE: &str = "Run `cargo test -p athena-core`: the page shows only undecided proposals";
+    const ROOT_CAUSE: &str = "The root cause is that decided proposals enter the page from the unfiltered list \
+                              built in `crates/athena-core/src/reading.rs`, and nothing excludes them";
+    const BASE_FAILING: &str = "The test `decided_proposals_are_not_listed`, built from approved and rejected \
+                                proposals, fails on the base tree and passes with the change";
+    let behavior = |text: &str| Criterion {
+        text: text.into(),
+        kind: CriterionKind::Behavior,
+    };
+    let content = |text: &str| Criterion {
+        text: text.into(),
+        kind: CriterionKind::Content,
+    };
+    // A code reading with a survey and the page criterion; the caller adds criteria and changes the case.
+    let code = |id: &'static str,
+                source: &'static str,
+                forms: &'static [&'static str],
+                request: &str,
+                bullets: usize,
+                expected: Expected| {
+        let mut c = case(id, source, forms, request, bullets, expected);
+        c.reading.class_of_work = "code".into();
+        c.reading.assumptions = vec![SURVEY.into()];
+        c.reading.acceptance_criteria = vec![behavior(PAGE)];
+        c.reading.deliverables = vec![deliverable(
+            "crates/athena-core/src/reading.rs",
+            DeliverableAction::Modify,
+        )];
+        c
+    };
+    let page_request = lines(&[
+        "The decisions page lists proposals that were already decided. Fix it.",
+        "",
+        "Acceptance:",
+        "- The page shows only undecided proposals",
+        "- fmt, clippy and test pass",
+    ]);
+    let mut out = Vec::new();
+
+    out.push(code(
+        "bug-fix-reading-without-diagnosis",
+        REBUILT,
+        &["dash-bullet", "bug-fix-request"],
+        &page_request,
+        2,
+        Expected::Refuse("check_root_cause_diagnosis"),
+    ));
+    let mut c = code(
+        "bug-fix-reading-copying-the-stock-bullets",
+        REBUILT,
+        &["number-dot-parts", "bug-fix-request"],
+        &lines(&[
+            "Fix the decisions page.",
+            "",
+            "Acceptance:",
+            "1. The root cause is named in the change description and fixed where it originates",
+            "2. A test fails without the change and passes with it",
+        ]),
+        2,
+        Expected::Refuse("check_root_cause_diagnosis"),
+    );
+    c.reading.acceptance_criteria.push(content(
+        "The root cause is named in the change description and fixed where it originates",
+    ));
+    c.reading.acceptance_criteria.push(behavior(
+        "A test fails without the change and passes with it",
+    ));
+    out.push(c);
+    let mut c = code(
+        "bug-fix-reading-with-root-cause-but-no-base-failing-test",
+        REBUILT,
+        &["dash-bullet", "bug-fix-request"],
+        &page_request,
+        2,
+        Expected::Refuse("check_root_cause_diagnosis"),
+    );
+    c.reading.acceptance_criteria.push(content(ROOT_CAUSE));
+    out.push(c);
+    let mut c = code(
+        "introspection-fix-request-without-diagnosis",
+        "job 20261030-170757-gev8's request shape (an introspection fix request); rebuilt from the job brief",
+        &["dash-bullet", "bug-fix-request"],
+        &root_cause_request(&[]),
+        3,
+        Expected::Refuse("check_root_cause_diagnosis"),
+    );
+    c.reading.deliverables = vec![deliverable(
+        "crates/athena-core/src/reading.rs",
+        DeliverableAction::Modify,
+    )];
+    out.push(c);
+    let mut c = code(
+        "bug-fix-reading-with-diagnosis-and-base-failing-test",
+        REBUILT,
+        &["dash-bullet", "bug-fix-request"],
+        &page_request,
+        2,
+        Expected::Accept,
+    );
+    c.reading
+        .acceptance_criteria
+        .extend([content(ROOT_CAUSE), behavior(BASE_FAILING)]);
+    out.push(c);
+    let mut c = code(
+        "bug-fix-reading-naming-a-file-path-in-plain-text",
+        REBUILT,
+        &["dash-bullet", "bug-fix-request"],
+        &page_request,
+        2,
+        Expected::Accept,
+    );
+    c.reading.acceptance_criteria.extend([
+        content(
+            "The root cause: decided proposals enter the page from the list built in xtask/src/site.rs \
+             because the filter there does not exclude them",
+        ),
+        behavior(BASE_FAILING),
+    ]);
+    out.push(c);
+    out.push(code(
+        "feature-request-with-a-failure-bullet-needs-no-diagnosis",
+        "job 20261028-055601-hg0n's request shape (a feature with a failure message); rebuilt from the job brief",
+        &["star-bullet", "bug-fix-request"],
+        &lines(&[
+            "Add a status command.",
+            "* `athena status` fails with a clear message when no job exists",
+        ]),
+        1,
+        Expected::Accept,
+    ));
+    out.push(code(
+        "feature-request-with-fixed-and-broken-words-needs-no-diagnosis",
+        "job 20261028-055601-hg0n's request shape (feature prose); rebuilt from the job brief",
+        &["bug-fix-request"],
+        "Keep a fixed token budget and list broken links in the guide check.",
+        0,
+        Expected::Accept,
+    ));
+    out.push(code(
+        "feature-request-needs-no-diagnosis",
+        "job 20261028-055601-hg0n, a code reading with a survey; rebuilt from the job brief",
+        &["bug-fix-request"],
+        "Make the gate refuse a retry that omits its prior job.",
+        0,
+        Expected::Accept,
+    ));
+    let mut c = code(
+        "bug-fix-docs-reading-needs-no-diagnosis",
+        "a docs request with a repair word; rebuilt from the job brief",
+        &["bug-fix-request"],
+        "Fix the typo in the guide.",
+        0,
+        Expected::Accept,
+    );
+    c.reading = base_reading("Fix the typo in the guide.");
+    out.push(c);
+    let mut c = code(
+        "regression-tests-request-needs-no-diagnosis",
+        "a tests request that adds regression tests; rebuilt from the job brief",
+        &["bug-fix-request"],
+        "Add regression tests for the reading gate.",
+        0,
+        Expected::Accept,
+    );
+    c.reading.class_of_work = "tests".into();
+    out.push(c);
+    // The limit: a first attempt worded only as an outcome has no repair word and is accepted. Its retry is
+    // not (the next case).
+    let outcome_request = "Show only open proposals above the limit on the decisions page";
+    out.push(code(
+        "outcome-worded-first-attempt-is-accepted",
+        "the landed title of a decisions-page change; rebuilt from the job brief",
+        &["bug-fix-request"],
+        outcome_request,
+        0,
+        Expected::Accept,
+    ));
+    let mut c = code(
+        "outcome-worded-retry-of-a-rejected-bug-fix-needs-diagnosis",
+        REBUILT,
+        &["retry-complaint", "bug-fix-request"],
+        outcome_request,
+        0,
+        Expected::Refuse("check_root_cause_diagnosis"),
+    );
+    c.attempt = Some(EarlierAttempt {
+        verdict: Some("fail".into()),
+        findings: vec![
+            "major: decided proposals still shown; the new test passes on the base".into(),
+        ],
+        ..earlier(RETRIED_JOB, outcome_request)
+    });
+    c.reading.summary = format!(
+        "Retry of job {RETRIED_JOB}: the decisions page is changed to hide decided proposals."
+    );
+    c.reading.out_of_scope = vec!["The reader and verifier prompts are not changed".into()];
+    out.push(c);
+    out.push(code(
+        "still-showed-request-needs-diagnosis",
+        REBUILT,
+        &["bug-fix-request"],
+        "The page published on 3 Nov still showed decided proposals",
+        0,
+        Expected::Refuse("check_root_cause_diagnosis"),
+    ));
     out
 }
 
@@ -863,6 +1082,39 @@ fn design_existing_code_refusal_is_declared_intended() {
     assert!(changelog.contains("check_design_existing_code"));
     assert!(changelog.contains("higher refusal rate is intended"));
     assert!(changelog.contains("expected 5% of newly refused readings"));
+}
+
+#[test]
+fn root_cause_diagnosis_refusal_is_declared_intended() {
+    // The declared share is read from the criterion text by the replay.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: "The change refuses more readings: expected 8% of newly refused readings".into(),
+            kind: CriterionKind::Behavior,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(8));
+    assert!(
+        acceptance_check_names(READING_SOURCE).contains(&"check_root_cause_diagnosis".to_string())
+    );
+    // The changelog wraps lines, so compare with runs of white space made single spaces.
+    let changelog = include_str!("../../../CHANGELOG.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "check_root_cause_diagnosis",
+        "expected 8% of newly refused readings",
+        "This share is an estimate",
+        "the higher refusal rate is intended",
+        "athena go",
+        "introspection",
+        "20261103-201526-t4qv",
+        "20261103-231808-3gkq",
+    ] {
+        assert!(changelog.contains(needle), "CHANGELOG.md lacks {needle:?}");
+    }
 }
 
 #[test]

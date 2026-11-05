@@ -52,6 +52,14 @@ matching governance file (`.github/workflows/` or `athena.toml`), and a new conf
 it in an acceptance criterion, or name it in `out_of_scope`. Otherwise it is refused and the reader repairs it,
 instead of the job failing at admission after the producer has finished.
 
+`check_root_cause_diagnosis` applies the same gate to bug fixes. A reading of class code or tests with a
+behavior criterion, for a job that reads as a bug fix (a repair word in the request prose, a `still shows`
+phrase, or a retry of a bug-fix job or of a job rejected with a symptom finding), needs a located root-cause
+criterion (where the wrong items enter and why they are not excluded) and a Behavior criterion that names a test
+and says it fails on the base tree. The second is judged by the predicate that makes Athena plan the job and
+run its revert demonstration, so the gate and that demonstration cannot disagree. Without both, the reading is
+refused and the reader repairs it, instead of a producer moving a filter that never caused the fault.
+
 ## Crates and dependency direction
 
 The workspace is split into crates so that Cargo enforces "no cycles". The table below is checked against

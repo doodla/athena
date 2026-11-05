@@ -3155,7 +3155,8 @@ pub fn check_reading_references(
 /// Every check a built reading must pass before it is accepted: the previous result and change scope of a
 /// retried or followed-up job ([`check_prior_result_and_scope`]), then the evidence each criterion rests on
 /// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
-/// rests on ([`check_code_survey`]), then the governance files the outcome needs
+/// rests on ([`check_code_survey`]), then the root-cause criterion and the base-failing test criterion a
+/// bug-fix code or tests reading rests on ([`check_root_cause_diagnosis`]), then the governance files the outcome needs
 /// ([`check_governance_coverage`]), then the deliverable paths and `content` criteria against the boundary
 /// words and the deliverables against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
 /// there is no repository to compare with), then the repo paths its text relies on against the same files
@@ -3209,6 +3210,11 @@ pub fn refusing_check(
     ));
     step!(check_criteria_evidence(reading));
     step!(check_code_survey(reading));
+    step!(check_root_cause_diagnosis(
+        reading,
+        request,
+        &continued_jobs(request, attempt, referenced)
+    ));
     step!(check_design_existing_code(reading));
     step!(check_governance_coverage(reading, request));
     step!(check_boundary_and_repo_files(reading, repo_files));
@@ -3563,6 +3569,276 @@ pub fn check_code_survey(reading: &Reading) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Words that make a request read as a bug fix when they stand in its own prose (whole words, lowercase).
+const REPAIR_WORDS: [&str; 5] = ["fix", "fixes", "fixing", "bug", "bugs"];
+
+/// Words that, right after `still`, describe a symptom ("the page still shows ...").
+const STILL_WORDS: [&str; 5] = ["shows", "showed", "shown", "lists", "listed"];
+
+/// Phrases in the findings of a job rejected after verification that say its change left the symptom in place
+/// or its test passed on the base tree. A retry of such a job is a bug fix even when its request is worded as
+/// an outcome.
+const SYMPTOM_FINDINGS: [&str; 7] = [
+    "still shown",
+    "still shows",
+    "still listed",
+    "still lists",
+    "passes on the base",
+    "passes without the change",
+    "not reproduced",
+];
+
+/// Lowercase words of `text`: runs of letters, digits and `_`, so `fix_it` and `prefix` are not `fix`.
+fn prose_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| !w.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Whether the prose of a request (its lines that are not acceptance bullets) holds a repair word or a
+/// `still` phrase. Bullets are left out because they describe the wanted result, and a feature bullet such as
+/// "fails with a clear message" is not a bug report.
+fn prose_is_bug_fix(request: &str) -> bool {
+    let words: Vec<String> = request
+        .lines()
+        .map(str::trim)
+        .filter(|l| !is_bullet(l))
+        .flat_map(prose_words)
+        .collect();
+    words.iter().any(|w| REPAIR_WORDS.contains(&w.as_str()))
+        || words
+            .windows(2)
+            .any(|p| p[0] == "still" && STILL_WORDS.contains(&p[1].as_str()))
+}
+
+/// Whether the job reads as a bug fix: its own prose does ([`prose_is_bug_fix`]), or a job it continues was a
+/// bug fix, or was rejected after verification with a finding that names the symptom.
+fn is_bug_fix_job(request: &str, continued: &[&EarlierAttempt]) -> bool {
+    prose_is_bug_fix(request)
+        || continued.iter().any(|job| {
+            prose_is_bug_fix(&job.request)
+                || (!job.failed
+                    && job.verdict.as_deref() == Some("fail")
+                    && job.findings.iter().any(|f| {
+                        let lower = f.to_lowercase();
+                        SYMPTOM_FINDINGS.iter().any(|p| lower.contains(p))
+                    }))
+        })
+}
+
+/// The acceptance bullets of a request with their marker removed, normalised, so a criterion copied from the
+/// request can be told from one written in the reader's own words.
+fn request_bullet_texts(request: &str) -> Vec<String> {
+    request_text_acceptance(request)
+        .iter()
+        .map(|line| normalised(bullet_body(line)))
+        .collect()
+}
+
+/// A line without its bullet marker (`- `, `* ` or `N. `); a line that is not a bullet is returned as it is.
+fn bullet_body(line: &str) -> &str {
+    if !is_bullet(line) {
+        return line;
+    }
+    line.strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .or_else(|| line.split_once(". ").map(|(_, rest)| rest))
+        .unwrap_or(line)
+}
+
+/// Whether a criterion's text is a bullet of the request, with or without the marker.
+fn copies_a_bullet(text: &str, bullets: &[String]) -> bool {
+    bullets.contains(&normalised(text)) || bullets.contains(&normalised(bullet_body(text.trim())))
+}
+
+/// The non-empty, closed backtick spans of `text`.
+fn code_spans(text: &str) -> Vec<&str> {
+    let parts: Vec<&str> = text.split('`').collect();
+    let last = parts.len();
+    parts
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 1 && i + 1 < last)
+        .map(|(_, s)| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Whether `text` names a concrete place: a backticked span, a `crates/` path, or a path to a file (a last
+/// segment with a `.`), which may stand in plain text.
+fn names_location(text: &str) -> bool {
+    !code_spans(text).is_empty()
+        || names_crates_path(text)
+        || path_tokens(text)
+            .iter()
+            .any(|t| t.rsplit('/').next().is_some_and(|last| last.contains('.')))
+}
+
+/// Whether a criterion is a located root-cause criterion: it says "root cause", says where the wrong output
+/// enters or why it is not excluded, names a place, and is not a bullet of the request.
+fn names_root_cause(criterion: &Criterion, bullets: &[String]) -> bool {
+    let lower = criterion.text.to_lowercase();
+    let words = prose_words(&criterion.text);
+    (lower.contains("root cause") || lower.contains("root-cause"))
+        && words.iter().any(|w| {
+            w == "where"
+                || w == "why"
+                || w == "because"
+                || w.starts_with("enter")
+                || w.starts_with("originat")
+                || w.starts_with("exclud")
+        })
+        && names_location(&criterion.text)
+        && !copies_a_bullet(&criterion.text, bullets)
+}
+
+/// Whether a backticked span names a test: one identifier, or a `cargo` command with a test filter after its
+/// flags (the argument of `-p`, `--test` and similar is not a filter). A bare `cargo test` names no test.
+fn span_names_a_test(span: &str) -> bool {
+    let is_identifier = |t: &str| {
+        !t.is_empty()
+            && t.chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | ':'))
+    };
+    let tokens: Vec<&str> = span.split_whitespace().collect();
+    if tokens.first() != Some(&"cargo") {
+        return tokens.len() == 1 && is_identifier(tokens[0]);
+    }
+    let mut skip_argument = false;
+    tokens.iter().skip(1).any(|t| {
+        if skip_argument {
+            skip_argument = false;
+            return false;
+        }
+        if matches!(
+            *t,
+            "-p" | "--package" | "--test" | "--bin" | "--features" | "-F"
+        ) {
+            skip_argument = true;
+            return false;
+        }
+        !t.starts_with('-') && *t != "test" && is_identifier(t) && t.contains(['_', ':'])
+    })
+}
+
+/// Whether `text` names a test: a backticked test name, or a test file path (`crates/` path ending `.rs`, or
+/// a path under a `tests/` directory).
+fn names_a_test(text: &str) -> bool {
+    code_spans(text).iter().any(|s| span_names_a_test(s))
+        || path_tokens(text)
+            .iter()
+            .any(|t| (names_crates_path(t) && t.ends_with(".rs")) || t.contains("tests/"))
+}
+
+/// Whether a criterion asks for a named test that fails on the base tree: a behavior criterion that Athena's
+/// own revert demonstration would run ([`crate::run::asks_for_failing_run_without_the_fix`]), names a test,
+/// and is not a bullet of the request.
+fn names_base_failing_test(criterion: &Criterion, bullets: &[String]) -> bool {
+    criterion.kind == CriterionKind::Behavior
+        && crate::run::asks_for_failing_run_without_the_fix(&criterion.text)
+        && names_a_test(&criterion.text)
+        && !copies_a_bullet(&criterion.text, bullets)
+}
+
+/// Refuses a bug-fix reading of class code or tests that has no root-cause criterion and no criterion for a
+/// test that fails on the base tree.
+///
+/// Root cause this check removes: the reading did not require a diagnosis of where the wrong items enter and
+/// why they are not excluded, nor a test that fails on the base tree. Jobs 20261103-201526-t4qv and
+/// 20261103-231808-3gkq each described only the wanted page content, so the producer moved a filter without
+/// finding why decided proposals reached the published page, and the new test passed on the base tree, so it
+/// proved nothing. Introspections 20261104-054700-e6js and 20261105-051344-q9fv traced both to the reading
+/// gate. The reader brief now asks for the two criteria (`ROOT_CAUSE_GUIDE` in athena-context), and this
+/// check enforces it where readings are accepted. It costs no model call, and it reads the request, the
+/// criteria and the earlier jobs it is handed, never the repository.
+///
+/// It applies when the reading has a capability and no question, its class of work is `code` or `tests`, at
+/// least one criterion is a behavior criterion, and the job reads as a bug fix. A job reads as a bug fix when
+/// the prose of its request (the lines that are not acceptance bullets) holds a whole word `fix`, `fixes`,
+/// `fixing`, `bug` or `bugs`, or `still` right before `shows`, `showed`, `shown`, `lists` or `listed`; or when
+/// a job it continues (a retry or a follow-up) was itself a bug-fix request, or was rejected after
+/// verification with a finding that says the symptom is still shown or the test passes on the base tree.
+/// Introspection fix requests ("Fix the root cause of a repeated failure") are in scope by design. A docs
+/// reading, a decline, a question and a reading with only content criteria need neither criterion.
+///
+/// It then requires two criteria, each in the reader's own words (a criterion copied from the request does
+/// not count). A root-cause criterion says "root cause", says where the wrong output enters or why it is not
+/// excluded, and names a place: a backticked span, a `crates/` path, or a file path. A Behavior criterion names
+/// a test (a backticked test name, a `cargo` command with a test filter, or a test file path) and says it fails
+/// on the base tree; it must satisfy `asks_for_failing_run_without_the_fix`, the same predicate that makes
+/// Athena plan the job and run the revert demonstration, so a criterion the gate accepts is one Athena runs on
+/// the tree without the change. Whether the test is built from real recorded data of both kinds (approved and
+/// rejected proposals) cannot be decided from text: the reader guide asks for it and this check is prose-only
+/// on that point.
+///
+/// Limit: a first attempt worded only as an outcome ("Show only open proposals") has no repair word and is not
+/// caught, and a wrapped bullet's continuation line is read as prose. A retry is caught through the earlier
+/// job's request and findings.
+///
+/// This check refuses more readings; the higher refusal rate is intended. A replay of accepted readings
+/// (`replay`) holds a job that newly refuses more than 10% unless the job's criteria declare a share, as
+/// "expected N% of newly refused readings", and give a reason when it is above 25%: expected 8% of newly
+/// refused readings. This share is an estimate; the snapshot has no records, so no replay was run when it was
+/// written. Introspection fix requests, retries of bug-fix jobs and outcome-worded `still` requests add to it.
+///
+/// The error names the missing criteria, with an example of each.
+pub fn check_root_cause_diagnosis(
+    reading: &Reading,
+    request: &str,
+    continued: &[&EarlierAttempt],
+) -> Result<()> {
+    if reading.capability.is_none()
+        || reading.question.is_some()
+        || !matches!(reading.class_of_work.as_str(), "code" | "tests")
+        || !reading
+            .acceptance_criteria
+            .iter()
+            .any(|c| c.kind == CriterionKind::Behavior)
+        || !is_bug_fix_job(request, continued)
+    {
+        return Ok(());
+    }
+    let bullets = request_bullet_texts(request);
+    let mut missing: Vec<&str> = Vec::new();
+    if !reading
+        .acceptance_criteria
+        .iter()
+        .any(|c| names_root_cause(c, &bullets))
+    {
+        missing.push(
+            "a root-cause criterion that says 'root cause', says where the wrong items enter and why they are \
+             not excluded, and names the place (a backticked function or data source, or a file path), for \
+             example 'The root cause is that decided proposals enter the page from `build_page` in \
+             xtask/src/site.rs, which does not exclude them'",
+        );
+    }
+    if !reading
+        .acceptance_criteria
+        .iter()
+        .any(|c| names_base_failing_test(c, &bullets))
+    {
+        missing.push(
+            "a Behavior criterion for a test that fails on the base tree: it names the test (a backticked test \
+             name or a test file path, not `cargo test` alone), says it is built from real recorded data of both \
+             kinds (for example approved and rejected proposals), and says it fails on the base tree and passes \
+             with the change, for example 'The test `decided_proposals_are_not_listed` fails on the base tree \
+             and passes with the change'",
+        );
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the reading was refused because it is a bug-fix change ({}) whose criteria describe the wanted result \
+         but do not require a diagnosis; it lacks {}. Write each in your own words: a criterion copied from the \
+         request does not count",
+        reading.class_of_work,
+        missing.join(", and ")
+    );
 }
 
 /// The `Existing code:` assumptions of a reading: those whose trimmed text starts with that label, in any case.
@@ -8299,6 +8575,407 @@ mod tests {
             .join(" ");
         assert!(changelog.contains("refuses more readings"));
         assert!(changelog.contains("higher refusal rate is intended"));
+    }
+
+    const BUG_REQUEST: &str = "The page lists proposals that were already decided; fix it.";
+    const PAGE_CONTENT_CRITERION: &str =
+        "Run `cargo test -p athena-core`: the page shows only undecided proposals";
+    const ROOT_CAUSE_CRITERION: &str = "The root cause is named: decided proposals enter the page from the \
+         unfiltered list built in `crates/athena-core/src/reading.rs` and the filter does not exclude them";
+    const BASE_FAILING_CRITERION: &str = "The named test `decided_proposals_are_not_listed`, built from approved \
+         and rejected proposals, fails on the base tree and passes with the change";
+
+    /// A code reading with the page-content criterion and these further criteria.
+    fn bug_fix_reading(extra: &[(&str, CriterionKind)]) -> Reading {
+        let mut reading = code_reading(&[SURVEY], &[MODIFY_READING]);
+        reading.acceptance_criteria = vec![Criterion {
+            text: PAGE_CONTENT_CRITERION.into(),
+            kind: CriterionKind::Behavior,
+        }];
+        for (text, kind) in extra {
+            reading.acceptance_criteria.push(Criterion {
+                text: (*text).into(),
+                kind: *kind,
+            });
+        }
+        reading
+    }
+
+    fn first_refusal(reading: &Reading, request: &str) -> Option<(&'static str, String)> {
+        refusing_check(reading, request, None, &[], None)
+            .map(|(name, error)| (name, error.to_string()))
+    }
+
+    #[test]
+    fn root_cause_diagnosis_refuses_a_symptom_only_reading() {
+        let reading = bug_fix_reading(&[]);
+        let error = check_root_cause_diagnosis(&reading, BUG_REQUEST, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("was refused"), "{error}");
+        assert!(error.contains("a root-cause criterion"), "{error}");
+        assert!(
+            error.contains("a Behavior criterion for a test that fails on the base tree"),
+            "{error}"
+        );
+        // The gate runs it, and no earlier step refuses this reading.
+        let (name, _) = first_refusal(&reading, BUG_REQUEST).unwrap();
+        assert_eq!(name, "check_root_cause_diagnosis");
+        assert!(check_reading_acceptance(&reading, BUG_REQUEST, None, &[], None).is_err());
+    }
+
+    #[test]
+    fn root_cause_diagnosis_accepts_both_criteria() {
+        let reading = bug_fix_reading(&[
+            (ROOT_CAUSE_CRITERION, CriterionKind::Content),
+            (BASE_FAILING_CRITERION, CriterionKind::Behavior),
+        ]);
+        check_root_cause_diagnosis(&reading, BUG_REQUEST, &[]).unwrap();
+        assert_eq!(first_refusal(&reading, BUG_REQUEST), None);
+        // The location may be plain text, and a cargo command with a test filter names a test.
+        let reading = bug_fix_reading(&[
+            (
+                "The root cause: decided proposals enter from the list built in xtask/src/site.rs, which does not exclude them",
+                CriterionKind::Content,
+            ),
+            (
+                "Run `cargo test -p athena-core decided_proposals_are_not_listed`: the test fails without the change",
+                CriterionKind::Behavior,
+            ),
+        ]);
+        assert_eq!(first_refusal(&reading, BUG_REQUEST), None);
+    }
+
+    #[test]
+    fn root_cause_diagnosis_refuses_criteria_copied_from_the_request() {
+        let request =
+            format!("{BUG_REQUEST}\n- {ROOT_CAUSE_CRITERION}\n- {BASE_FAILING_CRITERION}");
+        let reading = bug_fix_reading(&[
+            (ROOT_CAUSE_CRITERION, CriterionKind::Content),
+            (BASE_FAILING_CRITERION, CriterionKind::Behavior),
+        ]);
+        let error = check_root_cause_diagnosis(&reading, &request, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("a root-cause criterion"), "{error}");
+        assert!(error.contains("a Behavior criterion for a test"), "{error}");
+        // Reworded, the same two criteria are accepted.
+        let reworded = bug_fix_reading(&[
+            (
+                "Root cause: decided proposals enter from the list in `build_page` because nothing excludes them",
+                CriterionKind::Content,
+            ),
+            (
+                "`decided_proposals_are_not_listed` fails on the base tree and passes with the change",
+                CriterionKind::Behavior,
+            ),
+        ]);
+        check_root_cause_diagnosis(&reworded, &request, &[]).unwrap();
+    }
+
+    #[test]
+    fn root_cause_diagnosis_names_only_the_missing_part() {
+        let message = |extra: &[(&str, CriterionKind)]| {
+            check_root_cause_diagnosis(&bug_fix_reading(extra), BUG_REQUEST, &[])
+                .unwrap_err()
+                .to_string()
+        };
+        // No test criterion: only that part is named.
+        let error = message(&[(ROOT_CAUSE_CRITERION, CriterionKind::Content)]);
+        assert!(!error.contains("a root-cause criterion"), "{error}");
+        assert!(error.contains("a Behavior criterion for a test"), "{error}");
+        // No root-cause criterion: only that part is named.
+        let error = message(&[(BASE_FAILING_CRITERION, CriterionKind::Behavior)]);
+        assert!(error.contains("a root-cause criterion"), "{error}");
+        assert!(
+            !error.contains("a Behavior criterion for a test"),
+            "{error}"
+        );
+        // A root cause with no place, or with "and/or" as its only slash, is refused.
+        for text in [
+            "The root cause is why decided proposals are not excluded from the page",
+            "The root cause is where decided and/or rejected proposals enter the page",
+            "Decided proposals enter the page from `build_page` and are not excluded",
+        ] {
+            let error = message(&[
+                (text, CriterionKind::Content),
+                (BASE_FAILING_CRITERION, CriterionKind::Behavior),
+            ]);
+            assert!(error.contains("a root-cause criterion"), "{text}: {error}");
+        }
+        // A failing run with no named test is refused, `cargo test` alone included.
+        for text in [
+            "Tests fail without the change",
+            "Run `cargo test`: tests fail without the change",
+            "Run `cargo test -p athena-core`: the tests fail on the base tree",
+            "The named test `decided_proposals_are_not_listed` passes with the change",
+        ] {
+            let error = message(&[
+                (ROOT_CAUSE_CRITERION, CriterionKind::Content),
+                (text, CriterionKind::Behavior),
+            ]);
+            assert!(
+                error.contains("a Behavior criterion for a test"),
+                "{text}: {error}"
+            );
+        }
+        // A content criterion cannot be the test criterion.
+        let error = message(&[
+            (ROOT_CAUSE_CRITERION, CriterionKind::Content),
+            (BASE_FAILING_CRITERION, CriterionKind::Content),
+        ]);
+        assert!(error.contains("a Behavior criterion for a test"), "{error}");
+    }
+
+    #[test]
+    fn root_cause_diagnosis_accepts_this_jobs_own_reading() {
+        let request = "Fix the root cause of a repeated failure: the reading did not require a diagnosis\n\
+             The same cause has produced failures in more than one job.\n\n\
+             Acceptance:\n\
+             - The root cause is named in the change description and fixed where it originates, not at one instance\n\
+             - A test fails without the change and passes with it, for the cause and not only for one job\n\
+             - fmt, clippy and test pass";
+        let mut reading = code_reading(&[SURVEY], &[MODIFY_READING]);
+        reading.acceptance_criteria = vec![
+            Criterion {
+                text: "Run `cargo test -p athena-core`: a new unit test in crates/athena-core/src/reading.rs builds \
+                       the reading for a request like 'The page lists proposals that were already decided; fix it' \
+                       with criteria that only describe the wanted page content, and check_root_cause_diagnosis \
+                       refuses it; the same reading with both criteria is accepted. The refusal test fails on the \
+                       base tree because the function does not exist and the reading is accepted."
+                    .into(),
+                kind: CriterionKind::Behavior,
+            },
+            Criterion {
+                text: "crates/athena-core/src/reading.rs doc comment on the new check names the root cause \
+                       (reading did not require a diagnosis of where wrong items enter, nor a test that fails on \
+                       the base), cites jobs 20261103-201526-t4qv and 20261103-231808-3gkq, and states 'expected 8% \
+                       of newly refused readings'."
+                    .into(),
+                kind: CriterionKind::Content,
+            },
+        ];
+        check_root_cause_diagnosis(&reading, request, &[]).unwrap();
+        assert_eq!(first_refusal(&reading, request), None);
+    }
+
+    #[test]
+    fn root_cause_diagnosis_agrees_with_the_revert_run_predicate() {
+        let accepted = |phrase: &str| {
+            let reading = bug_fix_reading(&[
+                (ROOT_CAUSE_CRITERION, CriterionKind::Content),
+                (
+                    &format!("The named test `decided_proposals_are_not_listed`: {phrase}"),
+                    CriterionKind::Behavior,
+                ),
+            ]);
+            check_root_cause_diagnosis(&reading, BUG_REQUEST, &[]).is_ok()
+        };
+        for phrase in [
+            "A test fails without the fix",
+            "Tests fail without the change",
+            "the new test fails on the base",
+            "the demo test FAILS without it",
+            "A regression test that fails before the fix and passes after",
+            "the build never fails",
+            "a failing check is reported to the user",
+            "cargo test passes",
+            "the test fails before the change",
+        ] {
+            assert_eq!(
+                accepted(phrase),
+                crate::run::asks_for_failing_run_without_the_fix(phrase),
+                "{phrase}"
+            );
+        }
+        assert!(accepted("A test fails without the fix"));
+        assert!(!accepted("the build never fails"));
+        assert!(!accepted("the test fails before the change"));
+    }
+
+    #[test]
+    fn root_cause_diagnosis_reads_the_request_prose_for_a_bug_fix() {
+        for request in [
+            "Fix the page",
+            "This fixes the page",
+            "Fixing the page is wanted",
+            "There is a bug on the page",
+            "Two bugs remain",
+            "The page still shows decided proposals",
+            "The page still showed decided proposals",
+            "The page still lists decided proposals",
+            "Intro\n\n  Fix: the page",
+        ] {
+            assert!(prose_is_bug_fix(request), "{request}");
+        }
+        for request in [
+            "Add a greeting",
+            "Add a prefix to every line",
+            "Add a fixture for the parser",
+            "Rename fix_it to repair_it",
+            "The page still works",
+            "Add a greeting\n- fix the typo\n* a bug is reported\n1. fix it",
+            "debug output",
+        ] {
+            assert!(!prose_is_bug_fix(request), "{request}");
+        }
+        let reading = bug_fix_reading(&[]);
+        assert!(
+            check_root_cause_diagnosis(&reading, "The page still shows decided proposals", &[])
+                .is_err()
+        );
+        check_root_cause_diagnosis(&reading, "Add a prefix to every line", &[]).unwrap();
+    }
+
+    #[test]
+    fn root_cause_diagnosis_follows_a_retry_of_a_bug_fix() {
+        let outcome_request = "Show only open proposals above the limit on the decisions page";
+        let reading = bug_fix_reading(&[]);
+        // A first attempt worded as an outcome is not caught; this is the stated limit.
+        check_root_cause_diagnosis(&reading, outcome_request, &[]).unwrap();
+        let rejected = |request: &str, finding: &str| EarlierAttempt {
+            job: PRIOR_JOB.into(),
+            request: request.into(),
+            findings: vec![finding.into()],
+            end_state: "rejected".into(),
+            verdict: Some("fail".into()),
+            ..Default::default()
+        };
+        // A retry of a job rejected with a symptom finding is a bug fix.
+        let symptom = rejected(
+            outcome_request,
+            "major: decided proposals still shown; the new test passes on the base",
+        );
+        assert!(check_root_cause_diagnosis(&reading, outcome_request, &[&symptom]).is_err());
+        // A retry of a job whose own request was a bug fix is one too.
+        let bug = rejected("fix the decisions page", "major: something else");
+        assert!(check_root_cause_diagnosis(&reading, outcome_request, &[&bug]).is_err());
+        // A rejected feature job whose request and findings name no symptom is not.
+        let feature = rejected(outcome_request, "major: the greeting is missing");
+        check_root_cause_diagnosis(&reading, outcome_request, &[&feature]).unwrap();
+        // A job closed as failed, or one never verified, does not count by its findings.
+        let mut failed = symptom.clone();
+        failed.failed = true;
+        check_root_cause_diagnosis(&reading, outcome_request, &[&failed]).unwrap();
+        let mut unverified = symptom;
+        unverified.verdict = None;
+        check_root_cause_diagnosis(&reading, outcome_request, &[&unverified]).unwrap();
+    }
+
+    #[test]
+    fn stored_bug_fix_readings_are_refused_by_check_reading_text() {
+        let reading = bug_fix_reading(&[]);
+        assert!(matches!(
+            check_reading_text(&reading, BUG_REQUEST),
+            ReadingCheck::Refuse(reason) if reason.contains("root-cause criterion")
+        ));
+        let reading = bug_fix_reading(&[
+            (ROOT_CAUSE_CRITERION, CriterionKind::Content),
+            (BASE_FAILING_CRITERION, CriterionKind::Behavior),
+        ]);
+        assert_eq!(
+            check_reading_text(&reading, BUG_REQUEST),
+            ReadingCheck::Accept
+        );
+    }
+
+    #[test]
+    fn root_cause_diagnosis_does_not_apply() {
+        let none: &[(&str, CriterionKind)] = &[];
+        let shapes: Vec<(&str, Reading)> = vec![
+            ("add a greeting", bug_fix_reading(none)),
+            (
+                "Add a flag that already exists elsewhere.\n- `athena status` fails with a clear message when no job exists",
+                bug_fix_reading(none),
+            ),
+            (
+                "Add a status flag.\n   * `athena status` fails with a clear message",
+                bug_fix_reading(none),
+            ),
+            (
+                "Keep a fixed list that reports broken links and a wrong value",
+                bug_fix_reading(none),
+            ),
+            ("Add a prefix and a fixture", bug_fix_reading(none)),
+            ("Add regression tests for the parser", {
+                let mut r = bug_fix_reading(none);
+                r.class_of_work = "tests".into();
+                r
+            }),
+            ("Fix the typo in the guide", {
+                let mut r = bug_fix_reading(none);
+                r.class_of_work = "docs".into();
+                r
+            }),
+            ("Fix the page", {
+                let mut r = bug_fix_reading(none);
+                r.capability = None;
+                r.decline_reason = Some("no capability fits".into());
+                r
+            }),
+            ("Fix the page", {
+                let mut r = bug_fix_reading(none);
+                r.question = Some("which page?".into());
+                r
+            }),
+            ("Fix the page", {
+                let mut r = bug_fix_reading(none);
+                r.acceptance_criteria = vec![Criterion {
+                    text: "the page shows only undecided proposals".into(),
+                    kind: CriterionKind::Content,
+                }];
+                r
+            }),
+        ];
+        for (request, reading) in &shapes {
+            check_root_cause_diagnosis(reading, request, &[])
+                .unwrap_or_else(|e| panic!("{request}: {e}"));
+            assert_eq!(first_refusal(reading, request), None, "{request}");
+        }
+        // A retry of a rejected feature job names no symptom.
+        let feature = prior();
+        check_root_cause_diagnosis(&bug_fix_reading(none), "Add a greeting", &[&feature]).unwrap();
+        // The bug-fix reading of the same shape is refused.
+        assert!(check_root_cause_diagnosis(&bug_fix_reading(none), BUG_REQUEST, &[]).is_err());
+    }
+
+    #[test]
+    fn root_cause_diagnosis_doc_comment_names_the_cause() {
+        let source = include_str!("reading.rs");
+        let doc = source
+            .split("pub fn check_root_cause_diagnosis")
+            .next()
+            .unwrap()
+            .rsplit("\n\n")
+            .next()
+            .unwrap()
+            .replace("\n///", "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for needle in [
+            "did not require a diagnosis of where the wrong items enter",
+            "a test that fails on the base tree",
+            "20261103-201526-t4qv",
+            "20261103-231808-3gkq",
+            "expected 8% of newly refused readings",
+            "This share is an estimate",
+            "asks_for_failing_run_without_the_fix",
+            "Introspection fix requests",
+            "a first attempt worded only as an outcome",
+            "the higher refusal rate is intended",
+        ] {
+            assert!(doc.contains(needle), "{needle}: {doc}");
+        }
+        // The criterion sentence declares the share the replay reads.
+        let mut reading = bug_fix_reading(&[]);
+        reading.acceptance_criteria.push(Criterion {
+            text: "The change refuses more readings: expected 8% of newly refused readings, because bug-fix \
+                   readings now need a root-cause criterion."
+                .into(),
+            kind: CriterionKind::Content,
+        });
+        assert_eq!(replay_declaration_of(&reading).share, Some(8));
     }
 
     const EXISTING: &str =

@@ -146,6 +146,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A bug-fix reading now has to carry a diagnosis. Root cause: the reading gate accepted a bug-fix reading
+  whose criteria described only the wanted output, so it required neither a diagnosis of where the wrong items
+  enter and why they are not excluded, nor a test that fails on the base tree. Jobs 20261103-201526-t4qv and
+  20261103-231808-3gkq each moved a filter on the decisions page without finding why decided proposals
+  reached it, and the new test passed on the base tree; introspections 20261104-054700-e6js and
+  20261105-051344-q9fv traced both to the reading. The new check `check_root_cause_diagnosis`, one more `step!`
+  in `refusing_check` after the code-survey check, refuses a reading of class code or tests with a behavior
+  criterion, a capability and no question, for a job that reads as a bug fix, unless it has (1) a root-cause
+  criterion that says "root cause", where the wrong items enter or why they are not excluded, and a named place
+  (a backticked name or a path), and (2) a Behavior criterion that names a test and says it fails on the base
+  tree. Both must be in the reader's own words: a criterion copied from the request does not count, and
+  `cargo test` alone names no test. The base-failing wording is judged by the same predicate that makes
+  Athena plan the job and run the revert demonstration (`asks_for_failing_run_without_the_fix` in
+  `run/mod.rs`, now `pub(crate)`; its body is unchanged), so a criterion the gate accepts is one Athena runs on
+  the tree without the change. A job reads as a bug fix when the prose of its request (the lines that are not
+  acceptance bullets) has a whole word `fix`, `fixes`, `fixing`, `bug` or `bugs`, or `still` before `shows`,
+  `showed`, `shown`, `lists` or `listed`; or when a job it retries or follows up was a bug-fix request or was
+  rejected with a finding that says the symptom is still shown or the test passes on the base tree.
+  Introspection fix requests ("Fix the root cause of a repeated failure") are in scope by design. The limit: a
+  first attempt worded only as an outcome ("Show only open proposals") has no repair word and is not caught;
+  its retry is. Whether the test uses real approved and rejected data cannot be decided from text, so that
+  part stays prose-only in the reader guide (`ROOT_CAUSE_GUIDE` in `athena-context`, one more reading rule).
+  The corpus gains fourteen cases and the form `bug-fix-request`. Queued proposed jobs whose stored reading is
+  a bug fix without the two criteria now fail `check_reading_text` and wait until `athena go` reads them again.
+  This check refuses more readings; the higher refusal rate is intended: expected 8% of newly refused readings.
+  This share is an estimate; the snapshot has no records, so no replay was run when it was written.
+  Introspection fix requests, retries of bug-fix jobs and outcome-worded `still` requests add to it.
 - `athena retry` no longer starts the same work twice for an interrupted job. An interrupted job (dispatched,
   no live process) stays dispatched after it is retried, so `athena status` kept telling the user to run
   `athena retry <id>` and a second retry made a second "try again on <id>" job. The check is in `Athena::retry`
