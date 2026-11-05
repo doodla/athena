@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/design/continuous-landing.md` (D155): a design note, nothing built, for throughput review
+  `20261105-070420-vq95`, which found landing and rebuild at a median of 440.1 of 464.5 minutes per landed job.
+  When the verifier passes, a job joins the one ordered landing queue and its pull request merges automatically
+  by the existing REST path; a pending poll stays in the queue within a time limit; the rebuild keeps its lock
+  and runs once per batch. The review predicts a saving of 420.0 minutes per landed job (a prediction, not a
+  measurement); the note says how the next review measures it and makes the first build job a split of the 440.1
+  minutes by phase. `docs/design/async-drain.md` gains two pointer sentences and no renumbering.
 - `docs/design/warm-baseline-build.md`: a design note on the warm baseline build proposed by throughput review
   `20261029-155931-wfkr`, checked against the records. It lists the CI-first checks flow, the pull-request
   target-cache restore and the 6-shard test job as already present. It splits the review's 14.1-minute checks

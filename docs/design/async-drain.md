@@ -2,6 +2,9 @@
 
 Status: accepted (D145, decided by the brain under Sri's delegation, 2026-10-29). Nothing here is built. Written for Sri and for the verifier of the build jobs in section 12.
 
+Later note: `docs/design/continuous-landing.md` (proposed, D155) builds on sections 6 and 7 to make landing a
+continuous drain step. It changes none of the sections below.
+
 The drain runs one job at a time today (`[parallel] max_concurrency = 1` in `athena.toml`). Over 2026-10-27 to 29, 35 of
 61 jobs landed and the median job took 42 minutes. This design overlaps the stages of different jobs so that the
 slow shared resources, the check slot and the landing queue, are the only serial parts.
@@ -206,6 +209,8 @@ Point 4. A wait is not work. While one job waits for CI or while the drain rebui
   the file: a job in the producer stage resumes through the existing retry path; a job in the landing stage re-checks
   whether its branch already landed before doing anything. Build job 3 only reads the file and reports leftover rows;
   acting on them is build job 9.
+- Continuous landing and a batched rebuild: `docs/design/continuous-landing.md` proposes freeing the worker when
+  the verifier passes and running the rebuild once per batch, under the same lock. This section stays as written.
 
 ## 8. Ordering of records commits with several jobs in flight
 

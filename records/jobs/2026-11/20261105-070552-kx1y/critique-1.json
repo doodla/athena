@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-070552-kx1y",
+  "round": 1,
+  "at": "2026-11-05T07:41:00.818830682Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Decision 3 says moving the rebuild changes what is measured, but the code shows the rebuild already runs after a job's own landing.",
+      "evidence": "crates/athena-cli/src/drain.rs:2428-2431: `finish` calls `rebuild_if_due()` only after `ItemEnd::Landed`, so the rebuild runs after the job has landed. status.rs:805-813 (`landing_end`) ends a job's span at the later of the landing outcome and the landing record. A job's own rebuild is therefore already outside its own span. The rebuild can only reach other jobs' spans: it holds the `landing` mutex (drain.rs:2403), and every landing takes that same mutex (drain.rs:1715). The plan's own Risk 4 says the record 'is written before the rebuild finishes', which contradicts Decision 3. This is a guess where the code could have been read. Fix: Drop the claim that part of the 420.0 min is a measurement change caused by the job's own rebuild. State what the code shows instead: the rebuild adds to the spans of later jobs that wait on the `landing` lock, and a deferred rebuild removes that contention. Keep the request that the next review report rebuild time separately, but give this as the reason.",
+      "location": "Plan Decision 3, plan step 5 and Risk 4 (the rebuild 'leaves the span' as a measurement effect)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The design leaves out the Landing::Waiting path, where a job leaves the drain unlanded and is landed later: the 'separate, later' step the request targets.",
+      "evidence": "drain.rs:3136-3156 (`landing_from_report`): when the checks poll ends with checks still pending, the result is `Landing::Waiting` ('it merges once they have'). drain.rs:1761-1765 then marks the job 'waiting to merge' and leaves its PR open, to be landed by a later, separate step. This is the most likely home of a 440-minute median, given the 583 s median CI run the plan itself cites. The Existing code rows leave out `Landing::Waiting` and `landing_from_report`. The design does not say what the queue head does when the poll times out. Fix: Add `Landing::Waiting` / `landing_from_report` (and the later `athena land` that finishes such a job) to the Existing code table, labeled 'changed'. In the design, say that a job whose poll ends pending stays in the ordered queue and is polled again inside the drain (the parked CI wait of async-drain.md section 6/7) instead of leaving the drain. In build job 1, measure the time spent in Waiting as its own phase.",
+      "location": "Plan Approach and step 2 (Existing code rows) and step 4 (design)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The demonstration commands cannot see an uncommitted new file, and criterion 3's grep is never run.",
+      "evidence": "Criteria 3 to 6 run `git show HEAD:docs/design/continuous-landing.md`. The producer does not commit (Athena owns commits), so HEAD is the base commit and the command fails or shows nothing. Criterion 2 runs `git diff --stat`, and criterion 8 runs `git diff --name-only`. Neither lists untracked files, so neither shows the new note, and criterion 8 would miss a stray new file under crates/ or a new workflow. Criterion 3 asks that 'Grep finds the figures', but its demonstration runs no grep. Fix: Read the working-tree file directly. For criterion 3, run `grep -nF -e 440.1 -e 464.5 -e 16070.4 -e 'about 21' docs/design/continuous-landing.md`. Do the same for 420.0 and 20261105-070420-vq95 (criteria 4 and 5), and for the Alternatives, Risks and Out of scope headings (criterion 6). For criteria 2 and 8, use `git status --porcelain` (or `git diff --name-only HEAD` together with `git ls-files --others --exclude-standard`).",
+      "location": "Demonstrations for criteria 2, 3, 4, 5, 6 and 8",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "If D155 uses 'amends', 'supersedes' or 'superseded by' with a decision id, the backtest test fails.",
+      "evidence": "crates/athena-cli/src/backtest.rs:79-81 matches 'superseded by', 'supersedes' and 'amends' followed by a decision id. backtest.rs:131 asserts `report.hits.len() == confirmed.links.len()`. The plan says D155 'keeps D140's rule'. Writing 'amends D140' would add a hit the confirmed list lacks, and updating that list would mean changing a file outside the plan's four. Fix: In step 8, state that D155 refers to D140 and to async-drain.md without these phrases. Name backtest.rs:131 as the test that would catch it.",
+      "location": "Dependents: docs/decisions.md (backtest.rs); plan step 8 (D155 text)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The dependents list leaves out the tests that read CHANGELOG.md.",
+      "evidence": "CHANGELOG.md is read by crates/athena-core/tests/refusal_corpus.rs:859-865 and crates/athena-cli/tests/lifecycle.rs:2311-2324, both via include_str! with `contains` assertions. It also appears in a list at crates/athena-cli/tests/drain.rs:1931. Fix: Add a CHANGELOG.md dependent naming these tests. Note that an appended Unreleased entry keeps every asserted phrase, and that `cargo test --locked` covers them.",
+      "location": "Dependents list (CHANGELOG.md readers)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Criterion 8's demonstration expects files outside docs/design/ while its text says only docs/design/ changes.",
+      "evidence": "Criterion 8 says only files under docs/design/ change, yet the demonstration expects docs/decisions.md and CHANGELOG.md in the diff as well. The plan already raises this as an open question. Fix: Have the demonstration state the rule it checks: no governance file and nothing under crates/ or xtask/, with the two non-design files allowed because the deliverables list names them.",
+      "location": "Criterion 8 demonstration 'Observes' and Open question 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the request and the accepted reading: one new note directly under docs/design/, small pointer edits elsewhere, no code or governance changes. Most code it cites exists as described: merge_via_rest at athena.toml:189, LandingQueue at drain.rs:1236, rebuild_if_due at drain.rs:2402, THROUGHPUT_WINDOW = 20 and StageMinutes::median_of in status.rs, D154 as the last decision. THROUGHPUT.md is indeed absent from the snapshot. There are three major problems. (1) Decision 3 rests on a misreading. drain.rs:2428-2431 runs the rebuild only after a job has landed, so a job's own rebuild is already outside its own measured span. The rebuild reaches later jobs' spans only through the shared `landing` mutex. (2) The design leaves out `Landing::Waiting` / `landing_from_report` (drain.rs:3136-3156, 1761-1765). That is where a job whose checks poll times out leaves the drain with its PR open, to be landed later and separately: the step the request asks to make continuous. (3) Several demonstrations use commands that cannot observe an uncommitted new file (`git show HEAD:`, `git diff --stat`, `git diff --name-only`), and criterion 3's grep is never run. Two minor gaps are in the dependents list: backtest's supersession-phrase count for the D155 text, and the CHANGELOG readers in refusal_corpus.rs and lifecycle.rs. All of these can be fixed by the planner, so the verdict is revise."
+}

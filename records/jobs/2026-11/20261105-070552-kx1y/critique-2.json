@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-070552-kx1y",
+  "round": 2,
+  "at": "2026-11-05T07:43:08.808215804Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The deferred rebuild drops the landing lock without dealing with the reason the lock exists.",
+      "evidence": "The doc comment on rebuild_if_due says \"Landings wait while it builds, because a landing moves the checkout the build reads\", and line 2403 takes `self.landing.lock()` for exactly that reason. The plan says the rebuild 'no longer holds the landing lock against other landings'. In the same decision it also says the rebuild runs 'at a safe point where no job is in a landing or records stage'. Only one of those can hold: either the rebuild runs between landings while still blocking new ones, or it runs alongside landings while main moves under the build. Neither the design nor the risks section addresses a landing that moves the checkout in the middle of a build. Fix: In the note, state the invariant from drain.rs:2399-2401. Then choose a mechanism that keeps it and say what it costs. Option one: build from a fixed commit in a separate worktree, so landings can carry on while it builds. Option two: keep the lock, but merge rebuilds that are due into one run at a batch boundary, and estimate the lock time that saves. Rewrite Decision 3, Step 4(5) and the rebuild-failure risk to match. Add a matching row (changed) for rebuild_if_due in the Existing code table.",
+      "location": "Plan Decision 3 and Step 4(5); crates/athena-cli/src/drain.rs:2399-2403",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A Waiting job that keeps its place at the head can stall every later landing, and the plan sets no limit.",
+      "evidence": "The ordering mitigation says 'A job in Waiting keeps its place at the head and is polled again.' landing_from_report (drain.rs:3134-3145) also maps a merge the host refused under its repository rules to Waiting, and that state may never clear. With strict first-in first-out, one such job blocks the queue, and the saving disappears. Fix: Have the note give a limit on time at the head for a Waiting job. When it is reached, the job steps aside and keeps its order, or it goes back to the user. Add head-of-line blocking to the risks section as its own item.",
+      "location": "Plan Risks (Ordering mitigation) and Decision 2",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The grep relies on exact phrases the producer may word differently.",
+      "evidence": "`grep -nF -e 'merges automatically' -e 'verifier passes'` prints nothing if the note says 'merged automatically' or 'once the verifier passed', although the design is present. The verifier then reads the Design section anyway. Fix: Use a case-insensitive regex such as `grep -niE 'ordered landing queue|verifier pass|merg(es|ed) automatically'`, or tell the producer to use the exact phrases.",
+      "location": "Demonstration for criterion 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is well grounded. I checked its code citations against the snapshot. Drain::land is at drain.rs:1714. Landing::Waiting is handled at 1761. rebuild_if_due takes the `landing` mutex at 2402-2403. finish calls it only after ItemEnd::Landed (2428-2431). backtest.rs:78-82 matches the three link phrases, and backtest.rs:131 asserts the hit count. D154 is the last decision, so D155 is the right next id. The new note does not exist yet. Appending D155 at the end of decisions.md shifts none of the confirmed-link line numbers. None of the four edited files is a docs/ontology.toml source, so the ontology scan is unaffected. The dependents list matches the readers I found. The demonstrations are content checks, which suit content criteria, plus cargo test and git status. The plan correctly flags the clash between criterion 8 and the deliverables list as an open question. One design problem needs a fix. Decision 3 says the deferred rebuild \"no longer holds the landing lock against other landings\", but the code says that lock exists for correctness: landings must wait while the rebuild runs because a landing moves the checkout the build reads (drain.rs:2399-2401). Decision 3 also says the rebuild runs at a safe point where no job is landing, which already contradicts the lock-free claim. The note has to name this invariant and say how it is kept. A smaller point: keeping a Waiting job at the head of the queue can stall the whole queue, and the plan gives no limit for that."
+}

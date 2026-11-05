@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-051400-dzr4",
+  "round": 3,
+  "at": "2026-11-05T07:24:34.370861609Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Retries bypass the check: the cue is matched only on `request`, which for `athena retry` is `try again on <id>`.",
+      "evidence": "`retry` builds the request as `format!(\"{RETRY_PREFIX}{id}\")` (reading.rs:1119; RETRY_PREFIX is \"try again on \", reading.rs:1310). The gate at reading.rs:663-669 passes `&request.text`, which for a retry is that one line. The earlier job's text arrives only in `attempt: Option<&EarlierAttempt>`, whose `request` field holds it (athena-context briefs.rs:1703-1707). The planned check reads only `request`, so `is_wrong_output_report(\"try again on 2026...\")` is false and the check returns Ok for every `athena retry` of a bug-fix job. This class recurred across a first attempt and a later attempt (t4qv, then 3gkq; the accepted reading calls this job a retry of both). So the retry path is one of the two ways the class arrives, and the plan leaves it unguarded. No demonstration or corpus case covers it, even though `Case` already has an `attempt` field (refusal_corpus.rs:62) and an `earlier(job, request)` helper (refusal_corpus.rs:202). Fix: Give the check the attempt: `step!(check_root_cause_criterion(reading, request, attempt))`. Match cues on the request text plus `attempt.map(|a| a.request.as_str())`, after removing steward template lines from both. Do not read `referenced`, because those are cited evidence jobs. Add a REFUSE corpus case with request `try again on 20261030-060751-5389` and `attempt = Some(earlier(RETRIED_JOB, <wanted-content request>))`, tagged `retry-complaint` and `bug-fix-root-cause`, plus a matching unit-test line. Make sure the reading still passes `check_prior_result_and_scope`, for example by naming the retried job in an assumption, so the new check is the one that refuses. List `continued_jobs`/`attempt` in the dependents.",
+      "location": "Plan step 1-2 (`check_root_cause_criterion(reading, request)`), Decision 2; crates/athena-core/src/reading.rs:1119, 663-669",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Wanted-content cue family (iii) also matches feature-change requests, which would then need a made-up root cause.",
+      "evidence": "Family (iii) also matches feature-change requests that are not bug reports, such as `Make the status page show only running jobs` or `The dashboard should still show the cost column after the redesign`. The creation-word exemption covers only add/create/new/introduce/implement, so `make`, `change`, `should` and `redesign` pass. For those readings the gate would ask for a 'root cause' that does not exist, and the reader would make one up. The plan names this as a risk, but its corpus has only the `Add a page ...` feature case. Fix: Add a corpus ACCEPT case, or a unit-table line, for a `Make the X page show only Y` change request. Either narrow (iii), for example by requiring a past- or present-state cue (`still`, `no longer`, `anymore`, `now shows`) rather than bare `only` when no error word is present, or state in the doc comment that the check knowingly refuses this shape.",
+      "location": "Decision 2, cue family (iii) (content verb + only/still/no longer/anymore + output noun)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The reading's own 12% estimate is above the replay's 10% hold, and the plan has no step for a hold.",
+      "evidence": "The accepted reading puts its expected share (12%) in an assumption only. `replay_declaration` reads only criteria and out_of_scope (reading.rs:3880), so the 10% hold (REPLAY_HOLD_PERCENT, reading.rs:3630) applies. The reading's own estimate is above that limit, so if the estimate is right the replay will hold the job. Fix: Say in the plan what the producer and verifier do if the replay holds the job: report it, and do not widen the exemptions to get under 10%. Flag to Athena that the reading's criteria should declare `expected 12% of newly refused readings` if it is re-read.",
+      "location": "Open question 1 / Risks (replay share)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Template-line removal also drops user request lines that start `Introspection `.",
+      "evidence": "A user request with a line that starts `Introspection ` loses that line from cue matching, although only steward requests use that template (hestia.rs:421-423). Fix: Remove template lines only when the request also has the `Fix the root cause of a repeated failure:` title line.",
+      "location": "Step 2, `bug_report_lines` prefix `Introspection `",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read reading.rs (refusing_check at 3119-3144, check_code_survey at 3453, has_phrase, the retry path at 1101-1133, the gate call at 663), hestia.rs's root_cause_request (388-442), refusal_corpus.rs (Case, base_reading, case, earlier, root_cause_request, the code-survey cases) and briefs.rs (READING_RULES and its test at 3954-3985). The functions, line anchors and fixtures the plan names exist and match. The steward-template removal fits the real template, and the demonstrations call the real seams (refusing_check, check_root_cause_criterion, check_reading_text) and would fail without the change. One gap is major: the check reads only `request`, but `athena retry` makes the request text `try again on <id>` and passes the earlier request only through `attempt`. So every retry of a bug-fix job bypasses the new check, and a retry is one of the two ways this class arrived. Passing `attempt` and adding a retry corpus case fixes it. The other findings are minor: false positives on feature-change wording, the replay share with no planned response, and a nit on removing template lines from user requests. Verdict: revise."
+}

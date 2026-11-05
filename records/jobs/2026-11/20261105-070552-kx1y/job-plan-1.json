@@ -1,0 +1,264 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261105-070552-kx1y",
+  "round": 1,
+  "at": "2026-11-05T07:38:29.508202248Z",
+  "invocation_seq": 3,
+  "approach": "Write one new design note, docs/design/continuous-landing.md, that makes landing a continuous step of the drain. Once the verifier passes, the job joins the one ordered landing queue (async-drain.md sections 6 and 7). The queue head's pull request is merged by the code that already exists. The self-rebuild moves off the critical path as a background await. The note starts from what the code does today, which I read. `merge_via_rest = true` is already set (athena.toml:189). `land_pr` already waits for checks and merges when they are green (gh/landing.rs:228-253). `LandingQueue` already exists (drain.rs:1236). `rebuild_if_due` blocks the next job (drain.rs:2402). So the note says exactly what is reused and what is new: the worker is released at enqueue, the queue head does the landing, the landing record is written at merge confirmation, and the rebuild is a deferred await. It states the review's figures with sources: 440.1 of 464.5 min in landing and rebuild, about 21 min elsewhere, 16070.4/366 for idle time. It labels 420.0 min as the review's prediction. It names the measurement: the next review's median over the newest 20 landings (`THROUGHPUT_WINDOW`) from the verifier's end to the landing end, against 464.5 total and 440.1 for the stage. It also covers alternatives, risks, out of scope, build-job order and the duty to cite review 20261105-070420-vq95. Small additive edits go in async-drain.md (a pointer), docs/decisions.md (one new decision) and CHANGELOG.md (one entry). No code or governance file changes.",
+  "decisions": [
+    {
+      "choice": "Reuse the existing REST merge in `land_pr` (the `merge_via_rest` path), run by the queue head, as the 'automatic merge'. Do not depend on a host auto-merge setting.",
+      "reason": "The merge call, the wait for checks, the landing intent and landing records, and the merged-content check already exist and are tested (crates/athena-core/src/gh/landing.rs:228-300; docs/design/native-pr-landing.md section 5). Host squash-only and linear-history rules (docs/system-facts.md) are already handled there. The new work is when the merge starts and who waits for it, not how it merges.",
+      "rejected": [
+        {
+          "option": "Enable the host's native auto-merge on the pull request at enqueue",
+          "why": "Needs a repository setting the code does not show to be on (an open Host question). The merge would also happen outside the ordered queue, so order and the landing-intent write (records-history.md) would no longer hold."
+        },
+        {
+          "option": "Add a new merge code path for the drain",
+          "why": "Duplicates land_pr and its safety checks for no saving."
+        }
+      ]
+    },
+    {
+      "choice": "Release the worker at verifier pass and let the landing queue head do the CI wait and merge. The self-rebuild becomes a deferred await that runs at a safe point and does not hold the next job's landing or producer.",
+      "reason": "The measured span is verifier end to the later of the landing outcome and the landing record (status.rs:648-650, 805-813). It is 440.1 of 464.5 min, so the cause is waiting in a serial tail, not work. async-drain.md sections 6 and 7 already specify the queue, the parked CI wait and the deferred rebuild; this note commits to them first as the order of build jobs.",
+      "rejected": [
+        {
+          "option": "Raise [parallel] max_concurrency only",
+          "why": "async-drain.md section 9 alternative a: jobs would land racing, with no order and no conflict return."
+        },
+        {
+          "option": "Make the CI wait shorter",
+          "why": "Does not address the queue and rebuild share of a stage that is more than 20 times the sum of the CI runs the records show (median CI run 583 s in warm-baseline-build.md 2.1)."
+        }
+      ]
+    },
+    {
+      "choice": "Write the landing record at merge confirmation, as `land_pr` does, and have the next throughput review report the rebuild time separately.",
+      "reason": "The review's span ends at the landing record, so a rebuild that no longer precedes it leaves the span. Part of the 420.0 min is therefore a change in what is measured. The note says so, and asks the next review to keep the rebuild visible so the saving is not overstated.",
+      "rejected": [
+        {
+          "option": "Count the whole saving as latency removed",
+          "why": "hestia.md:277 says no record separates the rebuild, so the code cannot show how much of the 440.1 min is rebuild. Claiming all of it would be unmeasured."
+        }
+      ]
+    },
+    {
+      "choice": "Make the first build job a measurement of the 440.1 min by phase (wait for the drain, queue wait, CI wait, merge, rebuild) from the existing timestamps. Raise limits only afterwards.",
+      "reason": "The snapshot has no records or THROUGHPUT.md, and the code cannot say which phase dominates. The prediction of 420.0 is the review's; the note labels it a prediction and builds the evidence step first.",
+      "rejected": [
+        {
+          "option": "Build first and measure after",
+          "why": "A design that cannot show where 440.1 min goes risks fixing the wrong wait."
+        }
+      ]
+    },
+    {
+      "choice": "Edit async-drain.md only by adding a short pointer and no renumbering; add one decision D155 in the existing format; add one CHANGELOG Unreleased entry.",
+      "reason": "Code comments cite async-drain.md by section number (drain.rs:59, 74; disk.rs:77; config.rs:40, 93, 102), so numbers must stay. The deliverables list names the decisions and changelog files, and the user default 'changelog' asks for a record.",
+      "rejected": [
+        {
+          "option": "Put the design inside async-drain.md",
+          "why": "That file is accepted and long (25586 bytes); the request asks for a new note under docs/design/ that the next review can cite."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/design/continuous-landing.md",
+      "action": "create",
+      "purpose": "The design note: status, source and measured figures, Existing code, design, how it removes the bottleneck, predicted saving and measurement, alternatives, risks, out of scope, build-job order, citation duty.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "docs/design/async-drain.md",
+      "action": "modify",
+      "purpose": "Add a short pointer near the Status line and at the end of section 7 to continuous-landing.md; renumber nothing.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D155: continuous landing is the design for review 20261105-070420-vq95; alternatives, tradeoff, reversal cost, provenance.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under Unreleased / Added naming the note, the review id and the predicted 420.0 min saving.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Re-read docs/design/async-drain.md sections 6 and 7, native-pr-landing.md section 5.1, crates/athena-core/src/status.rs lines 642-695 and 805-813, crates/athena-core/src/gh/landing.rs lines 228-300, and crates/athena-cli/src/drain.rs lines 134-156, 1236 and 2397-2420. Quote only what they say.",
+    "Create docs/design/continuous-landing.md with a header (status: proposed, nothing built; audience), the source (review 20261105-070420-vq95; THROUGHPUT.md is not in the snapshot, so the figures are cited to the review request) and the Existing code table. Rows: LandingQueue, Drain::land, land_pr and merge_via_rest, landing and landing-intent records, rebuild_if_due, rebase and the re-check rule, the in-flight table. Each row says reused or changed.",
+    "Write the problem section with the measured figures: landing and rebuild 440.1 of 464.5 min median per landed job, other stages about 21 (reading, planning, producer, checks, verifier), idle 16070.4/366 = about 44 min. Define the span from status.rs (verifier end to the later of outcome and landing record) and say what the snapshot cannot show.",
+    "Write the design: (1) at verifier pass the job joins the one ordered landing queue and the worker is free; (2) the queue head rebases (section 6), then `land_pr` waits for checks and merges by the existing REST path; (3) the landing record is written at merge confirmation; (4) the self-rebuild is a deferred await at a safe point, and a failed rebuild holds landing. Add the 'How it removes the bottleneck' paragraph tied to the figures.",
+    "Write 'Predicted saving and how it is measured': 420.0 min per landed job is the review's prediction, not a measurement. 464.5 - 420.0 = 44.5 min is the implied remainder (about 21 other stages plus about 23.5 landing, an estimate). The next review takes the median over the newest 20 landings (`THROUGHPUT_WINDOW`) with `StageMinutes::median_of`, compares the total with 464.5 and the stage with 440.1, uses only landings after the change, and reports the rebuild time separately. Add the citation rule: a change implementing this must cite review 20261105-070420-vq95 in its request text.",
+    "Write Alternatives (concurrency only, host auto-merge, shorter CI wait, warm builds as in warm-baseline-build.md, do nothing), Risks (ordering, rebuild failure, merge conflicts, overstated saving, wrong phase), Out of scope (code, athena.toml, defaults.toml, workflows, editing the review), and ordered build jobs: measure phases; release the worker at enqueue; merge by the queue head; defer the rebuild; add the separate rebuild timing for the review.",
+    "Edit async-drain.md: add one sentence under the Status line and one at the end of section 7 pointing to continuous-landing.md, with no heading or number changes.",
+    "Append '## D155 · Landing becomes a continuous drain step' to docs/decisions.md in the D154 format (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance) and add an Unreleased / Added entry to CHANGELOG.md. Use no banned word or email-like text. Run `cargo test --locked` and `git diff --name-only` to confirm only the four files changed."
+  ],
+  "risks": [
+    {
+      "risk": "Ordering: releasing the worker at verifier pass lets later jobs finish and enqueue while an earlier one waits on CI, and could land out of order.",
+      "mitigation": "The note keeps one landing at a time under the existing queue (async-drain.md section 6, one ordered queue) and keeps FIFO by verifier pass. The merged-content check in `land_pr` remains the safety net."
+    },
+    {
+      "risk": "Rebuild failure: moving the rebuild off the critical path could let a job land on a main that Athena cannot build.",
+      "mitigation": "The note keeps D140's rule: the rebuild runs when no job is in a landing or records stage, and a failed rebuild holds landing and starts no new producers (async-drain.md section 7). The note adds that the rebuild result is reported separately from the landing record."
+    },
+    {
+      "risk": "Merge conflicts: a job waiting in the queue meets a moved main.",
+      "mitigation": "The note reuses the section 6 rebase, the held-back conflict case, `max_conflict_returns` and the re-check rule (`rebase_needs_recheck`), and says the real conflict hold wiring is a dependency of the build jobs."
+    },
+    {
+      "risk": "The saving is overstated because the measured span ends at the landing record, which is written before the rebuild finishes.",
+      "mitigation": "The note labels 420.0 as the review's prediction, derives the implied remainder (464.5 - 420.0 = 44.5 min) and states that the rebuild leaving the span is a measurement effect. The next review reports the rebuild time separately and compares the 20 newest landings after the change."
+    },
+    {
+      "risk": "The boundary or personal-data scan fails on new prose.",
+      "mitigation": "Verify that the new files hold no banned word and no email-like text; the run of `cargo test --locked` would catch it."
+    },
+    {
+      "risk": "The 440.1 minutes may be mostly waiting for the drain to reach the job, not queue, CI or rebuild, so this design would remove less than predicted.",
+      "mitigation": "The note makes the phase split the first build job and states the dependence on it; the saving is conditional on that split."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "async-drain.md section numbers and the [drain.pipeline] section 11 reference",
+      "dependent": "crates/athena-cli/src/drain.rs (comments at lines 59, 74 cite async-drain.md sections 4 and 6), crates/athena-core/src/disk.rs:77 and :535, crates/athena-data/src/config.rs:40, 93, 102, 564",
+      "kind": "code",
+      "test": null,
+      "reason": "The plan adds a pointer to async-drain.md and renumbers nothing, so every cited section keeps its meaning."
+    },
+    {
+      "name": "docs/decisions.md format (adding D155 after D154 at line 4213)",
+      "dependent": "crates/athena-cli/tests/backtest.rs (lines 117, 138, 780) and crates/athena-cli/tests/ontology.rs (line 100) read docs/decisions.md",
+      "kind": "code",
+      "test": "cargo test --locked (backtest and ontology tests); the new entry follows the existing '## D155 · title' header and bullet fields (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance).",
+      "reason": null
+    },
+    {
+      "name": "banned-word and personal-data scan of new text",
+      "dependent": "xtask/tests/policy.rs boundary_words() scan (line 88) of tracked files",
+      "kind": "rule",
+      "test": "cargo test --locked (xtask policy test); the new files contain no banned word and no email-like text.",
+      "reason": null
+    },
+    {
+      "name": "prompt-set token budgets",
+      "dependent": "docs/system-facts.md budget lines and the test system_facts_budgets_match_computed (crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The budgets count the always-loaded prompt files under crates/*/prompts and the contract; the plan touches none of them."
+    },
+    {
+      "name": "merge_via_rest (read, not changed)",
+      "dependent": "athena.toml:189 `[landing] merge_via_rest = true`; crates/athena-core/src/gh/landing.rs:237; crates/athena-data/src/config.rs:275",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The note reads this setting as the existing automatic merge and changes no key, default or code. A later build job decides whether to alter anything."
+    },
+    {
+      "name": "the landing-and-rebuild stage definition the note cites",
+      "dependent": "crates/athena-core/src/status.rs (`StageMinutes`, `landed_jobs`, `landing_end`, `THROUGHPUT_WINDOW`) and docs/design/hestia.md:273-281",
+      "kind": "code",
+      "test": null,
+      "reason": "The note cites the definition and changes neither code nor the stage. The next review computes the figures with the same `StageMinutes::median_of`, so the comparison with 464.5 stays like with like."
+    },
+    {
+      "name": "drain landing and rebuild behavior (described only)",
+      "dependent": "crates/athena-cli/tests/drain.rs and drain.rs `LandingQueue`, `Drain::land`, `rebuild_if_due` (all modes reaching landing, including [parallel] max_concurrency 1 to 8)",
+      "kind": "code",
+      "test": null,
+      "reason": "The note describes a future change to these and makes none now; no function, mode or state they read changes in this plan."
+    },
+    {
+      "name": "refusal corpus",
+      "dependent": "Refusal and matching rules (crates/athena-core/tests/refusal_corpus.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan adds or changes no parser, stem list, stop list or reading check, so no input form needs a corpus case and the corpus test is not a demonstration here."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the new file and check it describes the continuous landing step: a job joins the one ordered landing queue after the verifier passes, and its pull request merges automatically. Check it is directly under docs/design/.",
+      "command": "ls docs/design/continuous-landing.md",
+      "observes": "The file exists directly under docs/design/. Reading it shows a design section with the enqueue-at-verifier-pass rule and the automatic merge by the queue head.",
+      "fails_without": "Without the file, `ls` reports no such file, and without the described step there is no design to judge.",
+      "seam": "Content check by reading a file. Production entry point: none, since no code changes. The fixture is the file in the working tree, which plan step 2 creates."
+    },
+    {
+      "criterion": 2,
+      "method": "Read the 'Existing code' section: it must name docs/design/async-drain.md sections 6 and 7 and docs/design/native-pr-landing.md, and say per item whether it is reused or changed (LandingQueue, land_pr, merge_via_rest, rebuild_if_due, landing record).",
+      "command": "git diff --stat",
+      "observes": "The diff lists continuous-landing.md; reading its Existing code table shows each of async-drain.md 6 and 7 and native-pr-landing.md with a 'reused' or 'changed' label.",
+      "fails_without": "Without the section, the table of reused and changed parts is absent and the reader cannot tell what is new.",
+      "seam": "Content check by reading a file. No production entry point. The fixture is the new note from plan step 2."
+    },
+    {
+      "criterion": 3,
+      "method": "Search the note for the figures 440.1, 464.5, 21 and 16070.4/366, and read the paragraph that explains how the change removes the bottleneck.",
+      "command": "git show HEAD:docs/design/continuous-landing.md",
+      "observes": "The text shows 440.1 of 464.5 min in landing and rebuild, about 21 min for all other stages, and the idle figure, each with its source (the review request; status.rs definition). The explanation follows from them.",
+      "fails_without": "Without the figures or their sources, the claim that this is the biggest wait is unsupported.",
+      "seam": "Content check by reading a file (a text search of the note). The fixture is the new note from plan steps 3 and 4."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the 'Predicted saving and how it is measured' section for 420.0 min per landed job, labeled a prediction, and the measurement rule.",
+      "command": "git show HEAD:docs/design/continuous-landing.md",
+      "observes": "The section states 420.0 min per landed job as the review's prediction, and says the next review takes the median over the newest 20 landings from the verifier's end to the landing record, against 464.5 (stage 440.1). It notes the rebuild-leaves-the-span effect.",
+      "fails_without": "Without it the next review has no figure to score and no rule for the window.",
+      "seam": "Content check by reading a file. The rule must agree with `THROUGHPUT_WINDOW` and `StageMinutes::median_of` in crates/athena-core/src/status.rs (exist today, read at lines 642-695); the producer cites them and runs no code."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the note for the review id and the duty to cite it in a change's request text.",
+      "command": "git show HEAD:docs/design/continuous-landing.md",
+      "observes": "The id 20261105-070420-vq95 appears, with the sentence that a change implementing the design must cite it in its request text.",
+      "fails_without": "Without the id, the next review cannot match the change to its prediction.",
+      "seam": "Content check by reading a file. No production entry point."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the Alternatives, Risks and Out of scope sections.",
+      "command": "git show HEAD:docs/design/continuous-landing.md",
+      "observes": "Alternatives (at least: raise concurrency only, host auto-merge, shorter CI wait, do nothing); risks named: ordering, rebuild failure, merge conflicts, with a mitigation each; an out-of-scope list.",
+      "fails_without": "Without them the design is not reviewable against the 'designed' default.",
+      "seam": "Content check by reading a file. No production entry point."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the repository tests. Existing docs-consistency tests read docs: the boundary-word scan (xtask/tests/policy.rs `boundary_words`), the decisions.md readers (crates/athena-cli/tests/backtest.rs lines 117, 138, 780), the ontology scan (crates/athena-cli/tests/ontology.rs) and `system_facts_budgets_match_computed`.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass with the new note, the D155 entry and the CHANGELOG entry present.",
+      "fails_without": "A banned word or email-like text in any tracked file fails the policy scan; a malformed '## D155 · ...' header or missing field fails the decisions readers; a changed budgeted prompt file fails the budgets test.",
+      "seam": "Entry point: `cargo test --locked` from the repository root. No fake. These tests exist today (read: policy.rs:88, backtest.rs:117, ontology.rs:249). The only fixture is the working tree with plan steps 2 to 8 applied."
+    },
+    {
+      "criterion": 8,
+      "method": "List changed paths and confirm none is a governance file (athena.toml, defaults.toml, workflows, tool or lint configuration) and no file under crates/ or xtask/ changed.",
+      "command": "git diff --name-only",
+      "observes": "Only docs/design/continuous-landing.md, docs/design/async-drain.md, docs/decisions.md and CHANGELOG.md are listed.",
+      "fails_without": "A listed athena.toml, defaults.toml or workflow file shows the scope rule was broken.",
+      "seam": "Reads the producer's working tree diff. Exists today. See the open question on docs/decisions.md and CHANGELOG.md versus 'only docs/design/'."
+    }
+  ],
+  "open_questions": [
+    "User: Acceptance criterion 8 says only files under docs/design/ change, but the expected deliverables also list docs/decisions.md and CHANGELOG.md. This plan edits both, since neither is a governance file. Say if you want them dropped.",
+    "Host: Is GitHub's native auto-merge enabled on the repository? The code does not show it. The design does not depend on it (it uses the existing REST merge), but the alternatives section needs this fact to be exact.",
+    "Host: What share of the 440.1 minutes is the wait before the drain reaches landing, the queue and CI wait, and the rebuild? The snapshot has no records or THROUGHPUT.md, and hestia.md:277 says no record separates the rebuild. The note cites the request text and makes the phase split the first build job."
+  ],
+  "producer_section_sha256": "5fd8426a6de3d7b00a71a30767baf5190ffba6ee3b00e8fbd3ac36a1b6c921cd"
+}
