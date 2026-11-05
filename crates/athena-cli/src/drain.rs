@@ -224,6 +224,12 @@
 //!   retry`. That skips the rebuild only while the main branch has changed nothing outside `records/` since
 //!   the job's base; otherwise the retry plans and produces again, as any retry does. Space that stays short
 //!   holds the job again.
+//! - **A build-slot wait holds a job.** Each local check takes one of `[drain.pipeline] max_check_slots` build
+//!   slots ([`athena_core::slots`]). A check that waits longer than `build_wait_s` (default 1800) makes `athena
+//!   go` return [`athena_core::disk::SlotWait`]. The item ends held (outcome `environment: build slot wait`, not
+//!   `environment: low disk`, plus a note); that is not a failure, uses no attempt, and stops nothing. The job
+//!   stays dispatched with no process and its kept candidate, so the next pass lists it as interrupted and
+//!   resumes it by itself.
 //! - **A short budget holds a job.** A job's own budget (`[budget] job_usd`) must cover everything still to run
 //!   (`athena_core::reading::budget_reserve`). When it does not, `athena go` returns
 //!   [`athena_core::reading::BudgetShort`] before spending anything. The item is left queued (outcome
@@ -426,10 +432,10 @@ pub struct Run {
     /// is not run until a person accepts it. The job is still proposed: it is neither retried nor counted as
     /// a failure.
     pub needs_accepting: bool,
-    /// True when dispatch was held for lack of free disk space (`environment: low disk`), or because the
-    /// job's budget does not cover the whole path still to run (`budget short`). The job is still proposed
-    /// and was not run: it is neither retried nor counted as a failure, and a later drain runs the same job
-    /// once space is free or the budget is raised.
+    /// True when the job was held for lack of free disk space (`environment: low disk`), because no build
+    /// slot came free in time (`environment: build slot wait`), or because the job's budget does not cover
+    /// the whole path still to run (`budget short`). The job is not retried in this run and is not counted as
+    /// a failure; a later drain runs the same job once space or a build slot is free or the budget is raised.
     pub held: bool,
 }
 
@@ -1614,17 +1620,28 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 RunStep::NeedsAccepting
             }
             _ if run.held => {
-                line.outcome = if run.reason.starts_with(BUDGET_SHORT) {
-                    BUDGET_SHORT.into()
+                // The reason says which hold it is, so a slot wait is never counted as low disk.
+                let (outcome, fallback) = if run.reason.starts_with(BUDGET_SHORT) {
+                    (
+                        BUDGET_SHORT,
+                        "the job's budget does not cover the whole path",
+                    )
+                } else if run.reason.starts_with(athena_core::disk::BUILD_SLOT_WAIT) {
+                    (
+                        athena_core::disk::BUILD_SLOT_WAIT,
+                        "no build slot became free in time",
+                    )
                 } else {
-                    athena_core::disk::LOW_DISK.into()
+                    (
+                        athena_core::disk::LOW_DISK,
+                        "free disk space is below the minimum",
+                    )
                 };
+                line.outcome = outcome.into();
                 self.note(format!(
                     "item {} is left queued: {}",
                     item.job,
-                    line.reason
-                        .as_deref()
-                        .unwrap_or("free disk space is below the minimum")
+                    line.reason.as_deref().unwrap_or(fallback)
                 ));
                 self.push(line);
                 RunStep::Held
@@ -2521,7 +2538,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 &item.job,
                 &format!(
                     "held: {}",
-                    self.last_reason(&item.job, "free disk space is below the minimum")
+                    self.last_reason(&item.job, "it was held and a later pass runs it")
                 ),
             ),
             ItemEnd::Waiting => self.pass_over(&item.job, &self.last_landing(&item.job)),
@@ -3708,7 +3725,11 @@ impl Steps for RealSteps<'_> {
                     },
                     cost,
                     needs_accepting: false,
-                    held: short || error.downcast_ref::<athena_core::disk::LowDisk>().is_some(),
+                    held: short
+                        || error.downcast_ref::<athena_core::disk::LowDisk>().is_some()
+                        || error
+                            .downcast_ref::<athena_core::disk::SlotWait>()
+                            .is_some(),
                 }
             }
         }

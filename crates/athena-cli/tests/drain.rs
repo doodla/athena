@@ -2970,6 +2970,75 @@ fn a_later_pass_resumes_the_held_job_from_its_kept_candidate() {
 }
 
 #[test]
+fn a_build_slot_wait_holds_the_item_and_is_not_labelled_low_disk() {
+    // One build slot and a one-second wait; the real local checks (`sh`) are what ask for the slot.
+    let config = format!("{}\n[drain.pipeline]\nbuild_wait_s = 1\n", test_config());
+    let fx = Fixture::with_config(&config);
+    let athena = fx.athena(rated_scenario().script());
+    let job = queue_steward_request(&athena, "Add a greeting to the README.");
+    let id = athena_data::JobId::parse(&job).unwrap();
+    // Another command holds the only build slot through the whole first pass.
+    let queue = athena_core::slots::SlotQueue::new(
+        athena.state.slots_dir(),
+        1,
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(600),
+    );
+    let holder = queue.try_acquire().unwrap().expect("the slot is free");
+
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = RealSteps {
+        ui: &lines,
+        ..real_steps(&athena, &lander)
+    };
+    let first = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&first);
+    assert_eq!(first.landed, 0, "{text}");
+    assert_eq!(first.jobs.len(), 1, "attempted once, not retried: {text}");
+    assert_eq!(first.jobs[0].job, job);
+    assert_eq!(
+        first.jobs[0].outcome, "environment: build slot wait",
+        "{text}"
+    );
+    assert_ne!(first.jobs[0].outcome, "environment: low disk");
+    assert!(text.contains("environment: build slot wait"), "{text}");
+    assert!(!text.contains("low disk"), "{text}");
+    assert_ne!(
+        first.stop,
+        Stop::Environment,
+        "a held item stops nothing: {text}"
+    );
+    let said = lines_of(&lines);
+    assert!(
+        !text.contains("athena retry") && !said.iter().any(|l| l.contains("athena retry")),
+        "no one is told to retry: {text}\n{said:#?}"
+    );
+    assert!(lander.0.lock().unwrap().is_empty());
+
+    // Held, not closed: dispatched with its candidate, no verdict, no outcome, and no work failure.
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let held = &records.jobs[&job];
+    assert_eq!(held.state(), JobState::Dispatched);
+    assert!(held.outcome.is_none() && held.latest_score().is_none());
+    assert!(held.verification.is_none());
+    assert!(records.introspections.is_empty(), "not a work failure");
+    assert!(athena_core::disk::read_slot_hold(&athena.state, &id).is_some());
+    assert_eq!(athena_core::disk::read_hold(&athena.state, &id), None);
+    let status = display::status(&athena.status().unwrap());
+    assert!(status.contains("environment: build slot wait"), "{status}");
+
+    // The slot is free: a later pass resumes the same job, which runs its checks and lands.
+    drop(holder);
+    let second = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&second);
+    assert_eq!(second.landed, 1, "{text}");
+    assert_eq!(second.jobs[0].item, job, "{text}");
+    assert_eq!(second.jobs[0].outcome, "passed", "{text}");
+    assert_eq!(athena_core::disk::read_any_hold(&athena.state, &id), None);
+}
+
+#[test]
 fn space_that_stays_short_leaves_the_job_held_and_uses_no_attempt() {
     let held = built_then_low_disk();
     let lander = RecordingLander::default();

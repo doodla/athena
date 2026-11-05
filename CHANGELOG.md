@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Build slots for local checks (`docs/design/agent-and-build-slots.md`, build job 3). `[drain.pipeline]
+  max_check_slots` is now enforced: each local check takes one of that many slots from a counting queue of lock
+  files under the state directory (`crates/athena-core/src/slots.rs`), in strict class order with first in first
+  out and ageing, and frees it when it ends, including when the job panics or its process dies, with no sweeper.
+  A limit of 1 (the default) runs one build at a time, as before. A wait longer than the new `build_wait_s`
+  (default 1800) holds the job, not fails it: reason `environment: build slot wait`, no attempt used, resumed by
+  a later drain, and reported as its own outcome in the drain (not `environment: low disk`). `build_age_promote_s`
+  (default 600) is the wait after which a request moves up one class. A check that waited reads the free disk
+  space again before it runs. Each check in `verification.json` carries an optional `queued_s` (old records
+  still read), and `athena status` prints a `build wait` line in the throughput section that sums it.
 - Read-ahead with one job at a time. `drain_concurrent` with a bound of 1 now reads, and for a hard job plans,
   the next queued items while the current job runs, up to `Steps::read_ahead` of them, so the next job is
   ready when the slot frees. Before, only two or more jobs at once did this. A reading that is refused ahead

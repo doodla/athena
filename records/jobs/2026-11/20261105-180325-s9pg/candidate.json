@@ -1,0 +1,285 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261105-180325-s9pg",
+  "base_commit": "b562d63ef2cd5d1ee46e0651417489d38b2c6306",
+  "base_fingerprint": "sha256:a3a7a4200c7415a9a5dee935228cb37280f88e1822dc9b3eda99b8786731490c",
+  "previous_job": "20261105-172032-pm9h",
+  "candidate_commit": "f8da8d6710f7c0f643b321ab443c8579dde273b6",
+  "candidate_tree": "f200de81ec771a95108f38474d25f98c47d51230",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 328864
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 249847
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 325286
+    },
+    {
+      "path": "crates/athena-cli/tests/status_durations.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 3486
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 55934
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 81885
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 83909
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14547
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 356895
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 35683
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32521
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31188
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 84083
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 11645
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 196494
+    },
+    {
+      "path": "crates/athena-core/src/slots.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 26542
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32284
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 154365
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 105185
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 61590
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 197880
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 40989
+    }
+  ],
+  "fingerprint": "sha256:b7123f8f372a58b3223e66461ebcfa7b546239c846e8d5668380e08291990f0e",
+  "violations": [],
+  "producer_report": {
+    "summary": "Local checks now take a build slot from a counting queue of `max_check_slots` lock files. This is build job 3 from the design note, local-check part only. The slot is released by Drop, or by the OS if the process dies. The full `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo fmt --all --check` and `cargo test -p xtask --test policy` all passed. The full run came back as success, but its output was too large to read back.\n\n- **Queue (`slots.rs`):** each slot is an exclusive file lock on `slots/slot-<n>.lock`. A waiting request holds a locked ticket under `slots/queue/` (created under a temporary name, locked, then renamed into place). Only the head ticket tries the slot files, ordered by class, then time asked. Ageing moves a request up one class per `build_age_promote_s`. Dead tickets are removed when read. The `stop` closure runs on every poll, so the kill switch still ends a wait. A wait past `build_wait_s` returns `disk::SlotWait`.\n- **`SnapExec::exec`:** takes a `Class::Check` slot after the kill-switch check and the first-check disk gate. It holds the slot past the snapshot restore and stamps `queued_s` on the check. A check that waited reads the disk gate once more before it runs, so a long queue wait does not leave a stale free-space reading.\n- **Hold (`disk.rs`, `run/mod.rs`, `run/close.rs`):** `SlotWait`, the reason `environment: build slot wait`, `write_slot_hold` / `read_slot_hold`, and `AnyHold` / `read_any_hold` are new. `hold_for_slot_wait` shares one `commit_hold` helper with `hold_for_disk`. The job stays dispatched with its kept candidate, no outcome and no attempt used. `go` on a held job and `status` both read either hold marker through `read_any_hold`.\n- **Drain (`athena-cli/src/drain.rs`):** this file was not in the reading's deliverables. Without it, a slot-wait hold would be reported as `environment: low disk`, which would corrupt the \"low disk\" count the design uses as a metric. The drain now picks the held outcome from the reason: budget short, build slot wait, else low disk.\n- **Config:** `PipelineConfig` gains `build_wait_s` (default 1800) and `build_age_promote_s` (default 600). Each must be at least 1, and unknown keys are still refused.\n- **Records and status:** `CheckRun.queued_s` is optional and skipped when None, so old records still read. `status` prints a `build wait` line in the throughput section only when some check has a `queued_s`.\n- **Compiler-forced edits:** one-line `queued_s: None` additions in checks.rs, routing.rs, verify.rs, introspect.rs, reading.rs, close.rs, send_back.rs, run/mod.rs, run/tests.rs, status.rs, records.rs and the status_durations test.\n- **Docs:** CHANGELOG entry under Unreleased > Added. Build job 3 in the design note is marked built, with the choices recorded.",
+    "files": [
+      "crates/athena-core/src/slots.rs",
+      "crates/athena-core/src/lib.rs",
+      "crates/athena-core/src/state.rs",
+      "crates/athena-core/src/disk.rs",
+      "crates/athena-core/src/run/checks.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/close.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "crates/athena-core/src/run/send_back.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-core/src/checks.rs",
+      "crates/athena-core/src/routing.rs",
+      "crates/athena-core/src/verify.rs",
+      "crates/athena-core/src/introspect.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-data/src/config.rs",
+      "crates/athena-data/src/records.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "crates/athena-cli/tests/status_durations.rs",
+      "CHANGELOG.md",
+      "docs/design/agent-and-build-slots.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo check --all-targets --locked --workspace --message-format short",
+        "result": "pass",
+        "note": "Run first to list every CheckRun literal missing queued_s; clean after the one-line additions."
+      },
+      {
+        "command": "cargo test -p athena-core --lib slots:: --locked",
+        "result": "pass",
+        "note": "14 tests passed, including the killed-child, panic, error-return, two-slot, ordering, ageing, dead-ticket, timeout and stop tests."
+      },
+      {
+        "command": "cargo test -p athena-core --lib status:: --locked",
+        "result": "pass",
+        "note": "33 passed, including the_throughput_section_sums_build_wait and no_recorded_wait_gives_no_build_wait_line."
+      },
+      {
+        "command": "cargo test -p athena-core --lib run::tests --locked -- build_slot build_wait waited two_jobs",
+        "result": "pass",
+        "note": "The loose filter ran 74 tests, all passed, including the four new job-level tests (two_jobs_with_one_build_slot_run_one_after_the_other, a_check_that_waited_checks_the_disk_again, a_check_that_waits_past_build_wait_s_holds_the_job, the_build_slot_is_free_after_a_panic_in_the_check_and_after_a_normal_run) and the existing low-disk hold tests."
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain a_build_slot_wait_holds_the_item --locked",
+        "result": "pass",
+        "note": "Outcome is `environment: build slot wait`; the next pass resumes the same job and lands it."
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Run after cargo fmt --all and the last edit."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --test policy --locked",
+        "result": "pass",
+        "note": "The scan reads tracked files only, so slots.rs (new) was checked with a Grep for every banned word and fragment, which found none."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run once. It was reported as a plain success (a failure shows Exit code 101); the output was too large to read back."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "`cargo test -p athena-core` passes including a new slots test where two jobs need local checks with max_check_slots = 1: the second waits while the first holds the slot, then runs after release (asserted by order and a nonzero queued_s for the second).",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core --lib slots::` (the_second_request_waits_then_runs) and the run::tests filter that includes two_jobs_with_one_build_slot_run_one_after_the_other: both passed. The job-level test runs two real `go` calls on two threads at the default limit of 1. It asserts the log order first-start, first-end, second. The first fake waits for the other job's ticket via SlotQueue::waiting(), and the second fake asserts that no check is running. It also asserts both recorded queued_s values are present and the larger one is above zero and above the other."
+      },
+      {
+        "criterion": "`cargo test -p athena-core` includes a test where a slot holder's process dies (a child process holding the slot lock is killed, or a holder is dropped on panic/error) and a waiter then acquires the slot with no manual cleanup or sweeper.",
+        "status": "met",
+        "evidence": "slots::tests::a_killed_holder_frees_its_slot re-executes the test binary as a child that holds the only slot. The parent sees try_acquire refused while the child lives and records the file names. It then sends SIGKILL (Child::kill), checks no file was removed, and a blocking acquire succeeds. Also a_panicking_holder_frees_its_slot, a_holder_that_returns_an_error_frees_its_slot, and the job-level the_build_slot_is_free_after_a_panic_in_the_check_and_after_a_normal_run. All passed."
+      },
+      {
+        "criterion": "A test with max_check_slots = 2 shows at most 2 holders at once and a third request waits.",
+        "status": "met",
+        "evidence": "slots::tests::two_slots_admit_two_holders_and_the_third_waits passed. try_acquire gives two slots and refuses the third. With three threads, the live-holder peak is exactly 2, the queue shows one waiter while two hold, and at least one request reports waited()."
+      },
+      {
+        "criterion": "A test shows a check request waiting past build_wait_s returns a resumable hold with reason `environment: build slot wait`, uses no attempt, and is not recorded as a work failure.",
+        "status": "met",
+        "evidence": "run::tests a_check_that_waits_past_build_wait_s_holds_the_job (build_wait_s = 1, a real Slot held throughout) passed. It asserts a SlotWait error, the ui line `held       environment: build slot wait`, and JobState::Dispatched with no outcome, score or verification. It also asserts no introspections, read_slot_hold Some and read_hold None, a resume mark at the Checks stage, a second `go` message with 'build slot wait' and not 'was interrupted', and the status hold text. After the holder drops, retry plus go lands with no producer rerun (counts (0,1,_,1)). athena-cli drain test a_build_slot_wait_holds_the_item_and_is_not_labelled_low_disk passed: outcome `environment: build slot wait`, not an environment stop, and the next pass lands the same job. disk tests assert StopCause::OtherEnvironment and is_environment_reason."
+      },
+      {
+        "criterion": "crates/athena-core/src/slots.rs exists and SnapExec::exec in crates/athena-core/src/run/checks.rs acquires a guard from it before run_check and drops it after the snapshot restore, on every return path (guard released by Drop).",
+        "status": "met",
+        "evidence": "slots.rs exists. In run/checks.rs exec does `let slot = self.slots.acquire(Class::Check, ...)?;` before the check runs and uses `slot.queued()` after `restore_to`. The slot is a local that lives to the end of the call, so every `?`, panic or return drops it. The test the_build_slot_is_free_after_a_panic_in_the_check_and_after_a_normal_run panics after the slot is taken and then takes the slot again, and also does so after a normal run."
+      },
+      {
+        "criterion": "PipelineConfig in crates/athena-data/src/config.rs gains build_wait_s (default 1800) and build_age_promote_s (default 600) with validation and tests; unknown keys are still refused.",
+        "status": "met",
+        "evidence": "Fields added with serde defaults and Default. Validation refuses 0 for either, naming the key, via ConfigError::DrainPipeline. The tests drain_pipeline_defaults_keep_todays_behavior (1800, 600), bad_drain_pipeline_settings_are_refused_naming_the_key (build_wait_s = 0, build_age_promote_s = 0, and `surprise = 1` still refused) and reading_inputs_ignore_a_non_default_drain_pipeline passed in the full `cargo test --locked`."
+      },
+      {
+        "criterion": "Each check in verification.json carries an optional queued_s (old records still deserialize), and `cargo test` covers a 'build wait' line in the status throughput section that sums it.",
+        "status": "met",
+        "evidence": "CheckRun.queued_s is Option<f64> with serde default and skip-if-none. The records tests a_check_written_before_queued_s_existed_reads_with_none_and_writes_without_the_key and a_checks_wait_for_a_build_slot_round_trips passed. status::planning_cost_tests::the_throughput_section_sums_build_wait (12 + 30 = 42.0 s over 2 checks, longest 30.0 s, basis names the athena monotonic clock, a None check not counted) and no_recorded_wait_gives_no_build_wait_line passed. The job-level tests also read a recorded queued_s from verification.json."
+      },
+      {
+        "criterion": "`cargo clippy --all-targets` and `cargo fmt --check` are clean, and the whole `cargo test` passes with the default max_check_slots = 1.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo fmt --all --check` (clean), `cargo clippy --all-targets --locked -- -D warnings` (clean) and `cargo test --locked` once (reported as success). Every existing job test runs through SnapExec uncontended at the default limit of 1."
+      },
+      {
+        "criterion": "No change to athena.toml, defaults.toml, workflows, or records/; CHANGELOG.md gets an entry for the change.",
+        "status": "met",
+        "evidence": "`git status --short` lists no athena.toml, defaults.toml, .github or records path. CHANGELOG.md has a new bullet under [Unreleased] / ### Added naming the build-slot queue, build_wait_s, build_age_promote_s, the `environment: build slot wait` hold, queued_s and the 'build wait' status line."
+      }
+    ],
+    "open_issues": [
+      "Open question 1 from the plan, left unresolved (your call): the baseline run (`baseline_checks`) and the 'fails without' reruns (`demonstration_runs`) do not take a build slot. They have no hold path today and the reading names only `SnapExec::exec`. The design note records this.",
+      "Open question 2 from the plan, left unresolved (your call): ageing moves a request up one class per `build_age_promote_s` waited, down to the top class, as implemented and recorded in the design note. Only `Class::Check` is requested now, so nothing observable depends on it.",
+      "The 250 ms poll means a second request that arrives while the first holds a not-yet-removed ticket can wait one poll even when a second slot is free. This is acceptable now, but the poll interval is a field (`with_poll`) if it needs tuning.",
+      "The slot is per check, not per job. A job with several checks (fmt, clippy, test) re-queues between them, so another job's check can run in between. This matches the design's unit of one command."
+    ],
+    "mistakes": [
+      "My first slots tests asserted exactly one request had waited with 3 requests on 2 slots, and asserted try_acquire right after a release; both were flaky or wrong. A request queued behind a ticket not yet removed waits one poll even when a slot is free, and parallel tests' forked children can briefly hold a released lock. I weakened the first to a lower bound and added a retry helper for the second."
+    ],
+    "learnings": [
+      "`std::fs::File::try_lock` conflicts across separate open file descriptions in one process, so threads and tests share the real lock semantics. A forked child (any test spawning a process or git) briefly holds copies of open lock files, so a release can look delayed by milliseconds. Tests therefore retry try_acquire for a moment (take_soon / take_slot_soon) instead of asserting once.",
+      "The libtest harness prints `test <name> ... ` before the test body when run with --nocapture, so a child test's marker is appended to that text on one line. The parent therefore matches with `contains`, not equality.",
+      "CheckRun has no Default and derives deny_unknown_fields, so adding a field forces `queued_s: None` into every literal across athena-core, athena-data and athena-cli tests. `cargo check --all-targets --locked --workspace` lists them all.",
+      "The policy scan runs only on tracked files, so a newly created file such as slots.rs must be checked for banned words by hand.",
+      "Bash and Grep cannot read the harness's persisted tool-output file because it is outside the working directory, so a large `cargo test` output cannot be re-read. An error block (`Exit code N`) appears for a failing command, and its absence is the only success signal available."
+    ],
+    "desires": [
+      "A way to read a large `cargo test` output (or a filtered run) inside the working directory, to see the per-test summary instead of relying on the absence of an error."
+    ]
+  }
+}

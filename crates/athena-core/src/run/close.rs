@@ -177,27 +177,65 @@ impl Athena {
     pub(super) fn hold_for_disk(
         &self,
         ctx: &RunContext<'_>,
-        mut closing: Closing,
+        closing: Closing,
         low: crate::disk::LowDisk,
     ) -> anyhow::Error {
+        match self.commit_hold(ctx, closing, &low.text(), "low disk space", |id| {
+            crate::disk::write_hold(&self.state, id, &low)
+        }) {
+            Ok(()) => low.into(),
+            Err(why) => why,
+        }
+    }
+
+    /// Holds a job because no build slot came free within `build_wait_s`, at the checks. It is held the way
+    /// [`Athena::hold_for_disk`] holds a job: the records (candidate, invocations, plans) are committed with no
+    /// score and no outcome, a marker records the wait, the resume mark stays, and the next drain resumes the
+    /// job from its kept candidate with no attempt used. The error returned is the [`SlotWait`] hold; the
+    /// caller returns it from `go`.
+    ///
+    /// [`SlotWait`]: crate::disk::SlotWait
+    pub(super) fn hold_for_slot_wait(
+        &self,
+        ctx: &RunContext<'_>,
+        closing: Closing,
+        wait: crate::disk::SlotWait,
+    ) -> anyhow::Error {
+        match self.commit_hold(ctx, closing, &wait.text(), "a build slot", |id| {
+            crate::disk::write_slot_hold(&self.state, id, &wait)
+        }) {
+            Ok(()) => wait.into(),
+            Err(why) => why,
+        }
+    }
+
+    /// The part of a hold the two kinds share: commit the attempt's records with no outcome, write the marker
+    /// with `mark`, print the `held` line and settle the resume mark this run consumed.
+    fn commit_hold(
+        &self,
+        ctx: &RunContext<'_>,
+        mut closing: Closing,
+        text: &str,
+        lacking: &str,
+        mark: impl FnOnce(&JobId),
+    ) -> std::result::Result<(), anyhow::Error> {
         let id = ctx.id().clone();
         push_closing_records(&mut closing);
         let trailers = [("Athena-Job", id.as_str().to_string())];
         let subject = format!("Held: {}", ctx.reading.title);
-        let committed =
-            self.commit_records(&closing.files, &message(&subject, &low.text(), &trailers));
+        let committed = self.commit_records(&closing.files, &message(&subject, text, &trailers));
         if let Err(why) = committed {
-            return why.context(format!(
-                "job {id} was held for low disk space, but its records could not be committed"
-            ));
+            return Err(why.context(format!(
+                "job {id} was held for {lacking}, but its records could not be committed"
+            )));
         }
-        crate::disk::write_hold(&self.state, &id, &low);
-        ctx.ui.line(&format!("held       {}", low.text()));
+        mark(&id);
+        ctx.ui.line(&format!("held       {text}"));
         if let Some(old) = closing.consumed_resume.as_ref() {
             self.state.remove_resume(old);
             crate::disk::clear_hold(&self.state, old);
         }
-        low.into()
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -671,6 +709,7 @@ mod tests {
             failed_tests: Vec::new(),
             reused: false,
             revert_for,
+            queued_s: None,
         }
     }
 

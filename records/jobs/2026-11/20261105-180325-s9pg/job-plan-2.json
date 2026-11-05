@@ -1,0 +1,524 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261105-180325-s9pg",
+  "round": 2,
+  "at": "2026-11-05T18:21:30.941533882Z",
+  "invocation_seq": 6,
+  "approach": "Add crates/athena-core/src/slots.rs: a lock-file counting semaphore of max_check_slots files under <state root>/slots/. Waiters hold a locked ticket file under slots/queue/; only the head ticket (effective class, then enqueue time) tries the slot files. The exclusive file lock is the slot, so the OS frees it on drop or process death. SnapExec::exec takes a Class::Check slot after refuse_if_stopped and the first-check disk gate, holds it in a Drop guard through run_check and restore_to, and stamps the measured wait on the CheckRun as optional queued_s. If the slot waited, exec re-runs the disk gate once, so a long queue wait does not leave a stale space reading. A wait past build_wait_s returns a new disk::SlotWait error. run/mod.rs and close.rs turn it into a resumable hold (reason `environment: build slot wait`, no attempt) through the existing hold-and-resume path. In this revision, `go` and `status` read both hold markers through one new `disk::read_any_hold`, and the drain classifies the hold by reason, so a slot wait is never reported as `environment: low disk`. PipelineConfig gains build_wait_s (1800) and build_age_promote_s (600). status.rs prints a `build wait` line (sum of queued_s) in the throughput section only when some check has queued_s. The criterion 1 test now runs two real jobs on two threads, and the criterion 5 test releases the slot on a path that returns after the slot is taken.",
+  "decisions": [
+    {
+      "choice": "Counting semaphore from N lock files (slots/slot-0.lock..slot-{N-1}.lock, exclusive std File::try_lock) plus per-waiter ticket files under slots/queue/. A ticket is created under a temp name, locked, then renamed into place, so a visible ticket with a free lock is dead and is removed. Only the head ticket (lowest effective class, then earliest enqueue time, then name) tries the slots. Waiters poll (default 250 ms, with_poll sets it). The queue exposes waiting() (count of live tickets) so tests can see a waiter without sleeping.",
+      "reason": "state.rs lock_file/try_lock_job already use File::try_lock and the lock dies with the process, so a crash frees the slot with no sweeper (acceptance 2). Tickets give class order, FIFO and ageing across separate athena processes, which design section 4 asks for. They need no daemon.",
+      "rejected": [
+        {
+          "option": "Slot files only, every waiter polling try_lock",
+          "why": "Unordered, so class order and FIFO from section 4 cannot hold."
+        },
+        {
+          "option": "Pid or heartbeat file with a sweeper",
+          "why": "The acceptance criteria require freeing with no sweeper; pid reuse adds failure modes."
+        },
+        {
+          "option": "In-process Mutex/Condvar semaphore",
+          "why": "Not shared between separate athena processes (drain, go, a later producer shell)."
+        }
+      ]
+    },
+    {
+      "choice": "The slot is acquired once per check in SnapExec::exec and released by a plain `let slot = ...` guard at the end of that call, after restore_to. Drop covers `?`, panic and normal return.",
+      "reason": "Design takes a slot per command that builds or tests. Acceptance 5 requires release by Drop on every return path.",
+      "rejected": [
+        {
+          "option": "One slot across all checks of a job",
+          "why": "Starves other jobs for the whole fmt+clippy+test sequence; the design's unit is one command."
+        },
+        {
+          "option": "Explicit release() calls",
+          "why": "Easy to miss on an error path."
+        }
+      ]
+    },
+    {
+      "choice": "Slot is taken after the first-check disk gate (accepted reading). The Slot carries waited() (true when the first attempt was not served). When waited() is true, exec re-runs self.athena.disk_gate(...) once and returns the LowDisk error through the existing hold path (the guard drops on return). Uncontended runs never re-gate, so existing LowDisk tests and the `gated` Cell are unchanged.",
+      "reason": "Answers critic finding 14: a 30-minute queue wait makes the earlier free-space reading stale, and a build that then runs the disk out would be blamed on the work. The gate exists to prevent that. The cost is one extra gate call only after a real wait.",
+      "rejected": [
+        {
+          "option": "Only record the stale-gate trade-off in the design note",
+          "why": "Leaves the exact failure the gate exists to prevent; the fix is a few lines using the existing gate function."
+        },
+        {
+          "option": "Take the slot before the gate",
+          "why": "Departs from the accepted reading and holds a slot while the gate sweeps idle targets."
+        }
+      ]
+    },
+    {
+      "choice": "The timeout hold is a new disk::SlotWait { waited_s, limit_s } error with const BUILD_SLOT_WAIT = \"environment: build slot wait\". Display equals text(), which starts with BUILD_SLOT_WAIT. The marker goes in the same hold_file as LowDisk, with a distinct JSON shape, via write_slot_hold/read_slot_hold. read_hold and LowDisk are unchanged (read_hold gives None for a slot marker; read_slot_hold gives None for a LowDisk marker, since each fails to deserialize the other's missing fields). clear_hold clears either. A new enum disk::AnyHold { Disk(LowDisk), SlotWait(SlotWait) } with text(), and read_any_hold(state, job) -> Option<AnyHold>, are the one reader for display sites.",
+      "reason": "Reuses the records commit, the dispatched-with-no-process state, the resume mark and clear_hold, so the job is held and resumed with no attempt. LowDisk is compared at about a dozen sites, so it is not widened. StopCause::of already reads an `environment:` reason as OtherEnvironment.",
+      "rejected": [
+        {
+          "option": "Reuse LowDisk with fake numbers",
+          "why": "Puts false numbers and 'low disk' in the hold line."
+        },
+        {
+          "option": "Turn LowDisk into an enum",
+          "why": "Breaks every downcast_ref::<LowDisk> and read_hold == Some(low) test in athena-core and athena-cli."
+        },
+        {
+          "option": "Close the job failed with an environment reason",
+          "why": "Design says held, not failed, using no attempt."
+        }
+      ]
+    },
+    {
+      "choice": "Answer to critic finding 11: run/mod.rs `go` on a Dispatched job (the read_hold branch) and status.rs (line.hold) both call read_any_hold. For a LowDisk hold the go message is byte-for-byte unchanged. For a slot wait it reads: `job {id} is held: {text}. A drain resumes it from its kept candidate when a build slot is free; `athena retry {id}` does the same by hand, or `athena close {id} --why \"...\"` records what happened`. status keeps `h.text()`.",
+      "reason": "Without this, `go` on a slot-held job falls through to 'was interrupted: its process died' and status shows no hold. The Files entries and steps for run/mod.rs and status.rs now name both sites, and the criterion 4 test asserts both.",
+      "rejected": [
+        {
+          "option": "Leave both sites on read_hold",
+          "why": "Hides the hold and gives a wrong message."
+        },
+        {
+          "option": "Teach read_hold to return both kinds",
+          "why": "Changes its return type and every caller and test."
+        }
+      ]
+    },
+    {
+      "choice": "Answer to critic finding 10: crates/athena-cli/src/drain.rs picks the held outcome from the reason: BUDGET_SHORT, else BUILD_SLOT_WAIT when run.reason starts with it, else LOW_DISK. The note fallback is chosen the same way (`no build slot became free in time` for a slot wait, `free disk space is below the minimum` otherwise). The ItemEnd::Held fallback text is made neutral. The `held:` classification at the Run construction also accepts SlotWait. The module doc (drain.rs near line 215) gains a 'A build-slot wait holds a job' bullet, and the doc on Run.held is updated. A drain test sits next to the low-disk ones in crates/athena-cli/tests/drain.rs.",
+      "reason": "Design section 8 step 3 measures the effect partly by the count of jobs closed as low disk. Labelling slot waits as low disk would corrupt that count and send the maintainer to the wrong cause.",
+      "rejected": [
+        {
+          "option": "Only add SlotWait to the held classification",
+          "why": "Every slot-wait hold would show outcome `environment: low disk`."
+        }
+      ]
+    },
+    {
+      "choice": "queued_s: Option<f64> on CheckRun, #[serde(default, skip_serializing_if = \"Option::is_none\")], from a monotonic Instant. Throughput gains build_wait: Option<BuildWait> printed only when some check has queued_s. For findings 1-9 and 15: the edits in routing.rs, checks.rs, verify.rs, introspect.rs, reading.rs, send_back.rs, status_durations.rs, close.rs and the others are one-line `queued_s: None` additions to existing CheckRun struct literals. CheckRun derives deny_unknown_fields and has no Default, so the compiler refuses every literal until it is updated. The brief requires the field on each check in verification.json (criterion 7), so these edits cannot be avoided. The list is 'every athena_data CheckRun literal the compiler reports', not fixed line numbers; `cargo check --all-targets` lists them.",
+      "reason": "The criterion needs the number on each check record and old records must still read. Printing the line only when data exists leaves existing throughput text assertions unchanged.",
+      "rejected": [
+        {
+          "option": "Add Default to CheckRun and use ..Default::default()",
+          "why": "Still edits every literal, and hides future missed fields."
+        },
+        {
+          "option": "Store waits in a separate map or record file",
+          "why": "The reading forbids a new record file type, and it would not be 'on each check'."
+        },
+        {
+          "option": "Always print the line, with zero when none",
+          "why": "Changes output where there is no data and risks existing text assertions."
+        }
+      ]
+    },
+    {
+      "choice": "acquire takes a stop: &dyn Fn() -> Result<()> closure (Athena::refuse_if_stopped) and calls it each poll.",
+      "reason": "A wait can last build_wait_s (1800), and `athena stop` must still end it; exec checks the switch before every check today.",
+      "rejected": [
+        {
+          "option": "Check the kill switch only before the wait",
+          "why": "A stopped job would sit in the queue for up to 30 minutes."
+        }
+      ]
+    },
+    {
+      "choice": "The tests use real contention, not timing guesses. Criterion 1 runs two real jobs on two threads, and the first job's fake waits until SlotQueue::waiting() shows the second job's ticket. Criterion 5 uses a check_seam fake that panics after the slot is taken, run under catch_unwind (precedent: run/tests.rs near line 2554).",
+      "reason": "Answers critic findings 12 and 13. The order assertion fails without the slot, with no sleep race. The panic path returns after acquire, so try_acquire only succeeds if the Drop guard released.",
+      "rejected": [
+        {
+          "option": "One go plus a bare holder that releases after a fixed 500 ms",
+          "why": "Not two jobs; go can take over 500 ms to reach its checks, making the assertion pass or fail at random."
+        },
+        {
+          "option": "A disk-gate early return as the release proof",
+          "why": "That return happens before the slot is taken, so it proves nothing."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/slots.rs",
+      "action": "create",
+      "purpose": "Lock-file counting semaphore: Class (Landing, Check, Producer), SlotQueue { dir, slots, wait, promote, poll } with new, with_poll, waiting, try_acquire and blocking acquire(class, stop), and the Slot guard (Drop releases; queued(), waited()). Ticket files give class order, FIFO and ageing. Unit tests for order, two slots, killed child, panic, error return, ageing, dead-ticket cleanup and timeout.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "pub mod slots;",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "action": "modify",
+      "purpose": "StateDir::slots_dir() -> <root>/slots, with a small test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "SnapExec gains slots: SlotQueue. exec takes Class::Check after the disk gate (passing refuse_if_stopped as the stop closure), re-runs the disk gate once if the slot waited, holds the guard past restore_to, sets run.queued_s, and returns SlotWait through `?`. Update the doc comment.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Build the SlotQueue from self.state and jc.config.pipeline() where SnapExec is constructed. In the error arm after run_routed_with_record, downcast SlotWait beside LowDisk (remove verify_dir the same way) and return hold_for_slot_wait. In `go` on a Dispatched job, read the marker with read_any_hold and give a slot-wait message that fits (finding 11). queued_s: None in the nested-run CheckRun literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "purpose": "Factor the commit-records-and-mark part of hold_for_disk into a helper and add hold_for_slot_wait. This file holds hold_for_disk, and Closing and push_closing_records are private to the run module, so the new hold belongs beside it. Add queued_s: None to the CheckRun literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/disk.rs",
+      "action": "modify",
+      "purpose": "BUILD_SLOT_WAIT, SlotWait { waited_s, limit_s } (text, Display, Error), write_slot_hold/read_slot_hold over the same hold file, AnyHold and read_any_hold. Module doc for the extra environment stop. Tests: StopCause, marker round trip both ways, clear_hold. Update the pipeline() test helper literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "PipelineConfig.build_wait_s (1800) and build_age_promote_s (600): serde defaults, Default, validation >= 1 via ConfigError::DrainPipeline, tests. Update the doc comment that says no drain code reads these yet.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "CheckRun.queued_s: Option<f64> (serde default, skip when None), doc comment on the basis (athena monotonic clock), round-trip and old-record tests, and queued_s: None in the test literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "BuildWait and Throughput.build_wait computed from queued_s of request jobs' verification checks; text() appends a `build wait` line and basis only when Some; line.hold uses read_any_hold (finding 11). Tests: summing, and no data gives no line. queued_s: None in the test literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Finding 10: treat SlotWait as held; choose the held outcome and the note fallback from the reason (BUDGET_SHORT, BUILD_SLOT_WAIT, else LOW_DISK); neutral ItemEnd::Held fallback text; update the module doc near line 215 and the Run.held doc. Not in the reading's deliverables, but without it a slot-wait hold is reported as low disk.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "New drain test a_build_slot_wait_holds_the_item_and_is_not_labelled_low_disk next to the low-disk drain tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Tests for criteria 1, 4 and 5 (two_jobs_with_one_build_slot..., a_check_that_waited_checks_the_disk_again, a_check_that_waits_past_build_wait_s_holds_the_job, the_build_slot_is_free_after_a_panic_in_the_check) and queued_s: None in the CheckRun literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Compiler-forced: queued_s: None in its CheckRun literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/routing.rs",
+      "action": "modify",
+      "purpose": "Compiler-forced: queued_s: None in its CheckRun literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Compiler-forced: queued_s: None in every CheckRun literal the compiler reports (non-test and test).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Compiler-forced: queued_s: None in every CheckRun literal the compiler reports.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Compiler-forced: queued_s: None in the test literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Compiler-forced: queued_s: None in the test literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/status_durations.rs",
+      "action": "modify",
+      "purpose": "Compiler-forced: queued_s: None in the test literals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet under [Unreleased] / ### Added: the build-slot queue around local checks, build_wait_s and build_age_promote_s, the resumable `environment: build slot wait` hold (reported as its own outcome in the drain), queued_s on checks and the 'build wait' status line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "action": "modify",
+      "purpose": "Mark build job 3 as built and record the choices: ageing moves a waiter up one class per build_age_promote_s waited; the slot comes after the first disk gate and the gate is re-run after a wait; only the local-check class is in use; baseline and rerun checks are not wrapped yet.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "state.rs: add StateDir::slots_dir() (<root>/slots) and a test that it is under the root.",
+    "disk.rs: add BUILD_SLOT_WAIT, SlotWait (text, Display, Error), write_slot_hold/read_slot_hold on state.hold_file (distinct JSON shape; read_hold stays unchanged), AnyHold and read_any_hold. Add tests: marker round trip both ways, clear_hold, StopCause::of and is_environment_reason on the text. Update the module doc and the pipeline() test helper.",
+    "config.rs: add build_wait_s and build_age_promote_s to PipelineConfig (serde defaults 1800/600, Default, validation >= 1 via ConfigError::DrainPipeline). Extend drain_pipeline_defaults_keep_todays_behavior and bad_drain_pipeline_settings_are_refused_naming_the_key; fix the doc comment.",
+    "slots.rs and `pub mod slots;` in lib.rs: implement Class, SlotQueue::new/with_poll/waiting/try_acquire/acquire and Slot (queued, waited) with the lock-then-rename ticket protocol, dead-ticket cleanup, ageing, head-only slot attempts, the stop closure each poll and timeout -> SlotWait. Write the unit tests: one slot waits then runs, two slots admit two, class order, FIFO, ageing, a killed child frees the slot, a panic frees it, an Err return frees it, a timeout returns SlotWait.",
+    "records.rs: add CheckRun.queued_s with serde default and skip-if-none, then add `queued_s: None` to every CheckRun literal the compiler reports (`cargo check --all-targets --locked`), across athena-core and athena-cli tests. Add old-record and round-trip tests.",
+    "run/checks.rs: add slots: SlotQueue to SnapExec; in exec, after the disk gate, `let slot = self.slots.acquire(Class::Check, &|| self.athena.refuse_if_stopped())?;`. If slot.waited(), call disk_gate again and return LowDisk. Hold the guard past restore_to, set run.queued_s = Some(slot.queued().as_secs_f64()), and update the doc comment.",
+    "run/close.rs: factor the commit-and-mark part of hold_for_disk into a helper, and add hold_for_slot_wait (commit records with the SlotWait text, write_slot_hold, ui line `held       <text>`, clear the consumed resume's hold, return wait.into()). run/mod.rs: build the SlotQueue where SnapExec is constructed; downcast SlotWait beside LowDisk and return hold_for_slot_wait; in `go` on a Dispatched job, use read_any_hold with a slot-wait wording.",
+    "status.rs: add BuildWait, compute it in Throughput::compute, append the `build wait` line and basis in text() only when Some; set line.hold from read_any_hold. Add the summing test and a no-data test.",
+    "drain.rs: add SlotWait to the `held:` classification; choose outcome and note fallback by reason (BUDGET_SHORT, BUILD_SLOT_WAIT, else LOW_DISK); neutral ItemEnd::Held fallback; update the module doc bullet and Run.held doc. tests/drain.rs: add a_build_slot_wait_holds_the_item_and_is_not_labelled_low_disk.",
+    "run/tests.rs: add the four full-job tests (criteria 1, 4 and 5 plus the wait-gate test) using athena_with, repo_with_config, check_seam, SlotQueue::waiting and a real holder Slot on a cloned StateDir. Assert the log order, queued_s from loaded records, the SlotWait downcast, the hold marker, Dispatched with no outcome, the second go message, the status hold line, and the retry that lands.",
+    "CHANGELOG.md: add the entry. docs/design/agent-and-build-slots.md: mark build job 3 built and note the choices.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix what they show. Confirm `git diff --stat -- athena.toml defaults.toml .github records` prints nothing."
+  ],
+  "risks": [
+    {
+      "risk": "Cross-process ticket race: a visible but unlocked ticket reads as dead and is removed, so a live waiter loses its place.",
+      "mitigation": "Create the ticket under a temp name, lock it, then rename it into place (the flock follows the inode), so a visible ticket with a free lock is always dead. A dead-ticket unit test covers cleanup."
+    },
+    {
+      "risk": "Polling latency (250 ms) or head-of-line waiting slows contended runs.",
+      "mitigation": "An uncontended acquire is served on the first iteration; limit 1 reproduces today's behavior. The poll interval is a field. Waiters behind the head are served within one poll of a release."
+    },
+    {
+      "risk": "Changing CheckRun forces one-line edits in about a dozen files outside the deliverable list (findings 1-9).",
+      "mitigation": "Every edit is mechanical `queued_s: None`, forced by the compiler (deny_unknown_fields struct, no Default). The files list names them, and `cargo check --all-targets` reports any missed literal. No other code changes in those files."
+    },
+    {
+      "risk": "Existing tests assert the whole throughput text or the exact hold text.",
+      "mitigation": "The 'build wait' line is printed only when some check has queued_s. read_hold, LowDisk and the LowDisk wording of the `go` message are unchanged. The full cargo test --locked is the criterion 8 demonstration."
+    },
+    {
+      "risk": "Tests with real processes, threads and a 1 s wait are flaky.",
+      "mitigation": "The two-job test waits on SlotQueue::waiting() with a bounded 10 s timeout, not a fixed sleep. The child test waits for the HELD marker before asserting. Waits are asserted as lower bounds, never exact values. 1 s is the smallest valid build_wait_s."
+    },
+    {
+      "risk": "The drain classification change could alter the low-disk outcome or the budget-short outcome.",
+      "mitigation": "Outcome selection is by reason prefix with the old LOW_DISK as the default branch, so low-disk and budget-short behavior is unchanged; the existing low-disk drain tests (tests/drain.rs 2752-3000, 8569) must pass unchanged."
+    },
+    {
+      "risk": "A job holds a slot for up to check_timeout_s (1800), equal to build_wait_s, so a waiter can time out behind one slow check and be held.",
+      "mitigation": "This is the designed bound (section 4). The hold resumes on the next drain pass with no attempt used, and the drain labels it as a slot wait, not low disk."
+    },
+    {
+      "risk": "Re-running the disk gate after a wait calls the idle-target sweep and writes a ui line a second time.",
+      "mitigation": "It happens only when the slot waited. The sweep is idempotent and the existing disk_gate is reused unchanged. The new wait-gate test covers it."
+    },
+    {
+      "risk": "File::try_lock fails on a missing or read-only state directory.",
+      "mitigation": "acquire creates slots/ and its files as state.rs lock_file does. An I/O error is a normal error with context, not a hold."
+    },
+    {
+      "risk": "Two concurrent go calls on one repo in the criterion 1 test may conflict at landing.",
+      "mitigation": "The test asserts the order log, queued_s on each job's recorded verification and that both go calls return Ok; it does not require both to land unless the fixture shows they do. The drain tests already run concurrent runs against one repo."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "SnapExec::exec waits for and holds a build slot around each local check",
+      "dependent": "crates/athena-core/src/run/checks.rs SnapExec::exec, reached through run_routed_with_record -> run_local -> Fallback::run (routing.rs) and built at run/mod.rs (the SnapExec construction). Modes: a normal go, retry resumed at the checks stage, drain runs with [drain.pipeline] max_in_flight > 1, nested runs and CI-reused results (neither reaches it).",
+      "kind": "code",
+      "test": "run/tests.rs two_jobs_with_one_build_slot..., the_build_slot_is_free_after_a_panic_in_the_check; every existing job test in run/tests.rs runs through it uncontended at limit 1",
+      "reason": null
+    },
+    {
+      "name": "SnapExec::exec waits for and holds a build slot around each local check",
+      "dependent": "crates/athena-core/src/run/checks.rs RefuseExec, demonstration_runs and baseline_checks: other callers of run_check that do not use SnapExec",
+      "kind": "code",
+      "test": null,
+      "reason": "They run outside the checks stage and are not in step 3's local-check scope; they have no hold path today. Their behavior is unchanged. See open_questions for whether to wrap them."
+    },
+    {
+      "name": "hold_for_disk's commit-and-mark part moves into a shared helper; hold_for_slot_wait added",
+      "dependent": "crates/athena-core/src/run/mod.rs (the LowDisk downcast after run_routed_with_record) and run/close.rs hold_for_disk (also called from run/mod.rs and run/verification.rs)",
+      "kind": "code",
+      "test": "The three existing LowDisk hold tests in run/tests.rs (low_disk_before_the_verifier_holds_the_job_and_a_retry_resumes_it and the two others) must pass unchanged; a_check_that_waits_past_build_wait_s_holds_the_job covers the new path",
+      "reason": null
+    },
+    {
+      "name": "A slot-wait hold reaches the drain as a held run",
+      "dependent": "crates/athena-cli/src/drain.rs: the `held:` classification at the Run construction, the `_ if run.held` arm that sets line.outcome and the note, the ItemEnd::Held pass_over text, the Run.held doc and the module doc",
+      "kind": "code",
+      "test": "New drain test a_build_slot_wait_holds_the_item_and_is_not_labelled_low_disk (outcome `environment: build slot wait`, not a failure, not an environment stop); the existing low-disk drain tests at tests/drain.rs (outcome `environment: low disk`) must pass unchanged",
+      "reason": null
+    },
+    {
+      "name": "hold marker file now may hold a SlotWait; both sites move to disk::read_any_hold",
+      "dependent": "crates/athena-core/src/run/mod.rs (`go` on a Dispatched job, the read_hold branch) and crates/athena-core/src/status.rs (line.hold for proposed or interrupted jobs); crates/athena-cli/src/display.rs reads line.hold for display",
+      "kind": "code",
+      "test": "a_check_that_waits_past_build_wait_s_holds_the_job asserts the `go` error text and the status line.hold; existing tests that read LowDisk markers through go and status (binary.rs low disk tests, drain.rs tests at 2752-3000) stay green because the LowDisk wording is unchanged",
+      "reason": null
+    },
+    {
+      "name": "Reason text `environment: build slot wait`",
+      "dependent": "crates/athena-core/src/disk.rs StopCause::of, is_environment_reason, resumable_stop; crates/athena-core/src/scope_guard.rs and introspect.rs (environment-reason handling); `athena retry`",
+      "kind": "rule",
+      "test": "New disk.rs unit tests: StopCause::of(&SlotWait{..}.text()) is OtherEnvironment, is_environment_reason is true, and the marker round-trips (read_hold is None for it and read_slot_hold is None for a LowDisk marker). The job-level test asserts no outcome and no attempt.",
+      "reason": null
+    },
+    {
+      "name": "max_check_slots is now also enforced as a runtime limit",
+      "dependent": "crates/athena-core/src/disk.rs in_flight_limit and Figures, which read pipeline.max_check_slots for the disk bound; the pipeline() test helper literal in disk.rs",
+      "kind": "code",
+      "test": "the existing disk.rs in-flight tests",
+      "reason": "The disk formula still reserves max_check_slots x T, which agrees with the new limit; no formula changes. The test helper literal only gains the two new fields."
+    },
+    {
+      "name": "PipelineConfig fields build_wait_s and build_age_promote_s",
+      "dependent": "crates/athena-data/src/config.rs PipelineConfig (Copy, Eq, Serialize, deny_unknown_fields), the config digest and reading_inputs",
+      "kind": "code",
+      "test": "config.rs tests reading_inputs_ignore_a_non_default_drain_pipeline, drain_pipeline_defaults_keep_todays_behavior, bad_drain_pipeline_settings_are_refused_naming_the_key",
+      "reason": null
+    },
+    {
+      "name": "PipelineConfig fields build_wait_s and build_age_promote_s",
+      "dependent": "athena.toml and defaults.toml, which set no [drain.pipeline] table",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Both keys have in-code serde defaults (1800 and 600), so neither governance file needs a change."
+    },
+    {
+      "name": "CheckRun.queued_s (optional, serde default, skipped when None)",
+      "dependent": "Every athena_data CheckRun struct literal the compiler reports (status.rs, run/mod.rs, run/close.rs, run/send_back.rs, run/tests.rs, routing.rs, introspect.rs, reading.rs, verify.rs, checks.rs, records.rs tests, crates/athena-cli/tests/status_durations.rs); readers of verification.json: status.rs check_minutes and test_check_seconds, verify.rs verdict code",
+      "kind": "code",
+      "test": "cargo test --locked; the records.rs old-record and round-trip tests, and the AnyRecord verification parse tests",
+      "reason": "Readers use named fields, so an extra optional field changes nothing. Old records have no key and read as None."
+    },
+    {
+      "name": "The 'build wait' line in the throughput section",
+      "dependent": "crates/athena-core/src/status.rs Throughput::text and the throughput review's stored section and comparisons (StageMinutes::median_of), and the `status --snapshot` view",
+      "kind": "code",
+      "test": "status.rs the_snapshot_gives_the_same_throughput_section_as_the_main_checkout and existing throughput text tests stay green because the line is added only when some check has queued_s; the_throughput_section_sums_build_wait covers the line",
+      "reason": null
+    },
+    {
+      "name": "Design note status of build job 3",
+      "dependent": "docs/design/agent-and-build-slots.md sections 4 and 8",
+      "kind": "rule",
+      "test": null,
+      "reason": "Documentation only: marks step 3 built and records the choices (ageing per interval, slot after the disk gate with a re-gate after a wait, only the local check class used). No behavior effect."
+    },
+    {
+      "name": "Config validation of the two new keys",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (refusal corpus)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan adds no parser, stem list, stop list or reading check. A grep of the corpus for max_check_slots, drain.pipeline, deny_unknown and Config::parse found nothing, so no corpus case applies; config.rs unit tests cover the input forms (build_wait_s = 0, build_age_promote_s = 0, an unknown key)."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A full-job test in run/tests.rs, two_jobs_with_one_build_slot_run_one_after_the_other. Setup: repo_with_config(\"\") (default max_check_slots = 1), athena_with over a tempdir state and plenty_of_space, then two athena.ask calls to get two proposals. Inside std::thread::scope, two threads call the shared &Athena `go` (the drain does the same through RealSteps). Each thread installs its own thread-local check_seam fake. The fake appends to a shared Mutex<Vec<&str>> log and uses an `inside` AtomicUsize. The first fake call (chosen by an AtomicBool swap) logs 'first-start', then waits (bounded 10 s) until `SlotQueue::waiting()` on a clone of athena.state is at least 1, then logs 'first-end' and returns a passing CheckRun. The second fake logs 'second' and asserts inside == 0 on entry. A slots.rs unit test with two threads and one slot shows the same order for plain acquire calls. A second test in run/tests.rs, a_check_that_waited_checks_the_disk_again, uses a free-space fn pointer that reports low once a file in the state dir exists; the holder writes that file just before it drops the slot. The job then returns the LowDisk hold instead of running its check.",
+      "command": "cargo test -p athena-core two_jobs_with_one_build_slot && cargo test -p athena-core a_check_that_waited_checks_the_disk_again && cargo test -p athena-core slots::tests::the_second_request_waits_then_runs",
+      "observes": "The log reads first-start, first-end, second. The waiting job's check in verification.json has queued_s > 0 (loaded via Records) and the first job's check has a small queued_s. Both go calls return Ok. The waited-gate test returns the LowDisk hold, with the verifier not run.",
+      "fails_without": "Without the slot in SnapExec::exec, the second fake runs while the first waits, so the `inside == 0` assertion fails, or the first fake times out at 10 s because no ticket ever appears, and queued_s is None. Without the re-gate after a wait, the disk test runs the check instead of holding.",
+      "seam": "Production entry points: Athena::go -> SnapExec::exec -> SlotQueue::acquire (real lock files in the tempdir state). Fakes: the existing thread-local check_seam::install (run/mod.rs, used in run/tests.rs near lines 1983, 2666 and 3062) supplies only the CheckRun, and the existing free-space fn pointer via athena_with. athena_with, repo_with_config and counting exist. SlotQueue, waiting() and Slot::waited() are added by plan steps 4 and 6. The coordination (ticket seen) reads the real queue directory; no logic under test is in a double."
+    },
+    {
+      "criterion": 2,
+      "method": "A unit test in slots.rs, a_killed_holder_frees_its_slot, re-executes the test binary (std::env::current_exe with `--exact slots::tests::slot_holder_child --nocapture`, env var naming the slot dir). The child acquires the only slot, prints HELD and sleeps. The parent reads HELD, then asserts a non-blocking try_acquire on the same dir is refused with the child alive. It then calls Child::kill (SIGKILL) and wait, and a blocking acquire succeeds with no file removed and no cleanup call. A second test, a_panicking_holder_frees_its_slot, panics in a thread that holds a Slot and the waiter then acquires. A third shows a holder dropped on an Err return frees the slot.",
+      "command": "cargo test -p athena-core slots::tests::a_killed_holder_frees_its_slot && cargo test -p athena-core slots::tests::a_panicking_holder_frees_its_slot",
+      "observes": "The slot is refused while the child lives and acquired after the kill within a poll or two, with no manual cleanup. The same holds after a panic.",
+      "fails_without": "If the slot were a created/removed file or pid file with no sweeper, the waiter would time out after the kill. If the slot did not exclude, the refusal assertion before the kill would fail.",
+      "seam": "Production entry points: SlotQueue::acquire and try_acquire on a tempdir. The seam is a real child process, running as the same user and environment as production, so nothing mocks the lock. The child's test body returns at once unless the env var is set. SlotQueue::new(dir, slots, wait, promote) and with_poll are added by plan step 4; StateDir::slots_dir by step 1."
+    },
+    {
+      "criterion": 3,
+      "method": "A unit test in slots.rs, two_slots_admit_two_holders_and_the_third_waits, with slots = 2 and three threads calling acquire on one dir. A shared AtomicUsize counts live holders and records the peak. try_acquire is also called while two are held and then after one drops. Separate tests cover class order (a later Check waiter overtakes an earlier Producer waiter), FIFO within a class, and ageing (a Producer older than build_age_promote_s is promoted past a Check).",
+      "command": "cargo test -p athena-core slots::tests::two_slots_admit_two_holders_and_the_third_waits",
+      "observes": "The peak of concurrent holders is 2, never 3. The third request returns only after a release, with queued above zero. try_acquire is refused with two held and succeeds after a drop.",
+      "fails_without": "A limit of 1 or no limit fails the peak == 2 or the 'third waits' assertion; no ordering fails the class tests.",
+      "seam": "Production entry points: SlotQueue::acquire/try_acquire with real threads and tempdir lock files. There is no double. Ageing tests build queues with small promote and poll values through the constructor and with_poll (plan step 4)."
+    },
+    {
+      "criterion": 4,
+      "method": "A full-job test in run/tests.rs, a_check_that_waits_past_build_wait_s_holds_the_job, with repo_with_config(\"\\n[drain.pipeline]\\nbuild_wait_s = 1\\n\"). A real Slot from SlotQueue::acquire on a clone of athena.state is held for the whole first go. Assertions: (a) go returns an error that downcasts to disk::SlotWait; (b) the ui has a line starting `held       environment: build slot wait`; (c) the job is JobState::Dispatched with no outcome, no score and no verification, and the counts show producer 1 and verifier 0; (d) read_slot_hold is Some and read_hold is None; (e) a second `go` on the held job returns an error whose text contains `build slot wait` and not `was interrupted` (finding 11); (f) athena.status() shows the job's `hold` equal to the slot-wait text; (g) is_environment_reason(&text) is true; (h) after the holder drops, athena.retry then go resumes with no producer rerun and lands. A drain test in crates/athena-cli/tests/drain.rs, a_build_slot_wait_holds_the_item_and_is_not_labelled_low_disk, uses Fixture::with_config of config_with_change_checks plus `[drain.pipeline] build_wait_s = 1`, with a held Slot on athena.state, then drain::drain(&real_steps, work_everything(), &Quiet).",
+      "command": "cargo test -p athena-core a_check_that_waits_past_build_wait_s_holds_the_job && cargo test -p athena-cli --test drain a_build_slot_wait_holds_the_item",
+      "observes": "The core assertions (a)-(h) above. In the drain test: jobs[0].outcome == \"environment: build slot wait\" (not \"environment: low disk\"), landed == 0, the item is attempted once, display::drain text contains the slot-wait reason and no `athena retry` advice, the run does not stop as an environment stop, and the records show Dispatched with no outcome. After the holder drops, a second drain pass resumes the same job and lands it.",
+      "fails_without": "Without the SlotWait hold, the wait never times out, or the timeout surfaces as a plain error or a failed outcome, so (a), (c) and the drain outcome fail. Without read_any_hold, (e) gives 'was interrupted' and (f) is None. Without the drain reason switch, the outcome reads `environment: low disk`.",
+      "seam": "Production entry points: Athena::go -> SnapExec::exec -> SlotQueue::acquire -> Athena::hold_for_slot_wait, and the drain's RealSteps run. Fixtures that exist today: repo_with_config, athena_with, counting and plenty_of_space in run/tests.rs; Fixture::with_config, config_with_change_checks, real_steps, Lines, work_everything and rated_scenario in crates/athena-cli/tests/drain.rs. Core tests also use the existing check_seam; the drain test runs the real `sh -c true` checks (as gate_run does). The holder is the real SlotQueue (a pub module), and build_wait_s reaches the code through the committed config via JobConfig, as check_timeout_s does. No test clock: 1 s real, the smallest valid value. The hold, read_any_hold and SlotQueue are added by plan steps 2, 4, 7 and 9."
+    },
+    {
+      "criterion": 5,
+      "method": "Content check plus a full-job test, the_build_slot_is_free_after_a_panic_in_the_check_and_after_a_normal_run. The test installs a check_seam fake that panics (it is called after the slot is taken in exec), runs go under std::panic::catch_unwind(AssertUnwindSafe(..)), then asserts SlotQueue::try_acquire on a clone of athena.state returns Some. A second part runs a normal job to completion and asserts try_acquire succeeds again. Reading exec shows `let slot = self.slots.acquire(...)` before run_check and live past restore_to.",
+      "command": "ls crates/athena-core/src/slots.rs && cargo test -p athena-core the_build_slot_is_free_after_a_panic_in_the_check",
+      "observes": "slots.rs exists. After the panic unwinds out of exec, the single slot is free at once, and it is free after a normal run too.",
+      "fails_without": "If the guard were leaked (mem::forget) or released only on the success path, try_acquire after the unwind would be refused. flock conflicts between separate open files in one process, so the leak is visible. The panic happens after acquire, so the test cannot pass by an early return before the slot.",
+      "seam": "Production entry point: Athena::go -> SnapExec::exec. Fakes: the existing check_seam fake (it is the thing that panics) and athena_with with plenty_of_space, both existing. try_acquire is added by plan step 4. A wrong-order variant (a disk-gate return) is deliberately not used, since that returns before the slot is taken."
+    },
+    {
+      "criterion": 6,
+      "method": "Config tests in config.rs: the defaults give 1800 and 600, explicit values parse, a zero for either key is refused naming the key, and an unknown key under [drain.pipeline] is still refused. bad_drain_pipeline_settings_are_refused_naming_the_key gains `build_wait_s = 0` and `build_age_promote_s = 0` next to the unchanged `surprise = 1`. drain_pipeline_defaults_keep_todays_behavior asserts the new defaults. reading_inputs_ignore_a_non_default_drain_pipeline keeps passing.",
+      "command": "cargo test -p athena-data config::",
+      "observes": "The defaults tuple includes (1800, 600). A zero value gives ConfigError::DrainPipeline(\"build_wait_s\") or (\"build_age_promote_s\"). `surprise` is still refused, and the digest and reading-inputs equality hold.",
+      "fails_without": "Without the fields the defaults assertion does not compile. Without validation the zero cases parse and the expect_err fails.",
+      "seam": "Production entry point: Config::parse with the REPO_CONFIG fixture (exists in config.rs tests). No double. PipelineConfig stays Copy with u64 fields."
+    },
+    {
+      "criterion": 7,
+      "method": "Two tests. In records.rs, a CheckRun JSON without queued_s deserializes with None and re-serializes without the key, and one with queued_s 12.5 round-trips; the AnyRecord verification tests still pass. In status.rs, the_throughput_section_sums_build_wait builds landed jobs whose verification checks carry queued_s 12.0 and 30.0, plus a reused check with None, and calls Throughput::compute(...).text(). A second status test checks that no queued_s anywhere gives no `build wait` line.",
+      "command": "cargo test -p athena-data records:: && cargo test -p athena-core status::tests::the_throughput_section_sums_build_wait",
+      "observes": "Old JSON reads. The text has a line starting `build wait` with total 42 s, the count of waited checks and the basis 'athena monotonic clock'. With no data there is no such line, so existing throughput text assertions are unchanged.",
+      "fails_without": "Without the field, the round-trip with queued_s fails to compile. Without the summation, the `build wait` line is absent and the contains assertion fails.",
+      "seam": "Production entry points: AnyRecord::parse, serde on CheckRun, and Throughput::compute/text over Records built by the existing loaded(...), timed_job and test_run helpers in status.rs tests. No double. Plan step 5 adds the field, step 8 the line."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three Athena checks. Every existing test runs through Athena::go at the default max_check_slots = 1 with an uncontended queue, and every CheckRun literal across crates is updated (the compiler reports any missed).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The LowDisk hold tests, the drain tests, status and records tests behave as before.",
+      "fails_without": "A missing queued_s: None literal fails compilation. A slot that blocked at limit 1 even when uncontended would hang the existing job tests.",
+      "seam": "These are the production commands Athena runs on the result. State dirs are tempdirs, so slot files are isolated per test."
+    },
+    {
+      "criterion": 9,
+      "method": "Inspect the diff: nothing under athena.toml, defaults.toml, .github, workflows or records/, and a CHANGELOG.md bullet under Unreleased > Added.",
+      "command": "git diff --stat -- athena.toml defaults.toml .github records",
+      "observes": "The first command prints nothing. `git diff -- CHANGELOG.md` shows a new bullet under `## [Unreleased]` / `### Added` naming the build-slot queue, the two config keys, the `build slot wait` hold, queued_s and the 'build wait' status line.",
+      "fails_without": "A forgotten changelog shows an empty diff for CHANGELOG.md. An accidental governance edit shows in the stat.",
+      "seam": "Not a behavior criterion, so no seam. It is a content check on the repository diff."
+    }
+  ],
+  "open_questions": [
+    "User: Should the baseline check run and the 'fails without' reruns (take_baseline/baseline_checks, demonstration_runs in run/checks.rs) also take a build slot in this step? The request and reading name only SnapExec::exec, and these paths have no hold path today, so the plan leaves them unwrapped.",
+    "User: Should ageing promote a waiter one class once at build_age_promote_s, or one class per interval? Section 4 says it 'moves up one class'. The plan promotes one class per interval waited, capped at the top class; only Class::Check is used now, so nothing observable depends on it."
+  ],
+  "producer_section_sha256": "bbcb6b530d3c00fc222b5eb771db94ede5c717ca65eb293de85de5238d9d5e76"
+}
