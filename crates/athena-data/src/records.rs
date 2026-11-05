@@ -816,6 +816,11 @@ pub struct CheckRun {
     /// running only for the criteria listed here (D43).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revert_for: Vec<u32>,
+    /// Seconds this check waited for a build slot before it started (basis: athena monotonic clock), from the
+    /// build-slot queue. Absent for a check that took no slot (a reused CI result, a skipped or nested
+    /// check) and in records written before this field; `athena status` sums it into its "build wait" line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_s: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4506,6 +4511,7 @@ mod tests {
             failed_tests: Vec::new(),
             reused: false,
             revert_for: Vec::new(),
+            queued_s: None,
         };
         Baseline {
             job: job(),
@@ -4515,6 +4521,31 @@ mod tests {
             note: None,
             reused_from: None,
         }
+    }
+
+    #[test]
+    fn a_check_written_before_queued_s_existed_reads_with_none_and_writes_without_the_key() {
+        let check = sample_baseline().checks.remove(0);
+        let json = serde_json::to_value(&check).unwrap();
+        assert!(json.get("queued_s").is_none(), "{json}");
+        let old: CheckRun = serde_json::from_value(json).unwrap();
+        assert_eq!(old.queued_s, None);
+        assert_eq!(old, check);
+    }
+
+    #[test]
+    fn a_checks_wait_for_a_build_slot_round_trips() {
+        let mut check = sample_baseline().checks.remove(0);
+        check.queued_s = Some(12.5);
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(json.contains("\"queued_s\":12.5"), "{json}");
+        let back: CheckRun = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.queued_s, Some(12.5));
+        let mut baseline = sample_baseline();
+        baseline.checks = vec![check];
+        let record = AnyRecord::Baseline(Box::new(baseline));
+        let text = record.to_json();
+        assert_eq!(AnyRecord::parse("x", text.as_bytes()).unwrap(), record);
     }
 
     #[test]

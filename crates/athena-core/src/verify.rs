@@ -1501,6 +1501,7 @@ mod tests {
             failed_tests: Vec::new(),
             reused: false,
             revert_for: Vec::new(),
+            queued_s: None,
         }
     }
 

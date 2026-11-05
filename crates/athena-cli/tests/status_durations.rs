@@ -21,6 +21,7 @@ fn test_run(seconds: f64) -> CheckRun {
         failed_tests: Vec::new(),
         reused: false,
         revert_for: Vec::new(),
+        queued_s: None,
     }
 }
 

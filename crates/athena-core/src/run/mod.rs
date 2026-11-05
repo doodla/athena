@@ -399,11 +399,16 @@ impl Athena {
                 if self.running(id.as_str()) {
                     bail!("job {id} is running");
                 }
-                if let Some(low) = crate::disk::read_hold(&self.state, &id) {
-                    bail!(
+                match crate::disk::read_any_hold(&self.state, &id) {
+                    Some(crate::disk::AnyHold::Disk(low)) => bail!(
                         "job {id} is held: {}. A drain resumes it from its kept candidate once space is free; `athena retry {id}` does the same by hand, or `athena close {id} --why \"...\"` records what happened",
                         low.text()
-                    )
+                    ),
+                    Some(crate::disk::AnyHold::SlotWait(wait)) => bail!(
+                        "job {id} is held: {}. A drain resumes it from its kept candidate when a build slot is free; `athena retry {id}` does the same by hand, or `athena close {id} --why \"...\"` records what happened",
+                        wait.text()
+                    ),
+                    None => {}
                 }
                 bail!(
                     "job {id} was interrupted: its process died before it closed. `athena retry {id}` reads it again to resume, or `athena close {id} --why \"...\"` records what happened"
@@ -1582,6 +1587,7 @@ impl Athena {
                 ui: ctx.ui,
                 min_free_gb: jc.config.min_free_gb(),
                 gated: std::cell::Cell::new(false),
+                slots: crate::slots::SlotQueue::from_config(&self.state, &jc.config.pipeline()),
             };
             // The candidate was pushed to the job's CI branch above: a GitHub origin gives its push run, read
             // up to `ci_wait_s`; any other repository gives no CI result, with one read and no wait. A green
@@ -1610,6 +1616,12 @@ impl Athena {
                         let low = *low;
                         let _ = crate::pin::remove_tree(&verify_dir);
                         return Err(self.hold_for_disk(ctx, closing, low));
+                    }
+                    // No build slot came free in time: the job is held the same way, with no attempt used.
+                    if let Some(wait) = e.downcast_ref::<crate::disk::SlotWait>() {
+                        let wait = *wait;
+                        let _ = crate::pin::remove_tree(&verify_dir);
+                        return Err(self.hold_for_slot_wait(ctx, closing, wait));
                     }
                     return Err(e);
                 }
@@ -1643,6 +1655,7 @@ impl Athena {
                     failed_tests: Vec::new(),
                     reused: false,
                     revert_for: Vec::new(),
+                    queued_s: None,
                 });
             }
         }

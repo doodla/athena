@@ -46,6 +46,10 @@
 //! check timed out` with the measured duration and the limit ([`check_timeout_reason`]), and `athena retry`
 //! resumes it. A check that fails with its own exit code is still a failure of the work.
 //!
+//! Another environment stop sits there too: a check that waited `build_wait_s` for a build slot
+//! ([`BUILD_SLOT_WAIT`], [`SlotWait`]; the queue is [`crate::slots`]). The job is held the way a low-disk job
+//! is: records committed, no outcome, no attempt used, and a later drain resumes it from its kept candidate.
+//!
 //! A fifth and sixth sit beside them: a producer that stops on an expired login (API error 401) or a usage
 //! limit (API error 429). These say nothing about the work either. [`StopCause`] is the one classifier of all
 //! of them; the scope guard and `athena retry` both use it, so no second list of environment reasons exists.
@@ -261,6 +265,83 @@ pub fn write_hold(state: &StateDir, job: &JobId, hold: &LowDisk) {
 pub fn read_hold(state: &StateDir, job: &JobId) -> Option<LowDisk> {
     let text = std::fs::read_to_string(state.hold_file(job)).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// The status text of a job held because no build slot became free in time.
+pub const BUILD_SLOT_WAIT: &str = "environment: build slot wait";
+
+/// A check waited for a build slot for `build_wait_s` and got none. The job is held, not failed: it keeps its
+/// candidate, uses no attempt and resumes on a later drain pass, as a [`LowDisk`] hold does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotWait {
+    /// Whole seconds the request waited.
+    pub waited_s: u64,
+    /// The `build_wait_s` limit that ended the wait.
+    pub limit_s: u64,
+}
+
+impl SlotWait {
+    /// "environment: build slot wait: no slot free after 1800s of 1800s allowed".
+    pub fn text(&self) -> String {
+        format!(
+            "{BUILD_SLOT_WAIT}: no slot free after {}s of {}s allowed",
+            self.waited_s, self.limit_s
+        )
+    }
+}
+
+impl std::fmt::Display for SlotWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}; the job stays queued and is not rejected: a drain resumes it when a build slot is free",
+            self.text()
+        )
+    }
+}
+
+impl std::error::Error for SlotWait {}
+
+/// Records that `job` was held for a build slot. The marker uses the same file as [`write_hold`] with a
+/// different shape, so [`read_hold`] reads none of it and [`read_slot_hold`] reads only this kind.
+pub fn write_slot_hold(state: &StateDir, job: &JobId, hold: &SlotWait) {
+    let path = state.hold_file(job);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string(hold) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+/// The build-slot hold recorded for `job`, if any.
+pub fn read_slot_hold(state: &StateDir, job: &JobId) -> Option<SlotWait> {
+    let text = std::fs::read_to_string(state.hold_file(job)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Either kind of hold marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnyHold {
+    Disk(LowDisk),
+    SlotWait(SlotWait),
+}
+
+impl AnyHold {
+    /// The status text of the hold.
+    pub fn text(&self) -> String {
+        match self {
+            AnyHold::Disk(low) => low.text(),
+            AnyHold::SlotWait(wait) => wait.text(),
+        }
+    }
+}
+
+/// The hold recorded for `job`, of either kind. Display sites use this one reader.
+pub fn read_any_hold(state: &StateDir, job: &JobId) -> Option<AnyHold> {
+    read_hold(state, job)
+        .map(AnyHold::Disk)
+        .or_else(|| read_slot_hold(state, job).map(AnyHold::SlotWait))
 }
 
 /// Removes the hold marker of `job`.
@@ -1795,5 +1876,44 @@ mod tests {
         assert_eq!(read_hold(&state, &job), None);
         let text = hold.text();
         assert_eq!(text, "environment: low disk: 3.0 GB free, 10.0 GB required");
+    }
+
+    #[test]
+    fn a_slot_wait_marker_shares_the_file_and_each_reader_reads_only_its_own_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        let job = id(1);
+        let wait = SlotWait {
+            waited_s: 1800,
+            limit_s: 1800,
+        };
+        write_slot_hold(&state, &job, &wait);
+        assert_eq!(read_slot_hold(&state, &job), Some(wait));
+        assert_eq!(read_hold(&state, &job), None, "not a low-disk marker");
+        assert_eq!(read_any_hold(&state, &job), Some(AnyHold::SlotWait(wait)));
+        assert!(wait.text().starts_with(BUILD_SLOT_WAIT));
+        assert!(wait.to_string().starts_with(&wait.text()));
+        clear_hold(&state, &job);
+        assert_eq!(read_any_hold(&state, &job), None);
+
+        let low = LowDisk {
+            free: GB,
+            required: 10 * GB,
+        };
+        write_hold(&state, &job, &low);
+        assert_eq!(read_slot_hold(&state, &job), None, "not a slot marker");
+        assert_eq!(read_any_hold(&state, &job), Some(AnyHold::Disk(low)));
+        assert_eq!(AnyHold::Disk(low).text(), low.text());
+    }
+
+    #[test]
+    fn a_build_slot_wait_is_an_environment_stop_that_uses_no_attempt() {
+        let text = SlotWait {
+            waited_s: 5,
+            limit_s: 5,
+        }
+        .text();
+        assert_eq!(StopCause::of(&text), StopCause::OtherEnvironment);
+        assert!(is_environment_reason(&text));
     }
 }
