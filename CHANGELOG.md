@@ -354,6 +354,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The decisions page now lists only proposals that are open and above the raising role's limit, and says
+  `Nothing waiting for you` (one line, replacing `No proposals waiting`) when there are none. Root cause:
+  `render` listed every proposal that `read_snapshot` returned, and `read_snapshot` removed only proposals
+  named by a work decision. Nothing applied the raising role's limit, so a proposal the role may change itself
+  (for example 20261018-000648-ne91) reached the owner's page although nobody had to decide it; the page's
+  recommendation line already said so for such a card, but it was still shown. `render` now drops those
+  proposals, using the same rule as `in_limit` in `athena-core` (a role with no recorded definition counts as
+  above its limit; xtask does not depend on `athena-core`, so the rule is written again with the shared
+  `may_change`). Approved and rejected proposals were already dropped by `read_snapshot`, reading decisions
+  from the records branch and from main's tree; this change adds tests of that through `locate`, with an
+  approval on main and a rejection on the records branch, and does not alter that read. Not fixed here: a page
+  that still showed a decided proposal on 3 Nov was most likely stale, because `.github/workflows/pages.yml`
+  runs only on a push to main, so a decision committed after the last push, or a proposal written to the
+  records branch, does not rebuild it. That workflow is out of scope; a schedule trigger in it would fix it.
 - The decisions page no longer lists proposals that were approved or rejected. Root cause: approve-work and
   reject-work record their decisions under `records/work-decisions/` on main, but the page read work items and
   decisions only from the `athena/records` branch, which holds no decisions, so every proposal looked
