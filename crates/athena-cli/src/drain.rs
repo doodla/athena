@@ -1366,9 +1366,14 @@ enum RunStep {
     /// The job was held for lack of free disk space or of budget. It is not a failure and not tried again in
     /// this run.
     Held,
-    /// A queued job's reader gave no reading, with this reason. The job is recorded without a reading; its
-    /// next attempt reads it again. It is not a failure of a run.
-    Unread(String),
+    /// A job's reader gave no reading, with this reason. The job is recorded without a reading; its next
+    /// attempt reads it again. It is not a failure of a run. `retried` is the new job when the read was a
+    /// retry of an interrupted job: that retry job exists, so the next attempt reads it and does not retry
+    /// the interrupted job a second time.
+    Unread {
+        reason: String,
+        retried: Option<String>,
+    },
     Budget,
     JobLimit,
     /// Another worker had already ended the run.
@@ -1551,15 +1556,19 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     return RunStep::Held;
                 }
                 // A queued job whose reader failed is recorded with no reading: it is read once more, not
-                // counted as a failed run.
-                let unread = matches!(from, ReadOf::Queued(_))
-                    && !pre_read
+                // counted as a failed run. So is a retry whose reader failed: the retry job is recorded,
+                // and its next read is of that job, not a second retry of the interrupted one.
+                let unread = ((matches!(from, ReadOf::Queued(_)) && !pre_read)
+                    || matches!(from, ReadOf::Retry(_)))
                     && read.job.is_some()
                     && read.error.is_some();
+                let retried = matches!(from, ReadOf::Retry(_))
+                    .then(|| read.job.clone())
+                    .flatten();
                 let reason = line.reason.clone().unwrap_or_default();
                 self.push(line);
                 if unread {
-                    return RunStep::Unread(reason);
+                    return RunStep::Unread { reason, retried };
                 }
                 return RunStep::Failed {
                     job: item.job.clone(),
@@ -1820,7 +1829,12 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                     RunStep::Ended => return ItemEnd::Idle,
                     RunStep::NeedsAccepting => return ItemEnd::NeedsAccepting,
                     RunStep::Held => return ItemEnd::Held,
-                    RunStep::Unread(reason) => {
+                    RunStep::Unread { reason, retried } => {
+                        // A retry job was made: read that job next, not a second retry of the old one.
+                        if let Some(job) = retried {
+                            *last_job = job;
+                            retry = false;
+                        }
                         unread += 1;
                         if unread >= 2 {
                             self.note(format!(

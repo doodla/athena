@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261017-205547-cgzb",
+  "round": 1,
+  "at": "2026-11-05T08:42:05.9089987Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The guard counts a retry that was closed before it ran (dropped), which leaves the old job stuck and makes status point to a dead job.",
+      "evidence": "`retries_by_job` maps a job to its newest retry whatever state that retry is in. `Athena::retry` creates the retry through `ask` as a proposed job. If the user then runs `athena close` on it, `close_with` records it as Dropped (manage.rs 104-105). Retrying a dropped job is refused, because `earlier_attempt_with` (reading.rs 1343-1355) accepts only rejected, failed, timed-out or interrupted jobs. After the change, `athena retry <old>` is refused too, naming the dropped job, and status says 'retried as <dropped id>   # follow that job'. The only way left to retry the old job is a hand-typed `ask \"try again on <old>\"`, the loophole the plan itself leaves open. The plan's mitigation (the guard applies only to dispatched jobs) does not address this case. Fix: Count only retries that still stand for the work: ones not closed without running. For example, skip retries whose state is Closed(Dropped | Declined | Abandoned). Apply the same filter in status so 'retried as' never names a dropped job. Add a test in retry.rs: retry an interrupted job, close the retry while it is proposed, then retry the old job again and expect success.",
+      "location": "Decisions 1-2 (`retries_by_job` counts every 'try again on <id>' job); Risks item 1",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The drain calls `Athena::retry` on the old job a second time after an unread retry, so the new guard does fire there. The dependents list says it never does and lists no test.",
+      "evidence": "In `Drain::run_job`, a read from `ReadOf::Retry` that returns a job with a reader error is not treated as Unread, because `unread` requires `ReadOf::Queued` (drain.rs 1555-1558). It returns `RunStep::Failed { job: item.job, retry: false, read: false }` (1564-1568). In `attempts`, `retry = again || (item.interrupted && !read)` stays true and `last_job` is not updated (1844-1848). So the next attempt calls `self.athena.retry(<old id>)` again (1808-1809, 3597). By then the first call has already recorded the unread retry job, because `run_job` sees `read.job.is_some()`. With the new guard, this second call is refused with 'already retried as …' instead of reading again. Neither tests/drain.rs 4833/4881 nor the in-file Steps doubles cover this path. Fix: Choose and implement the drain behavior. Either (a) when a retry of an interrupted job records a new job but gives no reading, set `last_job` to that job and read it again through `ReadOf::Queued`/`go` (the existing Unread path), or (b) state that the refusal is the intended end of the item. Add this path to Dependents with a tests/drain.rs test against the real `Athena::retry` in which the first retry read fails.",
+      "location": "Decision 5 and the first Dependents entry (drain `ReadOf::Retry`, 'the new refusal never fires there')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No test covers the drain's own reap of a dead registry entry, although the request names drain.rs.",
+      "evidence": "The request names the `reap()` calls in both reading.rs and crates/athena-cli/src/drain.rs as what turns a restart's dead registry entry into 'interrupted', and the reading lists tests/drain.rs as a deliverable. The planned test exercises only `status()` and `retry()`. The drain lists interrupted work after its own `reap()` (drain.rs 3494-3504, 3639), and the existing drain tests at 4833-4920 make interrupted jobs without any registry entry. Fix: Add one tests/drain.rs case that registers an exited child's pid for a dispatched job and shows the drain lists and retries it. Alternatively, state plainly in the plan that the drain's reap path stays untested, and why.",
+      "location": "Decision 5 (rejected drain test for the dead-process case); Demonstration for criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The refusal always says 'follow that job', even when the right next step depends on the retry's state.",
+      "evidence": "If the soundness fix above lets some closed retries still count (for example a rejected one), the user's next step is `athena retry <new>`, not 'follow'. Fix: Choose the hint from the existing retry's state: `athena go <new>` if it is proposed, `athena retry <new>` if it is rejected or failed. Otherwise name the state in the message.",
+      "location": "Step 3 refusal message",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is mostly sound. It puts the check in `Athena::retry`, finds the existing retry through `job_history`/`retried_job`, and adds `retried_as` to the status output without changing the \"interrupted\" state string. Its test seams exist and its \"fails without\" claims hold: I read `Athena::retry` (reading.rs 1101-1133), `job_history` (1506), `request_jobs` sorted newest first (store.rs 499), `Registry::register`/`reap` (procs.rs 149-189), the `interrupted()` helper and the live-process test (retry.rs 401-465), status.rs 1646-1795 and display.rs `plan_suffix`. Two problems need a revision. (1) The guard counts any job whose request says \"try again on <id>\". That includes a retry that was closed before it ran: `close` turns a proposed job into \"dropped\" (manage.rs 104-105), and a dropped job cannot itself be retried. The old job is then stuck, and status points the user to a dead job. (2) The plan says the new refusal \"never fires\" in the drain, which is wrong. When the reader fails on the drain's retry of an interrupted job, the drain calls `Athena::retry` on the old job again (drain.rs 1555-1568 and 1835-1848). The new guard would refuse that call, and the plan lists no test for this path."
+}

@@ -4920,6 +4920,109 @@ fn drain_lists_and_retries_an_interrupted_job_and_leaves_one_on_another_channel_
     assert!(steps.queue().unwrap().items.is_empty());
 }
 
+/// A process id that is not running: a child that has exited, in its own process group.
+fn exited_pid() -> i32 {
+    use std::os::unix::process::CommandExt;
+    let mut child = std::process::Command::new("true")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    child.wait().unwrap();
+    child.id() as i32
+}
+
+#[test]
+fn a_job_with_a_dead_registered_process_is_listed_and_retried_by_the_drain() {
+    let fx = Fixture::new();
+    let kill = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let athena = fx.athena(killing_producer(kill.clone()));
+    let (cli, _) = athena.queue(FIRST).unwrap();
+    let cli = cli.as_str().to_string();
+    interrupt(&fx, &athena, &cli);
+    kill.store(false, std::sync::atomic::Ordering::SeqCst);
+    // What a container restart leaves: a registry entry whose process is gone.
+    athena
+        .state
+        .registry()
+        .register(exited_pid(), &cli, "producer")
+        .unwrap();
+    assert!(athena.running(&cli), "the dead entry is present");
+
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    let queue = steps.queue().unwrap();
+    let listed: Vec<(&str, bool)> = queue
+        .items
+        .iter()
+        .map(|i| (i.job.as_str(), i.interrupted))
+        .collect();
+    assert_eq!(listed, [(cli.as_str(), true)], "listed as interrupted");
+    assert!(!athena.running(&cli), "the dead entry was dropped");
+
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::TargetMet, "{}", display::drain(&report));
+    assert_eq!(report.jobs.len(), 1, "{}", display::drain(&report));
+    let line = &report.jobs[0];
+    assert_eq!(line.item, cli);
+    assert_ne!(line.job, cli, "the retry is a new job");
+    assert_eq!(line.outcome, "passed");
+    assert_eq!(report.landed, 1);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let request = records.jobs[line.job.as_str()].request.as_ref().unwrap();
+    assert_eq!(request.text, format!("try again on {cli}"));
+}
+
+#[test]
+fn an_interrupted_job_whose_retry_gave_no_reading_is_read_again_not_retried_twice() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let fx = Fixture::new();
+    let kill = Arc::new(AtomicBool::new(true));
+    // Once armed, the next reader call returns no structured reading, as a reader that fails does.
+    let fail_once = Arc::new(AtomicBool::new(false));
+    let inner = killing_producer(kill.clone());
+    let armed = fail_once.clone();
+    let script: Script = Box::new(move |spec| {
+        let mut turn = inner(spec);
+        if spec.role == Role::Reader && armed.swap(false, Ordering::SeqCst) {
+            turn.structured = None;
+        }
+        turn
+    });
+    let athena = fx.athena(script);
+    let (cli, _) = athena.queue(FIRST).unwrap();
+    let cli = cli.as_str().to_string();
+    interrupt(&fx, &athena, &cli);
+    kill.store(false, Ordering::SeqCst);
+    fail_once.store(true, Ordering::SeqCst);
+
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+    let report = drain::drain(&steps, limits(100.0), &Quiet).unwrap();
+    let text = display::drain(&report);
+
+    // The retry job exists once; it was read again, run and landed.
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let again = format!("try again on {cli}");
+    let retries: Vec<&str> = records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| j.request.as_ref().is_some_and(|r| r.text == again))
+        .map(|j| j.id().as_str())
+        .collect();
+    assert_eq!(retries.len(), 1, "{retries:?}\n{text}");
+    // The interrupted item itself ends in that job, and no attempt was refused as a second retry.
+    assert!(
+        report
+            .jobs
+            .iter()
+            .any(|l| l.item == cli && l.job == retries[0] && l.outcome == "passed"),
+        "{text}"
+    );
+    assert!(!text.contains("already retried"), "{text}");
+    assert_eq!(report.landed, 1, "{text}");
+    assert_eq!(report.stop, Stop::TargetMet, "{text}");
+}
+
 #[test]
 fn drain_start_reclaims_the_build_directory_of_an_interrupted_job_and_keeps_its_work_and_candidate()
 {
