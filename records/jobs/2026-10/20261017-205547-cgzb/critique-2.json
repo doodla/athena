@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261017-205547-cgzb",
+  "round": 2,
+  "at": "2026-11-05T08:46:37.993388691Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "A second drain path now ends in the new refusal: a retry whose reading is usable but has nothing to run.",
+      "evidence": "When Athena::retry returns a reading with no error but nothing to run (for example a declined reading: the read has a job, no error, and is not runnable), run_job takes the Failed{read:false} branch. The plan widens the unread check only for reads that carry an error. attempts then sets retry = item.interrupted && !read = true, so the drain calls Athena::retry(<old>) a second time, and the new guard refuses it, since a declined retry still counts. The result is better than today (no duplicate declined retry), but the drain path is changed and no test or dependents entry covers it. Fix: Add this path to the dependents list. Either state that the refusal is the intended end of that item and add a test, or send a retry read that gave a job but nothing to run down the same path that reads the retry job again.",
+      "location": "Dependents, entry 'Standing-retry rule' (claims the drain never calls retry on an already-retried job except through the fixed path); drain.rs run_job 1535-1568 and attempts 1844",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The drain deletes the old job's progress row when a retry read reports a reader error, and the new re-read never moves it to the retry job.",
+      "evidence": "When a retry read has reader_error Some, read() calls self.table().remove(old) instead of move_row (drain.rs 3611). The plan's next attempt reads the retry job through ReadOf::Queued, which does no move_row. So the stage the old job had reached (checks or verifier) is no longer shown for the retry job. This affects only the drain's live view; the resume mark is looked up separately when the job is dispatched (run/mod.rs 458). Fix: Note this in the risks, or keep the row and move it to the retry job when the retry is read again.",
+      "location": "Decision 5 / step 6; drain.rs RealSteps::read 3599-3613",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "`cargo test -p athena-cli retried_as` does not run status_names_the_follow_up_of_a_rejected_retry.",
+      "evidence": "Cargo's name filter matches substrings. status_shows_retried_as_and_no_retry_hint and status_line_shows_retried_as contain 'retried_as'; status_names_the_follow_up_of_a_rejected_retry does not, so the verifier's command skips part (b) of the demonstration. Fix: Rename the test to include 'retried_as' (for example status_shows_retried_as_with_the_follow_up_of_a_rejected_retry), or add a second command.",
+      "location": "Demonstration for criterion 2, Run line",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The request names crates/athena-cli/src/status.rs, which does not exist.",
+      "evidence": "Glob for crates/athena-cli/src/status*.rs found no files. The interrupted hint is at crates/athena-core/src/status.rs 1791, as the reading and plan already say. Fix: None needed beyond saying so in the change description.",
+      "location": "Request text vs. Files",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the snapshot to check the plan's claims; I ran nothing. The plan puts the refusal where the duplicate is made, in Athena::retry (reading.rs 1101), and checks for the same condition earlier_attempt_with already uses: dispatched with no live process (reading.rs 1339). Moving reap() earlier is safe, because it only removes entries whose process is dead and can be called twice (procs.rs 177-189). Existing retries are found through job_history/retried_job, which list jobs newest first (store.rs 502), so 'the newest retry wins' holds. Retries closed without standing for the work are ignored. Those outcomes match what close_with records (manage.rs 103-157), and earlier_attempt_with refuses to retry any of them, so skipping them never leaves the old job stuck. The drain change is needed and correct. Today, when a retry's reader fails, the drain tries the old job again (drain.rs 1555-1568, 1844), which the new guard would refuse. Re-reading the recorded retry through go works: go sends a proposed job with no reading to read_unread (run/mod.rs 388-390), which accepts the still-interrupted old job (reading.rs 1043). RunStep::Unread has exactly the three uses the plan names. The new drain test fails both without the guard (two retries) and with the guard but no drain change (refused). The plan admits the dead-process tests pass on today's code; that matches the request, which asks for the restart case to be covered. Keeping the state text 'interrupted' leaves every existing reader working. What remains is minor: one drain path that now hits the refusal is not listed, the drain's progress row for the old job is lost when the retry is read again, and one criterion-2 test is not matched by the command the plan gives."
+}

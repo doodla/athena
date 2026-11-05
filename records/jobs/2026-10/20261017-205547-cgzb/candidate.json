@@ -1,0 +1,161 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261017-205547-cgzb",
+  "base_commit": "342a3c185a1ba3eb37961263fb4c578cfc6ed87b",
+  "base_fingerprint": "sha256:e2c76ff30d70ba561cfe97c863b67a06184651858fc8ca9a3a1476eba5e41303",
+  "previous_job": "20261105-070552-kx1y",
+  "candidate_commit": "8f506c9d6ff6525e4d25e96e49162b252363ab0a",
+  "candidate_tree": "eabbf9be9f18cdb874a76f37f3589058a0a5f476",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 326862
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 77686
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 240152
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 322166
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 40587
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 356867
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 149992
+    }
+  ],
+  "fingerprint": "sha256:ffe471de2203e64dd5726f8d929b9352d76586bcf065633b67f994f9cb18618b",
+  "violations": [],
+  "producer_report": {
+    "summary": "A second `athena retry` of an interrupted job that already has a retry is now refused. The refusal names the first retry, its state and the next step, and records nothing. `athena status` shows `retried as <new id>` for the old job and no longer prints `athena retry <old>`. Root cause: the old job stays dispatched, and neither `retry` nor the hint knew a retry existed. The fix is in `Athena::retry`, not only in the hint.\nChanges:\n- `reading.rs`: new `retries_by_job` finds the newest standing retry of each job through `job_history`/`retried_job`. It ignores retries closed unrun (dropped, declined, abandoned, stale, closed). New `retry_follow_up` words the next step from the retry's state. `retry` reaps the registry first, then refuses a dispatched job with no live process that has a standing retry.\n- `status.rs`: `JobLine` gains `retried_as`, skipped in JSON when empty. The interrupted job's next line becomes `retried as <new> (<state>) # <follow-up> ...`, and its disk-hold text is skipped.\n- `display.rs`: the job line gets a ` · retried as <id>` suffix.\n- `drain.rs`: if the reader gives no reading for a retry the drain just made, the next attempt reads that retry job again. Before, it called `retry` on the old job a second time; with the new refusal that would have failed the item.\n- Tests added in `retry.rs`, `drain.rs` and `display.rs`, covering the double-retry refusal, the status text, the restart case and the drain path.\n- A CHANGELOG entry under [Unreleased] / Fixed.\nRetries of rejected, failed and timed-out jobs are unchanged.",
+    "files": [
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/retry.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test retry",
+        "result": "pass",
+        "note": "22 passed: the six new tests and the 16 existing ones."
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain interrupted; cargo test -p athena-cli --test drain dead_registered",
+        "result": "pass",
+        "note": "The new interrupted-job drain tests, the dead-registry-entry drain test and the two existing interrupted-job drain tests passed."
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain whose_retry_gave_no_reading, with the drain fix temporarily disabled",
+        "result": "pass",
+        "note": "Fails without the drain change (the report shows two 'already retried' refusals) and passes with it. The first draft of this test passed even without the fix, because the drain later picked up the proposed retry job as a separate item. I tightened the assertions: the passed job must belong to the interrupted item, and no refusal text may appear. The fix was restored afterwards."
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "Applied formatting."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "No warnings."
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed; the boundary scan found no banned word."
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran once. The tool printed no failure or exit-code line, so I took it as exit 0. The output was too large for me to read through the Grep tool, so I could not count the results."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-cli --test retry`: a test retries an interrupted job once, then a second `athena retry` of the same job returns an error whose message contains the first retry's job id, and the count of jobs in the records is unchanged after the second attempt.",
+        "status": "met",
+        "evidence": "`a_second_retry_of_an_interrupted_job_is_refused_naming_the_first` in tests/retry.rs passed in the 22/22 run. The error contains the first retry's id, the old id, 'already retried' and 'Nothing was started'. `request_jobs().len()` and the head commit are the same before and after the second call."
+      },
+      {
+        "criterion": "Run `cargo test`: a test shows `athena status` for the retried interrupted job contains 'retried as <new id>' and its next-step list contains no `athena retry <old id>` line.",
+        "status": "met",
+        "evidence": "`status_shows_retried_as_and_no_retry_hint` passed. It asserts `retried_as == Some(new)`, a next line containing 'retried as <new>' and 'athena go <new>', and no next line containing 'athena retry <old>'. `status_names_the_follow_up_of_a_rejected_retry` and the display.rs unit test `status_line_shows_retried_as` cover the other cases."
+      },
+      {
+        "criterion": "Run `cargo test`: a test registers a process id that is not running for a dispatched job; status lists the job as 'interrupted' and `athena retry` accepts it and creates a proposal.",
+        "status": "met",
+        "evidence": "`a_dispatched_job_with_a_dead_registered_process_is_interrupted_and_accepted_by_retry` passed. It registers the pid of a child that has already exited and shows the entry present. `status` lists the job as 'interrupted' and drops the entry. A second dead entry is registered, then `retry` returns a proposal with a reading and request 'try again on <job>'. In tests/drain.rs, `a_job_with_a_dead_registered_process_is_listed_and_retried_by_the_drain` covers the drain's reap."
+      },
+      {
+        "criterion": "Run `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`: all pass, with the existing retry.rs and drain.rs tests unmodified in their assertions.",
+        "status": "met",
+        "evidence": "left to Athena's checks for the recorded results. I ran `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all`, and none printed a failure. `git diff -U0` on retry.rs and drain.rs shows only added lines. The only edit to an existing test is in display.rs, where one JobLine literal gains `retried_as: None`; no assertion changed."
+      },
+      {
+        "criterion": "Athena::retry in crates/athena-core/src/reading.rs finds an existing retry through retried_job/job_history (the 'try again on <id>' form) rather than a new ad hoc parse, and the refusal text names the existing retry's id.",
+        "status": "met",
+        "evidence": "`retries_by_job` iterates `job_history(records)`, which calls `retried_job`. The diff adds no use of RETRY_PREFIX or retry_reference for parsing. The `bail!` in `Athena::retry` reads 'job {id} was interrupted and was already retried as job {again} ({state}); {follow_up}. Nothing was started.'"
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing the duplicate-retry refusal, the 'retried as' status line and the restart test.",
+        "status": "met",
+        "evidence": "The new first bullet under [Unreleased] / Fixed describes the refusal, `retried as <new id>` in status (plus the JSON field and line suffix), retries closed unrun not counting, the drain change, and the two restart tests by name."
+      },
+      {
+        "criterion": "The change refuses more retries only for already-retried interrupted jobs; expected 5% of newly refused readings.",
+        "status": "met",
+        "evidence": "The guard runs only when the job is Dispatched with no live process and `retries_by_job` has an entry for it. `a_rejected_job_can_be_retried_twice` and `a_dropped_retry_does_not_block_a_new_retry` passed. The existing retry tests passed unchanged. `retry_reference`, RETRY_PREFIX and the reading gate are untouched. I did not run `refusal_corpus` separately; it is part of the full `cargo test --locked`. The 5% figure is the brief's estimate, not something I measured."
+      }
+    ],
+    "open_issues": [
+      "The old job's records stay unclosed, as the brief puts that out of scope. The user can still close it with `athena close <old> --why ...`, which status and the refusal mention.",
+      "`athena ask \"try again on <id>\"` typed by hand can still make a second retry. Only `athena retry` and the drain are guarded.",
+      "The `go` error for an interrupted job (run/mod.rs) still says to run `athena retry <id>`. Following it for an already-retried job now ends in the new refusal.",
+      "`steward::interrupted_work` counts a dropped retry as still retried, so the drain will not pick up that old job. After the retry is dropped, only a hand-run `athena retry` can retry it. I left this unchanged."
+    ],
+    "mistakes": [
+      "My first draft of the drain unread-retry test passed without the drain fix. I found this by disabling the fix temporarily, then strengthened the assertions and confirmed the test fails without the fix and passes with it.",
+      "The full cargo test output was too large for me to read, so I took the absence of a failure line as success rather than counting results. Athena's own test run is the confirmation."
+    ],
+    "learnings": [
+      "`Athena::status` is in crates/athena-core/src/status.rs, not in athena-cli as the request says.",
+      "`ask` surfaces a reader that returns no structured output as `reader_error` on a recorded Proposal. The job exists with no reading, and `go` reads it again through `read_unread`.",
+      "The drain's queue pass also picks up a proposed retry job as its own item. A drain test that only checks the work landed once passes even without the drain fix. It has to check which item the passed job belongs to, and that no refusal text appears.",
+      "`interrupted()` helpers cut git history back, so a test sees a dispatched job with no registry entry. Restart tests must register an exited child's pid explicitly."
+    ],
+    "desires": [
+      "A way to read a large cargo test output from a saved file, to count passed and failed results. The Grep tool refused the saved output path as outside the working directory.",
+      "Permission to use wc or tail on command output."
+    ]
+  }
+}

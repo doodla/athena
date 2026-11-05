@@ -1,0 +1,173 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261017-205547-cgzb",
+  "n": 1,
+  "at": "2026-11-05T08:36:42.286269114Z",
+  "invocation_seq": 1,
+  "base_commit": "6096b565b93c78a3c1fac0bc3f2d45ab491dc97d",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Refuse a second retry of an interrupted job; show \"retried as\" in status",
+  "summary": "For an interrupted (dispatched, no live process) job that already has a retry job (\"try again on <id>\"), `athena retry` refuses naming the existing retry, and `athena status` shows \"retried as <new id>\" instead of the `athena retry` hint. Adds tests for the double retry and for a restart leaving a dead registry entry. Audience: the user following status hints and the reviewer of 8c20336.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Change and tests are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus cargo test, clippy -D warnings and fmt --check."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests exercising double retry, status text and dead-process interruption."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name commands the verifier can run."
+    },
+    {
+      "id": "root-cause",
+      "how": "The check lives in retry itself, not only in the status hint."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in reading.rs, status.rs and tests."
+    },
+    {
+      "id": "strangers",
+      "how": "Messages and changelog written for outside readers."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Outcome is that following the hint no longer duplicates work."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/reading.rs (Athena::retry at ~1101 calls registry().reap(), then resumable_job, then ask; earlier_attempt_with at ~1327 decides interrupted = Dispatched && !running; retried_job and job_history at ~1497-1535 already map a request 'try again on <id>' to the job it retries via records.resolve), crates/athena-core/src/status.rs (running() at 1646 checks registry entries; state_name 1650 yields 'interrupted'; status() reaps then builds the 'next' hints, the interrupted hint at ~1791), crates/athena-agent/src/procs.rs (reap at 177 removes dead groups), and crates/athena-cli/tests/retry.rs (interrupted() helper ~401, running-job test ~442 registers a live sleeper). The status code is in athena-core, not athena-cli as the request says.",
+    "Existing code: reuse reading.rs retried_job / job_history / retry_reference and the RETRY_PREFIX request form; extend status.rs state_name/next hints and Athena::retry. No new record or data file is added, so AnyRecord and check_record_file are unaffected.",
+    "Assumption: the refusal applies only when the job being retried is interrupted (as the request describes); retries of rejected or failed jobs behave as today so existing retry tests pass unchanged. An existing retry is any request job whose text resolves to the old job id, other than itself.",
+    "Assumption: 'retried as <new id>' replaces the retry hint for that job in the status 'next' list and shows in the job line/state text; the close hint may remain. If several retries exist, the newest is named.",
+    "Assumption: the dead-process test registers a pid of an exited process through the registry for a dispatched job, calls status/list and retry, and does not touch a real container.",
+    "Refusal rule: this refuses more retries only for interrupted jobs already retried; expected 5% of newly refused readings (rare, duplicate retries only)."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-cli --test retry`: a test retries an interrupted job once, then a second `athena retry` of the same job returns an error whose message contains the first retry's job id, and the count of jobs in the records is unchanged after the second attempt.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test shows `athena status` for the retried interrupted job contains 'retried as <new id>' and its next-step list contains no `athena retry <old id>` line.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test registers a process id that is not running for a dispatched job; status lists the job as 'interrupted' and `athena retry` accepts it and creates a proposal.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`, `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`: all pass, with the existing retry.rs and drain.rs tests unmodified in their assertions.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Athena::retry in crates/athena-core/src/reading.rs finds an existing retry through retried_job/job_history (the 'try again on <id>' form) rather than a new ad hoc parse, and the refusal text names the existing retry's id.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing the duplicate-retry refusal, the 'retried as' status line and the restart test.",
+      "kind": "content"
+    },
+    {
+      "text": "The change refuses more retries only for already-retried interrupted jobs; expected 5% of newly refused readings.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Closing or rewriting the old job's records",
+    "Changing retry behavior for rejected, failed or timed-out jobs",
+    "Governance files (athena.toml, defaults.toml, workflows)"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.09,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.2
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1800.0,
+        "p90": 4200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6732186732186732,
+      "p_user_intervenes": 0.08565121412803531,
+      "cost_usd": {
+        "p10": 0.5582334999999999,
+        "p50": 1.3495655000000002,
+        "p90": 3.9891516000000005
+      },
+      "wall_time_s": {
+        "p10": 545.5982055559853,
+        "p50": 1976.8653586148762,
+        "p90": 4209.656916398667
+      }
+    }
+  },
+  "departures": "Slightly lower verification odds: the refusal touches the shared retry path and tests need a fixture with a dead registry entry.",
+  "urgent_reason": "Cuts duplicated work: following the status hint currently starts the same job twice.",
+  "hard_reason": "Adds a refusal rule to `athena retry` and changes what `athena status` tells users about job state, which affects how work is held and re-run.",
+  "producer_effort": "high"
+}

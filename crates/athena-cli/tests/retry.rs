@@ -893,3 +893,202 @@ fn the_retry_command_takes_a_job_and_the_same_options_as_ask() {
         assert!(ask.contains(option));
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// An interrupted job stays dispatched after it is retried: a second retry is refused, and status says so.
+
+/// The `next` lines of `athena status`.
+fn next_lines(athena: &Athena) -> Vec<String> {
+    athena.status().unwrap().next
+}
+
+/// A process id that is not running: a child that has exited, in its own process group.
+fn exited_pid() -> i32 {
+    use std::os::unix::process::CommandExt;
+    let mut child = Command::new("true").process_group(0).spawn().unwrap();
+    child.wait().unwrap();
+    child.id() as i32
+}
+
+#[test]
+fn a_second_retry_of_an_interrupted_job_is_refused_naming_the_first() {
+    let model = Model::default();
+    let (fx, athena) = setup(&model);
+    let job = interrupted(&fx, &athena, "remove the readme");
+    let (first, _) = athena.retry(&job, &Lines::default()).unwrap();
+    let first = first.job.to_string();
+    let jobs = Records::load(&fx.git, &fx.head())
+        .unwrap()
+        .request_jobs()
+        .len();
+    let before = fx.head();
+
+    let error = athena
+        .retry(&job, &Lines::default())
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains(&first), "{error}");
+    assert!(error.contains(&job), "{error}");
+    assert!(error.contains("already retried"), "{error}");
+    assert!(error.contains("Nothing was started"), "{error}");
+    assert_eq!(fx.head(), before, "nothing was recorded");
+    let after = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(after.request_jobs().len(), jobs, "no new job was created");
+}
+
+#[test]
+fn status_shows_retried_as_and_no_retry_hint() {
+    let model = Model::default();
+    let (fx, athena) = setup(&model);
+    let job = interrupted(&fx, &athena, "remove the readme");
+    // Before the retry, status tells the user to retry.
+    let hint = format!("athena retry {job}");
+    assert!(
+        next_lines(&athena).iter().any(|l| l.starts_with(&hint)),
+        "{:?}",
+        next_lines(&athena)
+    );
+    let (retry, _) = athena.retry(&job, &Lines::default()).unwrap();
+    let retry = retry.job.to_string();
+
+    let view = athena.status().unwrap();
+
+    let line = view.open.iter().find(|l| l.id == job).unwrap();
+    assert_eq!(line.state, "interrupted");
+    assert_eq!(line.retried_as.as_deref(), Some(retry.as_str()));
+    let shown = format!("retried as {retry}");
+    assert!(
+        view.next.iter().any(|l| l.contains(&shown)),
+        "{:?}",
+        view.next
+    );
+    assert!(
+        view.next
+            .iter()
+            .any(|l| l.contains(&format!("athena go {retry}"))),
+        "{:?}",
+        view.next
+    );
+    assert!(
+        !view.next.iter().any(|l| l.contains(&hint)),
+        "the retry hint is gone: {:?}",
+        view.next
+    );
+    let _ = fx;
+}
+
+#[test]
+fn status_names_the_follow_up_of_a_rejected_retry() {
+    let model = Model::default();
+    let (fx, athena) = setup(&model);
+    let job = interrupted(&fx, &athena, "remove the readme");
+    let (retry, _) = athena.retry(&job, &Lines::default()).unwrap();
+    let retry = retry.job.to_string();
+    match athena
+        .go(&retry, AcceptedBy::User, &Lines::default())
+        .unwrap()
+    {
+        GoResult::Finished(f) => assert_eq!(f.state, OutcomeState::Rejected),
+        other => panic!("expected a finished job, got {other:?}"),
+    }
+
+    let next = next_lines(&athena);
+
+    let line = next
+        .iter()
+        .find(|l| l.starts_with(&format!("retried as {retry}")))
+        .unwrap_or_else(|| panic!("{next:?}"));
+    assert!(line.contains(&format!("athena retry {retry}")), "{line}");
+    assert!(
+        !next
+            .iter()
+            .any(|l| l.contains(&format!("athena retry {job}"))),
+        "{next:?}"
+    );
+    let error = athena
+        .retry(&job, &Lines::default())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&format!("athena retry {retry}")),
+        "the refusal names the next step: {error}"
+    );
+}
+
+#[test]
+fn a_dropped_retry_does_not_block_a_new_retry() {
+    let model = Model::default();
+    let (fx, athena) = setup(&model);
+    let job = interrupted(&fx, &athena, "remove the readme");
+    let (first, _) = athena.retry(&job, &Lines::default()).unwrap();
+    let first = first.job.to_string();
+    athena
+        .close(&first, "not wanted", &Lines::default())
+        .unwrap();
+    // The dropped retry does not stand for the work: status offers the retry again.
+    let hint = format!("athena retry {job}");
+    assert!(
+        next_lines(&athena).iter().any(|l| l.starts_with(&hint)),
+        "{:?}",
+        next_lines(&athena)
+    );
+
+    let (second, _) = athena.retry(&job, &Lines::default()).unwrap();
+
+    assert_ne!(second.job.as_str(), first);
+    assert!(
+        !next_lines(&athena).iter().any(|l| l.contains(&hint)),
+        "{:?}",
+        next_lines(&athena)
+    );
+    let _ = fx;
+}
+
+#[test]
+fn a_dispatched_job_with_a_dead_registered_process_is_interrupted_and_accepted_by_retry() {
+    let model = Model::default();
+    let (fx, athena) = setup(&model);
+    let job = interrupted(&fx, &athena, "remove the readme");
+    // What a container restart leaves: a registry entry whose process is gone.
+    athena
+        .state
+        .registry()
+        .register(exited_pid(), &job, "producer")
+        .unwrap();
+    assert!(athena.running(&job), "the dead entry is present");
+
+    let view = athena.status().unwrap();
+
+    let line = view.open.iter().find(|l| l.id == job).unwrap();
+    assert_eq!(line.state, "interrupted");
+    assert!(!athena.running(&job), "status dropped the dead entry");
+    // The same entry again, so that `retry` itself is shown to drop it.
+    athena
+        .state
+        .registry()
+        .register(exited_pid(), &job, "producer")
+        .unwrap();
+    assert!(athena.running(&job));
+    let (proposal, _) = athena.retry(&job, &Lines::default()).unwrap();
+    assert!(proposal.reading.is_some());
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let request = records.jobs[proposal.job.as_str()]
+        .request
+        .as_ref()
+        .unwrap();
+    assert_eq!(request.text, format!("try again on {job}"));
+    assert!(!athena.running(&job), "retry dropped the dead entry");
+}
+
+#[test]
+fn a_rejected_job_can_be_retried_twice() {
+    let model = Model::default();
+    let (_fx, athena) = setup(&model);
+    let job = reject(&model, &athena, "remove the readme", None, false);
+
+    let (first, _) = athena.retry(&job, &Lines::default()).unwrap();
+    let (second, _) = athena.retry(&job, &Lines::default()).unwrap();
+
+    assert_ne!(first.job, second.job);
+}

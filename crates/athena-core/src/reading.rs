@@ -1097,7 +1097,9 @@ impl Athena {
     /// process working on it, for example after a restart, or held for low disk space), seeded from that job's
     /// introspection record when it has one. The request recorded is "try again on <job id>", so a later
     /// retry of this job finds the original; nothing is run. The flag says whether the introspection
-    /// record seeded the reading (false: the plain "try again on" behavior).
+    /// record seeded the reading (false: the plain "try again on" behavior). An interrupted job that already
+    /// has a retry standing for it (see [`retries_by_job`]) is refused, naming that retry; a retry closed
+    /// without running does not count.
     pub fn retry(&self, job_ref: &str, ui: &dyn Ui) -> Result<(Proposal, bool)> {
         let head = self.head()?;
         let records = crate::store::Records::load(&self.git, &head)?;
@@ -1107,13 +1109,30 @@ impl Athena {
         if let Some(pause) = self.line_pause(&records, id.as_str()) {
             bail!("{}", self.pause_refusal(&pause));
         }
+        // A process that died (for example in a restart) no longer works on its job: drop its entry first, so
+        // the job counts as interrupted below and in `ask`.
+        self.state.registry().reap();
+        // An interrupted job stays dispatched after it is retried, so a second retry would do the same work
+        // twice. It is refused here, naming the first retry. Other states are left to `ask`.
+        if job.state() == JobState::Dispatched
+            && !self.running(id.as_str())
+            && let Some(again) = retries_by_job(&records).get(id.as_str())
+        {
+            bail!(
+                "job {id} was interrupted and was already retried as job {again} ({}); {}. Nothing was started.",
+                records
+                    .jobs
+                    .get(again.as_str())
+                    .map_or("unknown", |j| j.state().name()),
+                retry_follow_up(&records, again, self.running(again))
+            );
+        }
         let seeded = has_retry_introspection(&records, job);
         // A retry is a new job, judged on its own spend, which starts at 0. The check is made here too so a
         // retry that cannot be afforded prints no resume note; `ask` makes it again before the reader runs.
         let jc = JobConfig::at(&self.git, &head)?;
         self.preflight(&jc, 0.0, ReserveStage::Admission)?;
         // `ask` refuses a job that is not rejected, failed or interrupted before any model is called.
-        self.state.registry().reap();
         // A job that stopped for the environment, or was interrupted, after its candidate was built resumes
         // from that candidate: `go` runs no planner or producer. The reader still runs below.
         let request = format!("{RETRY_PREFIX}{id}");
@@ -1532,6 +1551,60 @@ pub fn job_history(records: &Records) -> Vec<JobEnd> {
             }
         })
         .collect()
+}
+
+/// For each job that has a retry ("try again on <job>"), the newest retry that still stands for the work.
+///
+/// Built on [`job_history`], so the request form is read in one place ([`retried_job`]). A retry closed
+/// without running (dropped, declined, abandoned, stale or closed by the bootstrap) does not stand: the
+/// work it was meant to do is still undone, so it does not hide the retried job.
+pub fn retries_by_job(records: &Records) -> BTreeMap<String, String> {
+    let mut retries = BTreeMap::new();
+    // `job_history` lists the newest job first, so the first retry kept for a job is its newest.
+    for end in job_history(records) {
+        let Some(retried) = end.retry_of else {
+            continue;
+        };
+        let unrun = matches!(
+            records.jobs.get(end.id.as_str()).map(JobRecords::state),
+            Some(JobState::Closed(
+                OutcomeState::Dropped
+                    | OutcomeState::Declined
+                    | OutcomeState::Abandoned
+                    | OutcomeState::Stale
+                    | OutcomeState::Closed
+            ))
+        );
+        if !unrun {
+            retries.entry(retried).or_insert(end.id);
+        }
+    }
+    retries
+}
+
+/// What to do next about `retry`, a retry job that stands for an interrupted job (see [`retries_by_job`]),
+/// worded to follow "retried as <job> (<state>);". `running` says whether a process works on the retry.
+pub fn retry_follow_up(records: &Records, retry: &str, running: bool) -> String {
+    let Some(job) = records.jobs.get(retry) else {
+        return "see `athena status`".into();
+    };
+    match job.state() {
+        JobState::Queued | JobState::Proposed | JobState::Blocked => {
+            format!("run `athena go {retry}` to carry it out")
+        }
+        JobState::Declined => {
+            format!("answer it with `athena correct {retry} \"<line>\"`")
+        }
+        JobState::Dispatched if running => "it is running; wait for it".into(),
+        JobState::Dispatched => {
+            format!("it was interrupted too; run `athena retry {retry}`")
+        }
+        JobState::Closed(
+            OutcomeState::Rejected | OutcomeState::Failed | OutcomeState::TimedOut,
+        ) => format!("it did not land; run `athena retry {retry}`"),
+        JobState::Closed(OutcomeState::Landed) => "it landed; nothing is left to do".into(),
+        JobState::Closed(_) => "see `athena status`".into(),
+    }
 }
 
 /// The job a request of the form "try again on <job>" may resume from its kept candidate: one that failed for

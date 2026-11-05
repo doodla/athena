@@ -90,6 +90,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena retry` no longer starts the same work twice for an interrupted job. An interrupted job (dispatched,
+  no live process) stays dispatched after it is retried, so `athena status` kept telling the user to run
+  `athena retry <id>` and a second retry made a second "try again on <id>" job. The check is in `Athena::retry`
+  itself: it refuses an interrupted job that already has a retry standing for it, names that retry with its
+  state and the next step for it, and records nothing. The retry is found through `job_history`/`retried_job`
+  (`retries_by_job` in `reading.rs`), so the "try again on <id>" form is read in one place. A retry closed
+  without running (dropped, declined, abandoned, stale) does not count, and rejected, failed and timed-out jobs
+  can still be retried more than once. `athena status` shows `retried as <new id>` for such a job (a
+  `retried_as` field in `--json`, and a `· retried as <id>` suffix on its line) in place of the `athena retry`
+  hint. The drain follows the same rule: when the reader gives no reading for a retry it just recorded, the next
+  attempt reads that retry job again instead of retrying the interrupted job a second time. New tests cover a
+  container restart, which leaves a registry entry whose process is dead: `status`, `retry` and the drain's
+  queue drop the entry, list the job as interrupted and accept it
+  (`a_dispatched_job_with_a_dead_registered_process_is_interrupted_and_accepted_by_retry`,
+  `a_job_with_a_dead_registered_process_is_listed_and_retried_by_the_drain`). The old job's records are not
+  closed or rewritten.
 - A pull request whose checks turn green during the landing poll now merges in the same locked step, instead of
   the job ending as `waiting to merge` and being merged about one poll (about 10 minutes) later. This fixes a
   suspected cause, not a confirmed one: when the host refused the merge by its repository rules while a check
