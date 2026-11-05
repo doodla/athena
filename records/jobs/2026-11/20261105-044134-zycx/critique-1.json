@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-044134-zycx",
+  "round": 1,
+  "at": "2026-11-05T06:37:00.648827439Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "A module doc comment will become false, and the plan's way of flagging it (a note in the changelog) is the wrong place.",
+      "evidence": "ci_result.rs:14-16 says the baseline lookup uses 'one read and no wait'. After this change the main-tip lookup waits up to ci_wait_s. The plan leaves the comment alone because ci_result.rs is out of scope, and proposes naming it in the CHANGELOG entry. CHANGELOG.md is a user-facing record of what changed, not a list of follow-ups. The 'strangers' default asks that docs be right for an outside reader. Fix: Name the stale comment only in the change description, as a proposed follow-up. Alternatively, ask whether a doc-only edit to those three lines is allowed: the out-of-scope line ('Changing routing.rs, ci_result.rs, or the gh client') reads as being about behavior. Keep it out of CHANGELOG.md.",
+      "location": "Plan Risks (third bullet) / crates/athena-core/src/ci_result.rs:14-16",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The wrapper reuses Err, which normally means 'the host could not be asked', to mean 'stop: no run exists yet'. Its doc comment must say so.",
+      "evidence": "In ci_result.rs:104-106, Err means 'the service could not be asked', and read_ci (ci_result.rs:196) returns Missing on Err. Under the plan, an absent run before any in-progress read becomes Err only to end the loop early. This is sound, and it is the least invasive option since ci_result.rs is excluded. But a later reader will not know why the Err is there unless it is documented. Fix: In the wrapper's doc comment, state that it turns 'no run yet' into an Err only so that read_ci stops after one read. A missing main run is therefore not waited for, and a run that was seen in progress and then vanished keeps being polled up to the bound.",
+      "location": "Plan Decision 1 / Step 1 (the WaitsWhileRunning wrapper)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Name the case where main's push run is not registered yet at the first read.",
+      "evidence": "The wrapper waits only after a read has shown the run in progress. If GitHub has not registered the push run when the baseline lookup makes its first read, the result is one read and a local run, which is the very race the request describes. The request does say 'missing' falls back to local, so the plan is consistent with it. Because `athena land` lands only after the merge and verification (system facts), the run is probably registered by then, but nothing measured shows that. Fix: Add a risk: a run not yet registered at the first read still falls back to local, as the request asks. The baseline line will say 'no usable CI result ... on main', so later job records can show whether this happens.",
+      "location": "Plan Decision 1 / Risks",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The test hardcodes ci_polls(1500) instead of reading the bound from the test's config.",
+      "evidence": "The existing test ci_reuse_falls_back_to_local_checks_when_the_run_gives_no_result (run/tests.rs:3587) already pins 76 reads, so 1500 matches today. Hardcoding it again ties the new test to a magic number in a second place. Fix: Derive the expected read count from the same config the test uses (budget.ci_wait_s) and pass it to crate::routing::ci_polls, or add one shared constant for both tests.",
+      "location": "Demonstration for criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The baseline can now block silently for up to 25 minutes.",
+      "evidence": "The baseline stage runs before the producer starts (producer.rs:53). With the wait, an operator sees no output until the wait ends. Existing tests assert exactly one line starting 'ci         baseline ' (run/tests.rs:3327-3331, 3441-3446), so adding a progress line under that prefix would break them. Fix: Optional. If a progress line is wanted, give it a different prefix so the existing one-line assertions still hold. Otherwise leave it as it is; the request does not ask for one.",
+      "location": "crates/athena-core/src/run/checks.rs:251-265 (take_baseline)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read checks.rs, run/mod.rs, routing.rs, ci_result.rs, gh/client.rs and run/tests.rs, and the code matches what the plan describes. green_run (checks.rs:592) calls with_ci_source_on(branch, 0, ..) with RunsOnly. The main-tip call is at checks.rs:516 and the landed-candidate call at checks.rs:496. with_ci_source_on (mod.rs:1362) builds a Paced source and computes polls with ci_polls. read_ci (ci_result.rs:189) polls through both missing and unfinished runs and stops on Err. The existing test ci_reuse_falls_back_to_local_checks_when_the_run_gives_no_result pins 76 reads and 75 pauses. The wrapper design is sound: it waits only after a read has shown main's run in progress, it ends on red or cancelled results, and it reuses the existing bound unchanged. It gives exactly ci_polls(ci_wait_s) reads and leaves ci_result.rs, routing.rs and the gh client untouched, so it fixes the fault where it starts (green_run's fixed wait of 0 for the main-tip lookup). I checked that no existing baseline or ci_reuse test reaches the main-tip lookup with an unfinished run, so criterion 4's read counts hold. The plan's extension to CiReplies handles the one real trap: the jobs listing must match the run reply on each read, because parse_ci_run takes 'finished' from the jobs listing. Each demonstration goes through Athena::go and the existing ci_seam, would fail without the wait, and asserts reuse, the absence of a local run, read counts and 20 s pauses. Nothing calls a live service, and the change touches no governance file and adds no config key. The dependents list matches what I found: take_baseline's only caller is producer.rs:53, and green_run's only callers are its two call sites in reused_baseline. Only minor findings remain: a module doc in ci_result.rs becomes false and the plan proposes flagging it in the changelog, the wrapper's use of Err needs documenting, and the case of a push run not yet registered at the first read should be named as a risk."
+}

@@ -2799,6 +2799,12 @@ mod produce_and_verify_order_tests {
         /// When set, the commit and branch the run exists for: any other request finds no run.
         only: Option<(String, String)>,
         paths: std::cell::RefCell<Vec<String>>,
+        /// How many reads of the run (those `only` lets through) find it still in progress before `reply`.
+        in_progress_reads: usize,
+        /// How many reads of the run have been answered.
+        answered: std::cell::Cell<usize>,
+        /// The reply given to the latest read of the run, which the jobs listing that follows must match.
+        current: std::cell::Cell<CiReply>,
     }
 
     impl CiReplies {
@@ -2807,7 +2813,16 @@ mod produce_and_verify_order_tests {
                 reply,
                 only: None,
                 paths: Default::default(),
+                in_progress_reads: 0,
+                answered: Default::default(),
+                current: std::cell::Cell::new(reply),
             }
+        }
+
+        /// The run is in progress for its first `reads` reads, and then gives the reply it was made with.
+        fn in_progress_first(mut self, reads: usize) -> CiReplies {
+            self.in_progress_reads = reads;
+            self
         }
 
         /// The reply for the run of `sha` on `branch` only; every other commit and branch has no run.
@@ -2822,7 +2837,14 @@ mod produce_and_verify_order_tests {
             {
                 return json!({ "workflow_runs": [] });
             }
-            let (status, conclusion) = match self.reply {
+            let answered = self.answered.replace(self.answered.get() + 1);
+            let reply = if answered < self.in_progress_reads {
+                CiReply::Unfinished
+            } else {
+                self.reply
+            };
+            self.current.set(reply);
+            let (status, conclusion) = match reply {
                 CiReply::Missing | CiReply::Unreachable => {
                     return json!({ "workflow_runs": [] });
                 }
@@ -2842,7 +2864,7 @@ mod produce_and_verify_order_tests {
         fn jobs(&self) -> serde_json::Value {
             let job = |name: &str, status: &str, conclusion: serde_json::Value| json!({ "name": name, "status": status, "conclusion": conclusion });
             let aggregate = "fmt, clippy, tests";
-            let jobs = match self.reply {
+            let jobs = match self.current.get() {
                 CiReply::Green => vec![
                     job("fmt", "completed", json!("success")),
                     job("clippy", "completed", json!("success")),
@@ -3328,6 +3350,155 @@ mod produce_and_verify_order_tests {
             said.len() == 1
                 && said[0].starts_with("ci         baseline runs locally: ")
                 && said[0].contains("has other governed content than the base"),
+            "{said:?}"
+        );
+    }
+
+    /// The pauses of 20 seconds the candidate's own checks make in these runs: its CI branch has no run, so
+    /// they wait out the whole bound (76 reads, 75 pauses) before they run locally. The baseline's pauses
+    /// come before them.
+    const CANDIDATE_OWN_PAUSES: usize = 75;
+
+    /// A `go` run whose base has a squash on main with the base's fingerprint, and whose main run for that
+    /// squash answers `replies`. Returns the run and the squash.
+    fn run_with_main_run(replies: impl FnOnce(&str) -> CiReplies) -> (CiReuse, String) {
+        let mut tip = String::new();
+        let run = ci_reuse_run_with(Some(GITHUB), MARKS_BASELINE_OUTSIDE, |git| {
+            tip = main_tip_beside_head(git, None);
+            replies(&tip)
+        });
+        (run, tip)
+    }
+
+    /// How many times the baseline read main's run for `tip`.
+    fn reads_of_main(run: &CiReuse, tip: &str) -> usize {
+        run.baseline_reads()
+            .iter()
+            .filter(|p| p.contains(&format!("head_sha={tip}")) && p.contains("branch=main&"))
+            .count()
+    }
+
+    /// The `ci         baseline ...` lines the run printed.
+    fn baseline_lines(run: &CiReuse) -> Vec<&String> {
+        run.lines
+            .iter()
+            .filter(|l| l.starts_with("ci         baseline "))
+            .collect()
+    }
+
+    #[test]
+    fn baseline_waits_for_mains_in_progress_run_then_reuses_it() {
+        let (run, tip) = run_with_main_run(|tip| {
+            CiReplies::new(CiReply::Green)
+                .only_for(tip, "main")
+                .in_progress_first(2)
+        });
+        let baseline = &run.baseline;
+        assert_eq!(
+            baseline.reused_from.as_deref(),
+            Some(CI_RUN_ADDRESS),
+            "{:#?}",
+            run.lines
+        );
+        assert_baseline_checks(baseline);
+        assert!(baseline.checks.iter().all(|c| c.reused && c.passed));
+        assert!(!run.baseline_ran, "the baseline checks ran locally");
+        // Two reads found the run in progress, the third found it green.
+        assert_eq!(reads_of_main(&run, &tip), 3, "{:?}", run.baseline_reads());
+        // The baseline paused 20 seconds before each of the two later reads; the rest are the candidate's.
+        assert_eq!(
+            run.sleeps,
+            vec![std::time::Duration::from_secs(20); 2 + CANDIDATE_OWN_PAUSES]
+        );
+        let line = format!(
+            "ci         baseline reused from {CI_RUN_ADDRESS} for {}",
+            baseline.base_commit
+        );
+        assert_eq!(baseline_lines(&run), [&line]);
+    }
+
+    #[test]
+    fn baseline_runs_locally_when_mains_in_progress_run_fails() {
+        let (run, tip) = run_with_main_run(|tip| {
+            CiReplies::new(CiReply::Red)
+                .only_for(tip, "main")
+                .in_progress_first(1)
+        });
+        assert!(
+            run.baseline_ran,
+            "the baseline did not run here: {:#?}",
+            run.lines
+        );
+        assert_eq!(run.baseline.reused_from, None);
+        assert!(run.baseline.checks.iter().all(|c| !c.reused));
+        // The wait stopped at the failure: one read in progress, one red, and no more.
+        assert_eq!(reads_of_main(&run, &tip), 2, "{:?}", run.baseline_reads());
+        assert_eq!(
+            run.sleeps,
+            vec![std::time::Duration::from_secs(20); 1 + CANDIDATE_OWN_PAUSES]
+        );
+        let said = baseline_lines(&run);
+        assert!(
+            said.len() == 1
+                && said[0].starts_with("ci         baseline runs locally: ")
+                && said[0].contains(CI_RUN_ADDRESS),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn baseline_runs_locally_when_mains_run_stays_in_progress_to_the_bound() {
+        let (run, tip) =
+            run_with_main_run(|tip| CiReplies::new(CiReply::Unfinished).only_for(tip, "main"));
+        assert!(
+            run.baseline_ran,
+            "the baseline did not run here: {:#?}",
+            run.lines
+        );
+        assert_eq!(run.baseline.reused_from, None);
+        assert!(run.baseline.checks.iter().all(|c| !c.reused));
+        // The bound is the same one the candidate's checks wait by: one read per poll of `ci_wait_s`.
+        let polls = crate::routing::ci_polls(1500) as usize;
+        assert_eq!(
+            reads_of_main(&run, &tip),
+            polls,
+            "{:?}",
+            run.baseline_reads()
+        );
+        assert_eq!(
+            run.sleeps,
+            vec![std::time::Duration::from_secs(20); polls - 1 + CANDIDATE_OWN_PAUSES]
+        );
+        let said = baseline_lines(&run);
+        assert!(
+            said.len() == 1
+                && said[0].starts_with("ci         baseline runs locally: ")
+                && said[0].contains(&format!("no usable CI result for {tip} on main")),
+            "{said:?}"
+        );
+    }
+
+    #[test]
+    fn baseline_does_not_wait_for_a_missing_main_run() {
+        let (run, tip) =
+            run_with_main_run(|tip| CiReplies::new(CiReply::Missing).only_for(tip, "main"));
+        assert!(
+            run.baseline_ran,
+            "the baseline did not run here: {:#?}",
+            run.lines
+        );
+        assert_eq!(run.baseline.reused_from, None);
+        // A run that is not there is not waited for: one read, and only the candidate's own pauses.
+        assert_eq!(reads_of_main(&run, &tip), 1, "{:?}", run.baseline_reads());
+        assert_eq!(
+            run.sleeps,
+            vec![std::time::Duration::from_secs(20); CANDIDATE_OWN_PAUSES]
+        );
+        let said = baseline_lines(&run);
+        assert!(
+            said.len() == 1
+                && said[0].starts_with("ci         baseline runs locally: ")
+                && said[0].contains("no usable CI result"),
             "{said:?}"
         );
     }

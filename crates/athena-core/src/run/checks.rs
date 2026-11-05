@@ -82,13 +82,37 @@ impl crate::routing::Exec for RefuseExec {
     }
 }
 
-/// A CI source that forwards the run and never reads a failing job's log: a red run is not reused as a
-/// baseline, so its log is not needed.
-struct RunsOnly<'a>(&'a dyn crate::ci_result::CiSource);
+/// A CI source for the baseline lookup. It forwards the run and never reads a failing job's log: a red run
+/// is not reused as a baseline, so its log is not needed.
+///
+/// It also decides what is worth waiting for. The read loop ([`crate::ci_result::resolve`]) keeps reading
+/// while a run is unfinished or absent, up to its bound. Here only a run that has been seen in progress is
+/// waited for: until then an absent run is reported as an error, which the loop reads as "no result" and
+/// stops at, so a run that never appeared does not hold the baseline for the whole bound.
+struct WaitsWhileRunning<'a> {
+    inner: &'a dyn crate::ci_result::CiSource,
+    /// Whether a read has shown the run for the asked commit in progress.
+    running: std::cell::Cell<bool>,
+}
 
-impl crate::ci_result::CiSource for RunsOnly<'_> {
+impl<'a> WaitsWhileRunning<'a> {
+    fn new(inner: &'a dyn crate::ci_result::CiSource) -> Self {
+        WaitsWhileRunning {
+            inner,
+            running: std::cell::Cell::new(false),
+        }
+    }
+}
+
+impl crate::ci_result::CiSource for WaitsWhileRunning<'_> {
     fn fetch(&self, sha: &str) -> Result<Option<crate::ci_result::CiRun>> {
-        self.0.fetch(sha)
+        let read = self.inner.fetch(sha)?;
+        match &read {
+            Some(run) if run.sha == sha && !run.finished => self.running.set(true),
+            None if !self.running.get() => bail!("there is no run for {sha} to wait for"),
+            _ => {}
+        }
+        Ok(read)
     }
 }
 
@@ -220,7 +244,8 @@ impl Athena {
     ///
     /// When a green GitHub run exists for the base's governed content, that result stands in for the checks
     /// and nothing runs here (see [`Athena::reused_baseline`]); the record then names the run in
-    /// `reused_from` and every check is marked reused. Otherwise the checks run on a fresh snapshot of the
+    /// `reused_from` and every check is marked reused. When the default branch's run for that content is
+    /// still in progress, this waits for it (up to the `ci_wait_s` bound). Otherwise the checks run on a fresh snapshot of the
     /// base commit, as they always did, and a `ci         baseline runs locally: <reason>` line says why.
     ///
     /// It never fails: a snapshot or environment error, or a nested run, gives a record with no checks and a
@@ -438,8 +463,12 @@ impl Athena {
     /// Looks for a green GitHub run that stands in for the baseline, so the base commit is not tested again
     /// on this machine when its governed content was just tested there. `Ok` holds the reused checks and the
     /// run's address. `Err` is why nothing was reused: `Some(reason)` for the output line, `None` when no
-    /// lookup was possible (no GitHub origin), which prints nothing. It reads the host at most twice, once
-    /// each, with no wait, and runs no check.
+    /// lookup was possible (no GitHub origin), which prints nothing. It runs no check. The landed
+    /// candidate's run (1 below) is finished by the time its job has landed, so it is read once. The run for
+    /// the default branch's tip (2 below) is often still in progress right after a landing, so that run is
+    /// waited for: read every [`crate::routing::CI_POLL`] (20 s), for at most the `ci_wait_s` of the
+    /// `[budget]` (the bound the candidate's own checks wait by), and reused if it passes. A run that is
+    /// missing, failed, cancelled, or still in progress when the wait runs out gives the local run.
     ///
     /// Both lookups go through the call the candidate's checks use ([`crate::routing::run_routed_with_record`],
     /// which calls [`crate::ci_result::resolve`]), so a run counts only when it is finished, green, covers
@@ -493,7 +522,7 @@ impl Athena {
         match self.landed_job(&content) {
             Ok(Some(landed)) if landed.fingerprint == own => {
                 let branch = crate::gh::ci_branch(&landed.job);
-                match self.green_run(&route, &landed.candidate, &landed.changed, &branch) {
+                match self.green_run(&route, &landed.candidate, &landed.changed, &branch, 0) {
                     Ok(hit) => return Ok(hit),
                     Err(reason) => why.push(format!("landed job {}: {reason}", landed.job)),
                 }
@@ -513,7 +542,8 @@ impl Athena {
                 let tracking = format!("refs/remotes/origin/{branch}");
                 match self.git.rev_parse(&tracking) {
                     Ok(Some(tip)) if fingerprint(&self.git, &tip, &tip).ok() == Some(own) => {
-                        match self.green_run(&route, &tip, &[], &branch) {
+                        let wait_s = ctx.jc.config.budget.ci_wait_s;
+                        match self.green_run(&route, &tip, &[], &branch, wait_s) {
                             Ok(hit) => return Ok(hit),
                             Err(reason) => why.push(format!("{branch}: {reason}")),
                         }
@@ -586,22 +616,28 @@ impl Athena {
         }))
     }
 
-    /// The checks from a green run for `sha` on `branch`, and the run's address; or why there is none. One
-    /// read, no wait, and a failing check executor in place of the local run, so a missing, unfinished,
-    /// red or untrusted result is an `Err` and nothing runs here.
+    /// The checks from a green run for `sha` on `branch`, and the run's address; or why there is none.
+    ///
+    /// With `wait_s` of 0 it makes one read. With more, a run that a read shows in progress is waited for:
+    /// it is read again every [`crate::routing::CI_POLL`] (20 s) until it finishes, for at most
+    /// [`crate::routing::ci_polls`]`(wait_s)` reads, so `wait_s` is the bound. A run that is not there on
+    /// the first read, a failed or cancelled one, and one still in progress when the reads run out are not
+    /// waited for any longer. A failing check executor stands in for the local run, so a missing,
+    /// unfinished, red or untrusted result is an `Err` and nothing runs here.
     fn green_run(
         &self,
         route: &crate::routing::Route,
         sha: &str,
         changed: &[String],
         branch: &str,
+        wait_s: u64,
     ) -> std::result::Result<(Vec<CheckRun>, String), String> {
-        let routed = self.with_ci_source_on(branch, 0, |ci, wait| {
+        let routed = self.with_ci_source_on(branch, wait_s, |ci, wait| {
             crate::routing::run_routed_with_record(
                 route,
                 sha,
                 changed,
-                &RunsOnly(ci),
+                &WaitsWhileRunning::new(ci),
                 &RefuseExec,
                 wait,
             )

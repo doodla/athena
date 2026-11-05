@@ -1,0 +1,153 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261105-044134-zycx",
+  "n": 1,
+  "at": "2026-11-05T06:32:25.590470907Z",
+  "invocation_seq": 1,
+  "base_commit": "f5aff382b3c661c3cdab4e87b659276fc11e5ec9",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Wait for main's in-progress CI run before running the baseline locally",
+  "summary": "When the baseline lookup finds main's push run for the base's content still in progress, wait for it (a read every 20 s, up to the existing ci_wait_s) and reuse it if it passes. If it fails, is missing, or the wait runs out, the baseline runs locally as today. The audience is Athena operators, who now avoid the 20-minute local baseline right after a landing.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The change and its tests are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests for wait-then-pass, fail, and timeout; cargo test and clippy must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria assert reuse, no local run, and read counts, not wiring."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuses the existing Wait, Paced, ci_polls and ci_wait_s machinery."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the baseline lookup."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria run through cargo test."
+    },
+    {
+      "id": "root-cause",
+      "how": "Waits for main's in-progress run instead of falling back on every race after a landing."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments are updated for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/run/checks.rs. reused_baseline resolves the base's content commit, then tries (1) the landed job's candidate run on its CI branch, then (2) the origin/<default> tip run when its fingerprint equals the base's. Both go through green_run, which calls with_ci_source_on(branch, 0, ..), so it makes exactly one read with no wait. A run that is unfinished falls to 'no usable CI result for {sha} on {branch}' and the baseline runs locally in baseline_checks.",
+    "Code survey: crates/athena-core/src/run/mod.rs with_ci_source_on turns wait_s into polls via routing::ci_polls (a read every CI_POLL = 20 s, polls = wait_s/20 + 1) and paces reads with the test sleeper seam ci_seam. The candidate path at mod.rs ~1596 already passes jc.config.budget.ci_wait_s. The change threads ci_wait_s (from ctx.jc.config.budget) into green_run for the main-tip lookup (step 2), where main's run is the one likely still in progress; this reuses the existing wait machinery and adds no new limit.",
+    "Assumption: waiting applies to main's run for the base's content (lookup 2). The landed-candidate lookup (1) is for a finished run on the job's CI branch and may keep one read. Failed, missing, or timed-out runs still fall back to a local run with the existing 'baseline runs locally: ...' line.",
+    "Code survey: the existing baseline-reuse tests are in crates/athena-core/src/run/tests.rs (baseline_reused_from_*, baseline_runs_locally_when_*), using CiReplies/CiReply (Green, Red, Unfinished, Missing) and ci_reuse_run_with. The new tests go there. CiReplies needs a way to answer Unfinished for the first N reads and then Green; run/tests.rs is therefore a likely extra file beyond checks.rs. No record or data file is added under crates/, so the records allow-list is untouched. No refusal rule is added.",
+    "The test for the green case must count reads (baseline_reads) to show the wait polled more than once, and the sleeper seam must show 20 s pauses, so the wait is measured directly."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-core/src/run/tests.rs has main's run for the base's content return in-progress on the first reads and then green. It asserts reused_from is Some(CI_RUN_ADDRESS), baseline_ran is false, more than one read of main happened, and the recorded sleeps are 20 s each. Run: cargo test -p athena-core baseline.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test has main's run for the base's content in progress and then failing (red). It asserts baseline_ran is true, reused_from is None, and the 'ci         baseline runs locally' line is printed. Run: cargo test -p athena-core baseline.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test has main's run still in progress when the ci_wait_s bound is exhausted. It asserts the number of reads equals ci_polls(ci_wait_s) and the baseline runs locally. Run: cargo test -p athena-core baseline.",
+      "kind": "behavior"
+    },
+    {
+      "text": "All existing baseline tests still pass unchanged: baseline_reused_from_the_landed_candidates_run_runs_nothing_locally, baseline_reused_from_the_default_branch_run_runs_nothing_locally, baseline_reused_from_a_squash_on_main_with_the_bases_fingerprint, baseline_runs_locally_when_main_tip_has_other_governed_content and baseline_runs_locally_when_no_green_ci_result_exists. Run: cargo test -p athena-core.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo clippy --all-targets and cargo fmt --check are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The doc comments on reused_baseline and green_run in crates/athena-core/src/run/checks.rs no longer say 'no wait'. They state that main's in-progress run is waited for, reading every 20 s up to ci_wait_s.",
+      "kind": "content"
+    },
+    {
+      "text": "The diff touches no governance file (athena.toml, defaults.toml, workflows), and reuses ci_wait_s and routing::CI_POLL without adding a new limit.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Changing the ci_wait_s default or adding a new config key",
+    "Changing how the candidate's own checks wait for CI (run/mod.rs ~1596)",
+    "Changing routing.rs, ci_result.rs, or the gh client",
+    "Changing the fingerprint rules for deciding whether main's tip matches the base"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 3.6
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2100.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6724137931034483,
+      "p_user_intervenes": 0.0860310421286031,
+      "cost_usd": {
+        "p10": 0.5581109061660832,
+        "p50": 1.3477366,
+        "p90": 3.986653724458447
+      },
+      "wall_time_s": {
+        "p10": 545.4064919281489,
+        "p50": 1980.2520507261522,
+        "p90": 4212.988788317521
+      }
+    }
+  },
+  "departures": "The change touches the baseline stage in a large file and needs new test seams in run/tests.rs, so I put cost and time slightly above the reference.",
+  "urgent_reason": "It cuts wasted time: it removes redundant 20-minute local baseline runs, which happened in 3 of the last 10 jobs.",
+  "hard_reason": "It changes the run pipeline's baseline stage, which decides whether baseline checks are reused from CI or rerun locally, so a mistake could silently reuse a wrong baseline.",
+  "producer_effort": "high"
+}
