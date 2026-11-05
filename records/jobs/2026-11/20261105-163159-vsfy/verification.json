@@ -1,0 +1,179 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261105-163159-vsfy",
+  "candidate_commit": "381f1b0befce9fb670a4d74d3427f878ad99abe6",
+  "verified_fingerprint": "sha256:e31d54adf48ea7c106c1f25be8ec084e0a4f5f87fa1d3a42ed5a7d248f9e8b70",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42105903361 for 381f1b0befce9fb670a4d74d3427f878ad99abe6",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42105903361 for 381f1b0befce9fb670a4d74d3427f878ad99abe6",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42105903361 for 381f1b0befce9fb670a4d74d3427f878ad99abe6",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 3,
+  "criteria": [
+    {
+      "criterion": "A note under docs/design/ (or the commit message) states the cause of the longer verifier stage and cites the code path or measurement that shows it, and the verifier can read it in the diff.",
+      "kind": "content",
+      "met": false,
+      "evidence": "Read in the diff and the evidence snapshot. docs/design/verifier-stage-slowdown.md names a cause: since the warm-target change, the verifier's target/verify starts empty. It cites code paths and admits the build time was not measured. The records contradict this cause. The review that measured 3.5 ran at 2026-11-05T16:31:57Z (throughput-reviews/2026-11/20261105-163157-ntaq.json, landings 369). The blamed commit 5bae74ba landed at 20:21:58 and the slot queue f2d168c6 at 19:20:52 (history.json). The previous review, at 07:04 with 366 landings, read 3.1. The growth came from jobs that landed before the stated cause existed, so the note does not state the cause of the longer verifier stage.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The diff removes the stated cause in crates/ code in the verifier path, for example by removing redundant work, and does not only change how the median is reported.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read in the diff. verification.rs now calls link_verifier_build before invoke_and_record and release_verifier_build after unlock. checks.rs adds both functions: they take a Check slot, link Side::Verify CARGO_TARGET_DIR to the slot's target directory, then unlink, clean the workspace output and free the slot. This removes the cause as the note states it, and it changes behavior, not reporting. It does not remove the cause of the measured slowdown (see finding 1).",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test` from the repository root: it passes, including a new or updated test that exercises the changed verifier behavior, and it fails if the cause is reintroduced.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded check: cargo test --locked passed (CI run 42105903361 for 381f1b0b). I ran the new test, which passed: 1 passed, 0 failed. Its fake verifier agent records read_link(CARGO_TARGET_DIR) and the files in debug/deps, then asserts a link to build-slots/0/target that holds libserde-0123abcd.rlib. Without the link in verification.rs, the path is not a link and holds nothing, so both assertions fail (read from the code; I did not run it against the base). The over-limit test was updated for the verifier being the slot's next user.",
+      "commands": [
+        "cargo test --locked",
+        "cargo test -q -p athena-core the_verifier_builds_in_the_slots_warm_target_directory"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo clippy` and `cargo fmt --check`: both are clean.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded checks: both passed (CI run 42105903361 for 381f1b0befce9fb670a4d74d3427f878ad99abe6).",
+      "commands": [
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo fmt --all --check"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The change is a single focused fix with no unrelated edits, and the note says how the next throughput review should show verifier minutes per landed job falling below 3.5.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read in the diff. All edits serve the one fix (link, release, test, CHANGELOG entry, note). The note's last section says the verifier column should fall below 3.5 for jobs landed after the change, read over at least 20 such jobs with athena status, and names the next step if it does not. Scope: checks.rs and verification.rs changed but are not on the deliverables list, while run/mod.rs and status.rs did not change (finding 3).",
+      "commands": [],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "The stated cause postdates the slowdown it is meant to explain; the real cause of 3.1 to 3.5 is not found",
+      "evidence": "The review that measured verifier 3.5 ran at 2026-11-05T16:31:57Z with 369 landings (evidence records/throughput-reviews/2026-11/20261105-163157-ntaq.json). The previous review, at 07:04:20Z with 366 landings, read 'verifier 3.1 to 3.1' (20261105-070420-vq95.json). The note blames the warm-target commit 5bae74ba, which landed at 20:21:58Z, and the slot queue f2d168c6, which landed at 19:20:52Z (history.json). Both came after the review, so they could not lengthen the verifier runs it measured. The note says the cause was 'read from the code path' and 'not measured'. This is the guess the reading ruled out, and the records show it is wrong for the measured window. Better approach: read the verifier invocation wall times of the 3 jobs that landed between the two reviews in records/, find what made them longer, and fix that. The warm-slot link can stay as a separate fix for the post-20:21 regression.",
+      "location": "docs/design/verifier-stage-slowdown.md (Cause section); CHANGELOG.md Fixed entry",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "The verifier holds a check slot for its whole run, which delays other jobs' checks",
+      "evidence": "link_verifier_build acquires a Class::Check slot and keeps it until release_verifier_build runs after the agent ends. With max_check_slots = 1 and parallel jobs, another job's checks wait for a whole verifier run (up to verifier_timeout_s). The note acknowledges this. It changes another stage's timing, which the brief puts out of scope, and the cost is not measured.",
+      "location": "crates/athena-core/src/run/checks.rs link_verifier_build; crates/athena-core/src/run/verification.rs:249",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "Files outside the expected deliverables changed; listed ones did not",
+      "evidence": "git diff HEAD~1 --stat shows checks.rs (+113) and verification.rs (+6), neither on the deliverables list. run/mod.rs and status.rs, which are on it, did not change. The edits are in the verifier path, so this is a scope note only.",
+      "location": "crates/athena-core/src/run/checks.rs, crates/athena-core/src/run/verification.rs",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "An early return on unlock failure skips cleaning the slot, and the slot is freed before its link is removed",
+      "evidence": "`vsnap.unlock()?;` returns before release_verifier_build runs. VerifierBuild is then dropped without clean_workspace_output, so workspace output stays in the slot for the next job. Fields drop in declaration order (slot, then link), so on that path the slot is freed while the link still exists.",
+      "location": "crates/athena-core/src/run/verification.rs:252-255; checks.rs struct VerifierBuild",
+      "source": "verifier"
+    },
+    {
+      "severity": "nit",
+      "summary": "A cargo test piped through tail was refused, and ls was run on the evidence path, which is outside the working directory",
+      "evidence": "The policy hook refused `cargo test ... | tail -5` because tail is not allowed; I reran the test without the pipe. Earlier, `ls` on the evidence records was outside the working directory and failed with 'No such file or directory'. Neither result is relied on above.",
+      "location": null,
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "1 of 5 criteria unmet",
+    "1 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "The change links the verifier's CARGO_TARGET_DIR to a warm build slot and says this cold build is why the verifier stage grew from 3.1 to 3.5 min. The evidence snapshot contradicts that. The throughput review that measured 3.5 and opened this job ran at 2026-11-05T16:31:57Z (records/throughput-reviews/2026-11/20261105-163157-ntaq.json). The commit the note blames, \"Give each build slot a warm, size-limited target directory\", landed at 20:21:58 that day, and the slot queue it builds on landed at 19:20:52 (history.json). The previous review, at 07:04 with 366 landings, read 3.1. At 16:31 there were 369 landings, so the 3.1 to 3.5 jump came from 3 jobs that landed before build slots existed. The stated cause cannot explain the measured growth. The note's only measurement (verifier 3.4 over the last 20 from athena status --snapshot) covers a different window that also takes in later jobs. The fix is a reasonable repair of a real regression that came later. Its new test passes, and the recorded fmt, clippy and tests passed. But the request asked for the cause of the measured slowdown, and that is still unnamed. Smaller points: the verifier now holds a check slot for its whole run, which slows other jobs' checks (another stage's timing). An early return on unlock failure skips cleaning the slot. The change edits checks.rs and verification.rs, which are not on the deliverables list."
+}

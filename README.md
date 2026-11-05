@@ -167,7 +167,33 @@ follow-up.
 **Stopping a drain.** Run `athena drain-stop` from another terminal. The drain finishes the job it is on (it is
 landed and rated as usual), starts no further job, and ends with the stop reason `stop requested`, exit code 2.
 Nothing is killed, and the rest stays queued. To kill running work instead, use `athena stop`. A stop asked for
-before a drain starts belongs to an earlier run and is cleared when the next drain begins.
+before a drain starts belongs to an earlier run and is cleared when the next drain begins. `athena drain-stop
+--wait` then waits until the drain has exited (it prints a progress line every 30 seconds; a job can run for
+hours, so there is no limit unless you add `--timeout SECS`, and a timeout leaves the stop asked for).
+
+**Seeing, stopping and restarting a drain.** Do not look for a drain with `pkill`, `pgrep` or a wait loop: a
+pattern that appears in your own command line matches that command line. `athena drain` writes a pid file,
+`drain.pid`, in the repository's state directory when it starts and removes it when it ends, and the commands
+below read only that file. The file holds the pid, the build and a process start marker, so a pid that another
+process has since been given is not taken for the drain; a missing file, a process that has exited and a recycled
+pid are each reported as "no drain is running", with the reason, and no process is ever signalled. A second
+`athena drain` while one runs is refused.
+
+- `athena drain-status` says whether a drain runs and as which build (exit code 0 running, 2 not running;
+  `--json` for scripts).
+- `athena drain-restart --budget USD` rebuilds first with `./setup.sh` (if the build fails, the running drain is
+  left alone and nothing starts), asks the running drain to stop and waits for it to finish its job and exit,
+  builds again if that drain landed code meanwhile, starts the new drain, and prints the pid and the build it
+  started. The new drain runs in the background in its own process group (not its own session) and writes its
+  output to `drain.log` in the state directory. It takes the same limits as `athena drain`, since a stopped drain
+  does not keep its own. `--timeout SECS` gives up waiting for the old drain; the stop stays asked for and no
+  new drain starts.
+
+A drain also refuses to start, and dispatches nothing, when its build is older than the landed code (a change
+under `crates/`, `xtask/`, `Cargo.toml`, `Cargo.lock` or `setup.sh` since the commit it was built from); run
+`./setup.sh`, or `athena drain-restart`. One-time transition: a drain started by a build from before the pid file
+existed has no pid file, so `drain-status` and `drain-restart` cannot see it. Run `athena drain-stop` and let
+that drain finish before the first restart.
 
 **Budget.** Before every model call (a reading, a run, the re-reading of a retry, a rating, the source check)
 `drain` checks that the money already spent, as the calls actually cost, plus that call's cap from
