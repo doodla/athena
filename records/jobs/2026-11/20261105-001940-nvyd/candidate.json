@@ -1,0 +1,133 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261105-001940-nvyd",
+  "base_commit": "a1385620ff3a21ec02103a47fa4ff38720587f8f",
+  "base_fingerprint": "sha256:fc59c2a5506f712376730baa03b64514f613deafd8a91d3d6744a2ca96aea3a8",
+  "previous_job": "20261104-124034-ysc4",
+  "candidate_commit": "f77e74de31a6ca6304496238c081d5964f131a7c",
+  "candidate_tree": "cf0f1cd51832cdf7c9c6cb64434ea60747334278",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 317287
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 234089
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 318104
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 94529
+    }
+  ],
+  "fingerprint": "sha256:e0a30879d815e790d01b569cc6689ec529d88dfe000dc52e8e7349b9670c59ca",
+  "violations": [],
+  "producer_report": {
+    "summary": "I changed how a batch (`athena drain`) selects proposed requests. A deferred request, whether from `ask --later`, the Steward or Hestia, now runs once its latest reading passes the reading checks. A re-read that changed scope after a settings change still waits for a person. The new tests fail on the old selection, except the stored-reading guard, which passes on both by design. Fmt, clippy, the policy scan and the full workspace tests all passed.\n\n**Root cause.** A request becomes \"proposed\" as soon as the reader has been run for it, even when no reading was stored (the reader failed, or both its readings were refused). `queued_work` in `steward.rs` marked every proposed request as read, so a batch never read it again. A request with no acceptance bullet was refused as an incomplete plan in every batch. One with bullets ended \"needs accepting\" and never ran.\n\n**Fix in `queued_work`.** I changed the selection and added a private helper in `steward.rs`; `drain.rs` gets doc edits only. A proposed request is now handled by what its latest reading shows:\n- **No stored reading:** it is queued unread, so the batch reads it in plan order and runs it when accepted. It is skipped after two empty reads.\n- **Stored reading that passes `check_reading_text`:** it runs without being read again. The repository-path check is not repeated.\n- **Stored reading that fails a check:** it is left out until a person runs `athena go`.\n- **Re-read with changed scope after a settings change:** it is left out in every batch, not only the one that re-read it. A reading from `athena correct` is not held back.\n\nBoth the `drain.rs` module bullet \"A read request stays queued\" and the `Item.read` doc now state this.\n\n**The 42 stuck requests.** I could not inspect them. A request with a stored, passing reading already ran in a batch before this change. This fix covers the proposed-with-no-stored-reading kind. Run `athena plan` on the 42 to see whether they are that kind. Any skipped for another reason (stale path, paused line, failed dependency) is not fixed.\n\n**Cost.** A request that stays unreadable now costs 2 reader calls per batch for a reader failure (was 1), and 4 for a refusal (was 2). These are charged to the batch budget in priority order. `CHANGELOG.md` records this and the follow-ups.\n\n**Tests.**\n- **Steward unit tests:** seven new tests on `queued_work`.\n- **Criterion 1:** two tests with a failed first read, one with bullets and one without, both run and land. A third test, a stored passing reading, runs with 1 reader call.\n- **Criterion 2:** a two-batch test where the held request is not run in batch 2 and a person's `athena go` still dispatches it.\n- **Criterion 3:** a stored reading that fails a check is not run (with a passing control that lands), and a twice-refused reading is skipped with \"not read\". The third test queues urgent last, with no stored reading, and checks the start order urgent, normal, low.\n\n**One existing test changed.** `a_reread_whose_scope_changed_is_left_for_a_person_and_is_not_a_failure` asserted that the report's queued list holds the item. The held request is no longer in that list, so I changed that one assertion to check the \"is left queued ... athena go\" note and an empty list. The \"needs accepting\" job line and \"no failure\" assertions are unchanged.",
+    "files": [
+      "crates/athena-core/src/steward.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/tests/drain.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --lib steward",
+        "result": "pass",
+        "note": "28 passed, including 7 new queued_work unit tests"
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain",
+        "result": "pass",
+        "note": "First run, before the test edits: 167 passed, 1 failed (the existing changed-scope test asserted report.queued.len()==1; I updated that assertion). After that, the 9 targeted new and related tests passed in two runs, one on the new selection and one on the old."
+      },
+      {
+        "command": "cargo test -p athena-cli --test drain -- proposed a_reread_whose (with queued_work temporarily set back to the old rule)",
+        "result": "pass",
+        "note": "7 of 9 failed as designed. The stored-passing-reading guard and the approved-job test pass on both rules. The old rule was restored and no TEMP marker remains."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "One clippy lint in a new test was fixed (cloned_ref_to_slice_refs); the second run was clean"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean after cargo fmt --all"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed, no banned word, run after the CHANGELOG edit"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run once, whole workspace, exit code 0. The output was too large to inline and I could not open the saved copy, so I judged it from the exit status."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-cli/tests/drain.rs has a deferred request (queued by `ask --later`) in state proposed whose latest reading passes the reading checks. The drain runs it, and `cargo test -p athena-cli --test drain` passes.",
+        "status": "met",
+        "evidence": "Three new tests drive drain::drain over RealSteps. (a) a_proposed_deferred_request_with_no_stored_reading_is_read_and_run_by_the_batch and (b) a_proposed_deferred_request_without_acceptance_words_is_read_and_run_by_the_batch: a failed first read leaves the job Proposed with an invocation and no reading. The batch reads it, runs it and lands it (landed == 1, last job line 'passed', one reading stored, 2 reader calls in total). Both fail on the old selection. (c) a_proposed_deferred_request_with_a_passing_stored_reading_runs_without_a_second_reading: a stored passing reading runs with 1 reader call in total. It passes on old and new code by design, because this case already ran before the change. Run: cargo test -p athena-cli --test drain -- proposed. Whether the 42 stuck requests are of the no-stored-reading kind is not confirmed."
+      },
+      {
+        "criterion": "A new test in crates/athena-cli/tests/drain.rs has a request re-read with a changed scope after a settings change. The drain does not run it, reports it as needing a person (`needs_accepting`), counts no failure, and `cargo test -p athena-cli --test drain` passes.",
+        "status": "met",
+        "evidence": "a_reread_whose_scope_changed_still_waits_for_a_person_in_every_batch. Batch 1: one job line with outcome 'needs accepting', landed 0, 2 readings stored, still Proposed. Batch 2: no job lines, landed 0, empty lander list, reader count unchanged, no dispatch record, queued_work omits it. Then a person's athena go dispatches it. The test fails on the old selection (batch 2 ran the held reading). The existing a_reread_whose_scope_changed_is_left_for_a_person_and_is_not_a_failure still passes, with one assertion changed (see open_issues). Steward unit tests cover the helper: a changed-scope re-read is held, a correction for the earlier reading releases it, and the same-scope or same-settings cases are listed."
+      },
+      {
+        "criterion": "A test shows that a proposed deferred request whose latest reading fails a reading check is not run by the batch, and that a run of proposed and queued items goes in priority order (the urgent one before the lower priority one). `cargo test -p athena-cli` passes.",
+        "status": "met",
+        "evidence": "a_proposed_request_whose_latest_reading_fails_a_reading_check_is_not_run_by_the_batch: a hand-seeded n=2 reading with a behavior criterion that names no command fails check_reading_text (asserted in the test). The batch never starts that job, makes no extra reader call, and leaves it Proposed and undispatched, while the control with a passing n=2 reading lands. a_proposed_request_whose_reading_was_refused_twice_is_read_again_then_skipped_and_not_run: outcome 'not read' with 'base commit' in the reason, a skip note, 4 reader calls in the batch, not landed, not dispatched. proposed_and_queued_requests_are_run_in_priority_order: the urgent request is queued last with no stored reading. The start order is urgent, normal (proposed with a stored reading), low (queued), and the urgent one lands first. The whole athena-cli crate was not run separately; the full workspace run was done once."
+      },
+      {
+        "criterion": "The diff changes only the drain's item selection (crates/athena-cli/src/drain.rs, and crates/athena-core/src/steward.rs only if selection lives there) and the tests, and `git diff` shows no change to athena.toml, defaults.toml, or .github/workflows.",
+        "status": "met",
+        "evidence": "git status --short lists only CHANGELOG.md, crates/athena-cli/src/drain.rs (comments only), crates/athena-cli/tests/drain.rs and crates/athena-core/src/steward.rs. The selection rule lives in steward::queued_work. No config or workflow file is touched."
+      },
+      {
+        "criterion": "`cargo test` passes for the workspace, `cargo clippy` is clean, and `cargo fmt --check` passes. The module docs of drain.rs describing 'A read request stays queued' are updated to state the new rule.",
+        "status": "met",
+        "evidence": "left to Athena's checks for the workspace test, clippy and fmt. I ran all three locally and each passed. The drain.rs module bullet 'A read request stays queued' and the Item.read doc now state the rule: a stored passing reading runs, no stored reading is queued unread and skipped after two empty reads, and a failing stored reading or a changed-scope re-read waits for athena go."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan: the existing test a_reread_whose_scope_changed_is_left_for_a_person_and_is_not_a_failure asserted report.queued.len() == 1. A held changed-scope re-read is no longer in the queue the report ends with, so I changed that one assertion to check the 'is left queued ... athena go' note and report.queued.is_empty(). Every other assertion in the test, including the 'needs accepting' job line and no failure, is unchanged.",
+      "The 42 stuck requests could not be inspected. A request that holds a stored passing reading already ran in a batch before this change. This change fixes the Proposed-with-no-stored-reading kind. A request skipped for another reason is not fixed: a stale path, a paused line, a failed dependency, or a failed re-read after a settings change. Please run `athena plan` on them.",
+      "approved_work (steward.rs) is unchanged: an approved job whose re-read changed scope is still run by a batch. Do you want the same rules applied there?",
+      "Known cost: a request that stays unreadable now costs 2 reader calls per batch for a reader failure (was 1) and 4 for a refusal (was 2), charged to the batch budget in priority order. Follow-up proposed: attempts (drain.rs, around 1810-1820) should not read again after a check refusal.",
+      "Other findings, outside this job: RealSteps::run labels every Reread result 'scope differs', even a failed re-read or a job with no reading. A failed re-read after a settings change stores nothing, so the stale reading is re-read in every batch.",
+      "Remaining limit of the changed-scope detector: it treats a reading with different settings hashes, different scope and no correction record for the earlier reading as a settings re-read. The only reading routes are ask, correct and the settings re-read, and correct stores a correction, so none other was found."
+    ],
+    "mistakes": [
+      "My first full drain run failed one existing test because I had not anticipated that a held changed-scope re-read leaves the report's queued list; I updated that assertion rather than leave the test failing.",
+      "A new test used `[job.clone()]` where clippy wants a slice from a reference; fixed."
+    ],
+    "learnings": [
+      "JobRecords::state calls a job Proposed as soon as it has an invocation, even with no stored reading. queued_work marked every Proposed job read, so a reader failure or two refused readings left a job the batch never read again.",
+      "Report.queued is the queue as re-fetched at the end of the run. A job held out of queued_work therefore also disappears from the 'queued' line of the batch that held it; the job line and the note still name athena go.",
+      "A refused read is retried once inside read_for, and the drain reads again before skipping. A stuck unreadable request costs 4 reader calls per batch (2 for a plain reader failure).",
+      "status::planning_cost_tests::invocation(job, seq, role, usd) is a reusable crate-internal test helper for building an Invocation.",
+      "The drain integration tests use rated_scenario, whose reading creates studies/demo/*. Once one job has landed, later jobs from the same scenario are refused (create of an existing file), so order tests should compare start order and the first landing."
+    ],
+    "desires": [
+      "The records of the 42 stuck requests, or an `athena plan` listing of them, to confirm whether they are proposed with no stored reading.",
+      "Permission to read the saved output of a long cargo test run, so the pass count can be quoted instead of judged from the exit status."
+    ]
+  }
+}
