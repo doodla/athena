@@ -38,6 +38,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena drain` now treats a deferred request in state proposed by what its latest reading shows, so a batch
+  runs a request that was asked for (`athena ask --later`, the Steward or Hestia) once its reading passes the
+  reading checks, in priority order. Root cause: the item selection (`queued_work`) marked every proposed
+  request as read, but a request is proposed as soon as the reader has been run for it, even when no reading
+  was stored (the reader failed, or both its readings were refused). Such a request was never read again by
+  a batch: a request with no acceptance bullet was refused as an incomplete plan in every batch, and one
+  with bullets ended `needs accepting` without being run. Now:
+  - a proposed request with no stored reading is queued unread, so the batch reads it in plan order, runs it
+    when the reading is accepted, and skips it with the reader's error after two empty reads;
+  - a proposed request with a stored reading is run without a second reading only when that reading passes
+    the text-only reading checks (`check_reading_text`; the check of the deliverable paths against the
+    repository is not repeated); one that fails a check is left for `athena go`;
+  - a request that was read again after a settings change and now has a different scope (capability, class
+    of work or deliverables) is left for `athena go` in every batch, not only the one that read it again. The
+    first batch still reports it `needs accepting` and counts no failure, and it is no longer listed in the
+    queue the report ends with. A reading made by `athena correct` is not held back: it stores a correction
+    for the reading it replaces, and the re-read after a settings change stores none.
+
+  Unchanged: a stored reading that passes already ran in a batch before this change (a person's `athena go`
+  or `athena plan` read it), and still runs without being read again; work decisions' approved jobs
+  (`approved_work`) are selected as before, including the changed-scope case. Whether the 42 requests that
+  never ran are of the fixed kind (proposed with no stored reading) is not confirmed from this change alone.
+  Known cost: a request that stays unreadable now costs a batch twice as many reader calls: 1 to 2 for a
+  reader failure, and 2 to 4 for a reading the checks keep refusing (each read already retries a refusal
+  once, and the drain reads once more before skipping). They are charged to the batch budget in priority
+  order. Findings left for later jobs: the drain's second read after a check refusal is redundant;
+  `RealSteps::run` labels every re-read result "scope differs", even a failed re-read; a re-read that fails
+  after a settings change stores nothing, so the stale reading is read again in each batch.
 - `athena drain` now passes over an item that fails twice instead of stopping the batch. The batch of
   4 Nov 12:39pm UTC, with $43 and 3 job slots left, stopped on job 20261029-160024-80qj, which had failed
   twice on a line the scope guard had neither paused nor flagged. Root cause: two earlier fixes passed over
