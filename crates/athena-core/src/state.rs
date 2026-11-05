@@ -333,6 +333,54 @@ impl StateDir {
         self.root.join("slots")
     }
 
+    /// The directory that holds the build slots' warm target directories. Unlike a job's directory it is never
+    /// removed when a job ends: it belongs to the slots, not to any job
+    /// (`docs/design/agent-and-build-slots.md` section 5.3).
+    pub fn build_slots_dir(&self) -> PathBuf {
+        self.root.join("build-slots")
+    }
+
+    /// The warm target directory of build slot `n`: `<state>/build-slots/<n>/target`. A job's `CARGO_TARGET_DIR`
+    /// is linked to it for the duration of one command.
+    pub fn slot_target(&self, n: usize) -> PathBuf {
+        self.build_slots_dir().join(n.to_string()).join("target")
+    }
+
+    /// Makes the target directories of slots `0..count` when they do not exist. Existing ones are left as
+    /// they are, with whatever third-party output they hold.
+    pub fn ensure_slot_targets(&self, count: usize) -> Result<()> {
+        for n in 0..count {
+            make_target_dir(&self.slot_target(n))?;
+        }
+        Ok(())
+    }
+
+    /// Readies slot `n`'s target directory for one command and returns it. A directory that holds more than
+    /// `max_bytes` (allocated size, each hard-linked file once) is deleted whole and made again empty, so the
+    /// next build in it is cold; one at or under the limit is kept as it is. A directory that does not exist is
+    /// made empty. The bytes of a deleted directory are in [`PreparedSlot::deleted_bytes`].
+    pub fn prepare_slot_target(&self, n: usize, max_bytes: u64) -> Result<PreparedSlot> {
+        let dir = self.slot_target(n);
+        let size = allocated_bytes(&dir);
+        let mut deleted_bytes = None;
+        if size > max_bytes {
+            (self.remover)(&dir).with_context(|| format!("removing {}", dir.display()))?;
+            deleted_bytes = Some(size);
+        }
+        make_target_dir(&dir)?;
+        Ok(PreparedSlot { dir, deleted_bytes })
+    }
+
+    /// Deletes slot `n`'s target directory and makes it again, empty. Used when its content cannot be trusted
+    /// (cleaning the workspace crates out of it failed).
+    pub fn reset_slot_target(&self, n: usize) -> Result<()> {
+        let dir = self.slot_target(n);
+        if dir.exists() {
+            (self.remover)(&dir).with_context(|| format!("removing {}", dir.display()))?;
+        }
+        make_target_dir(&dir)
+    }
+
     /// Removes a closed job's snapshots and build directories, keeping nothing that matters. Call it only
     /// after the closing commit has succeeded. It measures the directory's allocated size just before
     /// removal and returns it with the error, if any; the caller reports both with [`report_clean`].
@@ -347,6 +395,37 @@ impl StateDir {
             },
         }
     }
+}
+
+/// The first line of the `CACHEDIR.TAG` file cargo writes into a target directory it creates.
+const CACHEDIR_SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55";
+
+/// Makes `dir` (and its parents) when it does not exist, with the `CACHEDIR.TAG` file cargo expects. Cargo
+/// writes that file only into a target directory it creates itself, and `cargo clean` refuses a directory
+/// without it ("missing or invalid `CACHEDIR.TAG` file"), so a directory made here must carry it.
+fn make_target_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let tag = dir.join("CACHEDIR.TAG");
+    if !tag.exists() {
+        std::fs::write(
+            &tag,
+            format!(
+                "{CACHEDIR_SIGNATURE}\n# This file is a cache directory tag created by Athena for a build slot.\n\
+                 # For information about cache directory tags see https://bford.info/cachedir/\n"
+            ),
+        )
+        .with_context(|| format!("writing {}", tag.display()))?;
+    }
+    Ok(())
+}
+
+/// A build slot's target directory, ready for one command ([`StateDir::prepare_slot_target`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedSlot {
+    /// `<state>/build-slots/<n>/target`.
+    pub dir: PathBuf,
+    /// The size of the directory that was deleted because it was over the limit; `None` when it was kept.
+    pub deleted_bytes: Option<u64>,
 }
 
 /// What a job's producer owns on disk while it runs: its worktree ([`StateDir::work_dir`]) and its build
@@ -591,6 +670,66 @@ mod tests {
         assert_eq!(report.error, None);
         assert_eq!(report.bytes, expected);
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn slot_target_directories_outlive_jobs_and_are_made_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        assert_eq!(
+            state.slot_target(1),
+            temp.path().join("build-slots").join("1").join("target")
+        );
+        assert!(!state.build_slots_dir().exists(), "asking creates nothing");
+        state.ensure_slot_targets(2).unwrap();
+        assert!(state.slot_target(0).is_dir() && state.slot_target(1).is_dir());
+        assert!(!state.slot_target(2).exists());
+        std::fs::write(state.slot_target(0).join("kept"), b"third party").unwrap();
+        // Making them again leaves content alone, and closing a job removes none of them.
+        state.ensure_slot_targets(2).unwrap();
+        std::fs::create_dir_all(state.job_dir(&job())).unwrap();
+        assert!(state.clean_job(&job()).error.is_none());
+        assert!(state.slot_target(0).join("kept").is_file());
+    }
+
+    #[test]
+    fn a_slot_target_over_its_limit_is_deleted_and_made_empty_and_one_under_it_is_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(temp.path().to_path_buf());
+        let dir = state.slot_target(0);
+        std::fs::create_dir_all(dir.join("debug/deps")).unwrap();
+        std::fs::write(dir.join("debug/deps/libbig.rlib"), vec![9u8; 200_000]).unwrap();
+        let size = allocated_bytes(&dir);
+        assert!(size >= 200_000, "{size}");
+
+        // At the limit it is kept: only a directory over the limit goes.
+        let kept = state.prepare_slot_target(0, size).unwrap();
+        assert_eq!(kept.dir, dir);
+        assert_eq!(kept.deleted_bytes, None);
+        assert!(dir.join("debug/deps/libbig.rlib").is_file());
+
+        // Making the directory ready added its tag file, so measure again.
+        let size = allocated_bytes(&dir);
+        let rebuilt = state.prepare_slot_target(0, size - 1).unwrap();
+        assert_eq!(rebuilt.deleted_bytes, Some(size));
+        assert!(dir.is_dir(), "made again for the next build");
+        // Empty but for the tag file `cargo clean` needs, which cargo itself writes only into a directory it makes.
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["CACHEDIR.TAG"], "and empty");
+        assert!(
+            std::fs::read_to_string(dir.join("CACHEDIR.TAG"))
+                .unwrap()
+                .starts_with(CACHEDIR_SIGNATURE)
+        );
+
+        // A slot that was never used is made empty.
+        let fresh = state.prepare_slot_target(3, 1_000).unwrap();
+        assert_eq!(fresh.deleted_bytes, None);
+        assert!(fresh.dir.is_dir());
     }
 
     #[test]

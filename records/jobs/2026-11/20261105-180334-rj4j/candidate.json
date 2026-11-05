@@ -1,0 +1,167 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261105-180334-rj4j",
+  "base_commit": "084d4122af514faf254f65611109d861697a4120",
+  "base_fingerprint": "sha256:b7123f8f372a58b3223e66461ebcfa7b546239c846e8d5668380e08291990f0e",
+  "previous_job": "20261105-180325-s9pg",
+  "candidate_commit": "01590c42c2e87a1a2496a363103dfeb2596062b8",
+  "candidate_tree": "81d748b21423c55b87fc56fa321e472cddf93d96",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 329681
+    },
+    {
+      "path": "crates/athena-agent/src/env.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16813
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 37493
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 84417
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 206208
+    },
+    {
+      "path": "crates/athena-core/src/slots.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 33063
+    },
+    {
+      "path": "crates/athena-core/src/state.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 38862
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 62430
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 44741
+    }
+  ],
+  "fingerprint": "sha256:6670a9efac6d57a49bf6e897b2383f6138fbfa1fb35a63a78606f325010e3ff2",
+  "violations": [],
+  "producer_report": {
+    "summary": "Each build slot now owns a warm target directory at `<state>/build-slots/<n>/target`. It outlives jobs and is made by `ensure_slot_targets` in state.rs. When a local check wins slot n, the job's `CARGO_TARGET_DIR` path (`{job_dir}/target/verify`) becomes a symlink to that directory for the one command. That is the new `BuildLink` guard in env.rs, which runs the lexical check on the path before linking. After the command the link is removed. Then `cargo clean --offline --target-dir <slot> -p <member>` runs for every workspace member, so workspace-crate output goes and third-party output stays. If cleaning fails, the slot directory is deleted instead. A slot directory over the new `[drain.pipeline] slot_max_gb` (default 8, at least 1) is deleted and remade before its next use, and a `disk` line says so. `Slot` now exposes `index()`. Tests cover reuse between two jobs, the size limit, real workspace cleaning, `BuildLink`, config validation and slot directories surviving job cleanup. The design note step 5 is marked Built and says what was not measured, and CHANGELOG.md has an entry. athena.toml and defaults.toml are unchanged.",
+    "files": [
+      "crates/athena-core/src/slots.rs",
+      "crates/athena-core/src/state.rs",
+      "crates/athena-core/src/run/checks.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "crates/athena-agent/src/env.rs",
+      "crates/athena-data/src/config.rs",
+      "docs/design/agent-and-build-slots.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core slots (also: cargo test -p athena-core slot)",
+        "result": "pass",
+        "note": "29 tests matched the broader filter; all pass, including the reuse, workspace-clean and size-limit tests"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "no warnings"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "run after cargo fmt --all"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed, so no banned word in tracked files"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Ran once. The tool returned without an error exit, but its output was saved to a file I could not read, so I could not read the per-test results. Athena's own run is the record."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run cargo test -p athena-core slots: a test runs two jobs' checks one after the other through the same slot and asserts both used the same slot directory path under build-slots/<n>/target, and that third-party output written by the first is still present for the second.",
+        "status": "met",
+        "evidence": "Ran `cargo test -p athena-core slot`. Test `two_jobs_reuse_the_same_build_slots_target_directory` in run/tests.rs passes. It runs two jobs through `go`. Each job's check reads the link at `{job_dir}/target/verify`. Both links point to `state.slot_target(0)`, which ends in build-slots/0/target. The second job sees `libserde-0123abcd.rlib` written by the first. `slots::tests::a_slot_knows_its_number_and_a_freed_number_is_taken_again` also passes."
+      },
+      {
+        "criterion": "Run cargo test -p athena-core: after a command, a test asserts the slot directory keeps third-party output and workspace-crate output is gone (cargo clean -p per workspace member, or an equivalent shown by the test).",
+        "status": "met",
+        "evidence": "Two tests pass. `slots::tests::cleaning_a_slot_drops_workspace_crate_output_and_keeps_third_party_output` runs a real cargo build of a one-crate workspace, then `clean_workspace_output`, and finds no file with 'alpha' in its name while the planted serde files remain. `run::tests::...::after_a_command_the_slot_keeps_third_party_output_and_loses_workspace_crate_output` does the same through the job path: debug/deps ends up holding only the third-party file, with no warning line."
+      },
+      {
+        "criterion": "Run cargo test -p athena-core: a test makes a slot directory larger than slot_max_gb and asserts it is deleted and recreated empty before the next use, and one under the limit is kept.",
+        "status": "met",
+        "evidence": "`run::tests::...::a_slot_directory_over_slot_max_gb_is_deleted_before_the_next_use_and_one_under_it_is_kept` uses config slot_max_gb = 2 with a test-only shrunken gigabyte of 50 KB. Job 1 leaves 300 KB. Job 2 finds it deleted and empty, and a 'disk build slot 0 ... over its 2 GB limit' line is printed. Job 2 leaves 20 KB. Job 3 finds the 20 KB kept. `state::tests::a_slot_target_over_its_limit_is_deleted_and_made_empty_and_one_under_it_is_kept` checks the byte-level rule: at the limit it is kept, one byte over it is deleted, and only CACHEDIR.TAG is left. No test writes a real gigabyte."
+      },
+      {
+        "criterion": "Each of max_check_slots build slots owns one directory <state>/build-slots/<n>/target created in crates/athena-core/src/state.rs that is not removed when a job ends; the job's target path is linked to it only for the command's duration (read crates/athena-core/src/run/checks.rs and crates/athena-agent/src/env.rs).",
+        "status": "met",
+        "evidence": "state.rs has `slot_target`, `ensure_slot_targets(count)`, `prepare_slot_target` and `reset_slot_target`. run/mod.rs calls `ensure_slot_targets(max_check_slots)` before building the SnapExec. checks.rs `link_slot_target` creates an `env::BuildLink`, which is dropped right after the command, before the clean and the snapshot restore. `BuildLink` drop removes only the symlink. Tests: `slot_target_directories_outlive_jobs_and_are_made_once` shows `clean_job` leaves the slot directory; the env.rs link tests; the e2e tests assert the link is gone after each job."
+      },
+      {
+        "criterion": "PipelineConfig in crates/athena-data/src/config.rs gains slot_max_gb with a default and validation, with a test, and docs/design/agent-and-build-slots.md section 8 step 5 is marked Built with the choices made and what was measured or not; CHANGELOG.md has an entry.",
+        "status": "met",
+        "evidence": "`slot_max_gb` was added (default 8, serde default, `Default` impl). Validation refuses 0 and names the key. The existing config tests were extended: the defaults test, the bad-settings test and the non-default test. Design step 5 now has a **Built** paragraph listing the choices and what was not measured. CHANGELOG.md has an Added entry under Unreleased."
+      },
+      {
+        "criterion": "Run cargo test --locked, cargo clippy --all-targets --locked -- -D warnings and cargo fmt --all --check: all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran clippy and fmt --check (both clean) and one full `cargo test --locked`, which returned no error."
+      },
+      {
+        "criterion": "athena.toml and defaults.toml are unchanged, and the diff shows the effect can be read: the second build's time in the same slot is recorded or reported by measure-build in disk.rs, or the design note says it is not yet.",
+        "status": "met",
+        "evidence": "`git diff --stat` lists neither file. The design note step 5 says the second build's wall time in a slot and the slot size after real jobs are not measured or recorded yet. It says `measure-build` still builds cold in its own worktree. disk.rs is unchanged for that reason."
+      }
+    ],
+    "open_issues": [
+      "The second build's wall time in a warm slot and the slot's size after real jobs are not recorded anywhere. The design note says so. A later job should add them, for example to `measure-build` or the check record.",
+      "slot_max_gb defaults to 8, which is a guess above the 5 to 6 GB estimate in the design. No measurement backs it.",
+      "The size limit is checked before use, so an over-limit directory stays on disk until its slot is won again.",
+      "Baseline and fails-without reruns still do not use a slot, and so do not use the warm directory (out of scope, as before).",
+      "The CARGO_PROFILE_DEV_DEBUG and CARGO_INCREMENTAL settings in athena.toml were not touched (the maintainer's separate job).",
+      "The link path is taken from the CARGO_TARGET_DIR environment value. A repository whose change capability sets no CARGO_TARGET_DIR gets no slot directory and builds in the job's own directory as before."
+    ],
+    "mistakes": [
+      "The first version of the slot directory had no CACHEDIR.TAG, so `cargo clean` failed and the slot was deleted after every command. Found by the end-to-end test and fixed.",
+      "I tried to read the saved full-suite output, which the tools blocked (outside the working directory), so I could not read the per-test results."
+    ],
+    "learnings": [
+      "`cargo clean` refuses a target directory without a `CACHEDIR.TAG` file. Cargo writes that file only into a directory it creates itself, so a slot directory made empty by Athena needs the tag written by Athena. My first version had no tag, and the e2e test showed it deleting the slot after every command.",
+      "The check in env.rs (`check_build_dirs`) is lexical, so a symlink at `{job_dir}/target/<side>` passes it. The test fake capability returned an empty env, so I made it return the same `CARGO_TARGET_DIR` template as athena.toml. Other tests that run through `go` now also take the link path.",
+      "Jobs run one after another in a test from the same base commit make 'no change' unless the producer's edit differs. I added `each_job_its_own_edit` to give each job its own README text.",
+      "`cargo clean -p` removes deps files by computed hash, so planted fake workspace files would not be removed. Tests build for real instead."
+    ],
+    "desires": [
+      "A way to read the output of a large `cargo test` run. I could not read the saved result file, so I could not check per-test results of the full suite.",
+      "A way to measure the second-build time in a warm slot against a real workspace."
+    ]
+  }
+}

@@ -151,7 +151,11 @@ mod produce_and_verify_order_tests {
                 .collect()
         }
         fn env(&self, _: &JobConfig) -> BTreeMap<String, String> {
-            BTreeMap::new()
+            // What `athena.toml` gives the change capability: a build directory per job and side.
+            BTreeMap::from([(
+                "CARGO_TARGET_DIR".to_string(),
+                "{job_dir}/target/{side}".to_string(),
+            )])
         }
         fn admit(&self, _: &ChangeList, _: &JobConfig) -> Vec<PolicyViolation> {
             Vec::new()
@@ -2461,6 +2465,230 @@ mod produce_and_verify_order_tests {
             take_slot_soon(&probe).queued() < std::time::Duration::from_secs(10),
             "both slots are free again"
         );
+    }
+
+    /// What a job's check saw at its build path while it ran.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SeenAtBuildPath {
+        /// Where the build path linked to.
+        linked_to: PathBuf,
+        /// The names directly in the linked directory's `debug/deps`.
+        deps: Vec<String>,
+    }
+
+    /// Runs `job`'s checks with a fake check that looks at the job's build path, then runs `act` on the
+    /// directory behind it, and returns what the check saw.
+    fn run_job_through_slot(
+        athena: &Athena,
+        job: &JobId,
+        ui: &dyn Ui,
+        act: impl Fn(&std::path::Path) + 'static,
+    ) -> SeenAtBuildPath {
+        let link = athena.state.job_dir(job).join("target").join("verify");
+        let seen: std::rc::Rc<std::cell::RefCell<Option<SeenAtBuildPath>>> = Default::default();
+        let record = seen.clone();
+        let _seam = check_seam::install(std::rc::Rc::new(move |spec: &CheckSpec| {
+            let linked_to = std::fs::read_link(&link).expect("the build path is a link");
+            let deps_dir = link.join("debug/deps");
+            let mut deps: Vec<String> = std::fs::read_dir(&deps_dir)
+                .map(|rd| {
+                    rd.flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            deps.sort();
+            *record.borrow_mut() = Some(SeenAtBuildPath { linked_to, deps });
+            act(&link);
+            passed_run(spec)
+        }));
+        finished(athena.go(job.as_str(), AcceptedBy::User, ui).unwrap());
+        assert!(
+            std::fs::symlink_metadata(athena.state.job_dir(job).join("target/verify")).is_err(),
+            "the link goes when the command ends"
+        );
+        let seen = seen.borrow().clone();
+        seen.expect("the check ran")
+    }
+
+    /// `inner` with each producer writing its own job's name into `README.md`, so jobs run one after another
+    /// each make a change of their own, whatever an earlier job landed.
+    fn each_job_its_own_edit(inner: athena_agent::fake::Script) -> athena_agent::fake::Script {
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            if spec.role == Role::Producer {
+                turn.edits = vec![(
+                    "README.md".into(),
+                    Some(format!("# Demo\n\nA demo by {}.\n", spec.job)),
+                )];
+            }
+            turn
+        })
+    }
+
+    /// Writes a file of a third-party crate's output through the build path.
+    fn write_third_party(link: &std::path::Path, name: &str, bytes: usize) {
+        let deps = link.join("debug/deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::write(deps.join(name), vec![5u8; bytes]).unwrap();
+    }
+
+    #[test]
+    fn two_jobs_reuse_the_same_build_slots_target_directory() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            each_job_its_own_edit(counting(counts.clone(), None)),
+        );
+        let slot_dir = athena.state.slot_target(0);
+        assert_eq!(
+            slot_dir,
+            athena.state.build_slots_dir().join("0").join("target")
+        );
+
+        let one = athena.ask("describe the demo", &Quiet).unwrap().job;
+        let first = run_job_through_slot(&athena, &one, &Quiet, |link| {
+            write_third_party(link, "libserde-0123abcd.rlib", 10);
+        });
+        assert_eq!(first.linked_to, slot_dir);
+        assert!(first.deps.is_empty(), "the first build in a slot is cold");
+        // The job ended; the slot directory did not, and still holds what the build left.
+        assert!(slot_dir.join("debug/deps/libserde-0123abcd.rlib").is_file());
+        assert!(!athena.state.job_dir(&one).join("target/verify").exists());
+
+        let two = athena
+            .ask("describe the demo once more", &Quiet)
+            .unwrap()
+            .job;
+        let second = run_job_through_slot(&athena, &two, &Quiet, |_| {});
+        assert_eq!(second.linked_to, slot_dir, "the same slot, the same path");
+        assert_eq!(
+            second.deps,
+            ["libserde-0123abcd.rlib"],
+            "the second job starts on the first job's third-party output"
+        );
+        assert!(slot_dir.ends_with("build-slots/0/target"));
+    }
+
+    #[test]
+    fn a_slot_directory_over_slot_max_gb_is_deleted_before_the_next_use_and_one_under_it_is_kept() {
+        let repo = repo_with_config("\n[drain.pipeline]\nslot_max_gb = 2\n");
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            each_job_its_own_edit(counting(counts.clone(), None)),
+        );
+        let ask = |text: &str| athena.ask(text, &Quiet).unwrap().job;
+        // A test gigabyte is 50 KB, so the limit is 100 KB and no test writes a real gigabyte.
+        let _gb = checks::gb_seam::install(50_000);
+        let slot_dir = athena.state.slot_target(0);
+
+        // Job one leaves 300 KB behind: over the limit, but it is only deleted before the next use.
+        let first = run_job_through_slot(&athena, &ask("describe the demo"), &Quiet, |link| {
+            write_third_party(link, "libbig-1.rlib", 300_000);
+        });
+        assert!(first.deps.is_empty());
+        assert!(slot_dir.join("debug/deps/libbig-1.rlib").is_file());
+
+        // Job two finds the slot deleted and made again, empty, and says so. It leaves 20 KB, under the limit.
+        let ui = Lines::default();
+        let second = run_job_through_slot(&athena, &ask("describe it again"), &ui, |link| {
+            write_third_party(link, "libsmall-2.rlib", 20_000);
+        });
+        assert_eq!(second.linked_to, slot_dir);
+        assert!(
+            second.deps.is_empty(),
+            "{second:?}: deleted and rebuilt cold"
+        );
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter().any(
+                |l| l.starts_with("disk       build slot 0 target directory held ")
+                    && l.contains("over its 2 GB limit")
+            ),
+            "{said:#?}"
+        );
+
+        // Job three finds the 20 KB kept.
+        let ui = Lines::default();
+        let third = run_job_through_slot(&athena, &ask("describe it a third time"), &ui, |_| {});
+        assert_eq!(third.deps, ["libsmall-2.rlib"]);
+        let said = ui.0.lock().unwrap().clone();
+        assert!(!said.iter().any(|l| l.contains("over its")), "{said:#?}");
+    }
+
+    #[test]
+    fn after_a_command_the_slot_keeps_third_party_output_and_loses_workspace_crate_output() {
+        let repo = repo();
+        commit_file(
+            &repo,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"alpha\"]\nresolver = \"2\"\n",
+        );
+        commit_file(
+            &repo,
+            "alpha/Cargo.toml",
+            "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        commit_file(&repo, "alpha/src/main.rs", "fn main() {}\n");
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            each_job_its_own_edit(counting(counts.clone(), None)),
+        );
+        let job = athena.ask("describe the demo", &Quiet).unwrap().job;
+        let slot_dir = athena.state.slot_target(0);
+        let verify_dir = athena.state.job_dir(&job).join("verify");
+        // The check builds the workspace through the job's build path, which is the slot's directory.
+        let ui = Lines::default();
+        run_job_through_slot(&athena, &job, &ui, move |link| {
+            write_third_party(link, "libserde-0123abcd.rlib", 10);
+            let built = std::process::Command::new("cargo")
+                .args(["build", "--offline"])
+                .current_dir(&verify_dir)
+                .env("CARGO_TARGET_DIR", link)
+                .env_remove("RUSTC_WRAPPER")
+                .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
+                .output()
+                .unwrap();
+            assert!(
+                built.status.success(),
+                "{}",
+                String::from_utf8_lossy(&built.stderr)
+            );
+            let deps = link.join("debug/deps");
+            assert!(
+                std::fs::read_dir(deps)
+                    .unwrap()
+                    .flatten()
+                    .any(|e| e.file_name().to_string_lossy().starts_with("alpha-")),
+                "the command built the workspace crate"
+            );
+        });
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            !said.iter().any(|l| l.starts_with("warning:")),
+            "cleaning must not fall back to deleting the slot: {said:#?}"
+        );
+        let left: Vec<String> = std::fs::read_dir(slot_dir.join("debug/deps"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["libserde-0123abcd.rlib"], "only third-party output");
     }
 
     /// Free space that is low once `<state>/low-now` exists.

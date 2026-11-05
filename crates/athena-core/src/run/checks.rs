@@ -16,6 +16,12 @@ use super::*;
 /// leaves a slot taken. A wait longer than `build_wait_s` comes back as a [`crate::disk::SlotWait`] error that
 /// `check_and_verify` turns into a hold, and the time waited is stored on the check as `queued_s`. A request
 /// that waited reads the free disk space again, since the earlier reading may be a long wait old.
+///
+/// The slot also owns a warm target directory, `<state>/build-slots/<n>/target`, that outlives every job. For
+/// the length of one command the job's `CARGO_TARGET_DIR` is a link to it; afterwards the link goes and the
+/// workspace crates' output is cleaned out of the directory, so third-party crates stay compiled for the next
+/// job that gets the slot. A directory over `slot_max_gb` is deleted and rebuilt cold
+/// (`docs/design/agent-and-build-slots.md` section 5.3).
 pub(super) struct SnapExec<'a> {
     pub(super) athena: &'a Athena,
     pub(super) snapshot: &'a Snapshot,
@@ -34,6 +40,10 @@ pub(super) struct SnapExec<'a> {
     pub(super) gated: std::cell::Cell<bool>,
     /// The build slots every check takes one of.
     pub(super) slots: crate::slots::SlotQueue,
+    /// The job's own directory, inside which the build path is linked to the slot's directory.
+    pub(super) job_dir: &'a std::path::Path,
+    /// `[drain.pipeline] slot_max_gb`: the size above which a slot's target directory is deleted.
+    pub(super) slot_max_gb: u64,
 }
 
 impl crate::routing::Exec for SnapExec<'_> {
@@ -53,12 +63,14 @@ impl crate::routing::Exec for SnapExec<'_> {
         {
             return Err(low.into());
         }
+        // The slot's warm target directory is linked at the job's build path for this one command only.
+        let link = self.link_slot_target(&slot);
         #[cfg(test)]
         let seamed = check_seam::current().map(|fake| fake(spec));
         #[cfg(not(test))]
         let seamed: Option<CheckRun> = None;
-        let mut run = match seamed {
-            Some(run) => run,
+        let ran = match seamed {
+            Some(run) => Ok(run),
             None => run_check(
                 spec,
                 &CheckContext {
@@ -69,8 +81,14 @@ impl crate::routing::Exec for SnapExec<'_> {
                     job: self.job,
                     redactor: self.redactor,
                 },
-            )?,
+            ),
         };
+        // Every way out of the command: unlink, then drop the workspace crates' output from the slot.
+        if let Some(link) = link {
+            drop(link);
+            self.clean_slot_target(&slot);
+        }
+        let mut run = ran?;
         self.cleanup
             .borrow_mut()
             .extend(self.snapshot.restore_to(self.prepared)?);
@@ -80,6 +98,107 @@ impl crate::routing::Exec for SnapExec<'_> {
 
     fn redact(&self, text: &str) -> Result<String> {
         Ok(self.redactor.redact(text)?)
+    }
+}
+
+/// The bytes `slot_max_gb` gigabytes come to. A test build can shrink the gigabyte ([`gb_seam`]) so a test
+/// shows the deletion without writing one.
+fn slot_limit_bytes(slot_max_gb: u64) -> u64 {
+    #[cfg(test)]
+    let gb = gb_seam::current().unwrap_or(crate::disk::GB);
+    #[cfg(not(test))]
+    let gb = crate::disk::GB;
+    slot_max_gb.saturating_mul(gb)
+}
+
+/// The size of a gigabyte in a test, per thread, for [`slot_limit_bytes`].
+#[cfg(test)]
+pub(crate) mod gb_seam {
+    use std::cell::Cell;
+
+    thread_local! {
+        static GB: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// Restores the real gigabyte when dropped.
+    #[derive(Debug)]
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            GB.with(|g| g.set(None));
+        }
+    }
+
+    pub fn install(bytes: u64) -> Guard {
+        GB.with(|g| g.set(Some(bytes)));
+        Guard
+    }
+
+    pub fn current() -> Option<u64> {
+        GB.with(Cell::get)
+    }
+}
+
+impl SnapExec<'_> {
+    /// Links the job's build path (`CARGO_TARGET_DIR`) to `slot`'s warm target directory. A slot directory
+    /// over `slot_max_gb` is deleted and made again empty first. The directory outlives the job; only the
+    /// link goes when the returned value is dropped. A failure here is a warning line and the command builds
+    /// in the job's own directory, cold, as it did before slots owned directories. No build path in the
+    /// environment, or none inside the job's directory, links nothing.
+    fn link_slot_target(&self, slot: &crate::slots::Slot) -> Option<athena_agent::env::BuildLink> {
+        let path = self.env.get("CARGO_TARGET_DIR")?;
+        let limit = slot_limit_bytes(self.slot_max_gb);
+        let state = &self.athena.state;
+        let prepared = match state.prepare_slot_target(slot.index(), limit) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                self.ui.line(&format!(
+                    "warning: build slot {} has no usable target directory: {e:#}",
+                    slot.index()
+                ));
+                return None;
+            }
+        };
+        if let Some(bytes) = prepared.deleted_bytes {
+            self.ui.line(&format!(
+                "disk       build slot {} target directory held {}, over its {} GB limit: deleted, the next build is cold",
+                slot.index(),
+                crate::state::format_bytes(bytes),
+                self.slot_max_gb
+            ));
+        }
+        match athena_agent::env::BuildLink::create(
+            self.job_dir,
+            std::path::Path::new(path),
+            &prepared.dir,
+        ) {
+            Ok(link) => Some(link),
+            Err(e) => {
+                self.ui
+                    .line(&format!("warning: could not link the build slot: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Removes the workspace crates' output from `slot`'s target directory, keeping third-party output
+    /// ([`crate::slots::clean_workspace_output`]). When that fails the directory is deleted whole instead, so
+    /// the next job never builds on output it cannot trust.
+    fn clean_slot_target(&self, slot: &crate::slots::Slot) {
+        let target = self.athena.state.slot_target(slot.index());
+        if let Err(e) = crate::slots::clean_workspace_output(self.snapshot.dir(), &target) {
+            self.ui.line(&format!(
+                "warning: could not clean build slot {}, so its target directory is deleted: {e:#}",
+                slot.index()
+            ));
+            if let Err(e) = self.athena.state.reset_slot_target(slot.index()) {
+                self.ui.line(&format!(
+                    "warning: could not delete build slot {}'s target directory: {e:#}",
+                    slot.index()
+                ));
+            }
+        }
     }
 }
 

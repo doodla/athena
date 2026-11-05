@@ -1573,6 +1573,10 @@ impl Athena {
                     "routing    build job: the workflow's own run is required and not yet performed",
                 );
             }
+            let pipeline = jc.config.pipeline();
+            // The slots' warm target directories exist from the first check on and are never removed with a job.
+            self.state
+                .ensure_slot_targets(pipeline.max_check_slots as usize)?;
             let exec = SnapExec {
                 athena: self,
                 snapshot: &vsnap,
@@ -1587,7 +1591,9 @@ impl Athena {
                 ui: ctx.ui,
                 min_free_gb: jc.config.min_free_gb(),
                 gated: std::cell::Cell::new(false),
-                slots: crate::slots::SlotQueue::from_config(&self.state, &jc.config.pipeline()),
+                slots: crate::slots::SlotQueue::from_config(&self.state, &pipeline),
+                job_dir: &job_dir,
+                slot_max_gb: pipeline.slot_max_gb,
             };
             // The candidate was pushed to the job's CI branch above: a GitHub origin gives its push run, read
             // up to `ci_wait_s`; any other repository gives no CI result, with one read and no wait. A green

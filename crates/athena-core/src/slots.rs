@@ -25,7 +25,7 @@
 use crate::disk::SlotWait;
 use anyhow::{Context, Result};
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -69,11 +69,18 @@ pub struct SlotQueue {
 #[derive(Debug)]
 pub struct Slot {
     _file: File,
+    index: usize,
     queued: Duration,
     waited: bool,
 }
 
 impl Slot {
+    /// Which slot this is, from 0: the `<n>` of `slot-<n>.lock` and of the slot's warm target directory
+    /// ([`crate::state::StateDir::slot_target`]).
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
     /// How long the request took to get the slot, on the monotonic clock.
     pub fn queued(&self) -> Duration {
         self.queued
@@ -163,8 +170,9 @@ impl SlotQueue {
             return Ok(None);
         }
         let start = Instant::now();
-        Ok(self.try_slots()?.map(|file| Slot {
+        Ok(self.try_slots()?.map(|(file, index)| Slot {
             _file: file,
+            index,
             queued: start.elapsed(),
             waited: false,
         }))
@@ -182,11 +190,12 @@ impl SlotQueue {
         loop {
             stop()?;
             if self.is_head(&ticket.name)?
-                && let Some(file) = self.try_slots()?
+                && let Some((file, index)) = self.try_slots()?
             {
                 drop(ticket);
                 return Ok(Slot {
                     _file: file,
+                    index,
                     queued: start.elapsed(),
                     waited,
                 });
@@ -204,8 +213,8 @@ impl SlotQueue {
         }
     }
 
-    /// The first slot file whose lock is free, locked.
-    fn try_slots(&self) -> Result<Option<File>> {
+    /// The first slot file whose lock is free, locked, with its number.
+    fn try_slots(&self) -> Result<Option<(File, usize)>> {
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating {}", self.dir.display()))?;
         for n in 0..self.slots {
@@ -217,7 +226,7 @@ impl SlotQueue {
                 .open(&path)
                 .with_context(|| format!("opening {}", path.display()))?;
             match file.try_lock() {
-                Ok(()) => return Ok(Some(file)),
+                Ok(()) => return Ok(Some((file, n))),
                 Err(std::fs::TryLockError::WouldBlock) => {}
                 Err(std::fs::TryLockError::Error(e)) => {
                     return Err(
@@ -317,6 +326,67 @@ fn parse_ticket(name: &str) -> Option<Queued> {
         queued_at,
         class,
     })
+}
+
+/// Removes the workspace crates' output from a slot's target directory and keeps the third-party output.
+///
+/// It runs `cargo clean -p <member>` for every workspace member of the workspace at `workspace`, with
+/// `target` as the target directory (`docs/design/agent-and-build-slots.md` section 5.3, step 3). Each job's
+/// snapshot sits at another path, so workspace-crate fingerprints never match the next job's, and left in
+/// place they would add one set per job to the slot. Returns the member names cleaned; a workspace with no
+/// `Cargo.toml` has none and nothing runs. An error means the directory may still hold workspace output, and
+/// the caller deletes it.
+pub fn clean_workspace_output(workspace: &Path, target: &Path) -> Result<Vec<String>> {
+    if !workspace.join("Cargo.toml").is_file() {
+        return Ok(Vec::new());
+    }
+    let meta = std::process::Command::new("cargo")
+        .args([
+            "metadata",
+            "--no-deps",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .current_dir(workspace)
+        .output()
+        .context("running `cargo metadata`")?;
+    if !meta.status.success() {
+        anyhow::bail!(
+            "`cargo metadata` failed: {}",
+            String::from_utf8_lossy(&meta.stderr).trim()
+        );
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&meta.stdout).context("reading `cargo metadata`")?;
+    let members: Vec<String> = json["packages"]
+        .as_array()
+        .map(|packages| {
+            packages
+                .iter()
+                .filter_map(|p| p["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if members.is_empty() {
+        return Ok(members);
+    }
+    let mut clean = std::process::Command::new("cargo");
+    clean
+        .args(["clean", "--offline", "--target-dir"])
+        .arg(target)
+        .current_dir(workspace);
+    for member in &members {
+        clean.args(["-p", member]);
+    }
+    let out = clean.output().context("running `cargo clean`")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`cargo clean` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(members)
 }
 
 #[cfg(test)]
@@ -699,6 +769,112 @@ mod tests {
         };
         assert!(run().is_err());
         take_soon(&q);
+    }
+
+    #[test]
+    fn a_slot_knows_its_number_and_a_freed_number_is_taken_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let q = queue(temp.path(), 2);
+        let a = q.try_acquire().unwrap().unwrap();
+        let b = q.try_acquire().unwrap().unwrap();
+        assert_eq!((a.index(), b.index()), (0, 1));
+        drop(a);
+        let again = take_soon(&q);
+        assert_eq!(
+            again.index(),
+            0,
+            "the same slot, so the same warm directory"
+        );
+    }
+
+    /// Every file path under `dir` whose name contains `needle`.
+    fn files_named(dir: &Path, needle: &str) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if entry.file_name().to_string_lossy().contains(needle) {
+                found.push(path.clone());
+            }
+            if path.is_dir() {
+                found.extend(files_named(&path, needle));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn cleaning_a_slot_drops_workspace_crate_output_and_keeps_third_party_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("ws");
+        std::fs::create_dir_all(workspace.join("alpha/src")).unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"alpha\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("alpha/Cargo.toml"),
+            "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("alpha/src/main.rs"), "fn main() {}\n").unwrap();
+        let target = temp.path().join("slot/target");
+
+        // A real build of the workspace crate into the slot directory.
+        let built = std::process::Command::new("cargo")
+            .args(["build", "--offline"])
+            .current_dir(&workspace)
+            .env("CARGO_TARGET_DIR", &target)
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        // Output of a third-party crate, as an earlier build of a dependency left it.
+        let deps = target.join("debug/deps");
+        std::fs::write(deps.join("libserde-0123abcd.rlib"), b"compiled").unwrap();
+        std::fs::create_dir_all(target.join("debug/.fingerprint/serde-0123abcd")).unwrap();
+        std::fs::write(
+            target.join("debug/.fingerprint/serde-0123abcd/lib-serde"),
+            b"fingerprint",
+        )
+        .unwrap();
+        assert!(
+            !files_named(&target, "alpha").is_empty(),
+            "the build left workspace-crate output"
+        );
+
+        let cleaned = clean_workspace_output(&workspace, &target).unwrap();
+        assert_eq!(cleaned, ["alpha"]);
+        assert_eq!(
+            files_named(&target, "alpha"),
+            Vec::<PathBuf>::new(),
+            "no workspace-crate output is left"
+        );
+        assert!(deps.join("libserde-0123abcd.rlib").is_file());
+        assert!(
+            target
+                .join("debug/.fingerprint/serde-0123abcd/lib-serde")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn cleaning_a_directory_that_is_not_a_cargo_workspace_runs_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("kept"), b"x").unwrap();
+        assert!(
+            clean_workspace_output(temp.path(), &target)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(target.join("kept").is_file());
     }
 
     #[test]
