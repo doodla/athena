@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-215733-rf7z",
+  "round": 2,
+  "at": "2026-11-05T02:06:27.577284318Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/early.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/early.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The evidence for the root cause is circular, and the step meant to show 'no fault exists' can never trigger",
+      "evidence": "The refused-then-green test scripts FakeHost so the first merge gets 'Repository rule violations found' and the next read is Pending. The old arm at landing.rs:254-271 returns Pending in exactly that case on purpose (its comment: 'That is a wait, not a failure'). So the test fails on old code by construction. Step 3's branch 'if it passes, make no behaviour change' cannot happen, and the test cannot tell whether this arm is what costs the user 10 minutes. Open question 1 admits the plan does not know whether GitHub ever behaves this way. Fix: Say plainly that the core test shows the code's behaviour, not that the fault is real, and drop the claim that step 3 can refute the hypothesis. Make the open question concrete for the user: which line do their waiting jobs show? The warning 'the host refused the merge by its repository rules while checks were not finished', or the plain 'checks have not finished' wait, or host-error entries marked checks_pending? The plan proceeds only on the first, or states in the change description that the fix is for a suspected cause.",
+      "location": "Approach; Decision 5; Step 3; Criterion 6 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The plan does not consider the more likely cause: an unfinished optional run keeps the verdict Pending for the whole poll",
+      "evidence": "classify_checks (client.rs:1072-1078) gives Pending while any check run is unfinished, required or not. The test at tests.rs:1508 pins this: the required check is green, another run is in progress, and the wait reads for the whole budget and merges nothing. That matches the request's account ('after polling ... about 10 minutes it returns Landing::Waiting') better than the refusal arm, which returns Waiting right after a green read. Changing it would change the merge gate, which is out of scope, so it has to be named and sent to the user, not silently left alone. Fix: Add this path to the approach as an alternative explanation. Say why it is out of scope (the merge gate: every run finished), and ask the user in the open questions which one their jobs hit.",
+      "location": "Approach ('the only place ... suspect root cause'); Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out the host-error watcher, which reads the merge-refusal entries the retry adds",
+      "evidence": "watcher.rs:152-159: the D87 signal matches a Merge refusal in the Landing phase unless checks_pending is set. It is a hard signal with threshold_jobs 1 (watcher.rs:57, 592). The retry makes a second host.merge inside one land_pr. Each refusal is marked only if GhClient::merge's own re-read is Pending (client.rs:653-659). The plan's core tests go through FakeHost, not GhClient, so they never exercise the marking. The plan's note that the marker 'does not depend on whether land_pr retries' never checks what the watcher does with the extra entries. Fix: List watcher.rs (HostErrorSignal::matches, D87) as a dependent. Cite or add a GhClient-level test, using the scripted-refusal host near tests.rs:2834-2971, showing that a refused-while-pending then accepted landing leaves only refusal entries marked checks_pending. That way D87 does not fire on a landing that succeeded.",
+      "location": "Dependents: 'Rule-violation arm in land_pr' entry",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Reusing one landing-intent record across a retry may leave a stale expected_base",
+      "evidence": "landing.rs:240-241 reads base_tip(default_branch) when the intent is written, and LandingFacts.expected_base comes from it (landing.rs:279-281). With the retry, minutes may pass between writing the intent and the accepted merge. The drain's landing lock does not stop the default branch moving through other actors. Under old code a later re-land wrote a fresh intent. Fix: Say why reusing the intent is safe: the host requires the branch to be up to date, so a moved base gets the merge refused. Or re-read the base before the retry and state how a changed base is handled. Add an assertion to the refused-then-green test if records are wired.",
+      "location": "Approach ('The landing-intent record is written once'); Dependents: records entry",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The doc comment of wait_for_checks and the path (a) test name are not covered",
+      "evidence": "early.rs:117 says the three steps 'share one look budget of about twice poll.attempts'. That changes once the budget is passed in and the caller can re-enter the wait. The path (a) pending-then-green core test has no name, so `cargo test ... turn_green` may not run it. Fix: Update the doc comment of wait_for_checks to describe the budget it is given and the looks it returns. Name the path (a) test so that it contains turn_green.",
+      "location": "Files: early.rs; Criterion 1 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The `athena land --pr` display reads the same report shape and could be named",
+      "evidence": "display.rs:491-497 maps (Open, Pending, merge_requested) to 'the host refused the merge ... waiting to merge. Run the command again later'. When the budget runs out the retry still produces that shape, so nothing breaks, but the list does not name this reader. Fix: Add display.rs::land_pr to the dependents with the reason it is unchanged.",
+      "location": "Dependents: 'Callers and modes that reach land_pr'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read landing.rs, early.rs, client.rs (check_report, merge, classify_checks), watcher.rs, the drain's land path and World fake, test_support.rs and the core FakeHost/Rig tests. The plan's reading of the code holds up. wait_for_checks stops at the first read that is not pending (early.rs:145). land_pr merges on Green (landing.rs:234). The rule-violation arm (landing.rs:254-271) is the only place in land_pr where a green read leads to Waiting. The test seams the plan names exist (FakeHost.script and merge_error, Rig::run, World::land, landing_from_report). The budget-sharing design is bounded and does not lengthen the poll, and the plan is honest that its drain tests cannot fail on old code. Two problems need a revision. First, the claim about the root cause is circular. The core test that is supposed to fail first scripts the very host behaviour the plan guesses at, so it always fails on old code. That makes Decision 5's way out (\"if it passes on old code, change nothing\") impossible to reach. It also proves nothing about what actually costs the user 10 minutes. A second explanation that fits the request just as well is never considered: an unfinished optional run keeps the verdict Pending for the whole poll even when the required check is green (client.rs:1072-1078, tests.rs:1508). Second, the dependents list leaves out the host-error watcher. Its D87 signal is hard, fires on the first job, and reads the merge-refusal entries that the retry now produces more of within one landing. Both are fixable in the plan."
+}

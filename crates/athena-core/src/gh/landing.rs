@@ -169,9 +169,12 @@ pub struct PrReport {
 /// Then, while the pull request is open: look for a merge, else read the checks, and merge over REST only if
 /// the setting is on and the checks are green. Checks are green only when no check run on the head is still
 /// queued or in progress. A merge the host refuses with "Repository rule violations" while the checks are
-/// pending again is a wait: the report has `checks` pending, `merge_requested` set and a warning, and it is
-/// not an error. The same refusal with the checks settled stays an error. The client logs that refusal with the
-/// pending mark on the merge call's own entry, so the watcher does not read it as a refused merge method.
+/// pending again keeps reading the checks for what is left of the poll's look budget, and when a read is green
+/// it asks for the merge again in this same call, so a poll that turns green merges in the same locked step. Only
+/// a poll that ends with the checks still pending (or red) is a wait: the report has `checks` pending,
+/// `merge_requested` set and a warning, and it is not an error. The same refusal with the checks settled stays
+/// an error. The client logs each such refusal with the pending mark on the merge call's own entry, so the
+/// watcher does not read it as a refused merge method.
 pub fn land_pr(job: &LandPr) -> Result<PrReport> {
     // The commit an early push left on the branch at verification start, if any.
     let early = load_early(job.state, job.job)?;
@@ -243,33 +246,52 @@ pub fn land_pr(job: &LandPr) -> Result<PrReport> {
                 }
                 None => None,
             };
-            let method = match job.host.merge(link.pr_number, &link.head, job.squash) {
-                Ok(method) => {
-                    merge_requested = true;
-                    Some(method)
-                }
-                // The host refused the merge by its repository rules. While a check is still running that
-                // is a wait, not a failure: the merge is possible once every check has finished. Any other
-                // refusal, or one with the checks settled, is returned as it came.
-                Err(refusal) if is_rule_violation(&refusal) => {
-                    if job.host.check_report(&link.head)?.checks != Checks::Pending {
-                        return Err(refusal);
+            // The part of the poll's look budget the wait has not used. A merge refused while a check is
+            // unfinished spends it reading the checks again, so the whole landing stays within one poll.
+            let mut spare = job.poll.attempts.max(1).saturating_sub(waited.looks);
+            let method = loop {
+                match job.host.merge(link.pr_number, &link.head, job.squash) {
+                    Ok(method) => {
+                        merge_requested = true;
+                        break Some(method);
                     }
-                    let record = intent
-                        .as_ref()
-                        .map(|(_, _, id)| {
-                            format!("; landing-intent record {id} is on the records branch")
-                        })
-                        .unwrap_or_default();
-                    warnings.push(format!(
-                        "the host refused the merge by its repository rules while checks were not finished \
-                         ({refusal:#}); waiting to merge{record}"
-                    ));
-                    checks = Some(Checks::Pending);
-                    merge_requested = true;
-                    None
+                    // The host refused the merge by its repository rules. While a check is still running
+                    // that is a wait, not a failure: the merge is possible once every check has finished.
+                    // Any other refusal, or one with the checks settled, is returned as it came.
+                    Err(refusal) if is_rule_violation(&refusal) => {
+                        let mut read = job.host.check_report(&link.head)?;
+                        if read.checks != Checks::Pending {
+                            return Err(refusal);
+                        }
+                        spare = spare.saturating_sub(1);
+                        // Keep reading while the budget lasts: a check that finishes inside the poll lets
+                        // the merge go through in this same call, in the locked step, instead of leaving it
+                        // to a later call. Only a green read asks the host to merge again.
+                        while spare > 0 && read.checks == Checks::Pending {
+                            (job.poll.sleep)(job.poll.delay);
+                            read = job.host.check_report(&link.head)?;
+                            spare -= 1;
+                        }
+                        if read.checks == Checks::Green {
+                            warnings.extend(read.notes);
+                            continue;
+                        }
+                        let record = intent
+                            .as_ref()
+                            .map(|(_, _, id)| {
+                                format!("; landing-intent record {id} is on the records branch")
+                            })
+                            .unwrap_or_default();
+                        warnings.push(format!(
+                            "the host refused the merge by its repository rules while checks were not finished \
+                             ({refusal:#}); waiting to merge{record}"
+                        ));
+                        checks = Some(Checks::Pending);
+                        merge_requested = true;
+                        break None;
+                    }
+                    Err(other) => return Err(other),
                 }
-                Err(other) => return Err(other),
             };
             if let Some(method) = method {
                 observe_merge(job.host, job.content, &mut link, job.verified_fingerprint)?;

@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-215733-rf7z",
+  "round": 3,
+  "at": "2026-11-05T02:11:10.591847724Z",
+  "invocation_seq": 7,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/early.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/early.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/gh/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/gh/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The drain-level green-during-poll test cannot fail on old code, so criterion 6 ('each new test would fail on old code') is not met by it.",
+      "evidence": "PrLander::land (drain.rs:3112-3121) passes &GhCli directly to athena.land_pr. The only install-able seam, early_seam, is used only in early.rs:362 and 444 (the early-push paths), not in the landing poll. So a drain test can only feed a ready-made report through landing_from_report (drain.rs:3128). The plan says this itself and asks the user about it. Fix: In the change description, map criteria 1 and 6 explicitly to the core test checks_that_turn_green_during_the_poll_after_a_refused_merge_land_in_the_same_run. Label the drain test as a guard on the drain's result mapping so the verifier does not count it as failing-first evidence.",
+      "location": "Demonstrations, criteria 1 and 6: drain test a_job_whose_checks_turn_green_during_the_poll_lands_in_the_same_step",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After a refusal with pending checks, the locked step now lasts up to the remaining look budget, where today it returns at once. Only the upper bound is unchanged.",
+      "evidence": "Today, landing.rs:254-271 returns straight after the refusal's single check_report read. With the retry, the call can make up to attempts - looks - 1 more reads, with a sleep of poll.delay before each. With checks_poll at 30 looks x 20 s and green on the first look, that is about 28 x 20 s, roughly 9 minutes (estimate, not measured), while the landing lock is held. Fix: Reword to 'no longer than the existing poll budget', and say that a refused merge with pending checks now holds the landing lock for up to the remaining budget.",
+      "location": "Approach and Risks: 'the locked step is no longer than before'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The edited script has a fourth entry that is never used, and its length is a literal rather than following the rig's budget.",
+      "evidence": "Rig::new sets attempts: 3 (tests.rs:1382). With the retry the run reads Green, then Pending in the refusal arm, then one more read (3 - 1 - 1 = 1). So Green, Pending, Pending covers the budget and the fourth Pending is never read. Fix: Build the script from rig.attempts (Green followed by Pending repeated) and assert host.check_reads == rig.attempts, as the new still-pending test does.",
+      "location": "Decision 7 and step 7: edited script of the test at tests.rs:1526",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "With the retry, the existing PendingMerge tests make extra check reads and sleeps. The plan says they 'still pass' without checking their asserts.",
+      "evidence": "PendingMerge with pending_after set stays in_progress after a refusal (tests.rs:2862-2865, 2899-2903). land_pending uses Rig attempts 3. So the retry now makes at least one more check read inside the call, and status_failures causes a logged 500 on a status read. Tests that count log entries or reads could change. Fix: In step 1, read the tests at tests.rs:2932-2995, list any assert on entry counts or read counts that the extra retry read could change, and say in the plan whether each needs an edit.",
+      "location": "Dependents: host-error log entries; existing tests at tests.rs:2932-2995",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The records-level and client-level test names end in '_turn_green' only so that a test-name filter picks them up.",
+      "evidence": "The names a_refused_then_accepted_landing_..._d87_does_not_match_turn_green and a_refused_then_green_landing_writes_one_intent_and_one_landing_turn_green read awkwardly. Fix: Use descriptive names and run them by exact name or by module path.",
+      "location": "Demonstrations, criterion 3: test names ending in _turn_green",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code (read only, nothing run). The fault site it fixes is real: land_pr (landing.rs:254-271) returns the Open/Pending 'waiting to merge' report right after one rule-violation refusal followed by a Pending read, and never reads the checks again in that call. A retry on the unused look budget fixes this path where it starts. wait_for_checks (early.rs:129-220) counts its reads in a local `looks` but does not return it, so the new Waited.looks field is needed and the extra files early.rs and tests.rs are justified. The seams the demonstrations name exist: FakeHost.script and merge_error (tests.rs:1193-1306), Rig with attempts 3, PendingMerge and land_pending (tests.rs:2838-2929), and the client's marking re-read (client.rs:653-659). The core refused-then-green test does fail on old code (merges 1, Open, Pending). The dependents list matches what I found by searching the code (the only caller of wait_for_checks, the D87 marking, the display, landing_from_report, test_support's attempts 1). On soundness, the approach is not a guess where data could be read: the records and host-error log are not in the snapshot. CHANGELOG lines 396-407 show a real earlier case where the host refused a merge while a check was still running, so path A is a credible cause. The plan says plainly that path B (an optional run unfinished for the whole poll) may be what the user hits and leaves it alone because changing it changes the merge gate. Remaining issues are minor: the drain-level green test cannot fail on old code (disclosed), the claim that the locked step is 'no longer than before' is loosely worded, the edited test's script length does not follow rig.attempts, the existing client-level log tests need a check for extra reads, and a test-naming nit."
+}
