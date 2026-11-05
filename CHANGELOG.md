@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Read-ahead with one job at a time. `drain_concurrent` with a bound of 1 now reads, and for a hard job plans,
+  the next queued items while the current job runs, up to `Steps::read_ahead` of them, so the next job is
+  ready when the slot frees. Before, only two or more jobs at once did this. A reading that is refused ahead
+  is dropped with a note and is read again, and reported as before, when its item starts. The real steps keep
+  `read_ahead` at 0, so `athena drain` is unchanged for now, and `drain` itself still reads each item at its
+  turn. The change is in `crates/athena-cli/src/drain.rs`.
 - `docs/design/continuous-landing.md` (D155): a design note, nothing built, for throughput review
   `20261105-070420-vq95`, which found landing and rebuild at a median of 440.1 of 464.5 minutes per landed job.
   When the verifier passes, a job joins the one ordered landing queue and its pull request merges automatically

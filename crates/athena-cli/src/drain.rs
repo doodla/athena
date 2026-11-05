@@ -54,7 +54,7 @@
 //!   starts another job, jobs already started are finished (a failure or a refusal stops no sibling that is
 //!   in flight), and the first reason found is the one reported. A worker that panics is not isolated: the
 //!   drain ends with the panic once the other workers have finished.
-//! - **Read-ahead.** When more than one job may run at once and [`Steps::read_ahead`] is above 0,
+//! - **Read-ahead.** When [`Steps::read_ahead`] is above 0, with one job at a time as with several,
 //!   [`drain_concurrent`] also reads, and for a hard job plans ([`Steps::plan_ahead`]), the next items up to
 //!   `read_ahead` of them ahead of the batch that is running (`docs/design/async-drain.md` section 4). It
 //!   reads an item ahead only when the paths the plan says it touches are disjoint from every job of the
@@ -67,8 +67,10 @@
 //!   starts, the paths landed since its reading began are compared with the paths the reading touches by the
 //!   same rule; on a hit the drain notes it ([`Report::notes`]) and asks [`Steps::recheck`]. If the reading no
 //!   longer holds, [`Steps::reread`] makes a fresh one, and a reading whose paths no landing touched is used
-//!   as it is. With one job at a time (`max_in_flight` 1, so [`drain`] or a bound of 1), or `read_ahead` 0,
-//!   nothing is read ahead and the drain behaves as it always did. The real steps do not turn this on yet.
+//!   as it is. How many readings are held or being made at once is bounded by [`Steps::read_ahead`]. With
+//!   `read_ahead` 0 nothing is read ahead and the drain behaves as it always did. [`drain`] reads each item
+//!   at its turn, because its steps are not `Sync` and so cannot be read from a second thread. The real steps
+//!   do not turn this on yet.
 //! - **Checks run again after a rebase only when it touched what the candidate changed.** Under the landing
 //!   lock, before a verified job lands, the drain asks [`Steps::rebase`] what rebasing the job onto the latest
 //!   main moved (`docs/design/async-drain.md` section 6, decision D145, build job 7). The pure
@@ -617,8 +619,9 @@ pub trait Steps {
         Vec::new()
     }
     /// How many items ahead of the running batch [`drain_concurrent`] may read (and plan, for hard jobs) while
-    /// more than one job runs at once. 0 (the default) reads nothing ahead. The real steps keep the default
-    /// until the drain's pipeline settings are wired in.
+    /// jobs run, with one job at a time or several. 0 (the default) reads nothing ahead. [`drain`] reads each
+    /// item at its turn whatever this says. The real steps keep the default until the drain's pipeline
+    /// settings are wired in.
     fn read_ahead(&self) -> u32 {
         0
     }
@@ -1160,8 +1163,7 @@ struct State {
     /// Why the run is ending, once any worker has found a reason (the first reason found stands). No worker
     /// starts a job once this is set; jobs already started are finished.
     stop: Option<Stop>,
-    // Read-ahead. All of this stays empty unless more than one job runs at once and `Steps::read_ahead` is
-    // above 0.
+    // Read-ahead. All of this stays empty unless `drain_concurrent` runs and `Steps::read_ahead` is above 0.
     /// Readings made ahead and not yet claimed by a job that starts.
     ahead: BTreeMap<String, Ahead>,
     /// Items the read-ahead is reading or planning right now.
@@ -2587,13 +2589,13 @@ impl<S: Steps + Sync + ?Sized, U: Ui + Sync + ?Sized> Drain<'_, S, U> {
     /// done. A batch holds items that no dependency links and whose touched paths are disjoint.
     ///
     /// With [`Steps::read_ahead`] above 0, one more thread reads (and plans) the items of the batches to come
-    /// while the batch runs; see the module text.
+    /// while the batch runs; see the module text. This holds for one worker as well as for several.
     ///
     /// `batches` is one wave (the drain plans again before the next): the batch to run. `later` is the
     /// batches of the same plan after it; it only chooses what to read ahead and is never dispatched.
     fn run_parallel(&self, batches: Vec<Vec<Item>>, later: Vec<Vec<Item>>, workers: usize) {
         let window = self.steps.read_ahead() as usize;
-        if window == 0 || workers < 2 {
+        if window == 0 {
             return self.run_batches(batches, workers);
         }
         let upcoming: Vec<(usize, Item)> = batches
@@ -2784,8 +2786,10 @@ pub fn drain(steps: &dyn Steps, limits: Limits, ui: &dyn Ui) -> anyhow::Result<R
 /// Works the queue like [`drain`], running up to `max_concurrency` jobs at once. The jobs of one group of the
 /// plan (no dependency between them, disjoint touched paths) run side by side; the next group starts when
 /// the group before it is done, so an item that depends on another starts only after it has finished. Landing
-/// and rating stay one at a time. With `max_concurrency` 1 this is [`drain`]. A worker that panics ends the
-/// drain with that panic once the other workers have finished their jobs; its item is not isolated.
+/// and rating stay one at a time. With `max_concurrency` 1 it runs like [`drain`], one job at a time, except
+/// that it reads (and plans) the next items while the job runs when [`Steps::read_ahead`] is above 0. A worker
+/// that panics ends the drain with that panic once the other workers have finished their jobs; its item is
+/// not isolated.
 pub fn drain_concurrent(
     steps: &(dyn Steps + Sync),
     limits: Limits,
@@ -2796,7 +2800,7 @@ pub fn drain_concurrent(
     let d = Drain::new(steps, ui, caps, limits);
     let workers = max_concurrency.max(1) as usize;
     drain_with(&d, steps, workers == 1, move |d, wave, later| {
-        if workers == 1 {
+        if workers == 1 && d.steps.read_ahead() == 0 {
             d.run_serial(wave);
         } else {
             d.run_parallel(wave, later, workers);
@@ -2936,7 +2940,12 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         }
         let mut now = batches.remove(0);
         if one_at_a_time {
-            now.truncate(1);
+            // One item runs. The rest of its group is not dispatched now (a later wave takes it); it is
+            // passed on as `later` so the read-ahead can read it while the one item runs.
+            let rest = now.split_off(now.len().min(1));
+            if !rest.is_empty() {
+                batches.insert(0, rest);
+            }
         }
         wave = now.iter().map(|i| i.job.clone()).collect();
         d.st().tried.extend(wave.iter().cloned());
@@ -4481,6 +4490,8 @@ mod read_ahead_tests {
         /// `run(job)` waits (at most 5 s) until these log entries exist, then keeps running for 200 ms.
         gate: BTreeMap<String, Vec<String>>,
         recheck_holds: bool,
+        /// Items whose reading comes back not runnable, with an error, however often it is made.
+        refuses: BTreeSet<String>,
         stop_after: Option<String>,
         /// Jobs whose landing is a merge the host holds until checks finish.
         waiting: BTreeSet<String>,
@@ -4507,6 +4518,7 @@ mod read_ahead_tests {
                 named: BTreeMap::new(),
                 gate: BTreeMap::new(),
                 recheck_holds: true,
+                refuses: BTreeSet::new(),
                 stop_after: None,
                 waiting: BTreeSet::new(),
                 reports: BTreeMap::new(),
@@ -4518,6 +4530,12 @@ mod read_ahead_tests {
 
         fn waits(mut self, job: &str) -> World {
             self.waiting.insert(job.into());
+            self
+        }
+
+        /// Every reading of `item` is refused: not runnable, with an error.
+        fn refusing(mut self, item: &str) -> World {
+            self.refuses.insert(item.into());
             self
         }
 
@@ -4625,6 +4643,15 @@ mod read_ahead_tests {
             let made = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
             let open = made.saturating_sub(self.ended.load(Ordering::SeqCst));
             self.widest.fetch_max(open, Ordering::SeqCst);
+            if self.refuses.contains(item) {
+                return Read {
+                    job: None,
+                    cost: 0.1,
+                    runnable: false,
+                    error: Some(format!("{item} cannot be read")),
+                    held: false,
+                };
+            }
             Read {
                 job: Some(
                     self.named
@@ -5021,17 +5048,179 @@ mod read_ahead_tests {
         );
     }
 
+    /// a, b, c and d, each depending on the one before and touching only its own file.
+    fn long_chain(window: u32) -> World {
+        World::new(
+            window,
+            &[
+                ("a", &["src/a.rs"], &[]),
+                ("b", &["src/b.rs"], &["a"]),
+                ("c", &["src/c.rs"], &["b"]),
+                ("d", &["src/d.rs"], &["c"]),
+            ],
+        )
+    }
+
     #[test]
-    fn read_ahead_is_off_with_a_bound_of_one() {
-        // One job at a time, through both entry points, and a window of 0 with two jobs at a time.
-        let runs: [(&str, u32, u32); 3] = [
-            ("drain_concurrent 1", 1, 1),
-            ("drain", 1, 1),
-            ("window 0", 0, 2),
+    fn read_ahead_reads_the_next_items_while_a_single_job_runs() {
+        // One job at a time (a bound of 1), window 3. a is held until b, c and d have all been read, so
+        // the log order read b, read c, read d, end a shows the next items are read while a runs.
+        let world = long_chain(3).gate("a", &["read b", "read c", "read d"]);
+        let report = concurrent(&world, 1);
+        assert_eq!(report.landed, 4, "{:?} {:?}", report.jobs, report.notes);
+        assert_eq!(report.stop, Stop::QueueEmpty);
+        for item in ["b", "c", "d"] {
+            assert!(
+                world.at(&format!("read {item}")) < world.at("end a"),
+                "{item}"
+            );
+            assert!(
+                world.at(&format!("read {item}")) < world.at("land a"),
+                "{item}"
+            );
+        }
+        // Later jobs run on the readings made ahead: no item is read twice, and a is read first.
+        for item in ["a", "b", "c", "d"] {
+            assert_eq!(world.count(&format!("read {item}")), 1, "{item}");
+        }
+        // One job at a time, plus at most three readings held.
+        assert!(world.widest.load(Ordering::SeqCst) <= 4);
+        assert!(world.at("land a") < world.at("start b"));
+    }
+
+    #[test]
+    fn read_ahead_reads_independent_items_while_a_single_job_runs() {
+        // No dependencies and disjoint files, so the plan puts a, b, c and d in one group. With one job at a
+        // time only a runs now; the rest of its group must still be offered to the read-ahead.
+        let world = World::new(
+            3,
+            &[
+                ("a", &["src/a.rs"], &[]),
+                ("b", &["src/b.rs"], &[]),
+                ("c", &["src/c.rs"], &[]),
+                ("d", &["src/d.rs"], &[]),
+            ],
+        )
+        .gate("a", &["read b", "read c", "read d"]);
+        let report = concurrent(&world, 1);
+        assert_eq!(report.landed, 4, "{:?} {:?}", report.jobs, report.notes);
+        let first_start = world
+            .entries()
+            .into_iter()
+            .find(|e| e.starts_with("start "));
+        assert_eq!(first_start.as_deref(), Some("start a"));
+        for item in ["b", "c", "d"] {
+            assert!(
+                world.at(&format!("read {item}")) < world.at("end a"),
+                "{item}"
+            );
+        }
+        for item in ["a", "b", "c", "d"] {
+            assert_eq!(world.count(&format!("read {item}")), 1, "{item}");
+        }
+        assert!(world.widest.load(Ordering::SeqCst) <= 4);
+    }
+
+    #[test]
+    fn read_ahead_with_a_limit_of_one_reads_one_item_ahead() {
+        // Window 1. a is held until b is read, and then 200 ms more, long enough for a reader that ignored
+        // the limit to read c as well. c is read only once b's reading is claimed (b starts), while b runs.
+        let world = long_chain(1).gate("a", &["read b"]).gate("b", &["read c"]);
+        let report = concurrent(&world, 1);
+        assert_eq!(report.landed, 4, "{:?} {:?}", report.jobs, report.notes);
+        let before_end_of_a: Vec<String> = world.entries()[..world.at("end a")]
+            .iter()
+            .filter(|e| e.starts_with("read "))
+            .cloned()
+            .collect();
+        assert_eq!(before_end_of_a, ["read a", "read b"]);
+        assert_eq!(world.count("read c"), 1);
+        assert!(world.at("end a") < world.at("read c"));
+        assert!(world.at("read c") < world.at("end b"));
+        for item in ["a", "b", "c", "d"] {
+            assert_eq!(world.count(&format!("read {item}")), 1, "{item}");
+        }
+        // The running job plus one reading ahead.
+        assert!(world.widest.load(Ordering::SeqCst) <= 2);
+    }
+
+    #[test]
+    fn read_ahead_of_a_refused_reading_is_reported_as_when_it_starts() {
+        // a, then b and c, which depend only on a. b's reading is refused every time. The same queue is run
+        // with a window of 1 (b is read while a runs, and the reading is dropped) and with a window of 0
+        // (b is read only at its turn).
+        let build = |window: u32| {
+            World::new(
+                window,
+                &[
+                    ("a", &["src/a.rs"], &[]),
+                    ("b", &["src/b.rs"], &["a"]),
+                    ("c", &["src/c.rs"], &["a"]),
+                ],
+            )
+            .refusing("b")
+        };
+        let ahead = build(1).gate("a", &["read b"]);
+        let report = concurrent(&ahead, 1);
+        // b was read while a ran, and a still ran and landed.
+        assert!(ahead.at("read b") < ahead.at("end a"));
+        assert!(ahead.at("end a") < ahead.at("land a"));
+        assert!(report.landed >= 1, "{:?} {:?}", report.jobs, report.notes);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("the reading made ahead of b was dropped")),
+            "{:?}",
+            report.notes
+        );
+        // The refused reading is read again at b's turn, exactly as many times as with no read-ahead (observed:
+        // twice, the drain tries a refused item once more), so the look-ahead reading is the only extra one.
+        let turn = build(0);
+        let plain = concurrent(&turn, 1);
+        assert_eq!(turn.count("read b"), 2, "{:?}", turn.entries());
+        assert_eq!(ahead.count("read b"), 3, "{:?}", ahead.entries());
+        assert!(
+            plain.notes.iter().all(|n| !n.contains("made ahead")),
+            "{:?}",
+            plain.notes
+        );
+        let line = |report: &Report, item: &str| {
+            report
+                .jobs
+                .iter()
+                .find(|j| j.item == item)
+                .map(|j| (j.outcome.clone(), j.reason.clone(), j.landing.clone()))
+        };
+        let b = line(&report, "b");
+        assert!(b.is_some(), "{:?}", report.jobs);
+        assert_eq!(b, line(&plain, "b"), "{:?} {:?}", report.jobs, plain.jobs);
+        assert_eq!(report.stop, plain.stop);
+        assert_eq!(report.landed, plain.landed);
+        let kept = |report: &Report| -> Vec<String> {
+            report
+                .notes
+                .iter()
+                .filter(|n| !n.contains("made ahead"))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(kept(&report), kept(&plain));
+    }
+
+    #[test]
+    fn read_ahead_is_off_with_a_window_of_zero() {
+        // A window of 0 reads nothing ahead: with one job at a time through both entry points, and with two.
+        // `drain` takes steps that are not `Sync`, so it never reads ahead, whatever the window says.
+        let runs: [(&str, u32, u32); 4] = [
+            ("drain_concurrent 1, window 0", 0, 1),
+            ("drain, window 0", 0, 1),
+            ("drain_concurrent 2, window 0", 0, 2),
+            ("drain, window 1", 1, 1),
         ];
         for (how, window, bound) in runs {
             let world = World::chain(window);
-            let report = if how == "drain" {
+            let report = if how.starts_with("drain,") {
                 drain(&world, limits(20.0), &Quiet).unwrap()
             } else {
                 concurrent(&world, bound)

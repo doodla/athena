@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-103610-h1cj",
+  "round": 2,
+  "at": "2026-11-05T16:40:32.4679262Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The outcome of the refused item b can be read from the code, so the test should assert it instead of recording what it observed.",
+      "evidence": "The fake returns `job: Some(b)`, `error: Some(..)`, `runnable: false`. `run_job` (drain.rs:1561-1571) treats that as `RunStep::Unread`. `attempts` (drain.rs:1832-1846) reads the item once more, and on the second Unread it returns `ItemEnd::Skipped` with the note 'item b is skipped: the reader gave no reading twice: ...'. With window 1 the pump's single read is dropped with the note from drain.rs:2766-2768. It does not count toward `unread`, because `pumped` stops the pump from reading b again and `attempts` counts only its own reads. So b's line and its skip note are the same in both runs, and `read b` is logged 3 times with window 1 and 2 times with window 0. Fix: State the expected outcome in the test: b is skipped with the 'gave no reading twice' note in both runs, and `world.count(\"read b\")` is 3 with window 1 and 2 with window 0. Keep the window-1 against window-0 comparison, but drop the 'record what was observed' fallback from step 10. Compare only outcome, reason and landing, not `cost_usd`: the extra read adds 0.1 to b's line with window 1.",
+      "location": "Plan Risks (4th bullet) and Criterion 3 demonstration: \"the code does not settle it\"",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Item c's behavior in the refusal test is left unpinned: once b's reading is dropped, c is read ahead with window 1 but not with window 0.",
+      "evidence": "b and c depend only on a and touch disjoint files, so `Plan::build_with` puts them in one group (plan.rs:646-655). In the window-1 run, the pump drops b's reading and so frees its place in the window (held = ahead + reading, drain.rs:2649). It then reads c ahead during a's 200 ms hold. The window-0 report has no 'made ahead' activity for c. The plan compares only b, so this is harmless, but whether c is read ahead is not pinned down. Fix: Either assert that c's job line is the same in both runs and that `read c` is logged once in each, or say in the test comment that c may be read ahead after b's reading is dropped.",
+      "location": "Criterion 3 demonstration: item layout a, b, c with b and c depending only on a",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The renamed test also holds a `drain` case with window 1, which its name does not describe.",
+      "evidence": "Step 8 adds a `drain` window-1 case to a test named for window 0. Fix: Put the `drain` window-1 case in its own small test, for example `drain_reads_each_item_at_its_turn_even_with_a_window`, or name the combined test after both properties.",
+      "location": "Step 8: renamed test `read_ahead_is_off_with_a_window_of_zero`",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against drain.rs by reading the code; I ran nothing. Its claims hold. `run_parallel` returns early on `window == 0 || workers < 2` (drain.rs:2596). The `drain_concurrent` closure calls `run_serial` when `workers == 1` (2798-2804). `drain_with` truncates the first batch with `truncate(1)` (2938-2939), so the rest of an independent group never reaches `later`. `pick_ahead` skips items with `*batch <= st.batch` (2661) and enforces `held >= window` (2656). `drain` takes `&dyn Steps`, which is not `Sync` (2778), while the pump lives in the `Sync` impl (2585). Only the `World` fake overrides `read_ahead` (drain.rs:4713; no other `fn read_ahead(` in crates/), so the bound-1 callers in tests/drain.rs and main.rs keep using `run_serial`. The three code edits are small and fix the fault where it starts: the `workers < 2` gate and the truncation that drops group members. The tests run through the real `drain_concurrent` entry point with the existing `World` fake, check log order, and each would fail without the change. Test B, with independent items, isolates the split-off. The limit-1 test checks the window guard. The refused-reading test compares runs with window 1 and window 0. Every doc statement that would become false is named: line 57, lines 70-71, 619-621, 1163-1164, 2784-2788 and the `run_parallel` doc. A grep of docs/ found no other text that says read-ahead is off with one job at a time. The remaining findings are minor. The planner left b's refused outcome open when the code settles it, and one test name no longer fits all of its cases."
+}

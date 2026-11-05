@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-103610-h1cj",
+  "round": 1,
+  "at": "2026-11-05T16:37:23.51815526Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "No test needs the batch split in step 1, and it is what makes read-ahead work for independent queued items",
+      "evidence": "drain_with cuts the first batch to one item (drain.rs:2937-2940), and `pick_ahead` only looks at batches after the running one (drain.rs:2661). With independent items a, b, c, d, `Plan::build` puts them in one group, so only step 1 lets the reading thread see b, c and d. The criterion 1 and 2 tests use a chain (each item depends on the one before), so every group has one item and nothing is cut off. In the criterion 3 test, b and c share a group, but the only gate is on a and nothing checks that c is read while b runs. All three tests would pass with step 1 left out. The plan's dependents entry says only that 'the new look-ahead tests exercise the chain case'. Fix: Add a case, or a fourth test, with independent items: for example a, b, c, d with no dependencies, each touching its own file, window 3, bound 1, and `gate(\"a\", [\"read b\",\"read c\",\"read d\"])`. Assert that `read b`, `read c` and `read d` come before `end a` and that each item is read once. State that without step 1 the reads come only after `end a`.",
+      "location": "Plan step 1 / Decision 2 (drain_with split-off); Demonstrations for criteria 1-3",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out the test callers of `drain_concurrent` with a bound of 1",
+      "evidence": "The search found `drain::drain_concurrent(&steps, ..., 1)` in crates/athena-cli/tests/drain.rs at lines 8053, 8083, 8101, 8124, 8139, 8167, 8188 and 8215, and a helper at line 7282 that passes the bound through. Their stubs keep the default `read_ahead` of 0, because only drain.rs:4713 overrides it, so they should stay on `run_serial`. They do get the new `later` contents from `drain_with`. The plan's entry for this change names only main.rs:1198. Fix: Add an entry for tests/drain.rs: these callers use a bound of 1 with the default `read_ahead` of 0, so the closure still calls `run_serial` and `later` is ignored. Name `cargo test -p athena-cli --test drain` as the test that covers them.",
+      "location": "Dependents: `drain_concurrent` with bound 1 now takes the `run_parallel` path",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The module doc change misses the first sentence of the Read-ahead note",
+      "evidence": "drain.rs:57 opens the note with 'When more than one job may run at once and [`Steps::read_ahead`] is above 0'. Step 4 replaces only the sentence at lines 70-71, so line 57 would still say read-ahead needs more than one job. Fix: Rewrite line 57 too, for example: 'When [`Steps::read_ahead`] is above 0, [`drain_concurrent`] also reads ... (with one job at a time too)'.",
+      "location": "Plan step 4 (module doc) / criterion 5; drain.rs:57",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The `drain_concurrent` doc says a bound of 1 behaves like `drain`, which stops being true",
+      "evidence": "The doc says 'With `max_concurrency` 1 this is [`drain`].' After the change, a bound of 1 reads ahead when `read_ahead() > 0` and `drain` does not. No step updates this doc. Fix: Add this doc to step 4: with `max_concurrency` 1 it runs like [`drain`], except that it reads ahead when [`Steps::read_ahead`] is above 0.",
+      "location": "drain.rs:2787 (`drain_concurrent` doc)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the plan against crates/athena-cli/src/drain.rs and found that the core design holds. The look-ahead thread (`read_ahead_pump`), `pick_ahead` and the claim and stale-reading checks already work across waves. Removing the `workers < 2` early return and sending a bound of 1 through `run_parallel` when `read_ahead() > 0` is the right fix, and production is unchanged because only the test `World` overrides `read_ahead` (drain.rs:622 and 4713 are the only definitions). `drain` really takes `&dyn Steps` without `Sync` (drain.rs:2778), and `main.rs:1198` calls `drain_concurrent`, so leaving `drain` serial is sound. The tests for criteria 1 and 2 would fail without the change, and the refusal test for criterion 3 follows a path that works: refused, then read again, then skipped through `RunStep::Unread`. Two things need fixing before I accept. (1) Step 1 (passing on the rest of a first batch that is cut to one item) is what makes read-ahead work for independent queued items, but no test needs it: criteria 1 and 2 use a chain where each item depends on the one before, so every plan group has one item. (2) The dependents list leaves out the bound-1 `drain_concurrent` callers in tests/drain.rs. There are also two minor doc gaps. Nothing calls an external service, and the work fits one producer run."
+}
