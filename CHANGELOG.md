@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena measure-build` now records the whole-build peak memory and the peak number of concurrent processes of
+  each cold build, and `athena status` prints them as "build total peak memory" and "peak concurrent
+  processes" for build 1 and build 2. While cargo runs, a sampler reads `/proc` every 25 ms and sums the resident
+  memory of all processes of the build at that moment: cargo's descendants plus every process carrying the
+  build's `ATHENA_BUILD_MARK` environment variable, which reaches compilers that an `sccache` server runs for the
+  build. The record keeps the highest sum and the highest count. A process that lives under 25 ms can be missed,
+  and shared pages are counted once per process, so the memory figure can read high. The fields are optional in
+  `athena.build-measurement/1`, so older records still read and print without them. Not measured here: agent
+  memory. The mark's reach through a real `sccache` server is inferred from how `sccache` passes the client's
+  environment; the tests use a process that detaches itself, not `sccache`.
 - Drain life-cycle commands, so no one finds, stops or restarts a drain by matching text in the process list.
   Root cause: Athena kept no record of its own drain, so a person found it with `pkill -f`, `pgrep` or a wait
   loop whose pattern also appeared in the command doing the matching; the command matched itself, killed its own

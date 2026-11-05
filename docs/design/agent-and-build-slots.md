@@ -356,6 +356,12 @@ Each change is one focused job with its own tests, lands on its own, and reads i
    cores used of each cold build), `crates/athena-data/src/records.rs` (`BuildMeasurement`: optional new fields,
    old records still read), `crates/athena-core/src/status.rs` (`build_measurement_line`: print them). Also a one-off
    `sccache` run through the same builder (code exists).
+   The two build figures are **build totals**, not per-process figures: the peak memory is the highest resident memory
+   summed over all processes of the build at one sampled moment, and the cores figure is the highest number of build
+   processes alive at one moment. Both include the compilers an `sccache` server runs for the build (found by an
+   environment mark the build carries), and `athena status` labels them "build total peak memory" and "peak
+   concurrent processes". Resident memory counts shared pages once per process, so the sum can read high. Agent
+   memory is not measured by this step; a later step measures it.
    Effect measured by: the new fields in the `athena.build-measurement/1` record in `records/`, read by the
    `build` line of `athena status`. Replaces every **estimate** in section 7 (T, peak memory) with a measured number
    and answers whether `sccache` gives a nonzero hit count (`SccacheFigures` in that record).

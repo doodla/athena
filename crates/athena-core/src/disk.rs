@@ -91,7 +91,7 @@ use crate::state::{StateDir, format_bytes};
 use crate::store::{JobState, Records};
 use crate::{Athena, Ui};
 use athena_data::records::{
-    AnyRecord, BuildMeasurement, OutcomeState, SccacheCounts, SccacheFigures,
+    AnyRecord, BuildMeasurement, BuildPeak, OutcomeState, SccacheCounts, SccacheFigures,
 };
 use athena_data::{JobId, RecordId};
 use serde::{Deserialize, Serialize};
@@ -791,6 +791,9 @@ pub struct BuildRun {
     pub seconds: f64,
     /// The compile-cache counts of this build alone; `None` when no cache was in use.
     pub sccache: Option<SccacheCounts>,
+    /// The whole-build peaks (summed memory, concurrent processes); `None` when the platform gave no
+    /// process list.
+    pub peak: Option<athena_agent::procs::BuildPeak>,
 }
 
 /// The part of a measurement that runs cargo and `sccache`. [`Athena::measure_build`] does everything else
@@ -841,8 +844,19 @@ impl CargoBuilder for CargoBuild {
                 .env_remove("RUSTC_WRAPPER")
                 .env_remove("CARGO_BUILD_RUSTC_WRAPPER");
         }
+        // Measured quantity: the highest sum of resident memory of all processes of the build at one
+        // moment, and the highest number of them at one moment. The build is every descendant of cargo plus
+        // every process carrying the build's mark in its environment. Under `RUSTC_WRAPPER=sccache` the
+        // compilers are run by a long-lived sccache server, not by cargo; the server runs them with the
+        // environment of the client that asked, so they carry the mark and are counted (inferred from how
+        // sccache passes the client's environment; no real sccache build was run for this). `wait4`'s
+        // `ru_maxrss` is not used: it covers only the processes cargo waits for, so it leaves out the
+        // server's compilers, and it is the largest single process, not the total. A cgroup `memory.peak`
+        // would need a cgroup of our own; sampling `/proc` needs none (a bought crate would still read
+        // `/proc`, and the detached-process mark is ours either way).
         let started = std::time::Instant::now();
-        let out = cargo.output().context("running `cargo build`")?;
+        let (out, peak) =
+            athena_agent::procs::output_measured(&mut cargo).context("running `cargo build`")?;
         let seconds = started.elapsed().as_secs_f64();
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -867,7 +881,11 @@ impl CargoBuilder for CargoBuild {
         } else {
             None
         };
-        Ok(BuildRun { seconds, sccache })
+        Ok(BuildRun {
+            seconds,
+            sccache,
+            peak,
+        })
     }
 }
 
@@ -970,6 +988,14 @@ impl Drop for Scratch<'_> {
     }
 }
 
+/// The record form of a build's peaks: memory in decimal gigabytes, as the sizes in `athena status` are.
+fn peak_figures(peak: Option<athena_agent::procs::BuildPeak>) -> Option<BuildPeak> {
+    peak.filter(|p| p.processes > 0).map(|p| BuildPeak {
+        memory_gb: p.memory_bytes as f64 / 1e9,
+        processes: p.processes,
+    })
+}
+
 impl Athena {
     /// Builds the workspace cold in two separate git worktrees of HEAD, each with its own target directory,
     /// and commits the result as an `athena.build-measurement/1` record: T (the bytes of one cold target
@@ -1047,6 +1073,8 @@ impl Athena {
             first_build_seconds: first.seconds,
             second_build_seconds: second.seconds,
             sccache,
+            first_build_peak: peak_figures(first.peak),
+            second_build_peak: peak_figures(second.peak),
         };
         measurement.validate().map_err(|e| anyhow::anyhow!(e))?;
         let record = AnyRecord::BuildMeasurement(Box::new(measurement.clone()));
@@ -1501,6 +1529,7 @@ mod tests {
         installed: bool,
         counts: [Option<SccacheCounts>; 2],
         fail_second: bool,
+        peaks: [Option<athena_agent::procs::BuildPeak>; 2],
         calls: std::cell::RefCell<Vec<(std::path::PathBuf, std::path::PathBuf)>>,
     }
 
@@ -1514,18 +1543,32 @@ mod tests {
                 installed,
                 counts,
                 fail_second: false,
+                peaks: [None, None],
                 calls: Default::default(),
             }
         }
 
         fn with_sccache() -> FakeBuilder {
-            FakeBuilder::new(
+            let mut builder = FakeBuilder::new(
                 true,
                 [
                     Some(SccacheCounts { hits: 0, misses: 9 }),
                     Some(SccacheCounts { hits: 4, misses: 5 }),
                 ],
-            )
+            );
+            builder.peaks = [
+                Some(athena_agent::procs::BuildPeak {
+                    memory_bytes: 3_250_000_000,
+                    processes: 6,
+                    largest_process_bytes: 900_000_000,
+                }),
+                Some(athena_agent::procs::BuildPeak {
+                    memory_bytes: 2_500_000_000,
+                    processes: 4,
+                    largest_process_bytes: 800_000_000,
+                }),
+            ];
+            builder
         }
     }
 
@@ -1551,6 +1594,7 @@ mod tests {
             Ok(BuildRun {
                 seconds: SECONDS[n],
                 sccache: self.counts[n],
+                peak: self.peaks[n],
             })
         }
     }
@@ -1617,6 +1661,21 @@ mod tests {
         assert!(measured.source_bytes >= 100 + 250 + 12);
         assert_eq!(measured.first_build_seconds, 61.5);
         assert_eq!(measured.second_build_seconds, 12.25);
+        // The committed record holds the builder's whole-build figures, not the largest process.
+        assert_eq!(
+            measured.first_build_peak,
+            Some(BuildPeak {
+                memory_gb: 3.25,
+                processes: 6
+            })
+        );
+        assert_eq!(
+            measurements(&athena)[0].second_build_peak,
+            Some(BuildPeak {
+                memory_gb: 2.5,
+                processes: 4
+            })
+        );
         assert_eq!(
             measured.sccache,
             SccacheFigures::Measured {
@@ -1648,6 +1707,8 @@ mod tests {
         let measured = athena.measure_build(&builder, &Said::default()).unwrap();
 
         assert_eq!(measured.sccache, SccacheFigures::NotInstalled);
+        assert_eq!(measured.first_build_peak, None);
+        assert_eq!(measured.second_build_peak, None);
         assert_eq!(measured.target_bytes, TARGET_WRITTEN[0] as u64);
         assert_eq!(measurements(&athena).len(), 1);
         scratch_is_gone(&athena, &builder);
@@ -1747,6 +1808,8 @@ mod tests {
             first_build_seconds: 60.0,
             second_build_seconds: 10.0,
             sccache: SccacheFigures::NotInstalled,
+            first_build_peak: None,
+            second_build_peak: None,
         }
     }
 
