@@ -1,0 +1,177 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261105-093606-199q",
+  "candidate_commit": "999e5b0deb69ca7fe9cffc9f223a3ceb7c47b12f",
+  "verified_fingerprint": "sha256:da7bfdd4adeb0e34826b655602dfcfd4d214178151262f435a3ff19b72a3ec4d",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42006059478 for 999e5b0deb69ca7fe9cffc9f223a3ceb7c47b12f",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42006059478 for 999e5b0deb69ca7fe9cffc9f223a3ceb7c47b12f",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42006059478 for 999e5b0deb69ca7fe9cffc9f223a3ceb7c47b12f",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 3,
+  "criteria": [
+    {
+      "criterion": "A note under docs/design/ (or the change's commit text/doc comment) states the cause of the longer checks stage, citing the specific crates/ code path and the evidence (measured or labeled estimate).",
+      "kind": "content",
+      "met": false,
+      "evidence": "docs/design/checks-stage-slowdown.md names a cause: failed-to-compile demonstrations being compiled again. That cause does not explain the growth. I read the evidence snapshot. The previous throughput review (20261105-070420-vq95, 366 landings) found a checks median of 0.2. The current one (20261105-093605-zwwy, 368 landings) finds 0.6, so only two new landings entered the window. The note cites three jobs as evidence: hsg4, ysc4 and the f1cw-like ysc4/hsg4 pattern. hsg4 landed 2026-11-04T21:09, ysc4 at 22:45 and f1cw at 14:00, all before the 07:04 review. They were already in the window that gave 0.2, so they cannot be why it rose. The job that did enter the window, 20261105-070552-kx1y (landed 08:31), recorded one demonstration, `fails-without-7`: `cargo test --locked` (the full suite), exit 0, 2245 tests, 910.1 s. That run compiled and passed, so this change does not touch it. Other jobs in the window show the same full-suite pattern: rf7z `fails-without-4` `cargo test --locked` took 788.0 s, and 911m's second demonstration took 883.1 s. The note itself says 'I did not recompute the median of the last 20 landed jobs'. The reading required measuring the cause directly, not through a stand-in.",
+      "commands": [
+        "cargo run -q -p athena-cli -- status --snapshot /root/.local/state/athena/athena-77cba81fd890/jobs/20261105-093606-199q/evidence"
+      ],
+      "commands_verified": false
+    },
+    {
+      "criterion": "The diff to crates/ removes or bounds the identified cause (extra check run, wait, repeated work or snapshot restore) in the checks path, rather than a symptom such as raising a limit.",
+      "kind": "content",
+      "met": true,
+      "evidence": "In checks.rs, demonstration_runs now caches demonstrations that failed to build (verify::failed_to_build) under their verify::build_scope. A later demonstration with the same scope reuses that result with 0 s instead of calling run_check again. All demonstrations share one reverted snapshot (checks.rs lines 391-417), so the reuse is valid. This does remove the cause the change identified. That cause, though, is not what grew the stage (see criterion 1).",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A new or updated test in crates/ exercises the fixed behavior, failing on the old behavior; run `cargo test` and it passes.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's record shows `cargo test --locked` passed (reused from CI run 42006059478 for 999e5b0). I ran the new tests: demonstrations_of_one_build_scope_compile_once_when_the_build_fails passed, and so did verify::tests::build_scope_drops_the_filter_and_keeps_what_is_compiled. The integration test counts the logged runs and asserts 2. On the old code each of the three demonstrations calls run_check, so the log would have 3 lines and the assertion would fail.",
+      "commands": [
+        "cargo test --locked",
+        "cargo test -p athena-core demonstrations_of_one_build_scope_compile_once_when_the_build_fails",
+        "cargo test -p athena-core build_scope"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "`cargo clippy --all-targets` is clean and `cargo fmt --check` passes.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's records show both passed, reused from CI run 42006059478 for 999e5b0deb69.",
+      "commands": [
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo fmt --all --check"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Existing checks behavior is preserved: the same routed checks still run and failures still hold or reject the job; existing tests in crates/athena-core/src/run/tests.rs still pass.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The diff touches only the demonstration loop. Configured fmt, clippy and test routing is unchanged. A reused failed-build result keeps the earlier exit code, tests_ran and output tail, so demonstration_view classifies it the same way. The new test asserts that all three commands are still recorded as 'the test did not compile'. The full suite passed in Athena's record.",
+      "commands": [
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The stated cause does not explain the rise from 0.2 to 0.6. The jobs cited as evidence were already in the window that gave 0.2.",
+      "evidence": "Read from the evidence snapshot. The previous review vq95 recorded 366 landings and a checks median of 0.2. The current review zwwy recorded 368 landings and 0.6. The cited jobs landed before vq95: hsg4 at 2026-11-04T21:09, ysc4 at 22:45 and f1cw at 14:00. The new landing kx1y (08:31) spent 910.1 s on one passing, compiled full-suite `cargo test --locked` demonstration. This change leaves that kind of run untouched.",
+      "location": "docs/design/checks-stage-slowdown.md (Cause, Evidence)",
+      "source": "verifier"
+    },
+    {
+      "severity": "major",
+      "summary": "Soundness: the note guesses at the cause where the records could have been read, and it misses the largest local checks cost in the window. Full-suite `cargo test --locked` demonstrations cost 13 to 15 minutes each.",
+      "evidence": "kx1y fails-without-7 took 910.1 s, rf7z fails-without-4 took 788.0 s, and 911m's second demonstration took 883.1 s, all running `cargo test --locked`. kx1y was a docs-only change: fmt and clippy were 'not run', and the test result was reused from CI, yet the demonstration reran the whole suite. The note admits it 'did not recompute the median'. A simpler, correct approach: rebuild the per-job checks minutes for the two windows from verification.json, identify the job or jobs that moved the median, then fix that path. For example, do not run a full-suite demonstration when the test result is reused from CI, or bound it.",
+      "location": "docs/design/checks-stage-slowdown.md; crates/athena-core/src/run/checks.rs demonstration_runs",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "A changed file is outside the expected deliverables: crates/athena-core/src/verify.rs.",
+      "evidence": "The diff stat shows verify.rs +89. The expected deliverables list checks.rs, routing.rs, ci_result.rs, run/tests.rs, run/mod.rs, the design note and CHANGELOG.md. The helpers it adds (build_scope, failed_to_build) are a reasonable fit there.",
+      "location": "crates/athena-core/src/verify.rs",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "The CHANGELOG claims the change 'removes the cause of the checks median rising from 0.2 to 0.6', which the records do not support.",
+      "evidence": "See the first finding. The note itself calls the share an estimate, but the changelog states it as fact.",
+      "location": "CHANGELOG.md (Changed)",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "1 of 5 criteria unmet",
+    "2 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "This change does not find the cause of the longer checks stage, so it fails. The fix itself is sound and tested. It skips recompiling for later \"fails without the fix\" demonstrations of the same build scope once one has failed to compile, the new test checks this, and Athena's fmt, clippy and test records pass. The problem is the stated cause. I read the evidence snapshot: the checks median went from 0.2 (review vq95, 366 landings) to 0.6 (review zwwy, 368 landings), so only two new landings entered the window. The jobs the note cites (hsg4, ysc4, f1cw) landed before the 0.2 review, so they cannot explain the rise. The new landing kx1y spent 910 s on one passing full-suite `cargo test --locked` demonstration, and rf7z and 911m show the same 13–15 minute pattern. This change does not touch that path. The note admits it did not recompute the median. The request asks to find why the stage grew and remove that cause, so the cause needs to be re-derived from the two windows' records and that path fixed. verify.rs is also changed outside the expected deliverables (minor)."
+}

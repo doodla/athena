@@ -42,6 +42,12 @@ pub fn test_config() -> String {
         &without_job_plan(include_str!("../../../../athena.toml")),
         None,
     );
+    // Pin the concurrency: tests drain one job at a time and must not follow the live `[parallel]` value.
+    let live = base
+        .lines()
+        .find(|l| l.starts_with("max_concurrency = "))
+        .expect("the config sets max_concurrency");
+    let base = &base.replacen(live, "max_concurrency = 1", 1);
     let start = base
         .find("[[capabilities.change.checks]]")
         .expect("the config has checks");
