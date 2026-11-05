@@ -690,6 +690,7 @@ mod tests {
             root: std::path::PathBuf::from("."),
             commands: Default::default(),
             writes: false,
+            evidence: None,
         };
         plan_findings(&plan, &reading(), &verifier, &|p| dirs.contains(&p))
             .into_iter()
@@ -819,6 +820,7 @@ mod tests {
             root: std::path::PathBuf::from("."),
             commands: [("cargo".to_string(), vec!["test".to_string()])].into(),
             writes: false,
+            evidence: None,
         };
         plan_findings(&plan, &r, &verifier, &|_| false)
     }
@@ -903,6 +905,7 @@ mod tests {
             root: std::path::PathBuf::from("."),
             commands: Default::default(),
             writes: false,
+            evidence: None,
         };
         plan_findings(&plan, &r, &verifier, &|_| false)
     }

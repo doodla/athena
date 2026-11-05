@@ -330,6 +330,10 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
         job: Option<String>,
         #[arg(long)]
         json: bool,
+        /// Read the records and history from an evidence snapshot directory (written at dispatch under a
+        /// job's state directory) instead of this repository. Needs no repository and no records/ here.
+        #[arg(long, value_name = "DIR", conflicts_with = "job")]
+        snapshot: Option<PathBuf>,
     },
     /// Record an intervention: anything you did beyond what a lazy user would.
     Intervene {
@@ -1252,7 +1256,21 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::Status { job, json } => {
+        Command::Status {
+            snapshot: Some(dir),
+            json,
+            ..
+        } => {
+            // Handled before `open`: a snapshot is read on its own, with no repository.
+            let view = athena_core::snapshot::status(&dir)?;
+            if json {
+                print_json(&view)?
+            } else {
+                print!("{}", display::snapshot_status(&view))
+            }
+            Ok(0)
+        }
+        Command::Status { job, json, .. } => {
             let athena = open(false)?;
             match job {
                 Some(job) => {

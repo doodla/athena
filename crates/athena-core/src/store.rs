@@ -4,6 +4,7 @@
 
 use crate::plan::Priority;
 use anyhow::{Result, anyhow, bail};
+use athena_data::records::check_record_file;
 use athena_data::records::{
     AnyRecord, Baseline, Candidate, Correction, Critique, DecisionState, DecisionStateKind,
     DefaultExpectations, FailureClass, HostError, Intervention, IntrospectionRecord, Invocation,
@@ -11,9 +12,10 @@ use athena_data::records::{
     Resolution, Restart, Role, Score, Verification, fold_decision_states,
 };
 use athena_data::{JobId, RecordId};
-use athena_gate::records::RecordSet;
+use athena_gate::records::{RecordFile, RecordSet};
 use athena_git::Git;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 /// Every record of one job.
 #[derive(Debug, Clone, Default)]
@@ -262,28 +264,61 @@ pub struct Records {
     pub invalid: Vec<String>,
 }
 
-/// The landing records under `landings/` in `treeish`; an absent directory or an unreadable file counts nothing.
-fn landings_in(git: &Git, treeish: &str) -> Vec<athena_data::history::Landing> {
+/// The files under `landings/` in `treeish`, as (path, bytes); an absent directory or an unreadable file
+/// counts nothing.
+fn landing_files_in(git: &Git, treeish: &str) -> Vec<(String, Vec<u8>)> {
     let Ok(entries) = git.ls_tree_under(treeish, "landings") else {
         return Vec::new();
     };
-    let oids: Vec<String> = entries
-        .into_iter()
-        .filter(|e| e.kind == "blob")
-        .map(|e| e.oid)
-        .collect();
+    let entries: Vec<_> = entries.into_iter().filter(|e| e.kind == "blob").collect();
+    let oids: Vec<String> = entries.iter().map(|e| e.oid.clone()).collect();
     let Ok(blobs) = git.cat_blobs(&oids) else {
         return Vec::new();
     };
-    blobs
-        .iter()
-        .filter_map(|bytes| {
-            match athena_data::history::HistoryRecord::parse(&String::from_utf8_lossy(bytes)) {
-                Ok(athena_data::history::HistoryRecord::Landing(l)) => Some(l),
-                _ => None,
+    entries
+        .into_iter()
+        .map(|e| e.path)
+        .zip(blobs)
+        .collect::<Vec<_>>()
+}
+
+/// Every landing file [`Records::load`] reads: those in the tree itself, then those at the local records
+/// branch's tip, as (path, bytes). The same path can appear twice; [`Records::from_parts`] drops repeated ids.
+pub(crate) fn landing_files(git: &Git, treeish: &str) -> Vec<(String, Vec<u8>)> {
+    let mut files = landing_files_in(git, treeish);
+    if let Ok(Some(tip)) = athena_git::records_branch::RecordsWriter::new(git).tip() {
+        files.extend(landing_files_in(git, &tip));
+    }
+    files
+}
+
+/// The files under `dir/<sub>` as (path relative to `dir`, bytes), sorted by path. An absent directory is empty.
+fn read_files_under(dir: &Path, sub: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    fn walk(root: &Path, at: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<()> {
+        let Ok(entries) = std::fs::read_dir(at) else {
+            return Ok(());
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if path.is_dir() {
+                walk(root, &path, out)?;
+            } else {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("walked paths are under the root")
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.push((relative, std::fs::read(&path)?));
             }
-        })
-        .collect()
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk(dir, &dir.join(sub), &mut files)?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(files)
 }
 
 fn job_of(record: &AnyRecord) -> Option<&JobId> {
@@ -310,6 +345,35 @@ impl Records {
     /// Loads every record in `treeish`.
     pub fn load(git: &Git, treeish: &str) -> Result<Records> {
         let set = RecordSet::load(git, treeish)?;
+        Ok(Records::from_parts(&set, &landing_files(git, treeish)))
+    }
+
+    /// Loads every record from an evidence snapshot directory (`records/` and `landings/` under `dir`), through
+    /// the same assembly as [`Records::load`], so both give the same records for the same files.
+    pub fn load_dir(dir: &Path) -> Result<Records> {
+        let files = read_files_under(dir, "records")?
+            .into_iter()
+            .map(|(path, bytes)| match check_record_file(&path, &bytes) {
+                Ok(record) => RecordFile {
+                    path,
+                    record,
+                    error: None,
+                    bytes,
+                },
+                Err(error) => RecordFile {
+                    path,
+                    record: None,
+                    error: Some(error),
+                    bytes,
+                },
+            })
+            .collect();
+        let landings = read_files_under(dir, "landings")?;
+        Ok(Records::from_parts(&RecordSet { files }, &landings))
+    }
+
+    /// Assembles the records from the checked files under `records/` and the files under `landings/`.
+    pub(crate) fn from_parts(set: &RecordSet, landing_files: &[(String, Vec<u8>)]) -> Records {
         let mut records = Records::default();
         for file in &set.files {
             if file.error.is_some() {
@@ -374,10 +438,15 @@ impl Records {
         for job in records.jobs.values_mut() {
             job.sort();
         }
-        let mut landings = landings_in(git, treeish);
-        if let Ok(Some(tip)) = athena_git::records_branch::RecordsWriter::new(git).tip() {
-            landings.extend(landings_in(git, &tip));
-        }
+        let mut landings: Vec<athena_data::history::Landing> = landing_files
+            .iter()
+            .filter_map(|(_, bytes)| {
+                match athena_data::history::HistoryRecord::parse(&String::from_utf8_lossy(bytes)) {
+                    Ok(athena_data::history::HistoryRecord::Landing(l)) => Some(l),
+                    _ => None,
+                }
+            })
+            .collect();
         landings.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
         landings.dedup_by(|a, b| a.id == b.id);
         records.landings = landings;
@@ -423,7 +492,7 @@ impl Records {
         records
             .proposals
             .sort_by(|a, b| (a.at, &a.record).cmp(&(b.at, &b.record)));
-        Ok(records)
+        records
     }
 
     /// Jobs other than the bootstrap, newest first.

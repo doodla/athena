@@ -922,6 +922,49 @@ impl Git {
         Ok(parse_history(&out))
     }
 
+    /// The newest `limit` commits on the first-parent chain of `rev`, newest first, each with its full hash,
+    /// committer time (strict ISO 8601), subject and trailer lines (`Key: value`). Read-only.
+    pub fn log_first_parent(&self, rev: &str, limit: usize) -> Result<Vec<FirstParentCommit>> {
+        let out = self.run_bytes(
+            [
+                "log".to_string(),
+                format!("-n{limit}"),
+                "--first-parent".into(),
+                "--format=%x01%H%x02%cI%x02%s%x02%(trailers:only,unfold)%x03".into(),
+                rev.to_string(),
+                "--".into(),
+            ],
+            None,
+            &[],
+        )?;
+        let text = String::from_utf8_lossy(&out);
+        let mut commits = Vec::new();
+        for chunk in text.split('\u{1}').filter(|c| !c.trim().is_empty()) {
+            let Some((head, _)) = chunk.split_once('\u{3}') else {
+                continue;
+            };
+            let mut fields = head.splitn(4, '\u{2}');
+            let hash = fields.next().unwrap_or_default().trim().to_string();
+            let committed_at = fields.next().unwrap_or_default().to_string();
+            let subject = fields.next().unwrap_or_default().to_string();
+            let trailers = fields
+                .next()
+                .unwrap_or_default()
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect();
+            commits.push(FirstParentCommit {
+                hash,
+                committed_at,
+                subject,
+                trailers,
+            });
+        }
+        Ok(commits)
+    }
+
     /// The paths a commit adds relative to its first parent (or to the empty tree for a root commit).
     pub fn added_paths(&self, commit: &str) -> Result<Vec<String>> {
         let base = match self.parents(commit)?.first() {
@@ -944,6 +987,17 @@ pub struct HistoryCommit {
     pub date: String,
     pub subject: String,
     pub paths: Vec<String>,
+}
+
+/// One commit of [`Git::log_first_parent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstParentCommit {
+    pub hash: String,
+    /// Committer time, strict ISO 8601.
+    pub committed_at: String,
+    pub subject: String,
+    /// Trailer lines as `Key: value`, in message order.
+    pub trailers: Vec<String>,
 }
 
 /// Parses the output of `git log -z --name-only` with the format used by [`Git::log_history`].
@@ -1101,6 +1155,35 @@ mod tests {
         assert_eq!(log[1].subject, "init");
         assert_eq!(log[1].paths, ["a.txt", "d/b.txt"]);
         assert_eq!(git.log_history("HEAD", 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn log_first_parent_reads_hash_time_subject_and_trailers_newest_first() {
+        let (dir, git) = repo_with(&[("a.txt", "1")]);
+        write_files(dir.path(), &[("a.txt", "2")]);
+        git.run([
+            "commit",
+            "-q",
+            "-a",
+            "-m",
+            "second | odd",
+            "-m",
+            "Body text.\n\nAthena-Job: 20261010-153012-k7q2\nSigned-off-by: Someone",
+        ])
+        .unwrap();
+        let head = git.head().unwrap().unwrap();
+        let log = git.log_first_parent("HEAD", 10).unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].hash, head);
+        assert_eq!(log[0].subject, "second | odd");
+        assert_eq!(
+            log[0].trailers,
+            ["Athena-Job: 20261010-153012-k7q2", "Signed-off-by: Someone"]
+        );
+        assert!(log[0].committed_at.contains('T'), "{}", log[0].committed_at);
+        assert_eq!(log[1].subject, "init");
+        assert!(log[1].trailers.is_empty());
+        assert_eq!(git.log_first_parent("HEAD", 1).unwrap().len(), 1);
     }
 
     #[test]

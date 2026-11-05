@@ -3396,6 +3396,149 @@ pub(crate) mod planning_cost_tests {
         assert!((landed[0].stages.landing_and_rebuild - 0.1).abs() < 1e-6);
     }
 
+    /// A scratch repository holding `records` at their canonical paths, `tree_landings` under `landings/`,
+    /// and `branch_landings` on the local records branch only, as landings are written after a merge.
+    fn scratch_repo(
+        records: &[AnyRecord],
+        tree_landings: &[athena_data::history::Landing],
+        branch_landings: &[athena_data::history::Landing],
+    ) -> (tempfile::TempDir, athena_git::Git) {
+        use athena_data::history::HistoryRecord;
+        let dir = tempfile::tempdir().unwrap();
+        let git = athena_git::Git::isolated(dir.path());
+        git.run(["init", "-q", "-b", "main"]).unwrap();
+        let put = |path: &str, text: &str| {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        };
+        for record in records {
+            put(&record.canonical_path(), &record.to_json());
+        }
+        let landing_json = |l: &athena_data::history::Landing| {
+            serde_json::to_string(&HistoryRecord::Landing(l.clone())).unwrap()
+        };
+        for l in tree_landings {
+            put(&format!("landings/{}.json", l.id), &landing_json(l));
+        }
+        put("README.md", "scratch\n");
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "Records\n\nAthena-Job: bootstrap"])
+            .unwrap();
+        let writer = athena_git::records_branch::RecordsWriter::new(&git);
+        for l in branch_landings {
+            writer
+                .append(
+                    "landing",
+                    &[athena_git::records_branch::Change::put(
+                        format!("landings/{}.json", l.id),
+                        landing_json(l),
+                    )],
+                )
+                .unwrap();
+        }
+        (dir, git)
+    }
+
+    #[test]
+    fn the_snapshot_gives_the_same_throughput_section_as_the_main_checkout() {
+        let landed = OutcomeState::Landed;
+        let jobs = [
+            ("20261029-100000-mnd1", "2026-10-29T10:00:00Z", landed),
+            ("20261029-120000-mnd2", "2026-10-29T12:00:00Z", landed),
+            ("20261029-140000-mnd3", "2026-10-29T14:00:00Z", landed),
+            (
+                "20261029-160000-mnd4",
+                "2026-10-29T16:00:00Z",
+                OutcomeState::Failed,
+            ),
+        ];
+        let mut records = Vec::new();
+        for (job, start, state) in jobs {
+            records.extend(timed_job(
+                job,
+                t(start),
+                minutes(1.0, 0.0, 10.0, 2.0, 5.0, 0.1),
+                state,
+            ));
+        }
+        // Two landing records are in the tree and the third is on the records branch only: the snapshot
+        // must hold all three, the same two sources the checkout is read from.
+        // A job landing names the verification it rests on, or the record is not acceptable.
+        let landing = |job: &str, at: &str| {
+            let mut l = landing_of(job, t(at));
+            l.commits[0].verification = Some(athena_data::RecordId::generate(t(at)));
+            l
+        };
+        let tree = [
+            landing(jobs[0].0, "2026-10-29T10:23:00Z"),
+            landing(jobs[1].0, "2026-10-29T12:25:00Z"),
+        ];
+        let branch = [landing(jobs[2].0, "2026-10-29T14:27:00Z")];
+        let (_dir, git) = scratch_repo(&records, &tree, &branch);
+
+        let from_checkout = Records::load(&git, "HEAD").unwrap();
+        let expected = Throughput::compute(&from_checkout)
+            .expect("jobs landed")
+            .text();
+        assert!(
+            expected.contains("landing record (landings/) found for each"),
+            "the fixture's landing records must be read: {expected}"
+        );
+        assert_eq!(from_checkout.landings.len(), 3);
+
+        let out = tempfile::tempdir().unwrap();
+        let dest = out.path().join("evidence");
+        crate::snapshot::write(&git, "HEAD", &dest).unwrap();
+        struct Unlock(std::path::PathBuf);
+        impl Drop for Unlock {
+            fn drop(&mut self) {
+                let _ = crate::snapshot::unlock(&self.0);
+            }
+        }
+        let _guard = Unlock(dest.clone());
+        let view = crate::snapshot::status(&dest).unwrap();
+        let from_snapshot = view.throughput.expect("jobs landed in the snapshot").text();
+        assert_eq!(from_snapshot, expected);
+        assert_eq!(view.landing_records, 3);
+        assert_eq!(view.jobs_by_state.get("landed"), Some(&3));
+        assert_eq!(view.jobs_by_state.get("failed"), Some(&1));
+        assert!(
+            view.invalid_records.is_empty(),
+            "{:?}",
+            view.invalid_records
+        );
+        assert_eq!(view.history.commits, 1);
+        // The same records, assembled from the directory and from git.
+        let from_dir = Records::load_dir(&dest).unwrap();
+        assert_eq!(from_dir.jobs.len(), from_checkout.jobs.len());
+        assert_eq!(
+            from_dir.landings.iter().map(|l| &l.id).collect::<Vec<_>>(),
+            from_checkout
+                .landings
+                .iter()
+                .map(|l| &l.id)
+                .collect::<Vec<_>>()
+        );
+
+        // A snapshot without its landing records reads differently, so the equality above is not vacuous.
+        let bare = tempfile::tempdir().unwrap();
+        let bare_dest = bare.path().join("evidence");
+        let (_other, plain) = scratch_repo(&records, &[], &[]);
+        crate::snapshot::write(&plain, "HEAD", &bare_dest).unwrap();
+        let _bare_guard = Unlock(bare_dest.clone());
+        let without = crate::snapshot::status(&bare_dest)
+            .unwrap()
+            .throughput
+            .unwrap()
+            .text();
+        assert_ne!(without, expected);
+        assert!(
+            without.contains("no landing record (landings/) found"),
+            "{without}"
+        );
+    }
+
     #[test]
     fn a_landed_job_with_no_landing_record_reports_the_outcome_time_and_says_so() {
         let records = landed_job_records();

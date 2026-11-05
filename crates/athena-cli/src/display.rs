@@ -990,6 +990,63 @@ fn dormant_causes_section(causes: &[athena_core::hestia::DormantCause]) -> Strin
     out
 }
 
+/// `athena status --snapshot <dir>`: the evidence snapshot's base, history, job counts and throughput. The
+/// throughput block is the one `athena status` prints, from the same text function.
+pub fn snapshot_status(v: &athena_core::snapshot::SnapshotView) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "snapshot    {}", v.dir);
+    let _ = writeln!(out, "base        {}", &v.base[..v.base.len().min(12)]);
+    let commit = |c: &athena_core::snapshot::HistoryEntry| {
+        format!(
+            "{} {} {}",
+            &c.hash[..c.hash.len().min(12)],
+            c.committed_at,
+            c.subject
+        )
+    };
+    match (&v.history.newest, &v.history.oldest) {
+        (Some(newest), Some(oldest)) => {
+            let _ = writeln!(
+                out,
+                "history     {} first-parent commit(s)\n            newest {}\n            oldest {}",
+                v.history.commits,
+                commit(newest),
+                commit(oldest)
+            );
+        }
+        _ => {
+            let _ = writeln!(out, "history     no commits");
+        }
+    }
+    let jobs: Vec<String> = v
+        .jobs_by_state
+        .iter()
+        .map(|(state, n)| format!("{n} {state}"))
+        .collect();
+    let _ = writeln!(
+        out,
+        "jobs        {}",
+        if jobs.is_empty() {
+            "none".to_string()
+        } else {
+            jobs.join(" · ")
+        }
+    );
+    let _ = writeln!(out, "landings    {} landing record(s)", v.landing_records);
+    if !v.invalid_records.is_empty() {
+        let _ = writeln!(
+            out,
+            "invalid     {} file(s) under records/ are not acceptable records: {}",
+            v.invalid_records.len(),
+            v.invalid_records.join(", ")
+        );
+    }
+    if let Some(throughput) = &v.throughput {
+        let _ = writeln!(out, "{}", throughput.text());
+    }
+    out
+}
+
 /// `athena status`.
 pub fn status(v: &StatusView) -> String {
     let mut out = String::new();

@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A read-only evidence snapshot, written at dispatch, and `athena status --snapshot <dir>`. The producer's
+  working copy has no `records/` or history by design, so a check of real records (how many jobs landed, what
+  an earlier job's records say) had nothing to read. Dispatch now copies `records/`, `landings/` (the tree's
+  and the records branch's) and `history.json` (the base commit and the newest 200 first-parent commits: hash,
+  commit time, subject, trailers) to `<state>/jobs/<id>/evidence`, outside the working copy, and locks it
+  read-only against every user including root, failing the dispatch if the lock does not hold. The producer and
+  verifier briefs name the path and say real-records checks use it (stored briefs carry a `<state>`
+  placeholder, so no machine path is committed); the agents' tool policy lets those two roles read it and never
+  write it, and the host is given it with `--add-dir`. `athena status --snapshot <dir>` prints the job counts,
+  a history summary and the unchanged throughput section from such a directory, with no repository or
+  `records/` in the current directory (`--json` too); it conflicts with a job argument.
 - The throughput review now flags a slowdown even while a design request is open. Every review that runs
   compares the latest median minutes per landed job with the previous review's and names the stages whose
   median minutes grew, largest first, in the record's note and in the drain line. When the median grew by more

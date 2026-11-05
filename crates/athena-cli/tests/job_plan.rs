@@ -261,9 +261,18 @@ fn a_send_back_keeps_the_plan_section_and_its_hash_matches_the_plan_record() {
         .show_file("HEAD", &format!("{}/brief-producer.md", proposal.job.dir()))
         .unwrap()
         .unwrap();
+    // The committed brief names the evidence snapshot with a placeholder; the prompt names the real path.
+    let brief = String::from_utf8(brief).unwrap();
+    let id = proposal.job.as_str();
+    let placeholder = format!("<state>/jobs/{id}/evidence");
+    assert!(brief.contains(&placeholder), "{brief}");
+    let real = fx.state.path().join("repo/jobs").join(id).join("evidence");
     assert_eq!(
         prompts[0],
-        format!("{}\n\n{section}", String::from_utf8(brief).unwrap()),
+        format!(
+            "{}\n\n{section}",
+            brief.replace(&placeholder, real.to_str().unwrap())
+        ),
         "the committed brief and the plan record rebuild the prompt"
     );
 }

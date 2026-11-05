@@ -46,6 +46,9 @@ pub struct HookSpec {
     pub athena_bin: PathBuf,
     /// The policy file the hook evaluates against ([`policy::Policy`] as JSON).
     pub policy_file: PathBuf,
+    /// Directories outside the working directory that the agent may read (`--add-dir`): the job's evidence
+    /// snapshot. The policy file allows reads there and no writes.
+    pub read_dirs: Vec<PathBuf>,
 }
 
 /// Everything needed to run one agent once.
