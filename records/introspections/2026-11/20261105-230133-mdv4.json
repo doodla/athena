@@ -1,0 +1,30 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261105-230133-mdv4",
+  "at": "2026-11-05T23:01:33.079387261Z",
+  "trigger": "rejection",
+  "job": "20261105-180320-62j6",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "rejected",
+  "what_happened": "The job was to record peak memory and cores for cold builds and show them in status. The verifier rejected it at the final verdict, with two major findings and no blocker. No failed checks and no unmet criteria are listed. (1) When sccache is installed, the compiler runs outside the measured process tree, so the memory and cores figures leave out the compiler (crates/athena-core/src/disk.rs:830-892, CargoBuild::build). (2) The \"peak memory\" figure is the largest single process, not the build's total peak, so it understates what section 7 needs (crates/athena-agent/src/procs.rs wait_with_usage; crates/athena-core/src/status.rs build_measurement_line).",
+  "failure_class": "20261105-230145-m8c2",
+  "new_class": true,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "The request named a measure (\"peak memory\", \"cores\") without defining it as a quantity: the total across all processes in the build, including compiler processes spawned by wrappers such as sccache. The producer picked the easiest thing to read, the largest single process from the child it waits on. Athena's checks run once on the final tree and only show that a number is recorded and displayed. Nothing compares the figure with a known-load build, such as a parallel build whose total is known to exceed any single process, or a build run under sccache. The consumer's need (section 7) was not tied to the measure's definition, so only the verifier's reading of the code found the gap.",
+  "prevention_kind": "design-change",
+  "prevention": "For any job that adds a measurement, the reading must state the measured quantity precisely: scope (whole build tree, including wrapper-spawned compilers), aggregation (sum of concurrent processes at the peak, not a per-process maximum) and the consumer that needs it. Add a required behavior criterion with a demonstration: run a fake build that starts several concurrent child processes, one of them via a wrapper that detaches, with known memory and core use. The test must show the recorded peak is at least the known total and the cores equal the known concurrency. A measurement that cannot meet this test fails before the final verdict.",
+  "proposed_request": "Fix the cold-build resource measurement so it reports the whole build's peak memory and cores. Outcome: the peak memory recorded for a cold build is the highest total memory used at the same moment by all processes in the build, not the largest single process. Cores is the highest number of build processes running at the same moment. Both include compiler processes started through sccache when it is installed, and they appear in the status line as before. Acceptance: (1) a test with a fake build that runs several concurrent child processes, one started through a wrapper that detaches from the parent, with known memory and concurrency, shows the recorded peak memory is at least the known total of the concurrent processes and the cores equals the known concurrency; (2) the same test fails if the figure is reduced to the largest single process or the wrapper's processes are left out, and the recorded check output shows it; (3) status shows the new figures and labels them as build totals; (4) records still validate and existing tests pass; (5) the CHANGELOG entry states only what the diff does. Keep the change to the build measurement code, the status line and their tests.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.10786,
+    "input_tokens": 2,
+    "output_tokens": 1338
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}
