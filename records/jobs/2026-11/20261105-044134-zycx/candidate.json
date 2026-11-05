@@ -1,0 +1,115 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261105-044134-zycx",
+  "base_commit": "ddfa8aab9b2a23008797abc85720e8d383dda03c",
+  "base_fingerprint": "sha256:038d22dedd7f4e44c9ec5d6f78667c353b77875f8c85a2f8761ab78da2e182f4",
+  "previous_job": "20261105-061014-gjpt",
+  "candidate_commit": "cae416f38b872a1e7dc692b97092bf2036c9d7f3",
+  "candidate_tree": "7c71b967dbc65b66272abb2740df2d17fdce0617",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 324514
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 31310
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 182479
+    }
+  ],
+  "fingerprint": "sha256:c6330afbd36a2f1e8f576393c23e6970419abe4a5a1f51b2a2ce3c415f768bcc",
+  "violations": [],
+  "producer_report": {
+    "summary": "The baseline lookup now waits for main's run when it is still in progress. Right after a landing, main's run for the base's content is usually still going. The old lookup made one read, found it unfinished, and fell back to a 20-minute local run. In `run/checks.rs`, `green_run` takes a `wait_s` argument. The main-tip lookup passes `ctx.jc.config.budget.ci_wait_s`, and the landed-candidate lookup passes 0, so it stays one read. A new `WaitsWhileRunning` source replaces `RunsOnly`. It reports an absent run as an error until a read has shown the run in progress, so a run that never appeared is not waited for, because the read loop treats an error as \"no result\". Reads, 20 s pauses and the bound come from `with_ci_source_on`, `Paced`, `routing::ci_polls` and `CI_POLL`. No new limit, key or config was added. The doc comments on `take_baseline`, `reused_baseline` and `green_run` no longer say \"no wait\". In `run/tests.rs`, `CiReplies` gained `in_progress_first(n)`, which answers in-progress for the first n reads of the matching run. A `current` cell keeps the jobs listing in step with the run reply. There are four new tests. They drive the real `go` path and fake only `gh` and the sleeper. `CHANGELOG.md` has an entry under [Unreleased] / Changed. I did not run the full suite or the new tests against the pre-change source.",
+    "files": [
+      "crates/athena-core/src/run/checks.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core baseline",
+        "result": "pass",
+        "note": "16 passed, including the four new tests and the five existing baseline tests."
+      },
+      {
+        "command": "cargo test -p athena-core ci_reuse",
+        "result": "pass",
+        "note": "7 passed (the candidate's own wait is unchanged), plus the refusal-corpus case."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Run after `cargo fmt --all` had reformatted tests.rs."
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed. The boundary word scan is clean."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A new test in crates/athena-core/src/run/tests.rs has main's run for the base's content return in-progress on the first reads and then green. It asserts reused_from is Some(CI_RUN_ADDRESS), baseline_ran is false, more than one read of main happened, and the recorded sleeps are 20 s each. Run: cargo test -p athena-core baseline.",
+        "status": "met",
+        "evidence": "`baseline_waits_for_mains_in_progress_run_then_reuses_it` passes under `cargo test -p athena-core baseline`. It uses `in_progress_first(2)` then Green. It asserts reused_from == Some(CI_RUN_ADDRESS), baseline_ran false and 3 reads of main. It also asserts the sleeps equal 20 s × (2 + 75), where 75 are the candidate's own pauses, and that the 'baseline reused from' line is printed."
+      },
+      {
+        "criterion": "A new test has main's run for the base's content in progress and then failing (red). It asserts baseline_ran is true, reused_from is None, and the 'ci         baseline runs locally' line is printed. Run: cargo test -p athena-core baseline.",
+        "status": "met",
+        "evidence": "`baseline_runs_locally_when_mains_in_progress_run_fails` passes. It asserts baseline_ran true, reused_from None and no reused checks. It asserts exactly 2 reads of main (the wait stopped at the red result) and one baseline line that starts 'ci         baseline runs locally: ' and contains CI_RUN_ADDRESS."
+      },
+      {
+        "criterion": "A new test has main's run still in progress when the ci_wait_s bound is exhausted. It asserts the number of reads equals ci_polls(ci_wait_s) and the baseline runs locally. Run: cargo test -p athena-core baseline.",
+        "status": "met",
+        "evidence": "`baseline_runs_locally_when_mains_run_stays_in_progress_to_the_bound` passes. It asserts reads of main == `crate::routing::ci_polls(1500)` (76), baseline_ran true, reused_from None, and a 'no usable CI result for <tip> on main' reason. A companion test, `baseline_does_not_wait_for_a_missing_main_run`, asserts 1 read for a run that is not there."
+      },
+      {
+        "criterion": "All existing baseline tests still pass unchanged: baseline_reused_from_the_landed_candidates_run_runs_nothing_locally, baseline_reused_from_the_default_branch_run_runs_nothing_locally, baseline_reused_from_a_squash_on_main_with_the_bases_fingerprint, baseline_runs_locally_when_main_tip_has_other_governed_content and baseline_runs_locally_when_no_green_ci_result_exists. Run: cargo test -p athena-core.",
+        "status": "met",
+        "evidence": "All five appear as ok in the `cargo test -p athena-core baseline` run, with their code untouched. The `ci_reuse_*` tests also pass. The full `cargo test -p athena-core` was not run; the full suite is left to Athena."
+      },
+      {
+        "criterion": "cargo clippy --all-targets and cargo fmt --check are clean.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`, and both exited clean."
+      },
+      {
+        "criterion": "The doc comments on reused_baseline and green_run in crates/athena-core/src/run/checks.rs no longer say 'no wait'. They state that main's in-progress run is waited for, reading every 20 s up to ci_wait_s.",
+        "status": "met",
+        "evidence": "I rewrote both comments (and added a sentence to `take_baseline`). They say the run is read every `routing::CI_POLL` (20 s) up to `ci_wait_s`, and that a missing, failed, cancelled or timed-out run is not waited for. A grep for 'no wait' in checks.rs finds nothing from the comments I rewrote."
+      },
+      {
+        "criterion": "The diff touches no governance file (athena.toml, defaults.toml, workflows), and reuses ci_wait_s and routing::CI_POLL without adding a new limit.",
+        "status": "met",
+        "evidence": "Only checks.rs, tests.rs and CHANGELOG.md changed. The code reads `ctx.jc.config.budget.ci_wait_s` and passes it to `with_ci_source_on`. It adds no constant, config key or Duration."
+      }
+    ],
+    "open_issues": [
+      "The module doc of crates/athena-core/src/ci_result.rs (lines 14-16) still says the baseline lookup is 'one read and no wait', and the routing.rs comments may say the same. They are out of scope for this job. The CHANGELOG entry names them so a later job can correct them.",
+      "I did not run the new tests against the pre-change source. The plan's reasoning is that, without the wait, each would see one read and fall back locally."
+    ],
+    "mistakes": [],
+    "learnings": [
+      "`Paced` sleeps before every read after its first, and `with_ci_source_on` builds a new `Paced` per call. So each lookup restarts its pacing, and a Missing candidate run in tests adds 75 pauses of 20 s after the baseline's.",
+      "`read_ci` treats a fetch `Err` as Missing and stops, but treats `Ok(None)` and unfinished as 'keep polling to the bound'. That is the lever used to avoid waiting on an absent run.",
+      "`CiReplies` gets run and jobs answers from separate requests, so a mode that changes the reply per read must record the current reply for the jobs listing.",
+      "Bash in this role cannot pipe to `tail`; run cargo commands bare."
+    ],
+    "desires": []
+  }
+}
