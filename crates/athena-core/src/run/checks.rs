@@ -202,6 +202,119 @@ impl SnapExec<'_> {
     }
 }
 
+/// A build slot held for the length of one verifier run, with the verifier's build path linked to the slot's
+/// warm target directory (`docs/design/verifier-stage-slowdown.md`).
+pub(super) struct VerifierBuild {
+    /// Held until this value is dropped: the slot is the guard that frees it.
+    slot: crate::slots::Slot,
+    /// Dropped before the workspace crates' output is cleaned out of the slot's directory.
+    link: athena_agent::env::BuildLink,
+}
+
+impl Athena {
+    /// Takes a build slot and links the verifier's build path (`CARGO_TARGET_DIR` for [`Side::Verify`]) to the
+    /// slot's warm target directory, so the cargo commands the verifier runs start on compiled third-party
+    /// crates and not on an empty directory. The checks leave the path empty: their link goes with each
+    /// command. Any problem (no build path in the environment, a slot wait past the bound, a directory that
+    /// cannot be made or linked) is a warning line and the verifier builds cold, as before; it never holds or
+    /// fails the job.
+    pub(super) fn link_verifier_build(
+        &self,
+        ctx: &RunContext<'_>,
+        job_dir: &std::path::Path,
+        snapshot_dir: &std::path::Path,
+        capability_env: &std::collections::BTreeMap<String, String>,
+    ) -> Option<VerifierBuild> {
+        let jc = ctx.jc;
+        let env = athena_agent::env::build(
+            &EnvSpec {
+                agents: &jc.config.agents,
+                job: ctx.id().as_str(),
+                job_dir,
+                snapshot: snapshot_dir,
+                side: Side::Verify,
+                capability_env,
+            },
+            |key| std::env::var(key).ok(),
+        )
+        .ok()?;
+        let path = env.get("CARGO_TARGET_DIR")?;
+        let warn = |what: &str, e: &dyn std::fmt::Display| {
+            ctx.ui
+                .line(&format!("warning: the verifier builds cold, {what}: {e}"));
+        };
+        let pipeline = jc.config.pipeline();
+        if let Err(e) = self
+            .state
+            .ensure_slot_targets(pipeline.max_check_slots as usize)
+        {
+            warn("the slot directories could not be made", &format!("{e:#}"));
+            return None;
+        }
+        let slots = crate::slots::SlotQueue::from_config(&self.state, &pipeline);
+        let slot = match slots.acquire(crate::slots::Class::Check, &|| self.refuse_if_stopped()) {
+            Ok(slot) => slot,
+            Err(e) => {
+                warn("no build slot", &format!("{e:#}"));
+                return None;
+            }
+        };
+        let limit = slot_limit_bytes(pipeline.slot_max_gb);
+        let prepared = match self.state.prepare_slot_target(slot.index(), limit) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                warn("the slot has no usable directory", &format!("{e:#}"));
+                return None;
+            }
+        };
+        if let Some(bytes) = prepared.deleted_bytes {
+            ctx.ui.line(&format!(
+                "disk       build slot {} target directory held {}, over its {} GB limit: deleted, the next build is cold",
+                slot.index(),
+                crate::state::format_bytes(bytes),
+                pipeline.slot_max_gb
+            ));
+        }
+        match athena_agent::env::BuildLink::create(
+            job_dir,
+            std::path::Path::new(path),
+            &prepared.dir,
+        ) {
+            Ok(link) => Some(VerifierBuild { slot, link }),
+            Err(e) => {
+                warn("the slot could not be linked", &e);
+                None
+            }
+        }
+    }
+
+    /// Unlinks the verifier's build path, drops the workspace crates' output from the slot's directory (the
+    /// third-party output stays warm for the next job) and frees the slot. When cleaning fails the slot's
+    /// directory is deleted whole, as after a check.
+    pub(super) fn release_verifier_build(
+        &self,
+        build: VerifierBuild,
+        snapshot_dir: &std::path::Path,
+        ui: &dyn Ui,
+    ) {
+        let VerifierBuild { slot, link } = build;
+        drop(link);
+        let target = self.state.slot_target(slot.index());
+        if let Err(e) = crate::slots::clean_workspace_output(snapshot_dir, &target) {
+            ui.line(&format!(
+                "warning: could not clean build slot {}, so its target directory is deleted: {e:#}",
+                slot.index()
+            ));
+            if let Err(e) = self.state.reset_slot_target(slot.index()) {
+                ui.line(&format!(
+                    "warning: could not delete build slot {}'s target directory: {e:#}",
+                    slot.index()
+                ));
+            }
+        }
+    }
+}
+
 /// How many commits of records only the baseline lookup steps over to find the commit the host has.
 const MAX_RECORDS_ONLY_COMMITS: usize = 20;
 
