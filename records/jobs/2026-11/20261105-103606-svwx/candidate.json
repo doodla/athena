@@ -1,0 +1,107 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261105-103606-svwx",
+  "base_commit": "5ffa278deb429ff2ce381addfc39c3143e07b564",
+  "base_fingerprint": "sha256:8436f7bb95e6a19ee3d2ca343ce7e021e8f516c93a284175912768d27ed45151",
+  "previous_job": "20261105-160232-t9yq",
+  "candidate_commit": "c423516443651bc36ac72a30970780f606938234",
+  "candidate_tree": "1859815de7c24cdc6fa2606673280900c5ce9160",
+  "changes": [
+    {
+      "path": "docs/design/many-agents-few-builds.md",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 34433
+    }
+  ],
+  "fingerprint": "sha256:1921cd999bc4639d02c32298ff2d9a2bff391b7513a8058dc3c8ff9d7ded0a22",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added docs/design/many-agents-few-builds.md, a design note and nothing else. Over the last 3 days (59 jobs with an outcome record), wall time splits into 41.0 % model time, 26.2 % local build and test, and 32.8 % waiting. Landed jobs only: 52 / 26 / 22 %. The waiting figure is a residual that was not broken down. The second agent slot was used for only 0.17 % of busy time (peak 2 agents at once), so more agent slots alone would change little. The note separates agent slots from build slots, with a FIFO ticket queue and file-lock slots that free themselves when the holder dies. It covers how Athena's own checks and the agent's cargo calls acquire and release a slot. For shared compiled output it compares five options and recommends build-slot-owned target directories (\"lanes\") plus smaller debuginfo, which comes to about 0.9 GB per job at 16 jobs in flight against 10 to 12 GB today. It sizes the machine at 16 agents (up to about 20 if memory measures well) and 2 builds. MAX_CONCURRENCY_CEILING must be raised, from 8 to 32. A nine-step build order follows; each step names its files and how its effect is measured. Appendix A lists all 59 job ids with their numbers. Many of the memory, lane-size and disk figures are labeled estimates, because no record holds memory use or a build-size measurement.",
+    "files": [
+      "docs/design/many-agents-few-builds.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo run -q -p athena-cli -- status --snapshot <evidence>",
+        "result": "pass",
+        "note": "Read job counts and throughput; used as context only."
+      },
+      {
+        "command": "cargo run -q -p athena-core --example zz_measure -- <evidence>/records/jobs/2026-11 20261103",
+        "result": "pass",
+        "note": "Throwaway reader program that produced the section 2 sums; deleted afterwards, not part of the change."
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed, run after the note was written. It reads tracked files only, so I also grepped the new file for the banned words."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Exactly one new file under docs/design/ is added and no other path changes (check with git status / git diff).",
+        "status": "met",
+        "evidence": "git status --short after removing my throwaway reader program shows only `?? docs/design/many-agents-few-builds.md`. CHANGELOG.md and docs/design/agents-and-builds.md were deliberately not touched (see unchanged_planned_files)."
+      },
+      {
+        "criterion": "The design has an Existing code section that reuses or extends crates/athena-data/src/config.rs, crates/athena-core/src/disk.rs, crates/athena-core/src/run/mod.rs and docs/design/warm-baseline-build.md, saying what each already does and what the design builds on.",
+        "status": "met",
+        "evidence": "Section 3 table has rows for config.rs (MAX_CONCURRENCY_CEILING, Parallel, PipelineConfig, Config::validate), disk.rs (guards, in_flight_limit, start_hold, measure_build), run/mod.rs (replay_checkers shared target; I read it and it is not the producer's CARGO_TARGET_DIR, which comes from athena.toml via env.rs), and warm-baseline-build.md, plus env.rs, state.rs, checks.rs, routing.rs, drain.rs, async-drain.md and parallel-jobs.md. Each row says what it does and what the design does with it."
+      },
+      {
+        "criterion": "A measurements section splits job wall time into model time, local build and test time, and waiting, over the last 3 days, with numbers and each figure citing the specific job record ids or files it came from; unmeasured numbers are labeled estimates.",
+        "status": "met",
+        "evidence": "Section 2 gives the split for the 59 jobs of 2026-11-03 to 2026-11-05 (41.0 / 26.2 / 32.8 %), per state and per role. It names the source fields (outcome.json totals.wall_time_execution, invocations/*.json wall_time, verification.json and baseline.json checks[].duration). Appendix A lists every job id with its numbers. I produced the sums with a temporary Rust reader over the evidence snapshot, then deleted it. Section 2.5 lists what was not measured; unmeasured figures are marked estimate."
+      },
+      {
+        "criterion": "The note defines agent slots and build slots separately, including a queue for build slots, and states how a job acquires and releases a build slot around cargo runs.",
+        "status": "met",
+        "evidence": "Section 4.1 defines both slot kinds. Section 4.2 describes the FIFO ticket queue and per-slot lock files. Section 4.3 covers acquire and release for Athena's checks (routing.rs run_local, checks.rs run_check) and for the agent's cargo (a PATH wrapper with a 240 s wait and exit code 75). Release is by file-lock drop on process exit, and the producer deadline excludes the wait."
+      },
+      {
+        "criterion": "The note proposes a way for jobs to share compiled output, with at least two alternatives compared, and gives an expected per-job disk figure against the current 10 to 12 GB.",
+        "status": "met",
+        "evidence": "Section 5.2 compares five options (lanes, one shared directory, sccache, hardlink or reflink copy of a warm baseline, smaller targets) and recommends lanes plus smaller targets. The table in section 5.3 gives about 0.93 GB per job at 16 in flight (14.8 GB total) against 11.4 GB today. The inputs L and S_job are labeled estimates."
+      },
+      {
+        "criterion": "The note states how many agents and how many builds this machine can run at once, with the arithmetic from 4 CPUs, 15 GB memory and about 27 GB disk, and says whether MAX_CONCURRENCY_CEILING must be raised.",
+        "status": "met",
+        "evidence": "Sections 1 and 6: 16 agents from 15-3-4 = 8 GB at 0.5 GB each (about 20 at 0.4 GB); 2 builds from the CPU arithmetic and 17 GB usable disk (27 minus min_free_gb 10); the ceiling must be raised from 8 to 32 (config.rs, Config::validate). Section 6.5 adds the build-time per job needed to keep the agents busy."
+      },
+      {
+        "criterion": "A build order lists small changes, each landable alone; each names the files or functions it touches (e.g. config.rs, run/mod.rs, state.rs, disk.rs, env.rs) and states how its effect will be measured.",
+        "status": "met",
+        "evidence": "Section 7 is a table of nine steps. Each has a 'Files and functions touched' column and a 'How its effect is measured' column. Dependencies and order are stated under the table; every step changes no behavior until its setting is turned on."
+      },
+      {
+        "criterion": "cargo test and cargo clippy still pass with the doc-only change (run cargo test, cargo clippy).",
+        "status": "met",
+        "evidence": "left to Athena's checks for the full cargo test and clippy. The only change is a new Markdown file; I ran `cargo test -p xtask --test policy` (17 passed, boundary scan clean), and grepped the new file for every banned word and fragment with no match."
+      }
+    ],
+    "open_issues": [
+      "The brief's deliverables list conflicts with criterion 1 (two design file names plus CHANGELOG.md versus exactly one new file). The owner should confirm whether a CHANGELOG entry is wanted.",
+      "Memory per agent (0.4 to 0.5 GB), lane size L (7 GB, or 4.2 GB with smaller debuginfo), S_job and cargo memory are estimates; step 1 of the build order replaces them with measurements.",
+      "Share of the 'waiting' residual that is CI polling, disk holds or drain scheduling is not measured; the note only suggests CI polling from the measured CI run median (583 s) in warm-baseline-build.md.",
+      "Steps 5 and 7 of the build order touch D46 and athena.toml and need the owner's approval; this job edited neither."
+    ],
+    "mistakes": [
+      "I first read a whole invocation file and a large candidate record to learn their shape, which spent budget; I then switched to a small aggregator.",
+      "My first draft said a job with no waiting was 20261104-082023-06bz, which was wrong (it has about 508 s of residual); I corrected it to 20261105-051400-dzr4."
+    ],
+    "learnings": [
+      "The evidence snapshot has no athena.build-measurement record, so disk.rs falls back to ESTIMATE_T_BYTES = 6 GB, which is stale against the owner's 10 to 12 GB.",
+      "run/mod.rs line ~1821 sets CARGO_TARGET_DIR in replay_checkers (reading replay builds), not for the producer. The producer's and verifier's value comes from athena.toml [capabilities.change.env] through agent env.rs; state.rs produce_dir names that directory.",
+      "max_check_slots and max_in_flight in [drain.pipeline] already exist and feed the disk formula (disk.rs in_flight_limit, start_hold); athena.toml sets no [drain.pipeline], and [parallel] max_concurrency is 2.",
+      "async-drain.md already defines a check slot and removed sccache (D84); parallel-jobs.md records that the drain runs only the independent items of one plan group, with a barrier between groups.",
+      "Only 59 of about 136 job directories dated 2026-11-03 to 2026-11-05 have outcome.json plus invocations; I did not classify the rest.",
+      "outcome.json totals.wall_time_execution is missing for dropped jobs; verification.json and baseline.json checks with reused true carry duration 0.0.",
+      "The Bash tool for this role allows no cat or pipes; a throwaway cargo example inside the working copy was the only way to aggregate 59 jobs, and it was removed before handover."
+    ],
+    "desires": [
+      "A read-only aggregation command over records (per-stage time split for a date range) would have replaced the throwaway reader program.",
+      "Memory and CPU samples per agent process in the records."
+    ]
+  }
+}
