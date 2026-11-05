@@ -1941,11 +1941,12 @@ pub const READING_RULES_HEADING: &str = "# Reading rules";
 
 /// Each rule a reading must pass, one short line each, with the check that enforces it. A reading that
 /// breaks one is refused and read again once, with the refusal as a correction.
-pub const READING_RULES: [&str; 6] = [
+pub const READING_RULES: [&str; 7] = [
     "Previous result: a retry or follow-up names each earlier job, says how its result is addressed, lists deliverables and out_of_scope, and lists or excludes the files it changed (`check_prior_result_and_scope`).",
     "Criteria evidence: each criterion rests on a command, Grep or file the verifier can check, never the producer's report (`check_criteria_evidence`).",
     "Governance files: list one as a deliverable and name it in a criterion when the request names it or a deliverable implies it, or name it in out_of_scope (`check_governance_coverage`).",
     "Code survey: a code or tests reading with a behavior criterion has a `Code survey:` assumption naming a crates/ path (`check_code_survey`).",
+    "Root cause: a bug-fix code or tests reading has a located root-cause criterion and a Behavior criterion for a named test that fails on the base tree (`check_root_cause_diagnosis`).",
     "Design: an `Existing code:` assumption names crates/ or docs/ paths the job does not create; a criterion needs an existing code section that reuses or extends them (`check_design_existing_code`).",
     "Valid reading: class, capability and producer model from the closed lists; a decline gives a reason; a capability needs a criterion; forecasts are valid (`build_reading`).",
 ];
@@ -1964,6 +1965,19 @@ When the request adds or tightens a refusal rule, also write a criterion that sa
 Say how many: write `expected N% of newly refused readings` (a whole percent). A replay of past readings holds the job when more than N plus 5 points \
 of them are newly refused, and when you give no number it holds the job above 10%. For N above 25, also write, in a criterion or in out_of_scope, \
 one sentence with `because`, `now asks` or `new required` that says why past readings should be refused; the verifier is shown it.";
+
+/// What the reader writes for a job that fixes wrong output (a bug fix, a page that shows the wrong items, a
+/// test that passes when it should fail). Printed after [`CODE_SURVEY_GUIDE`] in the reader brief.
+///
+/// Root cause this guidance removes: the reading described the wanted output but did not require a diagnosis
+/// of where the wrong items enter and why they are not excluded, nor a test that fails on the base tree, so
+/// jobs 20261103-201526-t4qv and 20261103-231808-3gkq moved a filter without finding the cause.
+/// `check_root_cause_diagnosis` in athena-core enforces the two criteria; that the test uses real data of both
+/// kinds is asked here and not checked.
+pub const ROOT_CAUSE_GUIDE: &str = "For a job that fixes wrong output (the request says fix or bug, or says the output still shows the wrong items), read the code and write two criteria in your own words, not copied from the request's bullets. \
+First, a root-cause criterion: it says `root cause`, names the file, function or data source where the wrong items enter, and says why they are not excluded there. \
+Second, a Behavior criterion that names a test (a backticked test name) built from real recorded data of both kinds, for example approved and rejected proposals as they are stored, and says it fails on the base tree and passes with the change. \
+A criterion that only describes the wanted output, or says `cargo test` passes, is refused.";
 
 /// The reader brief: the request, earlier readings and corrections, the reference forecast, the closed
 /// lists, the reading rules, what the verifier can run, and the repository's top level.
@@ -2122,7 +2136,7 @@ pub fn reader_brief(inputs: &ReaderInputs) -> String {
     for rule in READING_RULES {
         let _ = writeln!(out, "- {rule}");
     }
-    let _ = writeln!(out, "\n{CODE_SURVEY_GUIDE}\n");
+    let _ = writeln!(out, "\n{CODE_SURVEY_GUIDE}\n\n{ROOT_CAUSE_GUIDE}\n");
     if !inputs.verifier_can_run.is_empty() {
         let _ = writeln!(
             out,
@@ -3967,12 +3981,13 @@ mod tests {
             "check_criteria_evidence",
             "check_governance_coverage",
             "check_code_survey",
+            "check_root_cause_diagnosis",
             "check_design_existing_code",
             "build_reading",
         ] {
             assert!(section.contains(check), "no rule for {check}:\n{section}");
         }
-        assert_eq!(READING_RULES.len(), 6);
+        assert_eq!(READING_RULES.len(), 7);
         assert!(
             lines
                 .iter()
@@ -3980,8 +3995,38 @@ mod tests {
                     && l.contains("`check_design_existing_code`")),
             "no rule line names Existing code: and its check:\n{section}"
         );
-        // The section adds little to the brief: six rule lines and the code survey guide paragraph.
-        assert!(section.len() < 2400, "{} bytes", section.len());
+        // The section adds little to the brief: seven rule lines and the two guide paragraphs (code survey
+        // and root cause).
+        assert!(section.len() < 3300, "{} bytes", section.len());
+    }
+
+    #[test]
+    fn the_reader_brief_tells_the_reader_to_diagnose_a_bug_fix() {
+        let brief = reader_brief(&reader_inputs(&reading()));
+        let (_, section) = brief.split_once(READING_RULES_HEADING).unwrap();
+        let section = section.split("\n# ").next().unwrap();
+        assert!(section.contains(ROOT_CAUSE_GUIDE), "{section}");
+        // It follows the code survey guide.
+        assert!(
+            section.find(CODE_SURVEY_GUIDE).unwrap() < section.find(ROOT_CAUSE_GUIDE).unwrap(),
+            "{section}"
+        );
+        for phrase in [
+            "root-cause criterion",
+            "root cause",
+            "where the wrong items enter",
+            "why they are not excluded",
+            "in your own words",
+            "backticked",
+            "real recorded data",
+            "approved and rejected",
+            "fails on the base tree and passes with the change",
+        ] {
+            assert!(
+                ROOT_CAUSE_GUIDE.contains(phrase),
+                "the guide lacks {phrase:?}"
+            );
+        }
     }
 
     #[test]

@@ -64,6 +64,45 @@ pub fn installed_binary() -> PathBuf {
     athena_data::paths::athena_home().join("bin/athena")
 }
 
+/// Starts `binary` with `args` in `cwd` in the background and returns its pid. It has no input; its output is
+/// appended to `log`; it runs in its own process group (not its own session), so a signal sent to the caller's
+/// group does not reach it. Nothing waits for it to start: the caller checks that it did.
+pub fn spawn_detached(
+    binary: &Path,
+    args: &[String],
+    cwd: &Path,
+    log: &Path,
+) -> std::io::Result<u32> {
+    if let Some(dir) = log.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)?;
+    let err = out.try_clone()?;
+    let mut command = std::process::Command::new(binary);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(err);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    // Reap the child if it ends while this process is still running, so it is never left as a zombie that
+    // looks alive. When this process ends first, the child carries on on its own.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(pid)
+}
+
 /// The text `athena --version` shows after the name: the package version, the source commit, and a
 /// `dirty` marker when the build does not name a clean commit.
 pub fn version_string(build: &Build) -> String {

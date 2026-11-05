@@ -171,7 +171,7 @@ fn asks_for_fails_without_run(reading: &Reading) -> bool {
 }
 
 /// Whether `text` names a failing run without the fix; the wording rules are on [`asks_for_fails_without_run`].
-fn asks_for_failing_run_without_the_fix(text: &str) -> bool {
+pub(crate) fn asks_for_failing_run_without_the_fix(text: &str) -> bool {
     let lower = text.to_lowercase();
     let words: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric())

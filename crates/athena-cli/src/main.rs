@@ -280,6 +280,11 @@ request whose own words leave the plan incomplete is read first (within the budg
 reading. An item whose plan still lacks a goal, a rung or acceptance is not worked and is reported with the \
 reason. `athena plan` prints this plan without working anything.
 
+One drain runs per repository. It writes its pid file (`drain.pid` in the state directory) when it starts and \
+removes it when it ends, and a second `athena drain` while one is running is refused. It also refuses to start, \
+and dispatches nothing, when this build is older than the landed code (the message says to run ./setup.sh). To see, stop or restart a drain use `athena drain-status`, `athena drain-stop --wait` \
+and `athena drain-restart`, not `pkill` or `pgrep`.
+
 Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena itself erred.")]
     Drain {
         /// The most to spend on model calls in this run, in US dollars.
@@ -311,8 +316,55 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
     },
     /// Ask a running `athena drain` to stop at the next job boundary: the job in progress is finished (landed and
     /// rated as usual), no further job is started, and the drain reports `stop requested`. Nothing is killed;
-    /// to kill running work use `athena stop`.
-    DrainStop,
+    /// to kill running work use `athena stop`. With `--wait` it then waits until the drain has exited, found
+    /// through the pid file `athena drain` keeps in the state directory, so use it instead of `pkill`, `pgrep`
+    /// or a hand-written wait loop: those match command text, which their own command line contains.
+    DrainStop {
+        /// Wait until the drain has exited (it finishes its job first, which can take hours). Prints a progress
+        /// line every 30 seconds. Exit code 2 if `--timeout` ran out first.
+        #[arg(long)]
+        wait: bool,
+        /// With `--wait`, give up waiting after this many seconds; the stop stays asked for.
+        #[arg(long, value_name = "SECS", requires = "wait", value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: Option<u64>,
+    },
+    /// Say whether an `athena drain` is running, and as which build, from the pid file in the state directory and
+    /// nothing else: the process is checked by pid and start time, never by matching command text. Use it
+    /// instead of `pgrep`, `pkill` or `ps | grep`, whose pattern matches their own command line. Reports why
+    /// no drain counts as running (no pid file, a process that has exited, a pid another process now holds).
+    /// Exit code: 0 when a drain is running, 2 when none is.
+    DrainStatus {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restart the drain on a fresh build, in one command, instead of a hand-written `pkill`, wait and start:
+    /// rebuild and install Athena (`./setup.sh`; a failed build leaves the running drain alone and starts
+    /// nothing), ask the running drain to stop and wait for it to finish its job and exit, build again if a
+    /// landing meanwhile left the installed binary behind the checkout, then start the new drain and print the
+    /// build it runs. The old drain is found through the pid file, never by `pkill` or `pgrep`. The new drain
+    /// runs in the background, in its own process group, and logs to `drain.log` in the state directory. It
+    /// takes the same limits as `athena drain`; a stopped drain does not keep its remaining ones. A drain
+    /// started by a build from before the pid file existed cannot be seen: run `athena drain-stop` first and
+    /// let it finish. Exit code: 0 when the new drain is running, 2 when the old drain was still on its job
+    /// at `--timeout` (nothing new was started), 1 on an error.
+    DrainRestart {
+        /// The most to spend on model calls in this run, in US dollars.
+        #[arg(long, value_name = "USD", value_parser = parse_budget)]
+        budget: f64,
+        /// The audience rating, 1 to 5, at or above which the target is met.
+        #[arg(long, value_name = "N", default_value_t = drain::DEFAULT_TARGET_RATING, value_parser = clap::value_parser!(u8).range(1..=5))]
+        rating_threshold: u8,
+        /// The most jobs to start; a retry of an item is a job.
+        #[arg(long, value_name = "N", default_value_t = drain::DEFAULT_MAX_JOBS, value_parser = clap::value_parser!(u32).range(1..))]
+        job_limit: u32,
+        /// Give up waiting for the old drain to exit after this many seconds (by default there is no limit: a
+        /// job can run for hours). The stop stays asked for and no new drain is started.
+        #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: Option<u64>,
+        /// The new drain prints its report as JSON, as `athena drain --json` does.
+        #[arg(long)]
+        json: bool,
+    },
     /// Close a job that will not run or finish.
     Close {
         job: String,
@@ -601,6 +653,24 @@ fn open(writes: bool) -> Result<Athena> {
 fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+/// `athena drain-status --json`: whether a drain runs, which one, and why not when none does.
+fn drain_status_json(state: &drain::DrainState, stop_asked: bool) -> serde_json::Value {
+    match state {
+        drain::DrainState::Running(drain) => serde_json::json!({
+            "running": true,
+            "pid": drain.pid,
+            "build": drain.build,
+            "started_at": drain.at,
+            "stop_asked": stop_asked,
+        }),
+        drain::DrainState::NotRunning(why) => serde_json::json!({
+            "running": false,
+            "reason": why.reason(),
+            "stop_asked": stop_asked,
+        }),
+    }
 }
 
 fn proposal_json(p: &Proposal) -> serde_json::Value {
@@ -1186,30 +1256,40 @@ fn run(cli: Cli) -> Result<u8> {
             json,
         } => {
             let athena = open(true)?;
-            warn_if_stale(&athena);
-            // A stop asked for before this run started belongs to an earlier run.
-            let _ = std::fs::remove_file(drain::stop_file(athena.state.root()));
-            // `[parallel] max_concurrency` from the head commit's athena.toml; 1 is one job at a time.
-            let max_concurrency =
-                athena_core::capability::JobConfig::at(&athena.git, &athena.head()?)?
-                    .config
-                    .parallel
-                    .max_concurrency;
-            let report = drain::drain_concurrent(
-                &drain::RealSteps::live(&athena, &Terminal),
-                drain::Limits {
-                    budget_usd: budget,
-                    target_rating: rating_threshold,
-                    max_jobs: job_limit,
+            let build = format!("athena {}", wiring::version_string(&athena.build));
+            // One drain per state directory: this refuses a build older than the landed code and a second
+            // live drain, and clears a stop left by an earlier run (unless this is the same drain carrying on
+            // after its own rebuild). The pid file is removed when the run ends.
+            let report = drain::guarded(
+                athena.state.root(),
+                &drain::RealProcs,
+                &build,
+                &|| athena.stale_build(),
+                || {
+                    // `[parallel] max_concurrency` from the head commit's athena.toml; 1 is one job at a time.
+                    let max_concurrency =
+                        athena_core::capability::JobConfig::at(&athena.git, &athena.head()?)?
+                            .config
+                            .parallel
+                            .max_concurrency;
+                    let report = drain::drain_concurrent(
+                        &drain::RealSteps::live(&athena, &Terminal),
+                        drain::Limits {
+                            budget_usd: budget,
+                            target_rating: rating_threshold,
+                            max_jobs: job_limit,
+                        },
+                        &Terminal,
+                        max_concurrency,
+                    )?;
+                    // After a landing that changed Athena's own code and a successful rebuild, the newly
+                    // installed binary carries on with the remaining budget and job limit. This returns only
+                    // if that failed.
+                    drain::follow_restart(report, &Terminal, &|left| {
+                        reexec(&drain::reexec_args(&left, json))
+                    })
                 },
-                &Terminal,
-                max_concurrency,
             )?;
-            // After a landing that changed Athena's own code and a successful rebuild, the newly installed
-            // binary carries on with the remaining budget and job limit. This returns only if that failed.
-            let report = drain::follow_restart(report, &Terminal, &|left| {
-                reexec(&drain::reexec_args(&left, json))
-            })?;
             if json {
                 print_json(&report)?;
             } else {
@@ -1231,15 +1311,58 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::DrainStop => {
+        Command::DrainStop { wait, timeout } => {
             let athena = open(false)?;
-            let file = drain::stop_file(athena.state.root());
-            std::fs::create_dir_all(athena.state.root())?;
-            std::fs::write(&file, "stop at the next job boundary\n")?;
-            println!(
-                "stop asked for: a running drain finishes its current job and starts no further one"
-            );
-            Ok(0)
+            let waiting =
+                wait.then(|| drain::StopWait::new(timeout.map(std::time::Duration::from_secs)));
+            let outcome = drain::stop_and_wait(
+                athena.state.root(),
+                &drain::RealProcs,
+                waiting.as_ref(),
+                &Terminal,
+            )?;
+            print!("{}", display::drain_stop(&outcome));
+            Ok(match outcome {
+                drain::StopOutcome::TimedOut(..) => 2,
+                _ => 0,
+            })
+        }
+        Command::DrainStatus { json } => {
+            let athena = open(false)?;
+            let root = athena.state.root();
+            let state = drain::drain_state(root, &drain::RealProcs);
+            let stop_asked = drain::stop_file(root).exists();
+            if json {
+                print_json(&drain_status_json(&state, stop_asked))?;
+            } else {
+                print!("{}", display::drain_status(&state, stop_asked));
+            }
+            Ok(state.exit_code())
+        }
+        Command::DrainRestart {
+            budget,
+            rating_threshold,
+            job_limit,
+            timeout,
+            json,
+        } => {
+            let athena = open(false)?;
+            let life = drain::RealLifecycle {
+                athena: &athena,
+                limits: drain::Limits {
+                    budget_usd: budget,
+                    target_rating: rating_threshold,
+                    max_jobs: job_limit,
+                },
+                json,
+            };
+            let waiting = drain::StopWait::new(timeout.map(std::time::Duration::from_secs));
+            let outcome = drain::restart(&life, &waiting, &Terminal)?;
+            print!("{}", display::drain_restart(&outcome));
+            Ok(match outcome {
+                drain::RestartOutcome::Started(_) => 0,
+                drain::RestartOutcome::StillStopping(..) => 2,
+            })
         }
         Command::Close {
             job,
@@ -1691,6 +1814,127 @@ mod tests {
             .render_help()
             .to_string();
         assert!(sub.contains("worktrees"), "{sub}");
+    }
+
+    #[test]
+    fn the_new_commands_are_in_the_help_and_the_code_does_no_text_matching() {
+        let top = Cli::command().render_help().to_string();
+        assert!(top.contains("drain-status"), "{top}");
+        assert!(top.contains("drain-restart"), "{top}");
+        let help_of = |name: &str| {
+            Cli::command()
+                .find_subcommand_mut(name)
+                .unwrap_or_else(|| panic!("no subcommand {name}"))
+                .render_long_help()
+                .to_string()
+        };
+        for name in ["drain-status", "drain-restart", "drain-stop"] {
+            let help = help_of(name);
+            assert!(
+                help.contains("pkill") && help.contains("pgrep"),
+                "{name}: {help}"
+            );
+            assert!(help.contains("instead of"), "{name}: {help}");
+        }
+        assert!(help_of("drain-stop").contains("--wait"));
+        let restart = help_of("drain-restart");
+        assert!(
+            restart.contains("background") && restart.contains("drain.log"),
+            "{restart}"
+        );
+        assert!(help_of("drain").contains("drain-status"));
+        // The flags parse, and a timeout without a wait is refused.
+        assert!(matches!(
+            Cli::try_parse_from(["athena", "drain-stop", "--wait", "--timeout", "30"])
+                .unwrap()
+                .command,
+            Command::DrainStop {
+                wait: true,
+                timeout: Some(30)
+            }
+        ));
+        assert!(Cli::try_parse_from(["athena", "drain-stop", "--timeout", "30"]).is_err());
+        assert!(Cli::try_parse_from(["athena", "drain-restart", "--budget", "5"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["athena", "drain-restart"]).is_err(),
+            "a budget is required"
+        );
+
+        // No code that finds a process by matching text. The needles are built here so that this file does
+        // not contain them. Only the code before each file's first test module is read.
+        let sources = [
+            ("drain.rs", include_str!("drain.rs")),
+            ("main.rs", include_str!("main.rs")),
+            ("wiring.rs", include_str!("wiring.rs")),
+        ];
+        let command = |program: &str| format!("Command::new(\"{program}\")");
+        let reads_command_text = format!("/{}", "cmdline");
+        for (file, source) in sources {
+            let code = source.split("#[cfg(test)]").next().unwrap();
+            for program in ["pgrep", "pkill", "pidof"] {
+                assert!(!code.contains(&command(program)), "{file} runs {program}");
+            }
+            assert!(
+                !code.contains(&reads_command_text),
+                "{file} reads command text"
+            );
+            // Every `ps` call looks one process up by pid.
+            for (at, _) in code.match_indices(&command("ps")) {
+                let call: String = code[at..].chars().take(200).collect();
+                assert!(
+                    call.contains("\"-p\""),
+                    "{file}: a ps call without -p: {call}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_changelog_and_readme_describe_the_drain_lifecycle_commands() {
+        // Line breaks in the files do not matter: compare with runs of white space as single spaces.
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let changelog = include_str!("../../../CHANGELOG.md");
+        let unreleased = flat(
+            changelog
+                .split("\n## [0.1.0]")
+                .next()
+                .expect("the changelog has an Unreleased section"),
+        );
+        for needle in [
+            "drain-status",
+            "drain-restart",
+            "drain-stop --wait",
+            "pid file",
+            "refuses to start when its build is older than the landed code",
+            "One-time transition",
+            "Estimate, not measured",
+        ] {
+            assert!(
+                unreleased.contains(needle),
+                "CHANGELOG Unreleased lacks {needle:?}"
+            );
+        }
+        let readme = include_str!("../../../README.md");
+        let stopping = flat(
+            readme
+                .split("**Stopping a drain.**")
+                .nth(1)
+                .expect("the README has a section on stopping a drain"),
+        );
+        assert!(
+            stopping.contains("athena drain-stop --wait"),
+            "the stop section lacks --wait"
+        );
+        for needle in [
+            "athena drain-status",
+            "athena drain-restart",
+            "drain.pid",
+            "drain.log",
+            "refuses to start",
+            "One-time transition",
+        ] {
+            assert!(stopping.contains(needle), "README lacks {needle:?}");
+        }
     }
 
     #[test]

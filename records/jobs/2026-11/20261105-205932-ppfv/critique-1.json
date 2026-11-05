@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-205932-ppfv",
+  "round": 1,
+  "at": "2026-11-05T21:11:06.708577598Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "restart rebuilds while the old drain can still land into the same checkout, so the build can be torn or stale. The new drain's stale guard then refuses to start, and the queue sits idle.",
+      "evidence": "drain.rs:2430-2436 (`rebuild_if_due`): \"Landings wait while it builds, because a landing moves the checkout the build reads\". It holds `self.landing` for the whole setup.sh run. `RealLifecycle::rebuild` = `run_setup(athena.git.dir())`, the same checkout (drain.rs:3808), but it takes no such lock. The old drain keeps working and landing until its next job boundary. A landing during or after restart's rebuild leaves the installed binary older than HEAD for BUILD_PATHS, or built from a half-updated tree. The new drain's `guarded` then refuses ('refusing to start the drain: stale build ...'), restart reports that the new process died, and no drain is running. The risk entry says 'the in-drain rebuild path already tolerates the installed binary changing'. That does not address the checkout moving under a build. Criterion 4's test uses a `Rec` double whose rebuild never races anything, so it cannot catch this. Fix: After `stop_and_wait` reports Exited or NotRunning, check whether the installed build is still current, for example with a `Lifecycle::stale()` that calls `Athena::stale_build` on a fresh open. If it is stale, rebuild again before spawning; if that rebuild fails, report it and spawn nothing. Alternatively, ask for the stop first and rebuild only after the old drain has exited, accepting that a failed rebuild leaves no drain running and reporting that loudly. Either way, add a criterion-4 case where the double's 'old drain' advances a fake HEAD while restart waits, and assert that a second rebuild happens before spawn, or that restart refuses with a clear message. Correct the risk text.",
+      "location": "Plan decision 3 / step 3 (`restart`: rebuild first, then stop_and_wait, then spawn) and the Risks entry 'drain-restart rebuilds while the old drain is still working'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan does not say what happens when restart times out waiting for the old drain. The stop file stays written, so the old drain later exits with nothing started after it: the idle queue of evidence 1.",
+      "evidence": "The old drain stops only at a job boundary (drain.rs:133, `stop_requested` asked before each job), and one job can run far longer than any default timeout. `stop_and_wait` 'always writes drain.stop'. The plan gives restart a `timeout` but does not say what that timeout leaves behind. Fix: Have restart wait with no limit by default, printing progress. Or, on timeout, say plainly that the stop is still asked for, that no new drain will start, and what to run next (`athena drain-restart` again, or `athena drain`). Test the timeout case in criterion 4's test.",
+      "location": "Plan step 5 (`DrainRestart {.., timeout}`) and step 3 (`restart` calls `stop_and_wait`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "On the first restart after this change ships, the running drain is an older build with no pid file. restart sees 'not running' and spawns a second drain at once, and the new drain's `guarded` deletes the stop file the old drain was meant to read.",
+      "evidence": "Step 4: `guarded` 'then remove drain.stop'. Decision 2 says the stop file is still written 'so a drain from an older build can still be stopped', but in restart the new drain clears it within moments. The job lock (athena-core/src/run/mod.rs:365) stops the same job from running twice, but two drains would still work the queue and spend budget side by side. Fix: When the pid file is missing, have restart print that a drain started by a build without the pid file cannot be seen, and either ask the person to confirm with `athena drain-stop --wait` first or wait for the stop file to be consumed. At minimum, state this transition step in the CHANGELOG and README.",
+      "location": "Plan decision 2 / step 3 (`restart` when `drain_state` is NotRunning(Missing))",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "When the drain re-execs itself after an in-drain rebuild, the new image removes any stop request that arrived after the old image's last stop check. That stop is lost, and `drain-stop --wait` or restart then waits until it times out.",
+      "evidence": "drain.rs:3021 checks `stop_requested` before setting `restart`. A stop file written after that check but before `reexec` (main.rs:583) is deleted by the exec'd binary's `guarded`, because the own-pid record is accepted and the stop file is then removed. restart writes its stop file right after a rebuild, the moment an in-drain rebuild is also likely. Fix: In the own-pid carry-over case, keep drain.stop, since it belongs to this run. Remove it only when the pid file was missing, dead or recycled. Add that case to criterion 5's test.",
+      "location": "Plan step 4 (`guarded` removes drain.stop after acquiring, including on the own-pid exec carry-over)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A new process group alone does not detach the drain from the terminal's session.",
+      "evidence": "The plan uses `process_group(0)`, not setsid, and the workspace denies unsafe code. The new drain stays in the caller's session. Fix: State in the help or README that the restarted drain runs in the background and writes to `<state>/drain.log`. If hangups are a concern, start it with `setsid` by path, which is not a text match.",
+      "location": "Plan step 5 (`spawn_detached` with `process_group(0)`)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. The functions and line numbers it cites exist, and I checked them by reading the code: stop_file at drain.rs:970, run_setup at 3317, reexec_args at 485, follow_restart at 3087, Stub at 3968, warn_if_stale and reexec at main.rs:574/583, the Command::Drain and DrainStop arms at main.rs:1182/1234, Athena::stale_build at athena-core/src/status.rs:1709, the include_str!/render_help tests in main.rs, and the named tests in tests/drain.rs. Its design choices are sound. It finds the drain by pid file plus start marker, never by command text. Stop sends no signal and only writes the stop file. A failed rebuild in restart touches nothing. restart confirms the new pid before it reports success. The own-pid case is handled, which matters because Drop does not run across exec. The demonstrations exercise the production functions with real child processes, and each one would fail without its behavior. One design gap is major. restart runs setup.sh in the live checkout while the old drain may still be landing, and the existing in-drain rebuild explicitly holds the landing lock for exactly that reason. So restart can build a checkout that a landing is moving, or build code older than what the old drain lands last. The new drain's stale guard then refuses, restart fails, and the queue sits idle, which is the outcome this change exists to prevent. The plan's risk section dismisses this on a wrong premise. I also list minor gaps: what a restart timeout leaves behind, the first restart against a drain built before this change, and a small window where a stop is lost across a re-exec. The issues I raise are all fixable within the plan, so the verdict is revise."
+}

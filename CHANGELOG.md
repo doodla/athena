@@ -9,6 +9,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Drain life-cycle commands, so no one finds, stops or restarts a drain by matching text in the process list.
+  Root cause: Athena kept no record of its own drain, so a person found it with `pkill -f`, `pgrep` or a wait
+  loop whose pattern also appeared in the command doing the matching; the command matched itself, killed its own
+  shell or never fired, and the queue sat idle or ran on an old build (recorded three times). Now `athena
+  drain` writes a pid file, `drain.pid` in the state directory next to `drain.stop`, when it starts and removes it
+  when it ends. The file holds the pid, a process start marker (field 22 of `/proc/<pid>/stat` on Linux, `ps -o
+  lstart=,stat= -p <pid>` elsewhere), the build and the start time. Every command finds the drain only through
+  that file: a missing file, an unreadable one, a process that has exited (a zombie counts as exited) and a pid
+  that another process now holds are each reported as "no drain is running" with the reason, and no process is
+  ever signalled. A second `athena drain` while one is running is refused. New: `athena drain-status` (exit 0
+  running, 2 not running; `--json`), `athena drain-stop --wait [--timeout SECS]` (the same stop at the next job
+  boundary, then waits until the drain has exited, with a progress line every 30 seconds and no limit unless
+  `--timeout` is given), and `athena drain-restart --budget USD [--rating-threshold N] [--job-limit N]
+  [--timeout SECS]`, which rebuilds with `./setup.sh` first (a failed build leaves the running drain alone and
+  starts nothing), asks the running drain to stop and waits for it to exit, builds again if the old drain landed
+  code meanwhile and left the installed binary behind the checkout, starts the new drain in the background in its
+  own process group (output in `drain.log` in the state directory) and prints the pid and build it started. A
+  stopped drain does not keep its remaining limits, so `drain-restart` takes them as `drain` does. Not
+  an exact detach: the new drain is not in its own session.
+- A drain now refuses to start when its build is older than the landed code, and dispatches nothing. The check
+  is the one `athena status` already shows as a stale-build line (a change under `crates/`, `xtask/`,
+  `Cargo.toml`, `Cargo.lock` or `setup.sh` since the build's commit), which other commands still only print as a
+  warning; the refusal names both commits and says to run `./setup.sh`. A drain that replaces itself after its own
+  rebuild keeps its pid and its pending stop. Estimate, not measured: about 5% of drain starts are newly refused.
+  One-time transition: a drain started by a build from before the pid file existed has no pid file, so
+  `drain-status` says no drain is running and `drain-restart` cannot see it (it says so, writes no stop file and
+  starts a new drain beside it). Before the first restart after upgrading, run `athena drain-stop` and let that
+  drain finish. Tested on Linux; the macOS `ps` path is covered only by a test of its output parser. The tracked
+  resume command for interrupted jobs is a separate change and not part of this one.
 - Warm target directories owned by build slots (`docs/design/agent-and-build-slots.md`, build job 5). Each
   build slot now owns `<state>/build-slots/<n>/target`, which outlives every job. A local check's
   `CARGO_TARGET_DIR` is linked to its slot's directory for that one command only, so third-party crates stay
@@ -117,6 +146,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A bug-fix reading now has to carry a diagnosis. Root cause: the reading gate accepted a bug-fix reading
+  whose criteria described only the wanted output, so it required neither a diagnosis of where the wrong items
+  enter and why they are not excluded, nor a test that fails on the base tree. Jobs 20261103-201526-t4qv and
+  20261103-231808-3gkq each moved a filter on the decisions page without finding why decided proposals
+  reached it, and the new test passed on the base tree; introspections 20261104-054700-e6js and
+  20261105-051344-q9fv traced both to the reading. The new check `check_root_cause_diagnosis`, one more `step!`
+  in `refusing_check` after the code-survey check, refuses a reading of class code or tests with a behavior
+  criterion, a capability and no question, for a job that reads as a bug fix, unless it has (1) a root-cause
+  criterion that says "root cause", where the wrong items enter or why they are not excluded, and a named place
+  (a backticked name or a path), and (2) a Behavior criterion that names a test and says it fails on the base
+  tree. Both must be in the reader's own words: a criterion copied from the request does not count, and
+  `cargo test` alone names no test. The base-failing wording is judged by the same predicate that makes
+  Athena plan the job and run the revert demonstration (`asks_for_failing_run_without_the_fix` in
+  `run/mod.rs`, now `pub(crate)`; its body is unchanged), so a criterion the gate accepts is one Athena runs on
+  the tree without the change. A job reads as a bug fix when the prose of its request (the lines that are not
+  acceptance bullets) has a whole word `fix`, `fixes`, `fixing`, `bug` or `bugs`, or `still` before `shows`,
+  `showed`, `shown`, `lists` or `listed`; or when a job it retries or follows up was a bug-fix request or was
+  rejected with a finding that says the symptom is still shown or the test passes on the base tree.
+  Introspection fix requests ("Fix the root cause of a repeated failure") are in scope by design. The limit: a
+  first attempt worded only as an outcome ("Show only open proposals") has no repair word and is not caught;
+  its retry is. Whether the test uses real approved and rejected data cannot be decided from text, so that
+  part stays prose-only in the reader guide (`ROOT_CAUSE_GUIDE` in `athena-context`, one more reading rule).
+  The corpus gains fourteen cases and the form `bug-fix-request`. Queued proposed jobs whose stored reading is
+  a bug fix without the two criteria now fail `check_reading_text` and wait until `athena go` reads them again.
+  This check refuses more readings; the higher refusal rate is intended: expected 8% of newly refused readings.
+  This share is an estimate; the snapshot has no records, so no replay was run when it was written.
+  Introspection fix requests, retries of bug-fix jobs and outcome-worded `still` requests add to it.
 - `athena retry` no longer starts the same work twice for an interrupted job. An interrupted job (dispatched,
   no live process) stays dispatched after it is retried, so `athena status` kept telling the user to run
   `athena retry <id>` and a second retry made a second "try again on <id>" job. The check is in `Athena::retry`
