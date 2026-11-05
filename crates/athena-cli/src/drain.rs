@@ -121,10 +121,12 @@
 //!   cannot be read is moved aside to `in-flight.json.corrupt`, noted, and the drain goes on. A write that
 //!   fails is a warning line, never a job failure.
 //! - **A pull request waiting on checks is not a failure.** The landing waits while any check run on the pull
-//!   request head is queued or in progress. A pull request that is still open with its checks pending, such
-//!   as one whose merge the host refused for its repository rules before every check finished, is
-//!   [`Landing::Waiting`]: the job line says `waiting to merge`, the item is not tried again and does not
-//!   count as a failure, and the run goes on to the next item. `athena land --pr` merges
+//!   request head is queued or in progress, and a poll that turns green merges in the same locked step: the
+//!   one land call polls the checks and merges as soon as they are green (including after a merge the host
+//!   refused for its repository rules before every check finished), so the job is [`Landing::Landed`] and
+//!   is not left for a later call. Only a poll that ends with the pull request still open and its checks
+//!   pending is [`Landing::Waiting`]: the job line says `waiting to merge`, the item is not tried again and
+//!   does not count as a failure, and the run goes on to the next item. `athena land --pr` merges
 //!   it once the checks have finished.
 //! - **Stop at a job boundary.** [`Steps::stop_requested`] is asked before every job. A job that has started
 //!   is finished (landed and rated) and no further job starts: [`Stop::Requested`]. Nothing is killed.
@@ -495,7 +497,8 @@ pub enum Landing {
     Landed { changed: Vec<String> },
     /// Anything short of that, with why. An open pull request is not a landing.
     NotLanded(String),
-    /// The pull request is open and the host holds the merge until its checks finish: not a failure. The
+    /// The pull request is still open with its checks pending when the land step's poll ends: not a failure.
+    /// A poll that turns green merges in the same locked step and is [`Landing::Landed`], never this. The
     /// drain reports the job as waiting to merge, does not try it again in this run, and goes on to the next
     /// item. `athena land --pr` (or a later run) merges it once every check has finished.
     Waiting(String),
@@ -1320,8 +1323,10 @@ enum ItemEnd {
     /// The item's reader gave no reading twice. It is skipped with its reason and the next item runs; this
     /// is not a failed run, so it does not stop the drain.
     Skipped,
-    /// The job passed and its pull request is open, waiting on checks that have not finished. It is not
-    /// retried and is not a failure: the next item runs, and the job merges on a later `athena land --pr`.
+    /// The job passed and its pull request is open, with checks that had not finished when the land step's
+    /// poll ended. (Checks that finish green during the poll merge in that same locked step and are not
+    /// this.) It is not retried and is not a failure: the next item runs, and the job merges on a later
+    /// `athena land --pr`.
     Waiting,
     /// The item's line is paused by the scope guard, with the reason. It is passed over before it is read or
     /// run: not a failed attempt. The batch goes on to the next item.
@@ -3104,8 +3109,10 @@ pub trait Lander {
 }
 
 /// Lands through the pull-request path of `athena land --pr`: push the job's branch, open the pull request,
-/// wait for every check run to finish and be green, merge only when `[landing] merge_via_rest` is on. Only a
-/// merged, verified pull request is a landing; one that waits on unfinished checks is [`Landing::Waiting`].
+/// wait for every check run to finish and be green, merge only when `[landing] merge_via_rest` is on. The wait
+/// and the merge are one call: checks that turn green during the poll are merged in that same call, in the
+/// drain's locked step. Only a merged, verified pull request is a landing; one whose checks are still
+/// unfinished when the poll ends is [`Landing::Waiting`].
 #[derive(Debug)]
 pub struct PrLander;
 
@@ -3121,9 +3128,10 @@ impl Lander for PrLander {
     }
 }
 
-/// What the drain makes of the result of `athena land --pr` for one job. A merged pull request is a landing.
-/// An open one whose checks are still pending (the host holds its merge until they finish, including a merge it
-/// refused for its repository rules) is [`Landing::Waiting`], not a failure. Anything else is
+/// What the drain makes of the result of `athena land --pr` for one job. A merged pull request is a landing,
+/// including one whose checks turned green during the poll: `land_pr` merges those in the same call, so the
+/// drain sees them merged. An open one whose checks are still pending when the poll ends (including a merge the
+/// host refused for its repository rules) is [`Landing::Waiting`], not a failure. Anything else is
 /// [`Landing::NotLanded`].
 fn landing_from_report(report: anyhow::Result<PrReport>) -> Landing {
     match report {
@@ -4462,6 +4470,9 @@ mod read_ahead_tests {
         stop_after: Option<String>,
         /// Jobs whose landing is a merge the host holds until checks finish.
         waiting: BTreeSet<String>,
+        /// Jobs whose land step ends with this pull request state and checks, as `land_pr` reports them once
+        /// its poll is over. The landing is what the production [`landing_from_report`] makes of that report.
+        reports: BTreeMap<String, (LinkState, Option<Checks>)>,
         reads: AtomicUsize,
         ended: AtomicUsize,
         /// The most readings made but not yet through a run, seen when a read started.
@@ -4484,6 +4495,7 @@ mod read_ahead_tests {
                 recheck_holds: true,
                 stop_after: None,
                 waiting: BTreeSet::new(),
+                reports: BTreeMap::new(),
                 reads: AtomicUsize::new(0),
                 ended: AtomicUsize::new(0),
                 widest: AtomicUsize::new(0),
@@ -4492,6 +4504,12 @@ mod read_ahead_tests {
 
         fn waits(mut self, job: &str) -> World {
             self.waiting.insert(job.into());
+            self
+        }
+
+        /// The job's single land call ends with a pull request in `state` whose checks read `checks`.
+        fn ends_with(mut self, job: &str, state: LinkState, checks: Checks) -> World {
+            self.reports.insert(job.into(), (state, Some(checks)));
             self
         }
 
@@ -4628,12 +4646,37 @@ mod read_ahead_tests {
             if self.waiting.contains(job) {
                 return Landing::Waiting("the host holds the merge until checks finish".into());
             }
-            Landing::Landed {
-                changed: self
-                    .landed
-                    .get(job)
-                    .cloned()
-                    .unwrap_or_else(|| vec![format!("src/{job}.rs"), "CHANGELOG.md".into()]),
+            let landing = match self.reports.get(job) {
+                Some((state, checks)) => landing_from_report(Ok(PrReport {
+                    link: athena_core::pr::PrLink {
+                        pr_number: 7,
+                        host: "github.com".into(),
+                        repository: "example/project".into(),
+                        head: "abc".into(),
+                        job: job.into(),
+                        state: *state,
+                        merged_commit: (*state == LinkState::Landed).then(|| "def".into()),
+                    },
+                    checks: *checks,
+                    merge_requested: *state == LinkState::Landed,
+                    reruns: 0,
+                    failing_test: None,
+                    warnings: Vec::new(),
+                })),
+                None => Landing::Landed {
+                    changed: Vec::new(),
+                },
+            };
+            match landing {
+                // As `RealSteps::land` does, take the paths from the job's record, here the scripted ones.
+                Landing::Landed { .. } => {
+                    Landing::Landed {
+                        changed: self.landed.get(job).cloned().unwrap_or_else(|| {
+                            vec![format!("src/{job}.rs"), "CHANGELOG.md".into()]
+                        }),
+                    }
+                }
+                other => other,
             }
         }
         fn rate(&self) -> Rate {
@@ -4705,6 +4748,63 @@ mod read_ahead_tests {
         assert!(!a.landing.starts_with("not landed"), "{}", a.landing);
         let b = report.jobs.iter().find(|j| j.item == "b").unwrap();
         assert_eq!(b.landing, "landed");
+    }
+
+    // The next three tests drive the drain's own land step. The scripted pull request state is what `land_pr`
+    // reports when its poll is over: the poll itself (and the merge on a green read inside it) is tested in
+    // `athena_core::gh`, where `land_pr` runs. Here the drain must take that one call as the whole landing.
+
+    #[test]
+    fn a_job_whose_checks_turn_green_during_the_poll_lands_in_the_same_step() {
+        // The checks were pending when the poll began and green partway through: the one land call merged.
+        let world = World::new(0, &[("a", &["src/a.rs"], &[])]).ends_with(
+            "a",
+            LinkState::Landed,
+            Checks::Green,
+        );
+        let report = concurrent(&world, 2);
+        assert_eq!(report.stop, Stop::QueueEmpty, "{:?}", report.jobs);
+        assert_eq!(world.count("land a"), 1, "no second land call");
+        assert_eq!(report.landed, 1);
+        let a = report.jobs.iter().find(|j| j.item == "a").unwrap();
+        assert_eq!(a.landing, "landed");
+        assert!(
+            report
+                .jobs
+                .iter()
+                .all(|j| !j.landing.contains("waiting to merge")),
+            "{:?}",
+            report.jobs
+        );
+    }
+
+    #[test]
+    fn a_job_whose_checks_are_still_pending_at_the_end_of_the_poll_is_waiting_and_not_retried() {
+        let world = World::new(0, &[("a", &["src/a.rs"], &[]), ("b", &["src/b.rs"], &[])])
+            .ends_with("a", LinkState::Open, Checks::Pending);
+        let report = concurrent(&world, 2);
+        assert_eq!(report.stop, Stop::QueueEmpty, "{:?}", report.jobs);
+        assert_eq!(world.count("land a"), 1, "not tried again");
+        assert_eq!(report.landed, 1, "only b landed");
+        let a = report.jobs.iter().find(|j| j.item == "a").unwrap();
+        assert!(a.landing.starts_with("waiting to merge"), "{}", a.landing);
+        assert!(!a.landing.starts_with("not landed"), "{}", a.landing);
+    }
+
+    #[test]
+    fn a_job_whose_checks_are_red_at_the_end_of_the_poll_is_not_landed() {
+        let world = World::new(0, &[("a", &["src/a.rs"], &[])]).ends_with(
+            "a",
+            LinkState::Open,
+            Checks::Red,
+        );
+        let report = concurrent(&world, 2);
+        // A failed landing is tried twice, like any failed job; a waiting one is tried once.
+        assert_eq!(world.count("land a"), 2);
+        assert_eq!(report.landed, 0);
+        let a = report.jobs.iter().find(|j| j.item == "a").unwrap();
+        assert!(a.landing.starts_with("not landed"), "{}", a.landing);
+        assert!(!a.landing.contains("waiting to merge"), "{}", a.landing);
     }
 
     #[test]

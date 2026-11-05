@@ -105,6 +105,8 @@ pub(super) struct Waited {
     pub(super) failing_test: Option<String>,
     /// Notes about failed optional checks, from the same read as `checks`.
     pub(super) notes: Vec<String>,
+    /// How many times the checks were read: the reads of step 1 and of step 3 (see [`wait_for_checks`]).
+    pub(super) looks: u32,
 }
 
 /// The first test name found in the logs of the failed runs; a failed lookup names nothing.
@@ -126,6 +128,10 @@ fn name_failure(host: &dyn PrHost, runs: &[CiRunState]) -> Option<String> {
 ///    `attempts` more times. A read is ignored until every re-run run shows a higher `run_attempt`, since
 ///    right after the request the commit still shows the old red. Green or red is then final; anything else
 ///    is pending. There is no second re-run.
+///
+/// The result reports how many times the checks were read (`looks`), so that a caller that has to wait again
+/// after the wait, such as a merge the host refuses while a check is unfinished, can spend what is left of
+/// `attempts` and keep the whole poll to its budget.
 pub(super) fn wait_for_checks(job: &LandPr, head: &str) -> Result<Waited> {
     let attempts = job.poll.attempts.max(1);
     let nap = |more: bool| {
@@ -147,16 +153,17 @@ pub(super) fn wait_for_checks(job: &LandPr, head: &str) -> Result<Waited> {
         }
         nap(n + 1 < attempts);
     }
-    let done = |checks, reruns, failing_test, notes| {
+    let done = |checks, reruns, failing_test, notes, looks| {
         Ok(Waited {
             checks,
             reruns,
             failing_test,
             notes,
+            looks,
         })
     };
     if seen != Checks::Red {
-        return done(seen, 0, None, notes);
+        return done(seen, 0, None, notes, looks);
     }
     // Step 2: wait for the runs to complete.
     let run_looks = (attempts - looks.min(attempts)).max(1);
@@ -170,7 +177,7 @@ pub(super) fn wait_for_checks(job: &LandPr, head: &str) -> Result<Waited> {
     }
     let failing_test = name_failure(job.host, &runs);
     if runs.iter().any(|r| r.status != "completed") {
-        return done(Checks::Red, 0, failing_test, notes);
+        return done(Checks::Red, 0, failing_test, notes, looks);
     }
     // Step 3: re-run each failed run once.
     let mut rerun: Vec<(u64, Option<u64>)> = Vec::new();
@@ -181,13 +188,14 @@ pub(super) fn wait_for_checks(job: &LandPr, head: &str) -> Result<Waited> {
     }
     if rerun.is_empty() {
         // Nothing to re-run (a red the runs do not explain), or the host refused: the refusal is in the log.
-        return done(Checks::Red, 0, failing_test, notes);
+        return done(Checks::Red, 0, failing_test, notes, looks);
     }
     let mut seen = Checks::Pending;
     let mut last_runs = Vec::new();
     for n in 0..attempts {
         let now = job.host.ci_runs(head)?;
         let read = job.host.check_report(head)?;
+        looks += 1;
         let restarted = rerun.iter().all(|(id, before)| {
             match (
                 before,
@@ -216,7 +224,7 @@ pub(super) fn wait_for_checks(job: &LandPr, head: &str) -> Result<Waited> {
     } else {
         None
     };
-    done(seen, 1, failing_test, notes)
+    done(seen, 1, failing_test, notes, looks)
 }
 
 /// What the early step needs: the job's candidate, and the seams it pushes and opens through.

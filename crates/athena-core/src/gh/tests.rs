@@ -1233,12 +1233,16 @@ struct FakeHost {
     runs: RefCell<Option<Value>>,
     /// The text of the refusal a merge request gets, in place of the fixed one of `merge_refused`.
     merge_error: RefCell<Option<String>>,
+    /// How many merge requests get `merge_error`, counting from the first; later ones are accepted. Unset: every
+    /// request is refused.
+    merge_error_limit: Cell<Option<u32>>,
 }
 impl FakeHost {
     fn new(checks: Checks) -> Self {
         FakeHost {
             runs: RefCell::new(None),
             merge_error: RefCell::new(None),
+            merge_error_limit: Cell::new(None),
             merge_refused: Cell::new(false),
             merge_confirms: Cell::new(true),
             on_merge: RefCell::new(None),
@@ -1344,7 +1348,12 @@ impl PrHost for FakeHost {
         if let Some(hook) = self.on_merge.borrow().as_ref() {
             hook();
         }
-        if let Some(error) = self.merge_error.borrow().as_ref() {
+        if let Some(error) = self.merge_error.borrow().as_ref()
+            && self
+                .merge_error_limit
+                .get()
+                .is_none_or(|limit| self.merges.get() <= limit)
+        {
             bail!("{error}");
         }
         if self.merge_refused.get() {
@@ -1526,7 +1535,13 @@ fn a_pull_request_with_the_required_check_green_and_another_in_progress_is_pendi
 fn a_merge_refused_for_rule_violations_while_checks_are_pending_is_a_wait() {
     let rig = Rig::new();
     let host = FakeHost::new(Checks::Green);
-    *host.script.borrow_mut() = vec![Checks::Green, Checks::Pending];
+    // Pending lasts to the end of the poll's look budget (3 reads), so the wait stands.
+    *host.script.borrow_mut() = vec![
+        Checks::Green,
+        Checks::Pending,
+        Checks::Pending,
+        Checks::Pending,
+    ];
     *host.merge_error.borrow_mut() = Some("Repository rule violations found".to_string());
     let report = rig.run(&host, true, "athena/bootstrap").unwrap();
     assert_eq!(host.merges.get(), 1);
@@ -1542,6 +1557,100 @@ fn a_merge_refused_for_rule_violations_while_checks_are_pending_is_a_wait() {
         report.warnings
     );
     assert_eq!(rig.stored(), report.link);
+}
+
+fn sleeps(rig: &Rig) -> usize {
+    log_of(rig)
+        .iter()
+        .filter(|e| e.starts_with("sleep"))
+        .count()
+}
+
+#[test]
+fn checks_that_turn_green_during_the_poll_after_a_refused_merge_land_in_the_same_run() {
+    let mut rig = Rig::new();
+    rig.attempts = 4;
+    let host = FakeHost::new(Checks::Green);
+    // The first read is green, the merge is refused while a check has not reported, then it turns green.
+    *host.script.borrow_mut() = vec![Checks::Green, Checks::Pending, Checks::Green];
+    *host.merge_error.borrow_mut() = Some("Repository rule violations found".to_string());
+    host.merge_error_limit.set(Some(1));
+    let report = rig.run(&host, true, "athena/bootstrap").unwrap();
+    // One land_pr call asked twice, and the second request merged.
+    assert_eq!(host.merges.get(), 2);
+    assert_eq!(report.link.state, LinkState::Landed);
+    assert_eq!(report.link.merged_commit.as_deref(), Some("merged1"));
+    assert_eq!(report.checks, Some(Checks::Green));
+    assert!(report.merge_requested);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .all(|w| !w.contains("waiting to merge")),
+        "{:?}",
+        report.warnings
+    );
+    assert_eq!(rig.stored(), report.link);
+    // The poll's budget was not exceeded, and the retry waited one delay for its read.
+    assert_eq!(host.check_reads.get(), 3);
+    assert!(host.check_reads.get() <= rig.attempts);
+    assert_eq!(sleeps(&rig), 1);
+}
+
+#[test]
+fn checks_that_turn_green_during_the_poll_with_the_merge_accepted_land_in_the_same_run() {
+    let rig = Rig::new();
+    let host = FakeHost::new(Checks::Green);
+    *host.script.borrow_mut() = vec![Checks::Pending, Checks::Pending, Checks::Green];
+    let report = rig.run(&host, true, "athena/bootstrap").unwrap();
+    assert_eq!(host.merges.get(), 1);
+    assert_eq!(host.check_reads.get(), 3);
+    assert_eq!(report.link.state, LinkState::Landed);
+    assert_eq!(report.checks, Some(Checks::Green));
+    assert_eq!(sleeps(&rig), 2);
+}
+
+#[test]
+fn checks_still_pending_at_the_end_of_the_poll_after_a_refused_merge_stay_a_wait() {
+    let mut rig = Rig::new();
+    rig.attempts = 4;
+    let host = FakeHost::new(Checks::Pending);
+    *host.script.borrow_mut() = vec![Checks::Green];
+    *host.merge_error.borrow_mut() = Some("Repository rule violations found".to_string());
+    host.merge_error_limit.set(Some(1));
+    let report = rig.run(&host, true, "athena/bootstrap").unwrap();
+    // The refusal is not retried without a green read, and the poll is read to its end and no further.
+    assert_eq!(host.merges.get(), 1);
+    assert_eq!(host.check_reads.get(), rig.attempts);
+    assert_eq!(report.checks, Some(Checks::Pending));
+    assert_eq!(report.link.state, LinkState::Open);
+    assert!(report.merge_requested);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("Repository rule violations") && w.contains("waiting to merge")),
+        "{:?}",
+        report.warnings
+    );
+    // One delay before each read after the refusal's own, and none after the last.
+    assert_eq!(sleeps(&rig), (rig.attempts - 2) as usize);
+    assert_eq!(rig.stored(), report.link);
+}
+
+#[test]
+fn a_merge_refused_while_checks_are_pending_then_red_does_not_merge_again() {
+    let mut rig = Rig::new();
+    rig.attempts = 4;
+    let host = FakeHost::new(Checks::Red);
+    *host.script.borrow_mut() = vec![Checks::Green, Checks::Pending, Checks::Red];
+    *host.merge_error.borrow_mut() = Some("Repository rule violations found".to_string());
+    host.merge_error_limit.set(Some(1));
+    let report = rig.run(&host, true, "athena/bootstrap").unwrap();
+    assert_eq!(host.merges.get(), 1);
+    assert_ne!(report.link.state, LinkState::Landed);
+    assert_eq!(report.checks, Some(Checks::Pending));
+    assert!(host.check_reads.get() <= rig.attempts);
 }
 
 #[test]
@@ -2841,6 +2950,9 @@ struct PendingMerge {
     pending: Cell<bool>,
     status_failures: Cell<u32>,
     merged: Cell<bool>,
+    /// How many reads of the check runs still show the check in progress once it is pending; the next read
+    /// shows it finished. Unset: it stays in progress.
+    green_after_reads: Cell<Option<u32>>,
 }
 impl PendingMerge {
     fn new(refusals: &[(u16, &'static str)], pending_after: bool) -> Self {
@@ -2850,7 +2962,14 @@ impl PendingMerge {
             pending: Cell::new(false),
             status_failures: Cell::new(0),
             merged: Cell::new(false),
+            green_after_reads: Cell::new(None),
         }
+    }
+
+    /// The check turns green after `reads` reads of the check runs that find it in progress.
+    fn turning_green_after(self, reads: u32) -> Self {
+        self.green_after_reads.set(Some(reads));
+        self
     }
 }
 impl Runner for PendingMerge {
@@ -2896,6 +3015,13 @@ impl Runner for PendingMerge {
                 r#"{"merged": false}"#.to_string()
             }
         } else if path.contains("check-runs") {
+            if self.pending.get() {
+                match self.green_after_reads.get() {
+                    Some(0) => self.pending.set(false),
+                    Some(left) => self.green_after_reads.set(Some(left - 1)),
+                    None => {}
+                }
+            }
             if self.pending.get() {
                 json!({"check_runs": [
                     {"id": 1, "name": EARLY_RUN_JOB, "status": "in_progress", "conclusion": null}
@@ -2951,6 +3077,33 @@ fn a_rule_refusal_while_checks_are_pending_is_marked_on_its_own_merge_entry() {
                 .all(|e| !e.checks_pending && e.status_code == Some(500))
         );
         assert_eq!(errors.iter().filter(|e| e.checks_pending).count(), 1);
+    }
+}
+
+#[test]
+fn a_refused_then_accepted_landing_leaves_only_the_pending_marked_refusal_in_the_log_and_d87_does_not_match_turn_green()
+ {
+    // The check is in progress for the client's own read after the refusal and for the poll's read, then
+    // finished: the retry in the same land_pr call is accepted.
+    let runner = PendingMerge::new(&[(422, RULES)], true).turning_green_after(2);
+    let (result, errors) = land_pending(&runner);
+    let report = result.expect("the checks turned green inside the poll");
+    assert_eq!(report.link.state, LinkState::Landed);
+    assert_eq!(report.checks, Some(Checks::Green));
+    assert!(runner.merged.get());
+    let merges: Vec<&HostError> = errors
+        .iter()
+        .filter(|e| e.operation == HostOperation::Merge)
+        .collect();
+    assert_eq!(merges.len(), 1, "{errors:?}");
+    assert_eq!(merges[0].status_code, Some(422));
+    assert!(merges[0].checks_pending);
+    for signal in crate::watcher::host_error_signals().unwrap() {
+        assert!(
+            errors.iter().all(|e| !signal.matches(e)),
+            "{}: {errors:?}",
+            signal.name
+        );
     }
 }
 
@@ -3414,6 +3567,16 @@ mod records_flow {
         }
 
         fn run(&self, host: &FakeHost, records: Option<&dyn LandingRecords>) -> Result<PrReport> {
+            self.run_polling(host, records, 1)
+        }
+
+        /// Lands with a poll of `attempts` looks.
+        fn run_polling(
+            &self,
+            host: &FakeHost,
+            records: Option<&dyn LandingRecords>,
+            attempts: u32,
+        ) -> Result<PrReport> {
             let state = StateDir::new(self.state_dir.path().to_path_buf());
             let nap = |_: Duration| {};
             land_pr(&LandPr {
@@ -3432,7 +3595,7 @@ mod records_flow {
                 repository: "example/project",
                 merge_via_rest: true,
                 poll: Poll {
-                    attempts: 1,
+                    attempts,
                     delay: Duration::ZERO,
                     sleep: &nap,
                 },
@@ -3551,6 +3714,33 @@ mod records_flow {
             world.remote_tip()
         );
         assert_eq!(world.remote_tip().as_deref(), Some(landing_commit.as_str()));
+    }
+
+    #[test]
+    fn a_refused_then_green_landing_writes_one_intent_and_one_landing_turn_green() {
+        let world = World::new();
+        let host = world.host();
+        // The first merge is refused while a check is unfinished; the poll then reads green and the same
+        // call merges.
+        *host.script.borrow_mut() = vec![Checks::Green, Checks::Pending, Checks::Green];
+        *host.merge_error.borrow_mut() = Some("Repository rule violations found".to_string());
+        host.merge_error_limit.set(Some(1));
+        let sink = world.sink();
+        let report = world.run_polling(&host, Some(&sink), 4).unwrap();
+        assert_eq!(report.link.state, LinkState::Landed);
+        assert_eq!(host.merges.get(), 2);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let records = world.records();
+        let intents = intents(&records);
+        let landings = landings(&records);
+        assert_eq!(intents.len(), 1, "one intent for the one landing");
+        assert_eq!(landings.len(), 1);
+        let intent = &intents[0].1;
+        let landing = &landings[0].1;
+        assert_eq!(landing.intent, intent.id);
+        assert_eq!(intent.expected_base, world.base);
+        assert_eq!(landing.host_commit, HOST_COMMIT);
     }
 
     #[test]
