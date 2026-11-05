@@ -63,6 +63,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The default `[parallel] max_concurrency` in `athena.toml` is now 2, so `athena drain` runs two independent
+  jobs of a plan group at once. The schema range (1 to 8) and the disk check are unchanged. The athena-cli
+  test fixture pins the value to 1, so drain tests no longer read the live setting.
 - The baseline now waits for the default branch's run when it is still in progress. Right after a landing,
   main's run for the base's content is usually still going, and the baseline made one read, found it
   unfinished, and fell back to a 20-minute local run (`main: no usable CI result ... on main`; 3 of the last
