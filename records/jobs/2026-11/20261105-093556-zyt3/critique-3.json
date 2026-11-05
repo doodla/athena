@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-093556-zyt3",
+  "round": 3,
+  "at": "2026-11-05T22:14:40.589557598Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The new base-failing-test rule uses its own phrase list, so the gate and Athena's revert run can disagree",
+      "evidence": "I read run/mod.rs. `asks_for_fails_without_run` / `asks_for_failing_run_without_the_fix` already decide whether a Behavior criterion asks for a failing run without the fix. They look for a `fail*` word plus one of: ' without the fix ', ' without the change ', ' without the mechanism ', ' without the patch ', ' without it ', ' before the fix ', ' on the base ', or `fail* without`. Line 863 then forces the job to be planned, and verification.rs:128 has Athena run each planned 'fails without the fix' demonstration itself on a scratch copy with the fix reverted. The plan's list is different: 'base tree', 'base commit', 'before the change', 'without the change', 'without the fix', 'on the base'. A criterion such as 'the test fails before the change' or 'fails against the base tree' passes the new gate but does not trigger the revert run. That means the gate can accept a reading whose 'fails on base' claim Athena never checks, which is exactly how job 20261103-231808-3gkq failed (its test passed on the base). The other direction differs too: 'fails without it' triggers the revert run but the new gate refuses it. The plan never mentions this existing mechanism, and its dependents list leaves out the planning decision at run/mod.rs:863. Fix: Use one predicate for both. Move `asks_for_failing_run_without_the_fix` into reading.rs as `pub(crate)` (or reference it there) and have `names_base_failing_test` call it, plus the named-test condition, instead of a second phrase list. Then a criterion the gate accepts is one that makes Athena plan the job and run the revert demonstration. Say this in the doc comment and the CHANGELOG entry: it is the mechanical half of the 'test fails on base' requirement. Add run/mod.rs:863 (bug-fix jobs are now always planned) to the dependents, with the existing run/tests.rs:4700-4730 cases as its test. Add a unit test showing that the gate's accept set equals `asks_for_failing_run_without_the_fix` on the plan's test phrases.",
+      "location": "Decision 3 / Step 1 `names_base_failing_test`; crates/athena-core/src/run/mod.rs:155-200 and :863; run/verification.rs:128",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "An omitted reader: queued Proposed jobs whose stored reading now fails the new check silently drop out of the drain",
+      "evidence": "steward.rs:401-406: for a Proposed job, `if crate::reading::check_reading_text(latest, &request.text) != ReadingCheck::Accept { return None; }`. The doc at 380 says 'a stored reading that fails a check is left out until a person runs `athena go`'. When this change lands, any proposed bug-fix job whose stored reading was accepted under the old rules and has no located root-cause and base-failing criteria disappears from `queued_work` without a message. The dependents list names `read_for`, `check_reading_text`/`athena check-reading`, replay, the corpus and the CLI tests, but not the steward queue. Fix: Add `steward::queued_work` as a dependent. State that such jobs are held until `athena go` re-reads them, and that this is intended. Name the existing test `a_stored_reading_that_fails_a_reading_check_is_left_for_a_person` (steward.rs:2347), or add a steward test with a bug-fix request and a symptom-only stored reading, so the effect is demonstrated. Mention the held jobs in the CHANGELOG entry so the person who runs Athena knows to re-read them.",
+      "location": "Dependents list; crates/athena-core/src/steward.rs:383-422 (`queued_work`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'regression' matches 'add regression tests', a common way to ask for a tests-only job",
+      "evidence": "The check applies to class `tests` with a behavior criterion. A request such as 'Add regression tests for the parser' contains the whole word 'regression', so the reading must invent a root-cause criterion with a location for a job that fixes nothing. The plan's accept cases cover 'fixed', 'broken' and 'wrong', but not this phrase. (Real incidence: HISTORY.txt has no 'regression' subject, so the risk is low.) Fix: Drop 'regression' as a trigger, or count it only when it is not followed by 'test'/'tests'. Add 'add regression tests for X' (class tests) to the criterion 3 accept cases.",
+      "location": "Decision 2 trigger list (`regression`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Every introspection-generated request triggers the check through 'Fix the root cause of a repeated failure', and the plan does not say so",
+      "evidence": "Introspection requests start with 'Fix the root cause of a repeated failure' (this job's request; refusal_corpus.rs:218). Every code or tests reading of such a job now needs a located root-cause criterion and a base-failing test criterion. That probably matches the root-cause default, but it is a large share of the newly refused readings, it affects the 8% estimate, and the Risks section does not mention it. Fix: State in the decision and the doc comment that introspection fix requests are in scope by design. Add a corpus case built from an introspection request with class code. Weigh this share when declaring the estimate.",
+      "location": "Decision 2; request shape of introspection jobs (refusal_corpus.rs:218, this job's request)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes the problem in the right place, the reading gate. Everything it names exists where it says: `refusing_check` and its `step!` list at reading.rs:3192-3216, `is_bullet` and `request_text_acceptance` at 2390/2400, `path_tokens` at 3035, `has_phrase` at 3366, `names_crates_path` at 3454, `check_code_survey` at 3526, `normalised`, `declared_percent` and `replay_declaration_of` at 3906-3981, `READING_RULES` and `CODE_SURVEY_GUIDE` in briefs.rs with the 6-rule and `< 2400` tests at 3954-3985, and `INPUT_FORMS: [&str; 17]` in refusal_corpus.rs. The demonstrations drive the real production entry points and would fail on the base tree. Two problems need a revision. First, the plan writes a new phrase list for \"fails on the base\". Athena already has one predicate for that wording, `asks_for_failing_run_without_the_fix` in run/mod.rs:165-200. It decides whether a job is planned and whether Athena runs the revert (\"fails without the fix\") demonstration on a scratch copy (run/mod.rs:863, run/verification.rs:128). The two lists differ, so the gate can accept a criterion that never makes Athena run that check. That leaves the second job's failure (a test that passed on the base) open, and the reading's out-of-scope note that a scratch base run is future work is partly out of date. Second, the dependents list leaves out `steward::queued_work` (steward.rs:401-406). It re-checks stored readings of Proposed jobs through `check_reading_text` and silently drops any that now fail, until a person runs `athena go`. Smaller points: 'regression' as a trigger catches 'add regression tests', and every introspection-generated request ('Fix the root cause of a repeated failure ...') triggers the check. The plan should state that second point openly."
+}
