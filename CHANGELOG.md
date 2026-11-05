@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- On a docs-only change (every changed path is under `docs/` or ends in `.md`), the verdict now counts a check
+  Athena skipped by the docs-only path rule (`skip_when_only`) as seen running, as it already did a check
+  reused from a green GitHub run, so a criterion such as "cargo test and cargo clippy still pass" can cite it.
+  Root cause: a skipped check has no exit code, so the seen-running rule (D43) never accepted it, and a docs-only
+  design note was rejected for a command Athena had skipped on purpose. `judge` takes the changed paths; a
+  skipped record on a change that touches code, a skip for another reason, and a failed check still do not count.
 - `athena measure-build` now records the whole-build peak memory and the peak number of concurrent processes of
   each cold build, and `athena status` prints them as "build total peak memory" and "peak concurrent
   processes" for build 1 and build 2. While cargo runs, a sampler reads `/proc` every 25 ms and sums the resident

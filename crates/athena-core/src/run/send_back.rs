@@ -266,6 +266,7 @@ mod left_to_athena_tests {
             checks: &checks,
             output: Some(&output),
             commands_run: &[],
+            changed_paths: &[],
             candidate_tree: None,
             checks_tree: None,
             system_fault: None,
