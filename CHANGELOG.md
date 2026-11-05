@@ -354,6 +354,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The decisions page now lists only proposals that wait for the owner: open ones whose rung is above the raising
+  role's recorded limit (or whose role has no recorded definition). A proposal the role may change itself is no
+  longer listed, and with nothing left the page shows one line, "Nothing waiting for you", in place of "No
+  proposals waiting". The page published on 3 Nov still showed decided proposals because it was built by code
+  that read work decisions only from the records branch. The records show those decisions (work decisions
+  20261027-074524-5j98, 20261030-081855-kh40 and 20261030-081746-a1he, all committed to main), and commit
+  3b1f8c1 ("Make the decisions page read approve/reject decisions from main") is the fix for that, in the entry
+  just below. This entry adds only the limit filter and the new empty-state line; the new tests for decided
+  proposals are regression guards, and only the within-limit assertions fail on the code before this change.
 - The decisions page no longer lists proposals that were approved or rejected. Root cause: approve-work and
   reject-work record their decisions under `records/work-decisions/` on main, but the page read work items and
   decisions only from the `athena/records` branch, which holds no decisions, so every proposal looked
