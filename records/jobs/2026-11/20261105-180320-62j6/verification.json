@@ -1,0 +1,199 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261105-180320-62j6",
+  "candidate_commit": "76c9ec2d3cad2b4d0944fb6e6831ba0b494714f8",
+  "verified_fingerprint": "sha256:3b4ceb296b2aeca470e05937de879948ea2ac185262a4b3c2f47a0686ef83210",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42124088268 for 76c9ec2d3cad2b4d0944fb6e6831ba0b494714f8",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42124088268 for 76c9ec2d3cad2b4d0944fb6e6831ba0b494714f8",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42124088268 for 76c9ec2d3cad2b4d0944fb6e6831ba0b494714f8",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 4,
+  "criteria": [
+    {
+      "criterion": "BuildMeasurement in crates/athena-data/src/records.rs gains optional peak-resident-memory and cores-used fields with serde defaults, and validate() rejects negative or non-finite values.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read the diff: records.rs adds first/second_peak_resident_bytes: Option<u64> and first/second_cores_used: Option<f64>, each with #[serde(default, skip_serializing_if = \"Option::is_none\")]. validate() refuses cores that are not finite or are negative. The byte fields are u64, so they cannot be negative or non-finite.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "BuildRun and CargoBuild::build in crates/athena-core/src/disk.rs capture peak resident memory and cores used of each cold build from the cargo process, and measure_build stores them in the record.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read disk.rs lines 787-894 and 1070-1076. BuildRun gains peak_resident_bytes and cores_used. CargoBuild::build spawns cargo, reads stderr, then reaps it with athena_agent::procs::wait_with_usage (wait4). cores_used is CPU seconds divided by wall seconds. measure_build copies first and second into the record. The criterion is literally met, but the figures are unsound in two ways (see findings): with sccache the compiler runs outside the cargo tree, and ru_maxrss is the largest single process, not the build's total.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A test parses a JSON build-measurement record written without the new fields and it deserializes with those fields None; a test round-trips a record with them set. Run `cargo test -p athena-data`.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "an_old_build_measurement_without_memory_or_cores_still_reads checks the JSON has no new keys, parses it with check_record_file, and asserts all four fields are None. a_build_measurement_with_memory_and_cores_round_trips_and_bad_cores_are_refused round-trips a record with the fields set and refuses NaN, infinite and negative cores. Both passed (4 build_measurement tests ok).",
+      "commands": [
+        "cargo test -p athena-data build_measurement"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "build_measurement_line prints the peak memory and cores when present and still prints old records without them; tests in status.rs and crates/athena-cli/tests/status_build_measurement.rs check the printed text. Run `cargo test -p athena-core -p athena-cli`.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "status.rs test the_line_shows_t_s_both_times_and_the_cache_counts_or_that_there_is_no_cache asserts that an old record's line has no 'peak memory' or 'cores', and that a sized record prints 'peak memory build 1 3.5 GB, build 2 2.5 GB' and 'cores used build 1 5.75, build 2 3.50'. The CLI test status_prints_the_latest_build_measurement_line checks the same text in `athena status` output. Both passed.",
+      "commands": [
+        "cargo test -p athena-core -p athena-cli build_measurement"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A disk.rs test with a fake builder checks measure_build writes the builder's memory and core figures into the committed record. Run `cargo test -p athena-core`.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "measure_build_writes_t_s_both_times_and_the_cache_counts gives the fake builder PEAK_BYTES and CORES, and asserts both the returned record and records[0] (read back from the committed records) hold them. It passed. Also ran the new wait4 unit test in athena-agent, which passed.",
+      "commands": [
+        "cargo test -p athena-core measure_build_writes_t_s_both_times_and_the_cache_counts",
+        "cargo test -p athena-agent wait_with_usage"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "`cargo test` passes for the workspace and `cargo clippy --all-targets` and `cargo fmt --check` are clean.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded checks for 76c9ec2d (CI run 42124088268): fmt, clippy -D warnings and the full test suite all passed.",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The design doc docs/design/agent-and-build-slots.md or CHANGELOG.md notes the new fields briefly, if the repository convention records such changes.",
+      "kind": "content",
+      "met": true,
+      "evidence": "CHANGELOG.md gets an Added entry naming the four fields and saying old records still read. The design doc's section 8 step 1 gets a 'Built:' note.",
+      "commands": [],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "With sccache installed, the memory and cores figures leave out the compiler.",
+      "evidence": "When sccache is installed, the builder runs `sccache --zero-stats`, which starts the sccache server, and sets RUSTC_WRAPPER=sccache. sccache clients hand each compile to that long-lived server, and the server runs rustc. The server is not a descendant that cargo waits for, so wait4's rusage on the cargo pid leaves out the compilers' memory and CPU time. Peak memory and cores used would then cover only cargo, the sccache clients, build scripts and any linker cargo starts itself. They would be far too low, and the status line gives no warning. Section 8 step 1 expects sccache runs through this same builder. Inferred from how sccache and wait4 work; no real sccache build was run here. Alternative: run the build in its own cgroup v2 and read memory.peak and cpu.stat, which count every process however it was spawned. Smaller fix: record None for memory and cores when the build is cached.",
+      "location": "crates/athena-core/src/disk.rs:830-892 (CargoBuild::build)",
+      "source": "verifier"
+    },
+    {
+      "severity": "major",
+      "summary": "'Peak memory' is the largest single process, not the build's total peak, so it understates the figure section 7 needs.",
+      "evidence": "ru_maxrss from wait4 is the biggest resident set of any one process in the tree. The CHANGELOG says so. Section 7.2 sizes slots by the memory of a whole build ('Two builds at about 3 GB each at CARGO_BUILD_JOBS = 2'), and cargo runs several rustc and linker processes at once, so the total can be several times the largest one. The status line prints just 'peak memory build 1 X', which a maintainer sizing slots will read as the build's total. Alternative: measure the build's own cgroup memory.peak, or poll the summed resident memory of the process tree. At minimum, label the status figure as the largest single process.",
+      "location": "crates/athena-agent/src/procs.rs wait_with_usage; crates/athena-core/src/status.rs build_measurement_line",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "A changed file is outside the expected deliverables, and two planned files are unchanged.",
+      "evidence": "procs.rs (new unsafe wait4 wrapper and ChildUsage) is not on the deliverables list. crates/athena-core/Cargo.toml and Cargo.lock were planned but left unchanged, and the producer gave no reason. The placement looks justified: it keeps all unsafe code in the one existing module and uses the libc crate the project already depends on.",
+      "location": "crates/athena-agent/src/procs.rs",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "The old-record test builds its JSON by serializing the struct, not from a hand-written old record.",
+      "evidence": "The JSON comes from to_json on a struct whose new fields are None, then the test asserts those keys are absent. That is equivalent today, but a fixed old-format JSON literal would guard against future serializer changes.",
+      "location": "crates/athena-data/src/records.rs an_old_build_measurement_without_memory_or_cores_still_reads",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "Agent memory, which section 7.2 expects step 1 to measure, is not measured.",
+      "evidence": "Section 7.2 says '16 after build job 1 has measured agent memory'. The accepted reading scoped agent memory out because the acceptance names only the build record. The doc's 'Built:' note says so, so a later step still needs to measure agent memory.",
+      "location": "docs/design/agent-and-build-slots.md section 7.2 / section 8 step 1",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "2 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "Fail. Every acceptance criterion is met: the four optional fields serialize correctly, old records still read, status prints the figures (and leaves them out for old records), the fake-builder test confirms they reach the committed record, and the recorded fmt, clippy and test checks passed. The measurement itself has two major soundness problems. First, when sccache is installed (the builder uses it automatically, and the design expects sccache runs), the compiler runs inside the sccache server, which is not a child of cargo. wait4 then misses its memory and CPU time, so both figures come out far too low. This is inferred from how sccache and wait4 work; no real sccache build was run. Second, ru_maxrss is the largest single process, not the build's total peak, while section 7.2 needs whole-build memory with several compilers running at once; the status line labels it just 'peak memory'. Measuring the build in its own cgroup (memory.peak, cpu.stat), or at least recording nothing for sccache builds and labelling the figure accurately, would fix both. Minor points: procs.rs changed outside the deliverables list (justified); the planned Cargo.toml and Cargo.lock were left unchanged without a reason; the old-record test builds its JSON from the struct rather than a fixed old-format literal; agent memory is left for a later step."
+}
