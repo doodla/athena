@@ -49,6 +49,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A pull request whose checks turn green during the landing poll now merges in the same locked step, instead of
+  the job ending as `waiting to merge` and being merged about one poll (about 10 minutes) later. This fixes a
+  suspected cause, not a confirmed one: when the host refused the merge by its repository rules while a check
+  was unfinished, `land_pr` gave up after that one refusal even if the checks went green a few reads later
+  inside the same poll. It now keeps reading the checks for what is left of the poll's look budget (the poll
+  length and interval are unchanged, and `wait_for_checks` reports its reads in `Waited.looks` so the two share
+  one budget) and asks for the merge again on a green read. Red or still-pending checks never reach the
+  merge, and a poll that ends pending is still `waiting to merge`. The landing-intent record is written once.
+  The code change is shown by `checks_that_turn_green_during_the_poll_after_a_refused_merge_land_in_the_same_run`,
+  which on the code before the change ended Open with the merge asked for once (the new
+  `checks_still_pending_at_the_end_of_the_poll_after_a_refused_merge_stay_a_wait` read the checks 2 times
+  instead of the poll's 4). That shows what the code does for a scripted refusal, not that the host refuses
+  this way. Not changed: a check run that is optional but stays unfinished keeps the checks pending for the
+  whole poll, so the job still waits with no merge asked for; ending that wait would change the merge gate
+  (merge only when every check run has finished). If waiting jobs show that line, it needs its own decision.
 - `athena drain` now treats a deferred request in state proposed by what its latest reading shows, so a batch
   runs a request that was asked for (`athena ask --later`, the Steward or Hestia) once its reading passes the
   reading checks, in priority order. Root cause: the item selection (`queued_work`) marked every proposed

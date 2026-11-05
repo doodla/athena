@@ -1,0 +1,155 @@
+{
+  "schema": "athena.invocation/1",
+  "job": "20261104-215733-rf7z",
+  "seq": 8,
+  "role": "producer",
+  "driver": {
+    "name": "claude-code",
+    "version": "2.1.302"
+  },
+  "athena": {
+    "version": "0.1.0",
+    "source_commit": "823dd32230aa7343a3cd97af3b0981c4475e98d0",
+    "dirty": false
+  },
+  "model": "claude-sonnet-5-5",
+  "effort": "high",
+  "context": {
+    "components": [
+      {
+        "id": "contract",
+        "version": 1,
+        "sha256": "420e706cc7ecea6f1ebf06864f4a87fb9822cf83d9551199e9e4d4840dbe6650",
+        "tokens": {
+          "value": 326.0,
+          "unit": "tokens",
+          "provenance": "estimated",
+          "basis": "ceil(bytes/3.0), prose tripwire"
+        }
+      },
+      {
+        "id": "frame.producer",
+        "version": 1,
+        "sha256": "fe13d12ee54117a27a30e270a4acd95c8f01e79dbb4aa8991c410d378d519853",
+        "tokens": {
+          "value": 591.0,
+          "unit": "tokens",
+          "provenance": "estimated",
+          "basis": "ceil(bytes/3.0), prose tripwire"
+        }
+      },
+      {
+        "id": "capability.change.producer",
+        "version": 1,
+        "sha256": "e634646ec94f046c087d6505fab237ab5777b34aa6c1eb28b1b2899872292fd3",
+        "tokens": {
+          "value": 237.0,
+          "unit": "tokens",
+          "provenance": "estimated",
+          "basis": "ceil(bytes/3.0), prose tripwire"
+        }
+      }
+    ],
+    "prompt_sha256": "a407e375096059b3a3c3f9c109c11f18734cef40e88568618913d3601c5c8a4c",
+    "prompt_tokens": {
+      "value": 1154.0,
+      "unit": "tokens",
+      "provenance": "estimated",
+      "basis": "ceil(bytes/3.0), prose tripwire"
+    },
+    "host_baseline": {
+      "value": 1070.0,
+      "unit": "tokens",
+      "provenance": "estimated",
+      "basis": "measured once with the pinned host and a role's structured-output tool (athena.toml [agents]); not measured per invocation"
+    },
+    "tools": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Edit",
+      "Write",
+      "Bash"
+    ]
+  },
+  "caps": {
+    "max_budget_usd": 10.0,
+    "timeout_s": 5400
+  },
+  "started_at": "2026-11-05T02:11:12.346365975Z",
+  "ended_at": "2026-11-05T02:25:41.97376195Z",
+  "wall_time": {
+    "value": 869.627396598,
+    "unit": "seconds",
+    "provenance": "measured",
+    "basis": "athena monotonic clock"
+  },
+  "tokens": {
+    "input": {
+      "value": 60.0,
+      "unit": "tokens",
+      "provenance": "measured",
+      "basis": "Claude Code result.modelUsage for the requested model"
+    },
+    "output": {
+      "value": 29064.0,
+      "unit": "tokens",
+      "provenance": "measured",
+      "basis": "Claude Code result.modelUsage for the requested model"
+    },
+    "cache_read": {
+      "value": 2063729.0,
+      "unit": "tokens",
+      "provenance": "measured",
+      "basis": "Claude Code result.modelUsage for the requested model"
+    },
+    "cache_write": {
+      "value": 104658.0,
+      "unit": "tokens",
+      "provenance": "measured",
+      "basis": "Claude Code result.modelUsage for the requested model"
+    }
+  },
+  "models_used": {
+    "claude-sonnet-5-5": {
+      "input": 60,
+      "output": 29064,
+      "cache_read": 2063729,
+      "cache_write": 104658,
+      "cost_usd": 0.9157649
+    }
+  },
+  "cost": {
+    "value": 0.9157649,
+    "unit": "usd",
+    "provenance": "reported",
+    "basis": "Claude Code total_cost_usd, at list price"
+  },
+  "outcome": "success",
+  "detail": "self-check failed: acceptance criteria not met or not reported: \"Outcome check: the diff shows the green-during-poll path ending in a merge in one locked step, rather than only adding types or wiring. Each new test would fail on the old code for the green-during-poll case.\"; redacted report: {\"summary\":\"I made `land_pr` merge in the same call when a poll turns green after a refused merge. Whether this is the cause of your 10-minute waits is not confirmed. In the old code, `land_pr` (crates/athena-core/src/gh/landing.rs) gave up after one refused merge, even if the checks went green a few reads later inside the same poll. The loop in the new code reads the checks again for the part of the poll's look budget that is left, and a green read asks the host to merge again in the same call. The poll length and interval are unchanged. Red or still-pending reads never reach the merge. A poll that ends pending returns the same Open/Pending report and 'waiting to merge' warning as before. The landing-intent record is written once. To share the budget, `wait_for_checks` (early.rs) now reports its reads in a new `Waited.looks` field.\\\\n\\\\nTests:\\\\n- **Core tests** (gh/tests.rs): refused-then-green lands with 2 merge requests, 3 check reads and 1 sleep. Pending-then-green with the merge accepted lands. A poll still pending after a refusal reads exactly the budget and stays a wait. A refusal followed by a red read does not merge again. A client-level test shows one pending-marked refusal in the host-error log and no D87 match. A records test shows one intent and one landing.\\\\n- **Edited test**: I changed the script of the existing core test `a_merge_refused_for_rule_violations_while_checks_are_pending_is_a_wait` to Green, Pending, Pending, Pending, so Pending lasts to the end of the poll. It still asserts a wait.\\\\n- **Drain tests** (drain.rs): three new ones, for landed in one step, waiting and not retried, and red gives not landed. I also reworded the drain.rs comments.\\\\n\\\\nOld-code result: I ran the new tests on the unmodified landing code first. The refused-then-green test failed (merges 1, expected 2), and the still-pending test failed (check_reads 2, expected the poll's 4). The accepted-merge test passed, as a regression guard.\\\\n\\\\nThe drain tests only pin the drain's mapping, so they pass on old code. The CHANGELOG entry records all of this. I did not run the full workspace suite.\\\"\",\"files\":[\"crates/athena-cli/src/drain.rs\",\"crates/athena-core/src/gh/landing.rs\",\"crates/athena-core/src/gh/early.rs\",\"crates/athena-core/src/gh/tests.rs\",\"CHANGELOG.md\"],\"checks_run\":[{\"command\":\"cargo test -p athena-core --lib turn_green (on the unmodified landing.rs/early.rs, new tests only)\",\"result\":\"fail\",\"note\":\"refused-then-green test FAILED (merges 1, expected 2); accepted-merge test passed\"},{\"command\":\"cargo test -p athena-core --lib at_the_end_of_the_poll_after (on the unmodified landing.rs/early.rs)\",\"result\":\"fail\",\"note\":\"FAILED: check_reads 2, expected the poll's 4\"},{\"command\":\"cargo test -p athena-core --lib gh:: (after the fix)\",\"result\":\"pass\",\"note\":\"123 passed, 0 failed, includes all new and edited core tests\"},{\"command\":\"cargo test -p athena-cli drain\",\"result\":\"pass\",\"note\":\"51 passed after the red test's land count was corrected to 2\"},{\"command\":\"cargo test -p athena-cli\",\"result\":\"pass\",\"note\":\"whole crate suite exited 0\"},{\"command\":\"cargo fmt --all\",\"result\":\"pass\",\"note\":\"applied; rustfmt reformatted two files\"},{\"command\":\"cargo clippy --all-targets --locked -- -D warnings\",\"result\":\"pass\",\"note\":\"clean\"},{\"command\":\"cargo test -p xtask --test policy\",\"result\":\"pass\",\"note\":\"17 passed, no banned words\"}],\"criteria_check\":[{\"criterion\":\"A new test in crates/athena-cli/src/drain.rs scripts checks that are pending at first and green partway through the poll. It shows the job reports Landing::Landed (the job line is 'landed') in the same land step, with no Landing::Waiting returned and no second land call. Check with `cargo test -p athena-cli drain`.\",\"status\":\"met\",\"evidence\":\"Added a_job_whose_checks_turn_green_during_the_poll_lands_in_the_same_step. It runs Drain::land through World, whose land now passes a scripted PrReport (Landed, Green) through the production landing_from_report. It asserts the job line is exactly 'landed', world.count(\\\"land a\\\") == 1, report.landed == 1 and no 'waiting to merge' line. `cargo test -p athena-cli drain` passes. The drain test pins the drain's mapping only and cannot fail on old code. The failing-first proof is the core test checks_that_turn_green_during_the_poll_after_a_refused_merge_land_in_the_same_run, which failed on the old landing code (merges 1, expected 2) and passes now.\"},{\"criterion\":\"A new test scripts checks that are still pending when the poll ends. It shows the result is still Landing::Waiting, the job line still starts 'waiting to merge', and the item is not retried. This is today's behaviour. Check with `cargo test -p athena-cli drain`.\",\"status\":\"met\",\"evidence\":\"Added a_job_whose_checks_are_still_pending_at_the_end_of_the_poll_is_waiting_and_not_retried (Open/Pending report). It asserts count(\\\"land a\\\") == 1, the line starts 'waiting to merge', not 'not landed', and report.landed == 1 (only b). Passes. The core counterpart checks_still_pending_at_the_end_of_the_poll_after_a_refused_merge_stay_a_wait asserts merges 1, check_reads == rig.attempts, the warning text and the stored link.\"},{\"criterion\":\"The existing tests a_job_waiting_to_merge_is_not_a_failure_and_the_run_goes_on_to_the_next_job and a_merge_refused_for_rule_violations_while_checks_are_pending_is_reported_as_waiting still pass unchanged. Red checks still give NotLanded. Check with `cargo test -p athena-cli`.\",\"status\":\"met\",\"evidence\":\"Both test bodies are untouched and pass in `cargo test -p athena-cli` (exit 0). Added a_job_whose_checks_are_red_at_the_end_of_the_poll_is_not_landed (Open/Red gives a 'not landed' line, never 'waiting to merge'). Core: a_merge_refused_while_checks_are_pending_then_red_does_not_merge_again and red_or_pending_checks_never_trigger_a_merge_even_with_the_setting_on pass.\"},{\"criterion\":\"`cargo test` passes for the workspace, `cargo clippy --all-targets` is clean and `cargo fmt --check` passes.\",\"status\":\"met\",\"evidence\":\"left to Athena's checks. I ran `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` (clean), `cargo test -p athena-core --lib gh::`, `cargo test -p athena-cli` and `cargo test -p xtask --test policy` (all pass). I did not run the full workspace suite.\"},{\"criterion\":\"The diff touches only crates/athena-cli/src/drain.rs, plus any file where the root cause is found. Comments or docs near the Landing::Waiting handling say that a poll which turns green merges in the same step.\",\"status\":\"met\",\"evidence\":\"git status: CHANGELOG.md, drain.rs, early.rs, landing.rs, gh/tests.rs. The root cause (suspected) is in landing.rs, which needs early.rs's looks field and the tests in gh/tests.rs. wiring.rs, athena.toml, defaults.toml and the poll constants are untouched. drain.rs comments reworded: module text, Landing::Waiting, ItemEnd::Waiting, PrLander, landing_from_report. Each says a poll that turns green merges in the same locked step and only a poll that ends pending is Waiting.\"},{\"criterion\":\"Outcome check: the diff shows the green-during-poll path ending in a merge in one locked step, rather than only adding types or wiring. Each new test would fail on the old code for the green-during-poll case.\",\"status\":\"unmet\",\"evidence\":\"landing.rs: the merge step is now a loop. After a rule-violation refusal with Pending checks it spends the unused look budget reading checks, and a Green read calls job.host.merge again in the same land_pr call. Run on the old code, the core refused-then-green test failed (merges 1, expected 2) and the still-pending test failed (check_reads 2, expected 4). The accepted-merge test and the drain tests pass on old code by design: the accepted-merge case is a regression guard, and the drain tests pin the drain's mapping only. So not every new test fails on old code.\"}],\"open_issues\":[\"The cause is suspected, not confirmed. Nothing in the tree shows that GitHub refuses a merge with 'Repository rule violations found' while a check is unfinished and then accepts it once the check is green. The core test shows what the code does for that scripted refusal, not what the host does.\",\"Other candidate cause, not changed: classify_checks reports Pending while any check run on the head is unfinished, required or not. An optional run that stays in progress keeps the verdict Pending for the whole poll, and the job ends waiting with no merge asked for. Fixing that would change the merge gate, which is out of scope, and it needs your decision. To tell the two apart: path A leaves a warning 'the host refused the merge by its repository rules while checks were not finished ... waiting to merge' and merge entries marked checks_pending in the host-error log. Path B shows only the drain line 'waiting to merge: pull request N is open and its checks have not finished' and no merge request.\",\"The drain tests cannot fail on old code because the drain only maps what the lander returns. Criterion 6 holds through the core test only, so I marked it unmet. The plan accepted this.\",\"Departure from the brief's listed files: early.rs and gh/tests.rs are also changed. early.rs gets Waited.looks so the retry shares the existing look budget instead of lengthening the locked step. gh/tests.rs holds the tests of the fix. The brief's expected list names wiring.rs, which I did not need to change.\",\"The retry reuses the landing-intent record written before the first merge, so its expected_base is the base read then. The host refuses a merge when the branch is not up to date, so a stale base cannot reach a landing. The records test asserts one intent and one landing.\"],\"mistakes\":[\"My first red-checks drain test assumed one land call; the drain retries a failed landing once, so it failed until I corrected the expected count to 2.\"],\"learnings\":[\"Drain::land only maps what Steps::land returns; the polling and the merge happen in athena-core gh::land_pr, so the fix and its failing-first test live there.\",\"wait_for_checks already stops at the first non-pending read and land_pr already merges on Green. The one place a green poll could still end in Waiting inside a single land call is the rule-violation refusal arm, which gave up after one refused merge.\",\"A NotLanded job is landed twice by the drain (one retry), a Waiting job once.\",\"The bash tool refuses tail, pipes and paths outside the working directory, so large cargo output cannot be filtered. Use narrow test filters.\"],\"desires\":[\"A GitHub-style origin fixture that Drain::land can run against with a real squash, so a drain-level test could fail on old code.\",\"A way to observe what GitHub actually returns for a merge while a required check is unfinished, to confirm the suspected cause.\"]}",
+  "turns": 65,
+  "commands_run": [
+    "cargo test -p athena-core --lib turn_green_during_the_poll",
+    "cargo test -p athena-core --lib gh::tests::checks_still gh::tests::a_merge_refused_while",
+    "cargo test -p athena-core --lib at_the_end_of_the_poll_after",
+    "cargo test -p athena-core --lib gh::",
+    "cargo test -p athena-core --lib turn_green",
+    "cargo test -p athena-cli drain",
+    "cargo test -p athena-cli",
+    "cargo fmt --all",
+    "cargo clippy --all-targets --locked -- -D warnings",
+    "cargo test -p xtask --test policy",
+    "cargo test -p athena-core --lib gh::",
+    "git status --short"
+  ],
+  "policy_denials": [
+    {
+      "tool": "Bash",
+      "detail": "cargo test -p athena-core --lib gh::tests::checks_ gh::tests::a_merge_refused 2>&1 | tail -40"
+    },
+    {
+      "tool": "Grep",
+      "detail": "{\"output_mode\":\"content\",\"path\":\"~/.claude/projects/-root--local-state-athena-athena-77cba81fd890-jobs-20261104-215733-rf7z-work/6abe9385-1636-47d6-9d2d-516e64534019/tool-results/b6xlz3sen.txt\",\"pattern\":\"test result|FAILED|failed\"}"
+    }
+  ]
+}

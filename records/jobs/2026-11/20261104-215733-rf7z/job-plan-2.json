@@ -1,0 +1,270 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261104-215733-rf7z",
+  "round": 2,
+  "at": "2026-11-05T02:03:39.703614328Z",
+  "invocation_seq": 4,
+  "approach": "Two levels, each test showing what it can. (1) Core, where the decision is made: `land_pr` (crates/athena-core/src/gh/landing.rs:225-273) waits once with `wait_for_checks`, merges on Green, and when the host refuses the merge by rule violations while the next check read is Pending it gives up with a Pending report (landing.rs:254-271), even though the checks may turn green a few reads later in the same poll. That arm is the only place the code reads a pull request as green and then drops back to a wait inside one landing, so it is the suspect root cause. The fix: `wait_for_checks` takes the look budget as a parameter and returns how many looks it used (a new `looks` field on `Waited`). `land_pr` loops: wait with the budget left, merge on Green. On a rule-violation refusal with Pending checks, sleep one delay, and if budget is left wait again with what remains, then retry the merge. If no budget is left, keep today's Pending/Waiting result. The budget is shared, so the 30 x 20 s poll and the locked step's length do not grow. The landing-intent record is written once, before the first merge. Red or still-Pending never reaches the merge, and other refusals or a refusal with settled checks still return an error. (2) Drain: `Drain::land` already only maps what `Steps::land` returns, so the drain gets its comments reworded and two tests that pin its side (a merged report is `landed` in one land call; a report still Pending at the end of the poll is `waiting to merge`, not retried). These drain tests feed the production `landing_from_report` and cannot fail on old code. The failing-first evidence for the fault is the core test with the refusal-then-green script. No poll constant changes, so wiring.rs stays untouched. Path (a), pending then green with the merge accepted, already merges today (early.rs:145 breaks on Green; landing.rs:234). Its test is a regression test and is expected to pass on old code. Path (c), checks pending for the whole budget, is today's Waiting and is kept. No refusal or matching rule over user input is added or changed (the rule-violation arm handles a host reply), so the refusal corpus is not involved.",
+  "decisions": [
+    {
+      "choice": "Fix in landing.rs/early.rs: after a rule-violation refusal with Pending checks, keep waiting on the remaining shared look budget and retry the merge once Green.",
+      "reason": "It is the one path where a green read is followed by a return to Waiting inside a single land call (landing.rs:254-271). Fixing it where it starts follows the root-cause default and makes the job land in the same locked step. Early.rs is touched only to pass the budget in and report looks used; wait_for_checks has a single caller (landing.rs:226).",
+      "rejected": [
+        {
+          "option": "Make Drain::land call Steps::land a second time on Waiting.",
+          "why": "It doubles the time the landing lock is held, changes the poll length (out of scope), and treats the symptom."
+        },
+        {
+          "option": "Restart a full 30-look wait after a refusal.",
+          "why": "It would lengthen the locked step to about 20 minutes and change the poll length."
+        },
+        {
+          "option": "Change only drain.rs.",
+          "why": "Drain::land maps the lander's result and never polls; nothing there can merge on green."
+        }
+      ]
+    },
+    {
+      "choice": "Test the fault at the core level with the existing Rig and scripted FakeHost (gh/tests.rs:1193-1443). Add one FakeHost field that limits how many merge requests are refused.",
+      "reason": "Rig drives the real `land_pr` with a scripted check sequence and an injected sleep, so only the host replies are scripted and the poll-and-merge logic is production code. Athena::land_pr cannot be driven from a drain test without a GitHub-looking origin, a pushed remote and a real squash on it; test_support::land_through_pr bypasses PrLander and always reports Green (test_support.rs:207-209).",
+      "rejected": [
+        {
+          "option": "Inject a scripted gh Runner and sleep into PrLander and run Athena::land_pr from a drain test.",
+          "why": "It needs a github.com origin, remote pushes and a real squash on the remote for observe_merge, so it is too heavy for one run. PrLander would also need Sync fields and a static for RealSteps::live (which relies on PrLander being a unit struct, drain.rs:3110, 3329)."
+        },
+        {
+          "option": "Extend the drain World fake so its land returns Landed after N calls.",
+          "why": "It would put the green-during-poll logic in the double and pass on old code."
+        }
+      ]
+    },
+    {
+      "choice": "Drain tests drive `Drain::land` through the existing `World` fake, extended so a job's land result comes from the production `landing_from_report` applied to a scripted `PrReport` (merged, still pending, red).",
+      "reason": "It checks the drain's own behaviour (one land call, the 'landed' and 'waiting to merge' job lines, no retry, red is NotLanded) with production mapping code in the loop. The double holds no merge logic, only the report a finished poll yields.",
+      "rejected": [
+        {
+          "option": "Claim the drain tests fail on old code.",
+          "why": "They cannot, because the drain only maps. The plan says so and puts the failing-first proof in the core test."
+        }
+      ]
+    },
+    {
+      "choice": "Edit the existing core test a_merge_refused_for_rule_violations_while_checks_are_pending_is_a_wait (gh/tests.rs:1526) so its script keeps Pending to the end of the budget, and add separate tests for refused-then-green and refused-then-red.",
+      "reason": "With the retry, its current script [Green, Pending] runs out and FakeHost reports Green, which would cause a second merge, a second refusal with settled checks, and an Err. The test must change to stay a wait; it is not left as is.",
+      "rejected": [
+        {
+          "option": "Leave the test untouched and special-case the retry.",
+          "why": "The retry would then have to treat a script-end Green differently, which is logic bent around a fake."
+        }
+      ]
+    },
+    {
+      "choice": "If the refused-then-green core test passes on old code, make no behaviour change, keep the tests, and raise the question to the user.",
+      "reason": "Criterion 6 cannot be met for a fault that does not exist; the producer must not invent a change.",
+      "rejected": [
+        {
+          "option": "Add a speculative retry loop anyway.",
+          "why": "It would be untestable as a fix."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Reword the comments at the module text (123-128), the Landing::Waiting doc (498-500), ItemEnd::Waiting (1323-1325), PrLander (3106-3108) and landing_from_report (3124-3127) to say a poll that turns green merges in the same locked step. Extend the World fake with a per-job scripted PrReport run through the production landing_from_report, and add the green-in-one-step, still-pending and red tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "purpose": "Root cause: in land_pr, loop wait then merge. After a rule-violation refusal with Pending checks, sleep one delay and, while shared budget remains, wait again and retry the merge once Green. With no budget left, keep the Pending/Waiting result. Write the intent record once.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/early.rs",
+      "action": "modify",
+      "purpose": "wait_for_checks takes the look budget as a parameter and Waited reports the looks used. Poll length and interval are unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Add a FakeHost field limiting how many merge requests are refused. Add refused-then-green (Landed, merges 2, reads within attempts), path (a) pending-then-green (merges 1), still-pending-after-refusal and refused-then-red tests. Edit the script of the test at line 1526 so it stays a wait.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry: checks that turn green during the poll after a refused merge now merge in the same landing step; names the root cause (the rule-violation arm gave up after one refused merge) and why the shared-budget retry fixes it.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read gh/landing.rs:180-325, gh/early.rs:101-200 and gh/tests.rs:1193-1443 again before editing. Run `cargo test -p athena-core gh` once to record the baseline.",
+    "In gh/tests.rs add the FakeHost field limiting how many merge requests are refused (default: repeat forever, as now). Write the refused-then-green test (script Green, Pending, Green; first merge refused; Rig attempts 4), the path (a) pending-then-green test, the still-pending-after-refusal test and the refused-then-red test. Assert merges, check_reads against rig.attempts, the link state and the sleeps in rig.log.",
+    "Run the new tests on the unmodified landing code. Record which fail. Path (a) is expected to pass; refused-then-green is expected to fail with an Open, Pending report.",
+    "If refused-then-green fails: change wait_for_checks in early.rs to take the look budget and add `looks` to Waited. In land_pr wrap the wait-and-merge block in a loop. After a rule-violation refusal with Pending checks, sleep one delay and, if budget remains, wait again and retry the merge once Green. With no budget left, push today's warning and return Pending. Write the intent only before the first merge. If it passes, make no behaviour change and go to step 6.",
+    "Edit the script of the test at tests.rs:1526 (Green, Pending, Pending) so it stays a wait and still asserts merges 1. Run `cargo test -p athena-core gh` and fix any count that moved (tests 1593, 1608, 1693 should not).",
+    "In drain.rs extend the test World with a per-job scripted PrReport (state, checks) that `land` passes through the production `landing_from_report`. Add the three drain tests: merged report gives 'landed' in one land call with report.landed 1, Open/Pending report gives a 'waiting to merge' line with one land call and no retry, Open/Red gives NotLanded. Use the names turn_green and still_pending_at_the_end_of_the_poll so the demonstration filters match.",
+    "Reword the drain.rs comments listed in the file entry to say a poll that turns green merges in the same locked step, and only a poll that ends pending is Waiting.",
+    "Add the CHANGELOG.md Unreleased entry. Name the root cause and why the shared-budget retry fixes it. If no behaviour changed, say the tests were added as regression tests and no fault was found.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "The retry could merge on a stale green or lengthen the locked step.",
+      "mitigation": "The retry reuses the remaining shared budget (no new 30 looks) and a merge happens only after a fresh Green read with merge_via_rest on. Tests assert check_reads is at most rig.attempts and that refused-then-red does not merge again."
+    },
+    {
+      "risk": "Editing the script of the existing core test at tests.rs:1526 weakens a guard.",
+      "mitigation": "It still asserts a wait: Open, Pending, merges 1, the 'waiting to merge' warning and the stored link. The refused-then-green case is a separate new test."
+    },
+    {
+      "risk": "Reads accounting is off by one: the arm's own check_report read plus the re-wait's reads could exceed the budget, or the retry could be skipped when one look remains.",
+      "mitigation": "Count the arm's read against the budget, sleep only when another look will follow, and assert check_reads <= rig.attempts in the tests."
+    },
+    {
+      "risk": "The refused-then-green core test passes on old code, so no fault is shown.",
+      "mitigation": "The producer records the result and changes no behaviour; the open question goes to the user."
+    },
+    {
+      "risk": "A drain-level test cannot fail on old code, so criterion 6 holds only through the core test.",
+      "mitigation": "State this in the change description; the core test is the failing-first evidence. The drain tests use the production landing_from_report so they still break if the mapping changes."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "wait_for_checks signature and Waited struct (budget parameter in, looks out)",
+      "dependent": "crates/athena-core/src/gh/landing.rs:226 is the only caller (grep over crates/); early.rs:102-129 defines both",
+      "kind": "code",
+      "test": "cargo test -p athena-core gh: red-rerun tests (tests.rs:1596 onward, check_reads <= 2 * attempts at 1608 and 1693) and the pending test (1579, check_reads == 3). The first wait gets the full attempts, so their counts are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "Rule-violation arm in land_pr (merge refused while checks pending)",
+      "dependent": "crates/athena-core/src/gh/tests.rs:1526 (edited script), 1548, 1558; client.rs:653-659 marks the host-error log entry with mark_checks_pending for the same refusal text",
+      "kind": "code",
+      "test": "a_merge_refused_for_rule_violations_while_checks_are_pending_is_a_wait (edited so Pending lasts to the end of the budget), a_merge_refused_for_rule_violations_with_the_checks_settled_stays_an_error, another_merge_refusal_while_checks_are_pending_stays_an_error, plus the new refused-then-green, refused-then-red and still-pending cases. The client's marker is a log annotation on each refused request and does not depend on whether land_pr retries.",
+      "reason": null
+    },
+    {
+      "name": "Callers and modes that reach land_pr",
+      "dependent": "`athena land --pr` (crates/athena-cli/src/main.rs), the drain's PrLander (drain.rs:3112-3121) including the [parallel] max_concurrency path where Drain::land takes the landing lock (drain.rs:1710), and athena_core::test_support::land_through_pr (test_support.rs:606, attempts 1, FakeHost always Green)",
+      "kind": "code",
+      "test": "The drain concurrent test (drain.rs:4688-4708) and the tests/drain.rs landing-order tests, run by cargo test -p athena-cli.",
+      "reason": "The signature of land_pr and Athena::land_pr is unchanged. test_support passes attempts 1 and is always Green, so it never reaches the refusal arm. The lock scope is unchanged, a land that merges inside the poll no longer needs a later re-land, and the held time is no longer than the old poll."
+    },
+    {
+      "name": "Landing::Waiting mapping and the 'waiting to merge' job line",
+      "dependent": "Drain::land and LandStep (drain.rs:1756-1761), ItemEnd::Waiting handling (1855, 2506), last_landing (1427), landing_from_report (3128)",
+      "kind": "code",
+      "test": "a_job_waiting_to_merge_is_not_a_failure_and_the_run_goes_on_to_the_next_job and a_merge_refused_for_rule_violations_while_checks_are_pending_is_reported_as_waiting, unchanged, plus the new drain tests.",
+      "reason": null
+    },
+    {
+      "name": "Poll budget (wiring::checks_poll, 30 looks x 20 s) and Poll struct",
+      "dependent": "crates/athena-cli/src/wiring.rs:42, crates/athena-core/src/gh/landing.rs:96, and the early-run wait (docs/system-facts.md, 'Early pull request and CI waits')",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged. The retry draws on the same attempts count and does not touch checks_poll. The early-run wait is a separate function and not called by the changed code."
+    },
+    {
+      "name": "Merge gate: merge only on Green with [landing] merge_via_rest on, and host merge rules",
+      "dependent": "landing.rs:234 gate; host squash-only, linear history, branch up to date (docs/system-facts.md 'Host merge rules')",
+      "kind": "host_setting",
+      "test": "red_or_pending_checks_never_trigger_a_merge_even_with_the_setting_on (tests.rs:1579) and with_the_setting_off_no_merge_is_requested_and_the_pull_request_stays_open_and_green (1446).",
+      "reason": "The retry reaches host.merge only after a fresh wait returns Green with merge_via_rest on, still guarded by the head sha. Red and Pending never reach it."
+    },
+    {
+      "name": "Landing-intent and landing records written around the merge",
+      "dependent": "records sink in land_pr (landing.rs:238-312), tests.rs:3498 land_pr_writes_the_intent_then_the_landing_with_the_head_as_second_parent, and the records validation allow-list (check_record_file, AnyRecord)",
+      "kind": "rule",
+      "test": "land_pr_writes_the_intent_then_the_landing_with_the_head_as_second_parent (tests.rs:3498).",
+      "reason": "The intent is written once before the first merge request and reused by a retry. The landing record is written once, after a confirmed merge. No new record kind or data file is added."
+    },
+    {
+      "name": "FakeHost test double (new refusal-limit field)",
+      "dependent": "crates/athena-core/src/gh/tests.rs users of FakeHost::new (tests 1445-1700 and the records-sink rig near 3416)",
+      "kind": "code",
+      "test": "cargo test -p athena-core gh",
+      "reason": "The new field defaults to the current behaviour (the refusal repeats on every request), so existing tests are unaffected."
+    },
+    {
+      "name": "Drain World fake (new scripted-report support)",
+      "dependent": "drain.rs tests that use World (4600-4710 and the concurrent tests)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli drain",
+      "reason": "The new field defaults to empty, which leaves land returning today's Landed or the `waiting` Waiting."
+    },
+    {
+      "name": "CHANGELOG.md Unreleased entry",
+      "dependent": "CHANGELOG.md, as BRIEF.md asks for",
+      "kind": "rule",
+      "test": null,
+      "reason": "Text only. No check reads its content beyond the existing changelog presence tests."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Two tests. Core: in crates/athena-core/src/gh/tests.rs, `checks_that_turn_green_during_the_poll_after_a_refused_merge_land_in_the_same_run` runs `Rig::run` (the real `land_pr`) over a FakeHost scripted Green, Pending, Green with the first merge refused by 'Repository rule violations found' and the second accepted. Rig attempts is 4. Add a pending-then-green case with the merge accepted (path a). Drain: `a_job_whose_checks_turn_green_during_the_poll_lands_in_the_same_step` runs `Drain::land` through the extended `World`, where the scripted report is merged (Landed).",
+      "command": "cargo test -p athena-core -p athena-cli turn_green",
+      "observes": "Core: report.link.state is Landed, host.merges is 2 (the refused request, then the accepted one), check_reads is at most rig.attempts, and the stored link is Landed. In the path (a) case merges is 1 and check_reads is below attempts. No Pending result and no 'waiting to merge' warning. Drain: the job line is exactly 'landed', world.count(\"land a\") is 1, report.landed is 1, and no 'waiting to merge'.",
+      "fails_without": "Core test: on the old code the arm returns Pending after the first refusal, so state stays Open, merges is 1 and the report is Pending, and the test fails. The path (a) case passes on old code, as expected. Drain test: pins the mapping and one land call only, so it does not fail on old code. If the core test passes on old code, no fault exists in this tree; the producer reports that and changes no behaviour.",
+      "seam": "Production entry points: `athena_core::gh::land_pr` (via `Rig::run`, gh/tests.rs:1397) and `Drain::land` -> `Steps::land` -> `landing_from_report` (drain.rs:1709, 3128). Fakes: `FakeHost` with its `script` field (exists, tests.rs:1208) plus one new field limiting how many merge requests are refused (step 2 adds it), injected through `Rig::run`; the `Rig` sleep is a recording closure (exists). Drain: the `World` fake (drain.rs:~4600) gains a per-job scripted `PrReport` that its `land` passes through the production `landing_from_report` (step 6 adds it). The refusal and scripted checks live in the FakeHost data; the retry and merge decision is production code."
+    },
+    {
+      "criterion": 2,
+      "method": "Core: `checks_still_pending_at_the_end_of_the_poll_after_a_refused_merge_stay_a_wait` runs `Rig::run` with the refused merge and Pending on every later read; the edited a_merge_refused_for_rule_violations_while_checks_are_pending_is_a_wait is the same case. Drain: `a_job_whose_checks_are_still_pending_at_the_end_of_the_poll_is_waiting_and_not_retried` runs `Drain::land` through `World` with a scripted Open/Pending report.",
+      "command": "cargo test -p athena-core -p athena-cli still_pending_at_the_end_of_the_poll",
+      "observes": "Core: the report is Open with checks Pending, merges is 1, check_reads equals rig.attempts (read from the rig, not the literal 30), the warning contains 'waiting to merge', and the stored link is Open. Drain: Landing::Waiting, the job line starts 'waiting to merge', world.count(\"land a\") is 1 (not retried), report.landed is 0, and the line does not start with 'not landed'.",
+      "fails_without": "A change that merged without green, looped past the budget or called land again would change merges, check_reads or the land count.",
+      "seam": "Same as criterion 1: `Rig::run` with FakeHost.script and the refusal limit (a new field, step 2), and `Drain::land` with World's scripted report (step 6). The pre-existing test a_job_waiting_to_merge_is_not_a_failure_and_the_run_goes_on_to_the_next_job (drain.rs:4693) uses the existing `waits(\"a\")` seam."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the whole athena-cli suite, which includes a_job_waiting_to_merge_is_not_a_failure_and_the_run_goes_on_to_the_next_job (drain.rs:4693) and a_merge_refused_for_rule_violations_while_checks_are_pending_is_reported_as_waiting (drain.rs:4711), both with unchanged bodies. Then run the athena-core gh tests for red checks and the refusal cases.",
+      "command": "cargo test -p athena-cli",
+      "observes": "The two named drain tests pass without edits. The core run (`cargo test -p athena-core gh`) shows red or pending checks never merge (tests.rs:1579), a refusal with settled checks stays an error (1548) and another refusal while pending stays an error (1558). A new refused-then-red case ends with merges at 1 and a non-Landed result.",
+      "fails_without": "Changing the Waiting mapping or the merge gate would fail landing_from_report's asserts (drain.rs:4731-4741) or the core gate tests. Core test 1526 is deliberately edited (script extended to keep Pending to the end of the budget) and still asserts a wait.",
+      "seam": "Existing: World and landing_from_report in drain.rs, Rig and FakeHost in gh/tests.rs. The refused-then-red case reuses the step 2 field."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three Athena checks on the whole workspace.",
+      "command": "cargo test --locked",
+      "observes": "All workspace tests pass. `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` are clean when run as separate commands.",
+      "fails_without": "A new warning, formatting drift, or a caller of wait_for_checks or Waited that was not updated would fail one of the three.",
+      "seam": "Existing workspace commands."
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the diff. Allowed: crates/athena-cli/src/drain.rs (comments and tests), crates/athena-core/src/gh/landing.rs, crates/athena-core/src/gh/early.rs and crates/athena-core/src/gh/tests.rs (root cause and its tests), and CHANGELOG.md. wiring.rs, athena.toml and defaults.toml are untouched. The comments at drain.rs:123-128, 498-500, 1323-1325, 3106-3108 and 3124-3127 say that a poll which turns green merges in the same locked step and only a poll that ends pending is Waiting.",
+      "command": "git diff --stat",
+      "observes": "The file list matches. A grep of the diff for 'same step' or 'same locked step' shows the new comment text, and `checks_poll` (30 x 20 s) is unchanged.",
+      "fails_without": "A change to athena.toml, defaults.toml or the poll constants would show in the stat.",
+      "seam": "No seam: a content check on the diff."
+    },
+    {
+      "criterion": 6,
+      "method": "Failing-first check on the core test. The producer first adds the FakeHost refusal field and the refused-then-green test, runs it on the unmodified landing code and records the result in the change description. It then makes the landing.rs/early.rs change and shows the test passing. The diff shows the retry loop reaching `job.host.merge` a second time inside the same `land_pr` call.",
+      "command": "cargo test -p athena-core turn_green",
+      "observes": "On old code the refused-then-green test fails with an Open, Pending report and one merge request. On the fix it ends Landed with the merge retried inside the same call and check_reads within the shared budget. If it passes on old code, the producer reports that and makes no behaviour change.",
+      "fails_without": "A change that only adds types or the budget parameter, without the retry, leaves the test failing.",
+      "seam": "Same as criterion 1: `Rig::run` and FakeHost.script plus the refusal limit field (step 2 adds it). The retry logic is production code in landing.rs."
+    }
+  ],
+  "open_questions": [
+    "Host: Does GitHub refuse a merge with 'Repository rule violations found' while a required check has not reported yet, and then accept it once the check goes green? The code only handles the refusal text (landing.rs:254, client.rs:653-659) and cannot show whether the real host does this. If it never does, the old code has no fault of this kind.",
+    "User: If the refused-then-green test passes on the unmodified code, so that no green-during-poll fault exists in this tree, do you want the tests kept as regression tests with no behaviour change, or the job closed as already fixed?",
+    "User: Is it acceptable that the criterion 1 and 2 tests in drain.rs only pin the drain's mapping, while the failing-on-old-code proof is the core test in crates/athena-core/src/gh/tests.rs? A drain-level test that fails on old code would need a Git fixture and a GitHub-style origin, which does not fit one run."
+  ],
+  "producer_section_sha256": "e6558e8793dc5ee4c85a05a0f3519ef1156937ce3514b80b25cc84c96fcce78b"
+}

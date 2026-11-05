@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-215733-rf7z",
+  "round": 1,
+  "at": "2026-11-05T02:00:36.213508338Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The scripted test cannot reproduce the suspected fault, so step 6's 'if step 1 showed the green test failing' never triggers.",
+      "evidence": "The criterion 1 script is check replies 'pending, pending, then success' with no merge refusal. On that script, wait_for_checks breaks on Green (early.rs:145) and land_pr merges (landing.rs:234-249). The plan's own read-through says so. The 'fails without the behavior' text expects old code to return Waiting 'after a green read followed by a refused or pending merge', but the script never serves a refusal. The rule-violation arm (landing.rs:254-271) runs only if the merge PUT is refused and the following check_report is Pending. That happens only if the test author scripts it, which builds the hypothesis into the test instead of finding the fault. Fix: Split the reproduction into one script per candidate cause and say which script matches the reported symptom. (a) pending→green with the merge accepted: expected to pass on old code. (b) green→merge refused by rule violations→pending, then green within budget: the leading suspect. (c) checks still pending for the whole budget because a check run is unfinished or the required run is missing: classify_checks (client.rs:1072-1078). Tell the producer to tell the paths apart by the Waiting warning text. The rule-violation arm adds 'the host refused the merge by its repository rules while checks were not finished ... waiting to merge', and the client marks the host-error log entry with mark_checks_pending (client.rs:653-659). Change landing.rs only if the evidence or the user's answer points to (b). Otherwise keep the regression tests and raise the open question, as decision 3 already says.",
+      "location": "Demonstrations, criterion 1; Steps 1, 4 and 6",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The named seam needs more than the plan says, and its fallback skips the code it claims to test.",
+      "evidence": "Athena::land_pr (landing.rs:690-775) runs reconcile, loads records and needs a passed verification and a candidate. It reads `git remote get-url origin` and passes it to parse_remote, which needs 'github.com' in the URL. It pushes through GitRemote to that same origin and builds GitLandingRecords::for_remote. After the merge, observe_merge → check_merged (pr.rs:372-383) checks the merged content on the remote against the verified fingerprint. So a 'Runner [that] holds no merge logic' cannot produce Landed: the double must create a real squash on the remote, as test_support FakeHost::merge does (test_support.rs:213-225). The only github.com origin in tests/drain.rs is https://github.com/owner/repo (line 2584), and it is used with seams Athena::land_pr does not consult. The fallback, land_through_pr (test_support.rs:606), calls core land_pr directly and bypasses PrLander and Drain::land. Its FakeHost::checks always returns Green (test_support.rs:207-209), so it cannot script pending→green. Fix: Put the poll-and-merge decision under test where it lives: a core test using the existing Rig and the scripted FakeHost in crates/athena-core/src/gh/tests.rs (script, merges, check_reads and merge_error, as in tests 1507-1564 and 1642-1652). Assert merges == 1, check_reads < attempts, state Landed, and checks Green for pending→green, and the reverse for all-pending. Then add a drain.rs test showing that Drain::land maps that report shape to 'landed' in one land call, using landing_from_report on a merged PrReport and the existing World. Only keep the PrLander injection if the producer also states the origin-URL trick (a local bare repository whose path contains github.com) and a Runner that performs the merge on the remote. Then estimate whether that fits one producer run.",
+      "location": "Decision 1 and Demonstrations 'Test seam' (PrLander with a scripted Runner through Athena::land_pr); Risks, item 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Adding fields to PrLander breaks RealSteps::live. The claim that it compiles unchanged is wrong, and the Sync bound is not mentioned.",
+      "evidence": "RealSteps::live sets `lander: &PrLander` (drain.rs:3329), which only works because PrLander is a unit struct (drain.rs:3110), so the reference is promoted to 'static. The field type is `&'a (dyn Lander + Sync)` (drain.rs:3311). A `PrLander::default()` temporary does not live long enough. Injected `&dyn Runner` and sleep fields must also be Sync, so a counting Runner built on RefCell will not fit. Fix: If the injection stays, add a `static LIVE_LANDER: PrLander = PrLander { runner: &GhCli, sleep: &std::thread::sleep }` (or similar) used by live. Require Sync on the injected references, and use atomics or a Mutex for the counters in the scripted Runner.",
+      "location": "Step 3 and Dependents entry 'PrLander construction'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The leading-candidate fix changes the outcome of an existing core test that the plan lists as a guard.",
+      "evidence": "a_merge_refused_for_rule_violations_while_checks_are_pending_is_a_wait (gh/tests.rs:1526-1545) scripts [Green, Pending] with merge_error set. Once the script runs out, FakeHost reports Green, so a retry-on-green arm would ask for a second merge. The second refusal comes with settled checks and returns Err. That turns the test's Waiting into an error and changes merges from 1 to 2. Fix: State that this test's script must be extended (for example, Pending kept to the end of the budget so it stays a wait). Add a separate test for refused-then-green-within-budget that ends Landed. Do not describe the existing test as passing unchanged.",
+      "location": "Step 6 and Dependents entry for the rule-violation arm",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The exact counts are tied to the live poll constants.",
+      "evidence": "The demonstration asserts exactly 30 reads and 29 sleeps. Those numbers come from wiring::checks_poll (wiring.rs:42), and a test with an injected poll may not use them. Fix: Assert against the attempts value of the poll the test passes in (as gh/tests.rs:1522 does with rig.attempts), not the literal 30.",
+      "location": "Demonstrations, criterion 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the code correctly. I checked that wait_for_checks (early.rs:140-149) stops at the first read that is not pending, that land_pr merges when the checks are green and merge_via_rest is on (landing.rs:234), and that the only paths to Waiting are a poll that ends pending and the rule-violation arm (landing.rs:254-271). Reproducing before fixing, and not inventing a change if nothing reproduces, is the right approach. The test design does not hold up, though. First, the green-during-poll test scripts pending, pending, success with no merge refusal. By the plan's own reading, the current code merges on that script, so the test passes on old code and step 6 never fires. Reaching the plan's leading suspect means scripting a refusal, which builds the guess into the test instead of finding the fault. Second, the chosen seam (the real Athena::land_pr behind a scripted gh Runner) is much heavier than the plan says. check_merged needs a real merged commit on the remote whose content matches the verified fingerprint, so the Runner must hold merge logic. It also needs an origin whose URL contains github.com but can still be pushed to, plus a verified job in the records. The fallback the plan names (land_through_pr with test_support FakeHost) skips PrLander and Drain::land, and that FakeHost always reports green. A cheaper seam already exists: Rig plus a scripted FakeHost in gh/tests.rs, where the script, merges and check_reads fields drive the production land_pr. Third, the claim that RealSteps::live compiles unchanged is wrong: `lander: &PrLander` relies on PrLander being a unit struct, and adding fields breaks it. The plan can fix all of this, so the verdict is revise."
+}

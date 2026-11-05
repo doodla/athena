@@ -1,0 +1,227 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261104-215733-rf7z",
+  "round": 1,
+  "at": "2026-11-05T01:57:49.196000489Z",
+  "invocation_seq": 2,
+  "approach": "Read-through finding: the production path already looks like it merges on green. `wait_for_checks` (crates/athena-core/src/gh/early.rs:140-149) stops at the first non-pending read. `land_pr` (landing.rs:225-234) merges when the result is Green and merge_via_rest is on. `Drain::land` (drain.rs:1709-1763) only maps what `Steps::land` returns. The only ways to reach Landing::Waiting (via `landing_from_report`, drain.rs:3134-3141) are a poll that ends Pending, or a merge refused by rule violations while checks are Pending again (landing.rs:254-271). So the producer must first reproduce the fault with a drain-level test that drives the real `PrLander` path (real `Athena::land_pr`, real `GhClient`) over a scripted gh `Runner`, with no real sleep. Then it fixes the root cause where the test shows it. Most likely site: the rule-violation-while-pending arm in landing.rs, which returns Waiting after one refused merge. The fix there keeps polling within the same attempts budget and retries the merge when checks turn green. Seam change in drain.rs: `PrLander` carries an injectable gh `Runner` and sleep function, defaulting to `GhCli` and `std::thread::sleep`. Add two tests (green partway through; still pending at the end) and update the comments by the Waiting handling (module text drain.rs:123-128, `Landing::Waiting` doc at 498-500, `LandStep`/`ItemEnd::Waiting` docs, `PrLander` doc) to say a poll that turns green merges in the same locked step. Add a CHANGELOG.md entry under Unreleased.",
+  "decisions": [
+    {
+      "choice": "Reproduce through the real PrLander -> Athena::land_pr -> GhClient path, injecting only a scripted gh Runner and a counting sleep.",
+      "reason": "Athena::land_pr already takes `runner: &dyn Runner` and a `Poll` with an injectable `sleep` (landing.rs:690-696). So the scripted checks (pending, then green) sit at the host boundary and the merge decision runs as production code. Nothing under test lives in the double.",
+      "rejected": [
+        {
+          "option": "Extend the drain.rs World fake so its `land` returns Landed after N calls.",
+          "why": "It would encode the green-during-poll logic in the double and pass on old code, which fails criterion 6."
+        },
+        {
+          "option": "Test only landing_from_report with hand-made PrReports.",
+          "why": "It never exercises a poll; the existing test (drain.rs:4711) already covers the mapping."
+        }
+      ]
+    },
+    {
+      "choice": "Put the fix where the reproduction shows the fault. Leading candidate: the rule-violation-while-pending arm in landing.rs, which resumes the check wait with the attempts left and retries the merge once checks are green. Drain::land stays one locked step.",
+      "reason": "The root-cause default requires fixing where the fault starts. The brief lists landing.rs and wiring.rs as deliverables for that reason. Poll length and interval stay unchanged: it is the same 30 x 20 s budget, shared rather than restarted.",
+      "rejected": [
+        {
+          "option": "Make Drain::land call Steps::land a second time on Waiting.",
+          "why": "It doubles the lock-held time to about 20 minutes and changes the poll length, which is out of scope. It also treats a symptom."
+        },
+        {
+          "option": "Re-poll in the drain between items.",
+          "why": "It is the 'comes back later' behaviour the request wants removed."
+        }
+      ]
+    },
+    {
+      "choice": "If the reproduction passes on old code (the fault is already fixed in core), do not invent a change. Keep the two tests as regression tests and report this in the change description.",
+      "reason": "The brief's root-cause default says to name where the fault starts, not to work around it. Criterion 6 then cannot hold for the green case, so the producer must say so explicitly.",
+      "rejected": [
+        {
+          "option": "Add a speculative retry loop in drain.rs anyway.",
+          "why": "It would be a no-op or a poll-length change, and it is untestable as a fix."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Give PrLander an injectable gh Runner and sleep (defaults GhCli and std::thread::sleep). Add the green-during-poll and still-pending tests. Reword the comments at the module text (123-128), the Landing::Waiting doc (498-500), ItemEnd::Waiting (1323-1325) and PrLander (3106-3108).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/landing.rs",
+      "action": "modify",
+      "purpose": "Only if reproduction shows the root cause here: on a merge refused by rule violations while checks are pending, keep waiting within the remaining attempts and retry the merge once green. Add or extend core tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "purpose": "Only if reproduction shows the fault in how the poll is built (checks_poll, line 42). Poll length and interval stay the same. Otherwise untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry: a pull request whose checks turn green during the poll merges in the same landing step; names the root cause.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Reproduce first: in crates/athena-cli/src/drain.rs tests (or tests/drain.rs), build the Athena fixture from athena_core::test_support and a scripted Runner serving check-runs and status replies that are pending, pending, then success. Drive `Drain::land` via `RealSteps` and the current `PrLander`. This needs the seam added in steps 2-3 first; write it, then run it on the unmodified landing code and record whether it lands or returns Waiting.",
+    "Add a scripted gh `Runner` test double in the drain tests. It answers only the API paths land_pr uses (repo, pulls, check-runs, status, merge), and counts reads and merges. It holds no merge logic.",
+    "Change `PrLander` to carry an injectable runner and sleep function (defaulting to `GhCli` and `std::thread::sleep`, via `Default`). Make `RealSteps::live` use the default, and pass `crate::wiring::checks_poll(sleep)` as before.",
+    "Write the green-during-poll test (criterion 1): pending, pending, green; assert 'landed', one merge request, one land call, no 'waiting to merge'.",
+    "Write the still-pending test (criterion 2): pending on all 30 reads; assert Waiting, a 'waiting to merge' line, no merge, 30 reads, one land call. Add a red-checks case that asserts NotLanded.",
+    "If step 1 showed the green test failing, fix the root cause where it starts. Expected site: the rule-violation-while-pending arm in crates/athena-core/src/gh/landing.rs:254-271, resuming the check wait with the attempts left and retrying the merge once green. Add a core test in gh/tests.rs beside line 1526. If wiring.rs is the cause, fix checks_poll or its use there. If it passes on old code, change no behaviour.",
+    "Reword the comments listed in the drain.rs file entry to say a poll that turns green merges in the same locked step and a poll that ends pending is Waiting.",
+    "Add the CHANGELOG.md Unreleased entry naming the root cause and why the change fixes it.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "The scripted-Runner harness through the real Athena::land_pr needs a git remote, records sink and verified job, so it is heavy for one producer run.",
+      "mitigation": "Step 1 is the reproduction. If a full gh script is too heavy, use the athena_core::test_support FakeHost and land_through_pr pattern to build the Athena fixture, and script only the check replies. Keep scripted replies minimal (repo, pulls, check-runs, status, merge)."
+    },
+    {
+      "risk": "The green-case test passes on old code, so criterion 6 ('would fail on old code') cannot hold.",
+      "mitigation": "The producer records the old-code result in the change description. If the green test passes on old code, no behaviour change is made and the open question goes to the user. The producer does not fake a failure."
+    },
+    {
+      "risk": "A retry loop in landing.rs could lengthen the locked step or merge on a stale green.",
+      "mitigation": "The retry reuses the remaining attempts, not a new 30, and merge is still gated on Green. Add a test that the read count never exceeds the attempts and that Red after a retry ends NotLanded."
+    },
+    {
+      "risk": "Injecting fields into PrLander breaks `RealSteps::live` or the integration-test landers.",
+      "mitigation": "Default values keep GhCli and std::thread::sleep, and the signature of Lander::land does not change. Run cargo test -p athena-cli and cargo clippy --all-targets."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Landing::Waiting mapping and the 'waiting to merge' job line",
+      "dependent": "Drain::land and its LandStep match in crates/athena-cli/src/drain.rs:1709-1763, the `ItemEnd::Waiting` handling at 1855 and 2506, and `last_landing` at 1422",
+      "kind": "code",
+      "test": "a_job_waiting_to_merge_is_not_a_failure_and_the_run_goes_on_to_the_next_job (drain.rs:4693) plus the new still-pending test",
+      "reason": null
+    },
+    {
+      "name": "Pending report to Waiting",
+      "dependent": "landing_from_report in drain.rs:3128 maps an open PR with Checks::Pending to Waiting",
+      "kind": "code",
+      "test": "a_merge_refused_for_rule_violations_while_checks_are_pending_is_reported_as_waiting (drain.rs:4711), unchanged",
+      "reason": null
+    },
+    {
+      "name": "land_pr behaviour on a merge refused while checks are pending",
+      "dependent": "crates/athena-core/src/gh/landing.rs land_pr rule-violation arm (254-271) and its core callers: `athena land --pr` (crates/athena-cli/src/main.rs), the drain's PrLander, and crates/athena-core/src/test_support.rs land_through_pr (line 606)",
+      "kind": "code",
+      "test": "a_merge_refused_for_rule_violations_while_checks_are_pending_is_a_wait (gh/tests.rs:1526), a_merge_refused_for_rule_violations_with_the_checks_settled_stays_an_error (1548), another_merge_refusal_while_checks_are_pending_stays_an_error (1558). The producer extends these if the arm changes.",
+      "reason": null
+    },
+    {
+      "name": "Poll budget (30 attempts x 20 s from wiring::checks_poll, wiring.rs:42)",
+      "dependent": "wait_for_checks in crates/athena-core/src/gh/early.rs:129 and the Poll struct (landing.rs:96), also used by the early-run wait (docs/system-facts.md 'Early pull request and CI waits')",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged: the plan neither edits checks_poll nor wait_for_checks's loop. Any retry shares the existing attempts budget."
+    },
+    {
+      "name": "Locked landing step (one landing at a time)",
+      "dependent": "[parallel] max_concurrency path into landing: Drain::land holds the landing mutex (drain.rs:1710) for the whole land step, and drain_concurrent shares RealSteps between workers",
+      "kind": "code",
+      "test": "The existing concurrent test (drain.rs:4688-4708, `concurrent(&world, 2)`) and the tests/drain.rs landing-order tests using RecordingLander.",
+      "reason": "The lock scope is unchanged. A land that merges inside its poll does not lengthen the held time, and it removes the later re-land."
+    },
+    {
+      "name": "PrLander construction (new injectable Runner and sleep fields)",
+      "dependent": "Lander trait and RealSteps::live (drain.rs:3102, 3324), plus tests/drain.rs RecordingLander and ConfigLander impls (lines 2117, 3037)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli (tests/drain.rs)",
+      "reason": "Lander::land's signature is unchanged and `PrLander::default()` keeps GhCli and std::thread::sleep, so RealSteps::live and the integration-test landers compile unchanged."
+    },
+    {
+      "name": "[landing] merge_via_rest and the merge gate (merge only on Green)",
+      "dependent": "Host merge rules in docs/system-facts.md (squash-only, linear history, branch up to date): merge still goes through `job.host.merge` guarded by the head sha",
+      "kind": "host_setting",
+      "test": "with_the_setting_off_no_merge_is_requested_and_the_pull_request_stays_open_and_green (gh/tests.rs:1446) and the new still-pending test",
+      "reason": "Unchanged: the merge still happens only when seen == Green and merge_via_rest is true (landing.rs:234). Red and still-Pending never reach merge."
+    },
+    {
+      "name": "Landing-intent record written before the merge",
+      "dependent": "records validation allow-list (check_record_file, AnyRecord) and the landing-intent and landing records written by land_pr",
+      "kind": "rule",
+      "test": "land_pr_writes_the_intent_then_the_landing_with_the_head_as_second_parent (gh/tests.rs:3498)",
+      "reason": "A retried merge reuses the one intent written before the first merge call; no new record kind or data file is added."
+    },
+    {
+      "name": "Changelog entry",
+      "dependent": "CHANGELOG.md (Unreleased) as asked by BRIEF.md",
+      "kind": "rule",
+      "test": null,
+      "reason": "The entry is text only; no check reads its content beyond the existing changelog presence tests."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new test in crates/athena-cli/src/drain.rs (or crates/athena-cli/tests/drain.rs if the Athena fixture lives there) calls `Drain::land` through `RealSteps` with `PrLander` built with a scripted Runner and a counting sleep. The Runner serves check-run replies pending, pending, then success. It asserts the job line is 'landed' and that the merge call was made exactly once. It also asserts the checks were read fewer than the 30 attempts and that no 'waiting to merge' line was printed.",
+      "command": "cargo test -p athena-cli drain",
+      "observes": "The job ends 'landed' in one `land` call with no Landing::Waiting, and the merge request is sent once, after the green read.",
+      "fails_without": "On old code that returns Waiting after a green read followed by a refused or pending merge, the test sees 'waiting to merge' and no merge. If the fault is not in that path, the producer reports that the test passes on old code.",
+      "seam": "Production entry point: `Drain::land` via `RealSteps::land` -> `PrLander::land` -> `Athena::land_pr` -> `landing::land_pr` -> `wait_for_checks`. Fake: a scripted `Runner` implementing athena_core's Runner trait for the gh API calls, plus a counting sleep closure. Both are injected through new fields on `PrLander` (a plan step adds them). The Athena fixture comes from `athena_core::test_support` (athena-cli dev-dependency enables `test-support`, Cargo.toml:31); that exists today. The scripted Runner and the PrLander injection are added by steps 2 and 3."
+    },
+    {
+      "criterion": 2,
+      "method": "A second test uses the same harness with the Runner serving pending on every read. It asserts `Landing::Waiting`, a job line starting 'waiting to merge', exactly one land call (the item is not retried), no merge request, and exactly 30 reads with the injected sleep called 29 times.",
+      "command": "cargo test -p athena-cli drain",
+      "observes": "With checks still pending at the end of the poll the result is Waiting, the line starts 'waiting to merge', and the item is not tried again.",
+      "fails_without": "If a fix wrongly merged, or looped past the poll budget or retried, the merge count, read count or land-call count would differ.",
+      "seam": "Same as criterion 1 (the same injected Runner and sleep). The test is added in steps 4-5."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the whole athena-cli suite. It includes `a_job_waiting_to_merge_is_not_a_failure_and_the_run_goes_on_to_the_next_job` (drain.rs:4693) and `a_merge_refused_for_rule_violations_while_checks_are_pending_is_reported_as_waiting` (drain.rs:4711), left unchanged. It also includes the core tests for red checks (gh/tests.rs:1619-1651) and for the rule-violation wait (gh/tests.rs:1526). A red case in the new harness asserts NotLanded.",
+      "command": "cargo test -p athena-cli && cargo test -p athena-core gh",
+      "observes": "The two named tests still pass without edits, and red checks still end NotLanded.",
+      "fails_without": "Changing the Waiting mapping or the merge gate would break `landing_from_report`'s asserts (drain.rs:4731-4741) or the core tests that expect a refused merge with pending checks to be a wait.",
+      "seam": "Existing: `World` fake and `landing_from_report` unit tests in drain.rs, and `Rig` plus `FakeHost` in athena-core gh/tests.rs. No new seam."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three Athena checks on the whole workspace.",
+      "command": "cargo test --locked",
+      "observes": "The workspace tests pass. Then `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` are clean (they run as separate commands).",
+      "fails_without": "A new warning, formatting drift or a broken test in a dependent crate would fail the corresponding command.",
+      "seam": "Existing workspace commands."
+    },
+    {
+      "criterion": 5,
+      "method": "Inspect the diff. Only drain.rs (plus its tests), CHANGELOG.md, and wiring.rs or landing.rs if the root cause is there may change. The comments at drain.rs:123-128, 498-500, 1323-1325 and 3106-3108 are reworded to say that a poll which turns green merges in the same step.",
+      "command": "git diff --stat",
+      "observes": "The file list matches the brief's deliverables. Grep of the diff shows the new comment text.",
+      "fails_without": "A change to athena.toml, defaults.toml or poll constants would show in the stat, and the out-of-scope check would fail.",
+      "seam": "No new seam: this is a content check on the diff."
+    },
+    {
+      "criterion": 6,
+      "method": "Check that the new green-case test is the failing-first test. The producer reproduces it on the unmodified code before editing, and records the result in the change description. Then the test passes after the root-cause change. The diff shows the merge call reached in the same `Drain::land` call, not just new types.",
+      "command": "cargo test -p athena-cli drain",
+      "observes": "The green-case test fails or passes on old code as recorded. On the fix it asserts landed, one merge request and one land call.",
+      "fails_without": "A change that only adds the injection fields and no behaviour fix leaves the green test failing, if the fault is real.",
+      "seam": "Same as criterion 1."
+    }
+  ],
+  "open_questions": [
+    "Host: Does the real GitHub check-runs and status API ever report a green head and then refuse the merge by rule violations while a new run is queued, outside the 20-second polling? If it does, the rule-violation arm (landing.rs:254) is the fault. If not, the fault may already be fixed in core; the code alone cannot show this.",
+    "User: If the reproduction passes on the unmodified code, so no fault exists in the current tree, do you want the two tests kept as regression tests with no behaviour change, or the job closed as already fixed?"
+  ],
+  "producer_section_sha256": "1d9657a8fc46d381ca1316682b69125ad82fbdfd05bc3aebaa6b4388b511ca90"
+}
