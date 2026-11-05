@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `docs/design/warm-baseline-build.md`: a design note on the warm baseline build proposed by throughput review
+  `20261029-155931-wfkr`, checked against the records. It lists the CI-first checks flow, the pull-request
+  target-cache restore and the 6-shard test job as already present. It splits the review's 14.1-minute checks
+  median by path: that window ran about 99 percent of verified jobs locally (4 of 393 reused CI), while in
+  November 51 of 59 reused CI (median CI run 583 s, 53 runs); local runs took a median of 18.5 minutes
+  (6 runs). It corrects the earlier claim that the median was CI wait and the freshness claim (stable Cargo
+  uses file mtimes, so workspace crates rebuild). It scales the 8.0-minute estimate to about 0.6 to 1.1 minutes
+  per landed job, does not recommend building the baseline now, and states how the next review splits the
+  checks stage by CI versus local.
 - The gate now detects the three ways a job's records could be written by hand (design §16.2): a whole job
   written across two commits, one forged commit that lands a job that was dispatched but never closed, and a
   hand-made proposal closed with `athena close`. A new check, `jobs::provenance`, runs for a commit being made
