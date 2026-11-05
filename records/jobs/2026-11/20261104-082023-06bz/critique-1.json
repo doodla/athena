@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-082023-06bz",
+  "round": 1,
+  "at": "2026-11-05T03:13:54.926020724Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "The strict new rules re-judge the frozen pre-C0 history, and the plan's remedy cannot be used on that path.",
+      "evidence": "athena.toml:153 sets `cutover_job`, and HISTORY.txt shows the cutover work landed (b4f6a8a, e96feac). Once the cutover shows, `check_history` calls `check_after_cutover`, which calls `legacy::check_attribution_with_legacy`. That runs `check_history_with_exempt(git, c0, Some(record.shas()))` (legacy.rs:192), and so `jobs::check`, on every commit up to C0. The exempt list comes from `legacy-exempt.json`, not from athena.toml. records-history.md §4 says that list is append-only and that 'adding to it after the cutover is refused'. The design also calls this 'a frozen module' that 'runs unchanged'. Every dispatch field on `Job` is `Option` (records.rs:607-620), which is evidence that older genuine job.json files lack some of them. Decision 4 makes a missing field a refusal with no leniency. So `athena check --history` in CI would refuse genuine historical jobs, with no remedy inside scope. Before the cutover shows, the plan's remedy is to exempt each affected commit. That switches off the whole governed-content invariant for those commits, which is worse than the gap being closed. Fix: Keep the frozen legacy judgment unchanged. Run the new provenance checks only on commits that can still arrive: Athena's own commit gate and the hook (`history == None`), and the post-C0 path. Do not run them inside `check_history_with_exempt` for commits up to C0. For example, pass a flag or call the new checks from `gate()` and the post-C0 walk, not from inside `jobs::check`'s legacy use. Pre-C0 main history cannot gain new commits, so nothing is lost. Add a test that the legacy check of a pre-C0 commit with old-shape records gives the same violations as today, extending the comparison at legacy.rs:304.",
+      "location": "Decision 4, the Risks entry on records from older builds, and the Dependents entry on the history walk / check_after_cutover; crates/athena-gate/src/legacy.rs:10-13 and 192; docs/design/records-history.md §4 (lines 115-125)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "After C0, CI never runs `jobs::check` on new commits, so the new detection does not reach the CI backstop for this repository's current state.",
+      "evidence": "`check_after_cutover` judges commits after C0 only with `invariant::classify_pre_merge` (for head-only commits), `legacy::check_attribution_with_legacy` (attribution findings), and `reconcile::check_records` on main's RecordSet. Grep shows `jobs::check` is called only at lib.rs:357 and 372 and history.rs:255. The audit of the records branch (`audit_commits`) checks only that no file is dropped or changed. Under records-history.md §4 stage 1, new records go only to `athena/records`, and a hand-made proposal closed with `athena close` lands nothing on main. So forgery (c), and a whole job written by hand, are judged only by the commit-msg/commit hook. Anyone hand-writing records can skip that hook. The demonstrations use `history_of` on a fixture with no cutover, so they never cover this path. Fix: Either run the job-records judgment, including the new provenance checks, on each first-parent commit of `athena/records` that adds `records/jobs/` files, inside the post-C0 check (attribution `run_check` or `check_after_cutover`), and add a test built on the cutover fixture (crates/athena-cli/tests/cutover_fixture.rs or the history.rs records tests). Or narrow the claim explicitly: the docs and CHANGELOG would say that after C0 detection happens only at commit time, and an open question would name the records-branch check as the follow-up. The Dependents entry for the history walk must be corrected either way.",
+      "location": "Dependents entry 'The same violations during the history walk (... the check_after_cutover path ...)' and the 'CI history check' entry; crates/athena-gate/src/history.rs:122-197; crates/athena-git/src/records_branch.rs:184-223",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Forgery (b) is caught only when its timestamps are out of order. The control test shows the realistic forgery passes.",
+      "evidence": "Every (b) variant breaks one ordering on purpose: producer before `dispatched_at`, verifier before the producer ended, or outcome before the verifier ended. The control 'with honest times is accepted'. So the §16.2 forgery as described, with records that reconcile, still passes. The test fails without the change, but it shows detection of careless timestamps, not of the forgery itself. The Risks section admits this. Fix: Keep the tests, but name (b) in the docs and CHANGELOG as 'detected only when the forged invocation and outcome times contradict the dispatch'. Alternatively, add a link the person forging cannot compute alone, such as the verifier invocation's brief hash against a committed brief, if such a record exists. Check the `InvocationContext` fields before relying on it.",
+      "location": "Approach (4) and Demonstration for criterion 1(b)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The fixture migration outside athena-gate is open-ended, which risks one producer run.",
+      "evidence": "`AnyRecord::Outcome(` appears in 17 files across athena-core, athena-cli, athena-gate and athena-data. history.rs:459-502 commits a hand-written outcome and score through the history walk, and exemption tests then assert on the violations it gives. Step 5 says only to fix whatever fails. Fix: Before planning the steps, Grep for tests that commit closing scores or outcomes through `gate()`, `commit_records` or `check_history`, and list them with the expected edit. If the list is long, apply the new checks only where finding 1 places them. That also shrinks the set of affected fixtures.",
+      "location": "Step 5 and the Risks entry on hand-made fixtures",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly. The files and functions it names exist: `jobs::check` and `JobFiles::load` in jobs.rs, the `gate()` call sites at lib.rs:357 and 372, history.rs:255, the dispatch fields at run/mod.rs:952-991, `defaults_sha256` as `sha256_hex(&defaults_bytes)` at capability.rs:51, and the docs lines it cites. The test seams are real: `job_records_of` and `history_of` run on real temporary git repositories. Two design faults remain, both about where the new rule runs compared with where records now live. First, `jobs::check` is also the frozen legacy rule. After the cutover, `legacy::check_attribution_with_legacy` re-runs `check_history_with_exempt` over every commit up to C0, using the exempt list from `legacy-exempt.json`. So the strict new rules would re-judge every genuine pre-C0 job. Many of those were written by older builds: every dispatch field on `Job` is an `Option`. The plan's remedy, `[history] exempt` in athena.toml, is not the list that path reads, and athena.toml is out of scope anyway. Second, CI never runs `jobs::check` on commits after C0. `check_after_cutover` uses only attribution, `classify_pre_merge`, and an append-only audit of the records branch. So new forgeries, including a closed proposal that never touches main, are caught only by the local hook, which the person forging the records controls. Detecting forgery (b) also comes down to timestamp order alone, and the plan's own control test shows a forgery with honest times passes. I read the code to reach all of this; I ran nothing."
+}

@@ -11,17 +11,22 @@
 //!   landing of each of them;
 //! - an outcome after `blocked` (`outcome-landed.json`, `outcome-abandoned.json`) needs the job's
 //!   `blocked` outcome on the parent commit, or in the same commit when a squash folds the job into one.
+//!
+//! A commit being made is also held to provenance ([`provenance`], design §16.2): a job it closes must
+//! carry the request, reader invocation, dispatch fields, brief and ordering of times that Athena's own
+//! writers leave. Records are unsigned, so this refuses records written by hand that lack or contradict
+//! that evidence; it does not stop a forger who writes all of it consistently.
 
 use crate::invariant::{self, HistoryState};
 use crate::{Change, Judged, Result, Rule, Violation};
 use athena_data::records::{
     AnyRecord, Candidate, Correction, Intervention, Invocation, Job, Outcome, OutcomeState,
-    Reading, Score, Verification,
+    Reading, Role, Score, Verification,
 };
 use athena_data::{JobId, RecordId};
 use athena_git::Git;
 use athena_score::{JobFacts, RulesVersion};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The records of one job in one tree. Files that do not parse, or that sit away from their canonical
 /// path, are left out: the content checks report them.
@@ -216,8 +221,372 @@ fn first_difference(
     }
 }
 
-/// Checks the job records `change` adds against the rest of their job (M27).
+/// Checks the job records `change` adds against the rest of their job (M27), and, for a commit being made,
+/// the cross-links that Athena's own writers always leave ([`provenance`]).
+///
+/// `history` is `None` for a commit being made (the commit-msg hook, Athena's plumbing commits and
+/// `athena close`: `gate` in lib.rs) and `Some` for the frozen walk over commits already made
+/// ([`crate::history`]). Only a commit being made is held to provenance: records that older builds wrote
+/// carry less of it, and a commit already made cannot be excused afterwards. A future caller that passes
+/// `None` for commits already made gets provenance too.
 pub fn check(
+    git: &Git,
+    change: &Change,
+    judged: &Judged,
+    history: Option<&HistoryState>,
+) -> Result<Vec<Violation>> {
+    let mut violations = check_records(git, change, judged, history)?;
+    if history.is_none() {
+        violations.extend(provenance(git, change, judged, history)?);
+    }
+    Ok(violations)
+}
+
+/// The start of every [`provenance`] detail, so that a reader of a gate report sees which kind of refusal
+/// it is.
+pub const PROVENANCE: &str = "provenance: ";
+
+/// The dispatch fields a landed job's `job.json` must hold: those the provenance rules compare, and no more.
+fn missing_dispatch_fields(job: &Job) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    let mut need = |present: bool, name: &'static str| {
+        if !present {
+            missing.push(name);
+        }
+    };
+    need(job.accepted_reading.is_some(), "accepted_reading");
+    need(job.accepted_by.is_some(), "accepted_by");
+    need(job.caps.is_some(), "caps");
+    need(job.base_commit.is_some(), "base_commit");
+    need(job.config_sha256.is_some(), "config_sha256");
+    need(job.defaults_sha256.is_some(), "defaults_sha256");
+    need(job.athena.is_some(), "athena");
+    need(job.driver.is_some(), "driver");
+    need(job.brief_sha256.is_some(), "brief_sha256");
+    need(job.dispatched_at.is_some(), "dispatched_at");
+    missing
+}
+
+/// Whether `text` can name a commit safely on a git command line: 40 or 64 hex digits.
+fn is_full_id(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Judges whether the records a commit closes a job with carry the evidence Athena's own writers always
+/// leave (design §16.2). Records are not signed, so this cannot tell a careful forgery from the real thing;
+/// it refuses the hand-written job whose links are missing, copied or out of order.
+///
+/// It applies to a request job that this commit closes: a closing score (not a re-score) or any outcome is
+/// added to its directory. Each reading of the job needs (R1):
+///
+/// - `request.json`, received at or before the reading;
+/// - the reader invocation the reading names (`invocation_seq`), ended at or before the reading;
+/// - when the reading's base commit is held, a `defaults.toml` there that hashes to its `defaults_sha256`.
+///
+/// A job whose outcome is `landed` also needs (R2) a `job.json` with the dispatch fields, whose config and
+/// defaults hashes equal the accepted reading's, and a `brief-producer.md` whose hash is `brief_sha256`;
+/// and (R4, [`dispatch_order_problem`]) records that happened in the order of a real run.
+///
+/// Reading-before-work and the presence of a successful verifier invocation are judged by
+/// [`invariant::prediction_problem`] and the landing check in `invariant`, which run in the same gate scope;
+/// they are not repeated here.
+///
+/// Like [`check`], it judges a commit being made. A history walk does not call it.
+pub fn provenance(
+    git: &Git,
+    change: &Change,
+    judged: &Judged,
+    history: Option<&HistoryState>,
+) -> Result<Vec<Violation>> {
+    if invariant::is_exempt(change, judged, history) {
+        return Ok(Vec::new());
+    }
+    let commit = change.commit.as_deref();
+    let fail = |path: &str, detail: String, repair: &str| {
+        Violation::new(Rule::JobRecords, format!("{PROVENANCE}{detail}"), repair)
+            .at_path(path)
+            .in_commit(commit)
+    };
+    // The jobs this commit closes, each with the landed outcome record's path and value when it adds one.
+    let mut closed: BTreeMap<JobId, Option<(String, Outcome)>> = BTreeMap::new();
+    for d in judged
+        .diff
+        .iter()
+        .filter(|d| d.status == 'A' && d.path.starts_with("records/jobs/"))
+    {
+        // A merge brings in records its other parents already have; those were judged where they were
+        // added.
+        let mut from_another_parent = false;
+        for parent in change.parents.iter().skip(1) {
+            if git.show_file(parent, &d.path)?.is_some() {
+                from_another_parent = true;
+            }
+        }
+        if from_another_parent {
+            continue;
+        }
+        let bytes = git.cat_blob(&d.new_oid)?;
+        let Ok(record) = AnyRecord::parse(&d.path, &bytes) else {
+            continue;
+        };
+        if record.canonical_path() != d.path {
+            continue;
+        }
+        match record {
+            AnyRecord::Score(score) if score.cause.is_none() && score.job.is_request() => {
+                closed.entry(score.job.clone()).or_insert(None);
+            }
+            AnyRecord::Outcome(outcome) if outcome.job.is_request() => {
+                let landed = (outcome.state == OutcomeState::Landed)
+                    .then(|| (d.path.clone(), Outcome::clone(&outcome)));
+                let slot = closed.entry(outcome.job.clone()).or_insert(None);
+                if landed.is_some() {
+                    *slot = landed;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut violations = Vec::new();
+    for (job, landed) in &closed {
+        let dir = job.dir();
+        let files = JobFiles::load(git, &change.tree, job)?;
+        let request = git
+            .show_file(&change.tree, &format!("{dir}/request.json"))?
+            .and_then(|bytes| AnyRecord::parse(&format!("{dir}/request.json"), &bytes).ok())
+            .and_then(|record| match record {
+                AnyRecord::Request(r) => Some(r),
+                _ => None,
+            });
+        for reading in &files.readings {
+            let n = reading.n;
+            let path = format!("{dir}/reading-{n}.json");
+            match &request {
+                None => violations.push(fail(
+                    &path,
+                    format!(
+                        "{path} has no request record: {dir}/request.json is not in the tree, so nothing shows the request it answers was received"
+                    ),
+                    "a proposal is made by `athena ask`, which commits the request with its reading; a hand-written proposal cannot be closed here",
+                )),
+                Some(request) if request.received_at > reading.at => violations.push(fail(
+                    &path,
+                    format!(
+                        "{path} was recorded at {}, before its request was received at {} ({dir}/request.json)",
+                        reading.at, request.received_at
+                    ),
+                    "a reading follows its request; `athena ask` writes them in that order",
+                )),
+                Some(_) => {}
+            }
+            match files
+                .invocations
+                .iter()
+                .find(|(_, i)| i.seq == reading.invocation_seq)
+            {
+                Some((inv_path, inv)) if inv.role == Role::Reader => {
+                    if inv.ended_at > reading.at {
+                        violations.push(fail(
+                            &path,
+                            format!(
+                                "{path} was recorded at {}, before the reader invocation it names ended at {} ({inv_path})",
+                                reading.at, inv.ended_at
+                            ),
+                            "a reading is made from the reader's output; `athena ask` records the invocation first",
+                        ));
+                    }
+                }
+                other => violations.push(fail(
+                    &path,
+                    match other {
+                        Some((inv_path, inv)) => format!(
+                            "{path} names invocation {} as its reader, but there is no reader invocation with that number: {inv_path} is a {:?} invocation",
+                            reading.invocation_seq, inv.role
+                        ),
+                        None => format!(
+                            "{path} names invocation {} as its reader, but there is no reader invocation with that number in {dir}",
+                            reading.invocation_seq
+                        ),
+                    },
+                    "the reader's invocation record is committed with its reading by `athena ask`; run `athena ask` for a new proposal",
+                )),
+            }
+            if is_full_id(&reading.base_commit) && git.commit_exists(&reading.base_commit)? {
+                let actual = git
+                    .show_file(&reading.base_commit, crate::DEFAULTS_PATH)?
+                    .map(|bytes| athena_data::sha256_hex(&bytes));
+                if actual.as_deref() != Some(reading.defaults_sha256.as_str()) {
+                    violations.push(fail(
+                        &path,
+                        format!(
+                            "{path} records defaults_sha256 {}, which does not match {} at its base commit {} ({})",
+                            reading.defaults_sha256,
+                            crate::DEFAULTS_PATH,
+                            crate::short(&reading.base_commit),
+                            actual.as_deref().unwrap_or("the file is absent there")
+                        ),
+                        "a reading records the hash of the defaults it was made under; `athena ask` computes it from the base commit",
+                    ));
+                }
+            }
+        }
+
+        let Some((outcome_path, outcome)) = landed else {
+            continue;
+        };
+        let job_path = format!("{dir}/job.json");
+        let Some(dispatched) = &files.job else {
+            violations.push(fail(
+                outcome_path,
+                format!(
+                    "{outcome_path} says the job landed, but the job has no job.json ({job_path} is not in the tree), so no dispatch is recorded"
+                ),
+                "a job is dispatched by `athena go`, which commits job.json before any work starts",
+            ));
+            continue;
+        };
+        let missing = missing_dispatch_fields(dispatched);
+        if !missing.is_empty() {
+            violations.push(fail(
+                &job_path,
+                format!(
+                    "{job_path} lacks {}, which `athena go` records when it dispatches",
+                    missing.join(", ")
+                ),
+                "a job is dispatched by `athena go`; a job.json written by hand or by an older build cannot land",
+            ));
+        }
+        if let Some(accepted) = dispatched
+            .accepted_reading
+            .and_then(|n| files.readings.iter().find(|r| r.n == n))
+        {
+            for (name, recorded, read) in [
+                (
+                    "config_sha256",
+                    &dispatched.config_sha256,
+                    &accepted.config_sha256,
+                ),
+                (
+                    "defaults_sha256",
+                    &dispatched.defaults_sha256,
+                    &accepted.defaults_sha256,
+                ),
+            ] {
+                if recorded.as_deref().is_some_and(|r| r != read) {
+                    violations.push(fail(
+                        &job_path,
+                        format!(
+                            "{job_path} {name} {} differs from the accepted reading's {read} ({dir}/reading-{}.json)",
+                            recorded.as_deref().unwrap_or_default(),
+                            accepted.n
+                        ),
+                        "`athena go` copies these hashes from the accepted reading; do not edit job.json",
+                    ));
+                }
+            }
+        }
+        if let Some(expected) = &dispatched.brief_sha256 {
+            let brief_path = format!("{dir}/brief-producer.md");
+            match git.show_file(&change.tree, &brief_path)? {
+                None => violations.push(fail(
+                    &job_path,
+                    format!(
+                        "{job_path} records brief_sha256 {expected}, but {brief_path} is not in the tree"
+                    ),
+                    "`athena go` commits the producer brief with job.json; run `athena go` for this request",
+                )),
+                Some(bytes) => {
+                    let actual = athena_data::sha256_hex(&bytes);
+                    if &actual != expected {
+                        violations.push(fail(
+                            &brief_path,
+                            format!(
+                                "{brief_path} hashes to {actual}, but {job_path} records brief_sha256 {expected}"
+                            ),
+                            "`athena go` writes the brief and its hash together; run `athena go` for this request",
+                        ));
+                    }
+                }
+            }
+        }
+        for problem in
+            dispatch_order_problem(&files, dispatched.dispatched_at, outcome_path, outcome)
+        {
+            violations.push(fail(
+                outcome_path,
+                problem,
+                "`athena go` records each step as it happens, in order; a landed job whose records say otherwise was not run by Athena",
+            ));
+        }
+    }
+    Ok(violations)
+}
+
+/// Why the times in a landed job's records are not those of a real run, one reason per fault.
+///
+/// Every invocation other than the reader's starts at or after `dispatched_at`; the verifier named by the
+/// verification starts at or after the end of the latest producer invocation with a lower number; and the
+/// landed outcome is recorded at or after the verifier ended. All comparisons are one way, so equal times
+/// pass. This is the complement of [`invariant::prediction_problem`] (the reading comes before the
+/// dispatch and before every non-reader invocation) and of the landing check in `invariant` (the
+/// verification names a successful verifier invocation): when the verification names no verifier
+/// invocation that the records hold, the verifier orderings are skipped and that check refuses it.
+pub fn dispatch_order_problem(
+    files: &JobFiles,
+    dispatched_at: Option<jiff::Timestamp>,
+    outcome_path: &str,
+    outcome: &Outcome,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    if let Some(dispatched_at) = dispatched_at {
+        for (path, inv) in files
+            .invocations
+            .iter()
+            .filter(|(_, i)| i.role != Role::Reader)
+        {
+            if inv.started_at < dispatched_at {
+                problems.push(format!(
+                    "{path} started at {}, before the job was dispatched at {dispatched_at}",
+                    inv.started_at
+                ));
+            }
+        }
+    }
+    let verifier = files
+        .verification
+        .as_ref()
+        .and_then(|v| v.verifier_invocation)
+        .and_then(|seq| files.invocations.iter().find(|(_, i)| i.seq == seq))
+        .filter(|(_, i)| i.role == Role::Verifier);
+    let Some((verifier_path, verifier)) = verifier else {
+        return problems;
+    };
+    let producer = files
+        .invocations
+        .iter()
+        .filter(|(_, i)| i.role == Role::Producer && i.seq < verifier.seq)
+        .max_by_key(|(_, i)| i.seq);
+    if let Some((producer_path, producer)) = producer
+        && verifier.started_at < producer.ended_at
+    {
+        problems.push(format!(
+            "{verifier_path} started at {}, before the producer invocation ended at {} ({producer_path})",
+            verifier.started_at, producer.ended_at
+        ));
+    }
+    if outcome.at < verifier.ended_at {
+        problems.push(format!(
+            "{outcome_path} was recorded at {}, before the verifier invocation ended at {} ({verifier_path})",
+            outcome.at, verifier.ended_at
+        ));
+    }
+    problems
+}
+
+/// The M27 checks of [`check`] on their own: the score recompute, the re-score and outcome rules. A history
+/// walk calls this and not [`provenance`].
+pub fn check_records(
     git: &Git,
     change: &Change,
     judged: &Judged,
@@ -384,7 +753,7 @@ mod tests {
         let id = git.rev_parse("HEAD").unwrap().unwrap();
         let change = Change::of_commit(git, &id).unwrap();
         let judged = Judged::new(git, &change).unwrap();
-        check(git, &change, &judged, None).unwrap()
+        check_records(git, &change, &judged, None).unwrap()
     }
 
     #[test]

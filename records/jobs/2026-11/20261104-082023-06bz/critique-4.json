@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-082023-06bz",
+  "round": 4,
+  "at": "2026-11-05T03:41:04.668353337Z",
+  "invocation_seq": 15,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Test (a) forges a weaker job than the documented §16.2 forgery: both variants are caught only because the request record is missing, but the documented forgery had one.",
+      "evidence": "docs/design/reviews/athena-v0-acceptance-2.md:31-33 (read) gives the forgery that §16.2 (athena-v0.md:1662) names. The first commit holds a request, reading, reader invocation and job.json, all records. The second holds the hand change, candidate, verification, a verifier invocation copied from a real job, and a landed outcome. The plan's variant 1 uses `opening(&HONEST)`, which (landing_tests.rs:240-252, read) has no request.json. Variant 2 has 'full genuine evidence except the request record'. Both are refused for 'no request record', so a forger who repeats the review's steps exactly is never shown to be refused. Which rule would catch that forger (the copied verifier invocation starting before `dispatched_at`, or a missing or mismatched brief-producer.md) is never exercised. Fix: Build (a) the way acceptance review 2 did. Commit 1 holds request.json, the reading, the reader invocation and a hand-written job.json with no brief-producer.md, or with a brief_sha256 copied from another job. Commit 2 holds the code, candidate, verification, and a verifier invocation whose times come from an earlier job and so fall before `dispatched_at`, plus a Landed outcome. Assert the specific provenance violations, for example 'brief-producer.md' and 'before the job was dispatched'. Keep the missing-request variant as an extra case. In §16.2 and enforcement.md, say which parts of the documented forgery are now caught.",
+      "location": "Demonstrations, Criterion 1 (a) `a_job_written_by_hand_across_two_commits_is_refused`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan rejects checking in CI only on grounds that apply to re-walking main's history. It does not mention the existing per-PR CI check, which judges only a pull request's own commits and already calls `prediction_problem`.",
+      "evidence": "crates/athena-core/src/pr_check.rs:1-12, 47-162 (read): `check_pr_head` classifies each commit in `base..head` and calls `athena_gate::invariant::prediction_problem` on job landings. `.github/workflows/ci.yml:677-708` runs `athena check --pr-head` on every pull request. Records-only commits (the (c) close) pass it unjudged. Because it sees only new commits, the reasons decision 2 gives (old main commits re-judged, no exemption possible after the fact) do not apply. A forger who commits with `--no-verify`, as lifecycle.rs:3016 `commit_by_hand` models, passes the hook-only check. Fix: Name `check_pr_head` in the residuals and in the open question as the natural place to run `jobs::provenance` in CI without re-judging history. Or, if scope allows, add pr_check.rs as a deliverable with a test there.",
+      "location": "Decision 2 / Risks ('A person who skips the commit hook...') / Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "R1 runs on every close of a request job and has no remedy in the live gate. An open proposal whose reading an older build wrote without a matching reader invocation, or before request.json existed, could no longer be closed.",
+      "evidence": "manage.rs:103-109 (read): `athena close` on a Queued, Proposed or Declined job always commits a Score and an outcome through `commit_records_in` (manage.rs:192), which the live gate judges. The plan's mitigation covers only dispatch fields and the brief hash ('Closes of open or old jobs face R1 only'). R1 itself depends on how older builds wrote readings, and that cannot be measured because records/ is absent from the snapshot. Fix: State this case in Risks and in the docs. Make the R1 repair text say what to do: a reading older than the request/reader-invocation convention is closed through an intervention, or name the fallback. Or apply the reader-invocation link only when the reading's `invocation_seq` names an invocation in the tree that is not a Reader.",
+      "location": "Decision 3 / Risks (older-build jobs) — R1 applied to every `athena close`",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Two checks repeat rules that already run in the same gate scope, so one fault produces two violations.",
+      "evidence": "invariant.rs:638 already runs `prediction_problem`, and invariant.rs:713-723 already requires the verification to name a successful Verifier invocation. Both run inside `invariant::check`, which lib.rs:356/371 calls next to `jobs::check` in the same scopes. Fix: Drop the Verifier-invocation check from `dispatch_order_problem`. Either drop the `prediction_problem` call or note that it is there only so `provenance_of` is complete on its own.",
+      "location": "Approach R4 / Step 3 ('verification names a Verifier invocation'; call to `prediction_problem`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The (b) variants break links that a real forger would not break, so the tests can read as stronger than they are.",
+      "evidence": "A forger who writes closing records after an interrupted `athena go` and stamps them with the current time automatically falls after `dispatched_at` and keeps producer, verifier and outcome in order. So the realistic (b) forgery is the control case that passes. Only copied or back-dated records are caught. Fix: In §16.2 and the CHANGELOG, say plainly that a (b) forgery written with current timestamps passes, and that (b) is caught only when its records are copied from another job or back-dated.",
+      "location": "Decision 9 / Criterion 1 (b) variants",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fits the reading. It keeps D111 intact by running the new provenance check only in the live gate. It names every function and file correctly: `jobs::check` at jobs.rs:220, the two call sites at lib.rs:357/372, the history walk at history.rs:255, `prediction_problem` (public, invariant.rs:754), and the Dispatch commit writing `brief_sha256` and `brief-producer.md` together (run/mod.rs:981/994). It is also honest about the limits: consistent forgeries still pass, and (b) is caught only when its records contradict each other. I grepped for other readers of the changed behavior. The only other `gate()` callers are commits.rs:202, manage.rs:424-425, hooks.rs:43 and lifecycle.rs:3028, and the lifecycle hook tests assert with `any(..)`, so extra violations do not break them. The hestia.rs and introspect.rs fixtures that hand-write outcomes commit with raw git and no hooks, so the gate never sees them. One finding is major: demonstration (a) builds an easier forgery than the one §16.2 and acceptance review 2 describe. Both of its variants are refused only for a missing request record, but the documented forgery had a request, a reader invocation and job.json, so the criterion's forgery is never shown to be caught. There are also three minor findings and one nit: the per-PR CI check is overlooked, R1 can block closing old jobs with no remedy, two checks repeat existing rules, and (b) as a real forger would do it still passes. Verdict: revise."
+}

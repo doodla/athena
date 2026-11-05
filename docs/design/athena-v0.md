@@ -1657,13 +1657,44 @@ repository carries this attribution in `README.md`.
   list in [§8](#8-enforcement-map).
 - **Records are not signed.** Athena writes its records with the user's own rights, so no local check can
   tell them from records written by hand to look like them. The gate refuses a hand change dressed as a
-  landing, and scores and outcomes that do not follow from a job's records (D55, D56). Deliberate
-  fabrication of consistent records still passes, in three ways that acceptance verification 2 showed:
-  - every record of a job, written by hand across two commits, with usage that reconciles;
+  landing, and scores and outcomes that do not follow from a job's records (D55, D56). Acceptance
+  verification 2 showed three fabrications that passed. The gate now judges each against the links that
+  Athena's own writers always leave (`jobs::provenance`, mechanism M27, run for a commit being made: the
+  commit-msg hook, Athena's own commits, and `athena close`):
+  - every record of a job, written by hand across two commits, with usage that reconciles. It is refused
+    when `job.json` lacks a dispatch field or carries hashes that differ from the accepted reading's, when
+    the `brief-producer.md` that `brief_sha256` names is not committed or hashes differently, when the
+    request record or the reader invocation its reading names is missing, or when an invocation (a verifier
+    copied from an earlier job, for example) started before the job was dispatched. Test:
+    `a_job_written_by_hand_across_two_commits_is_refused`;
   - one forged commit, for a job that Athena read and dispatched but that never closed, as an interrupted
-    `athena go` leaves it: the commit adds the hand change and the closing records;
-  - no landing at all: a hand-made proposal, closed with `athena close`, is scored like any job, so its
-    invented forecasts move its class's calibration headline.
+    `athena go` leaves it: the commit adds the hand change and the closing records. It is refused when
+    those records are copied from another job, back-dated, or contradict the dispatch: a producer or
+    verifier that started before the dispatch, a verifier that started before the producer ended, an
+    outcome recorded before the verifier ended, or a `job.json` or brief that does not match the accepted
+    reading. Test: `a_forged_landing_of_a_dispatched_job_that_never_closed_is_refused`;
+  - no landing at all: a hand-made proposal, closed with `athena close`, is scored like any job. It is
+    refused when its reading has no request record, no reader invocation, a request received after the
+    reading, or a defaults hash that `defaults.toml` at the reading's base commit does not give. Test:
+    `a_hand_made_proposal_closed_with_athena_close_is_refused`.
+
+  Each refusal names the missing or contradicting record and the Athena command that writes it. The
+  reading-before-work order and the presence of a successful verifier invocation are judged by the
+  landing check (`prediction_problem` and the verifier checks in `invariant`), which runs beside
+  provenance in the same gate and is not repeated.
+
+  What still passes, because nothing is signed. A forger who writes every link, in order, with a matching
+  brief and consistent times passes
+  (`a_job_written_by_hand_with_every_link_consistent_still_passes`). The second fabrication is caught only
+  when its records contradict the dispatch; one stamped with current times after the dispatch, copied from
+  nothing, passes
+  (`a_forged_landing_of_a_dispatched_job_written_with_current_times_still_passes`). A commit made with
+  `--no-verify` is not judged, and the per-pull-request CI check (`check_pr_head`) does not yet run
+  provenance; running it there over a pull request's own commits is a follow-up. Commits already in
+  history are not re-judged: the history walk and main after the cutover (D111) are unchanged, because
+  older builds wrote jobs with less of this evidence. A reading whose base commit is not held skips the
+  defaults-hash comparison. Job records kept only on the records branch are not judged. A reading from a
+  build that wrote no request record or reader invocation can no longer be closed with `athena close`.
 
   Each forged job shows in `athena status` as a job nobody asked for.
 
@@ -1961,4 +1992,4 @@ raised one new major, and three precisions to the residual of unsigned records.
 |---|---|---|
 | N1: a one-character `[history] exempt` entry hid later hand changes from the history check | entries are full commit ids, matched exactly, and must name a commit already in the history when added; the history check reports a tip configuration that does not parse | D60 |
 | An outcome with `"totals": null` skipped reconciliation | an outcome of a request job must record its totals | D60 |
-| The residual understated how fabrication passes | §16.2 and the enforcement map now name all three ways: a whole job by hand, one forged commit for a dispatched job that never closed, and a hand-made proposal that reaches calibration; making them detectable is a queued request | — |
+| The residual understated how fabrication passes | §16.2 and the enforcement map named all three ways: a whole job by hand, one forged commit for a dispatched job that never closed, and a hand-made proposal that reaches calibration. The gate now refuses each when its records lack or contradict the links Athena's writers leave (`jobs::provenance`, §16.2); consistent, fully mimicked records still pass, as nothing is signed | — |

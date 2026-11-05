@@ -2,12 +2,12 @@
 //! adds, with no `Athena-*` trailers and no ancestry.
 
 use crate::testutil::*;
-use crate::{Change, Judged, Rule, Violation, history, invariant, short};
+use crate::{Change, Judged, Rule, Scope, Violation, history, invariant, short};
 use athena_data::records::{
-    AnyRecord, Build, Candidate, Criterion, CriterionKind, DefaultApplied, Deliverable,
+    AnyRecord, Build, Candidate, Caps, Criterion, CriterionKind, DefaultApplied, Deliverable,
     DeliverableAction, DriverInfo, Forecast, Forecasts, Intervention, InterventionCategory,
-    InterventionSource, Invocation, InvocationCaps, InvocationContext, InvocationOutcome,
-    ModelUsage, Outcome, OutcomeState, Quantiles, Reading, Role, Tokens, Totals, Verdict,
+    InterventionSource, Invocation, InvocationCaps, InvocationContext, InvocationOutcome, Job,
+    ModelUsage, Outcome, OutcomeState, Quantiles, Reading, Request, Role, Tokens, Totals, Verdict,
     Verification,
 };
 use athena_data::{JobId, Quantity, RecordId, Unit};
@@ -824,7 +824,7 @@ fn job_records_of(git: &Git, rev: &str) -> Vec<Violation> {
     let id = git.rev_parse(rev).unwrap().unwrap();
     let change = Change::of_commit(git, &id).unwrap();
     let judged = Judged::new(git, &change).unwrap();
-    crate::jobs::check(git, &change, &judged, None).unwrap()
+    crate::jobs::check_records(git, &change, &judged, None).unwrap()
 }
 
 #[test]
@@ -1266,4 +1266,559 @@ fn a_middle_job_that_already_landed_is_refused_in_a_history_walk() {
     state.landed.insert(CHAIN_IDS[1].to_string());
     let found = invariant::check(&git, &change, &judged, Some(&state)).unwrap();
     only_refusal(found, &format!("job {} has already landed", CHAIN_IDS[1]));
+}
+
+// ---- Records written by hand (design §16.2): provenance ----
+//
+// Records are not signed, so the gate cannot tell a careful forgery from the real thing. It can tell a
+// job whose records lack, copy or contradict the links Athena's own writers leave: the request and the
+// reader invocation before a reading, the dispatch fields and the producer brief, and the order of times.
+
+/// The `defaults.toml` the genuine repository holds; a reading records the hash of these bytes.
+const DEFAULTS_TEXT: &str = "version = 1\n";
+/// The producer brief `athena go` commits with `job.json`.
+const BRIEF: &str = "# Brief\n\nChange a.\n";
+
+/// The repository `athena ask` reads: the owner repository plus a committed `defaults.toml`.
+fn genuine_repo() -> (tempfile::TempDir, Git) {
+    repo(&[
+        (
+            ".gitattributes",
+            "/OWNER.md athena-exclude\n/SPEC.md athena-readonly\n",
+        ),
+        ("src/lib.rs", "pub fn a() {}\n"),
+        ("defaults.toml", DEFAULTS_TEXT),
+    ])
+}
+
+/// Every record of one job, in the shape Athena writes it, ready to be changed by a test.
+struct Parts {
+    request: Option<Request>,
+    reading: Reading,
+    reader: Option<Invocation>,
+    job: Job,
+    /// The text of `brief-producer.md`, or None when the file is not committed.
+    brief: Option<String>,
+    producer: Invocation,
+    verifier: Invocation,
+    outcome: Outcome,
+}
+
+impl Parts {
+    /// The records of a genuine job read at `base`.
+    fn genuine(base: &str) -> Parts {
+        let mut reading = reading(&HONEST);
+        reading.base_commit = base.to_string();
+        reading.defaults_sha256 = athena_data::sha256_hex(DEFAULTS_TEXT.as_bytes());
+        let AnyRecord::Job(mut job) = job_record(&HONEST) else {
+            unreachable!("job_record makes a job")
+        };
+        job.caps = Some(Caps {
+            job_usd: 3.0,
+            reader_usd: 0.5,
+            producer_usd: 1.5,
+            verifier_usd: 1.0,
+            producer_timeout_s: 1800,
+            verifier_timeout_s: 900,
+            check_timeout_s: 600,
+        });
+        job.base_commit = Some(base.to_string());
+        job.config_sha256 = Some(reading.config_sha256.clone());
+        job.defaults_sha256 = Some(reading.defaults_sha256.clone());
+        job.athena = Some(Build {
+            version: "0.1.0".into(),
+            source_commit: "0".repeat(40),
+            dirty: false,
+        });
+        job.driver = Some(DriverInfo {
+            name: "claude-code".into(),
+            version: "2.1.299".into(),
+        });
+        job.brief_sha256 = Some(athena_data::sha256_hex(BRIEF.as_bytes()));
+        Parts {
+            request: Some(Request {
+                job: job_id(),
+                text: "Change a.".into(),
+                received_at: ts("2026-10-10T14:59:00Z"),
+                channel: "cli".into(),
+            }),
+            reading,
+            reader: Some(invocation(
+                1,
+                Role::Reader,
+                PRODUCER,
+                "2026-10-10T15:00:00Z",
+                "2026-10-10T15:01:00Z",
+            )),
+            job: *job,
+            brief: Some(BRIEF.to_string()),
+            producer: invocation(
+                2,
+                Role::Producer,
+                PRODUCER,
+                "2026-10-10T15:03:00Z",
+                "2026-10-10T15:05:00Z",
+            ),
+            verifier: invocation(
+                3,
+                Role::Verifier,
+                VERIFIER,
+                "2026-10-10T15:06:00Z",
+                "2026-10-10T15:07:00Z",
+            ),
+            outcome: outcome(),
+        }
+    }
+
+    /// The records `athena ask` commits: the request, the reader's invocation and the reading.
+    fn asked(&self) -> Vec<AnyRecord> {
+        let mut records = Vec::new();
+        records.extend(self.request.iter().cloned().map(AnyRecord::Request));
+        records.extend(
+            self.reader
+                .iter()
+                .cloned()
+                .map(|i| AnyRecord::Invocation(Box::new(i))),
+        );
+        records.push(AnyRecord::Reading(Box::new(self.reading.clone())));
+        records
+    }
+
+    /// The records `athena go` commits when it dispatches: `job.json`.
+    fn dispatched(&self) -> Vec<AnyRecord> {
+        vec![AnyRecord::Job(Box::new(self.job.clone()))]
+    }
+
+    fn write_brief(&self, root: &std::path::Path) {
+        if let Some(brief) = &self.brief {
+            let path = format!("{}/brief-producer.md", job_id().dir());
+            write(root, &[(&path, brief)]);
+        }
+    }
+}
+
+/// A job landed by commits in the order Athena makes them, each record taken from `Parts::genuine` and
+/// changed by `tweak`. With `two_commits`, `job.json` arrives with the reading (as a person would write a
+/// whole job in two goes); otherwise the commits are `athena ask`, `athena go` and the landing. Returns
+/// the repository; `HEAD` is the landing.
+fn landed_job(tweak: impl FnOnce(&mut Parts), two_commits: bool) -> (tempfile::TempDir, Git) {
+    let (dir, git) = genuine_repo();
+    let root = dir.path();
+    let base = git.head().unwrap().unwrap();
+    let mut parts = Parts::genuine(&base);
+    tweak(&mut parts);
+    let trailer = format!("Athena-Job: {JOB}\n");
+    write_records(root, &parts.asked());
+    let prediction = if two_commits {
+        write_records(root, &parts.dispatched());
+        parts.write_brief(root);
+        commit(&git, &format!("Read a request: t\n\n{trailer}"))
+    } else {
+        commit(&git, &format!("Read a request: t\n\n{trailer}"));
+        write_records(root, &parts.dispatched());
+        parts.write_brief(root);
+        commit(&git, &format!("Dispatch: t\n\n{trailer}"))
+    };
+    write(root, &[("src/lib.rs", NEW_CODE)]);
+    let fp = landed_fingerprint(&git, &base);
+    write_records(
+        root,
+        &[
+            AnyRecord::Invocation(Box::new(parts.producer.clone())),
+            AnyRecord::Invocation(Box::new(parts.verifier.clone())),
+            AnyRecord::Candidate(Box::new(candidate(&fp))),
+            AnyRecord::Verification(Box::new(verification(&fp))),
+            AnyRecord::Outcome(Box::new(parts.outcome.clone())),
+        ],
+    );
+    commit(
+        &git,
+        &format!(
+            "Land: t\n\n{trailer}Athena-Prediction: {prediction}\nAthena-Verified-Content: {fp}\n"
+        ),
+    );
+    (dir, git)
+}
+
+/// The provenance violations of the commit at `rev`.
+fn provenance_of(git: &Git, rev: &str) -> Vec<Violation> {
+    let id = git.rev_parse(rev).unwrap().unwrap();
+    let change = Change::of_commit(git, &id).unwrap();
+    let judged = Judged::new(git, &change).unwrap();
+    crate::jobs::provenance(git, &change, &judged, None).unwrap()
+}
+
+/// The violations the commit-msg hook gives the commit at `rev`.
+fn gate_of(git: &Git, rev: &str) -> Vec<Violation> {
+    let id = git.rev_parse(rev).unwrap().unwrap();
+    let change = Change::of_commit(git, &id).unwrap();
+    crate::gate(git, &change, Scope::CommitMsg).unwrap()
+}
+
+/// Asserts that `found` holds a job-records violation that starts with the provenance prefix, names the
+/// missing or contradicting evidence (`detail`), carries its commit, and names the command that repairs it.
+fn assert_refused(found: &[Violation], detail: &str, repair: &str) {
+    let v = found
+        .iter()
+        .find(|v| v.detail.contains(detail))
+        .unwrap_or_else(|| panic!("no violation names {detail:?}: {found:#?}"));
+    assert_eq!(v.rule, Rule::JobRecords);
+    assert!(
+        v.detail.starts_with(crate::jobs::PROVENANCE),
+        "{}",
+        v.detail
+    );
+    assert!(v.repair.contains(repair), "{}", v.repair);
+    assert!(v.commit.is_some());
+}
+
+/// Makes the reading, its request and the reader invocation older than `copied_verifier`, the way a
+/// forger who copies records from an earlier job has them.
+fn from_an_earlier_job(p: &mut Parts) {
+    p.request.as_mut().unwrap().received_at = ts("2026-10-09T09:00:00Z");
+    let reader = p.reader.as_mut().unwrap();
+    reader.started_at = ts("2026-10-09T09:00:10Z");
+    reader.ended_at = ts("2026-10-09T09:01:00Z");
+    p.reading.at = ts("2026-10-09T09:01:30Z");
+    p.verifier = copied_verifier();
+}
+
+/// A verifier invocation copied from a job run before this one was dispatched.
+fn copied_verifier() -> Invocation {
+    invocation(
+        3,
+        Role::Verifier,
+        VERIFIER,
+        "2026-10-09T10:06:00Z",
+        "2026-10-09T10:07:00Z",
+    )
+}
+
+#[test]
+fn a_genuine_landing_is_not_refused() {
+    // The shape Athena writes: `athena ask`, `athena go`, then the landing, each a commit of its own.
+    let (_dir, git) = landed_job(|_| {}, false);
+    for rev in ["HEAD~2", "HEAD~1", "HEAD"] {
+        assert_eq!(provenance_of(&git, rev), vec![], "at {rev}");
+        assert_eq!(gate_of(&git, rev), vec![], "at {rev}");
+    }
+    assert_eq!(judge(&git, "HEAD"), vec![]);
+    let walked = history_of(&git);
+    assert!(
+        !walked
+            .iter()
+            .any(|v| v.detail.starts_with(crate::jobs::PROVENANCE)),
+        "{walked:?}"
+    );
+}
+
+#[test]
+fn a_job_written_by_hand_across_two_commits_is_refused() {
+    // Acceptance review 2's forgery: the request, a reading, a reader invocation and a `job.json` in one
+    // commit; the code, candidate, verification, a verifier invocation copied from an earlier job and a
+    // landed outcome in the next. The records are consistent with each other apart from what follows.
+    let forged = |p: &mut Parts| {
+        from_an_earlier_job(p);
+        p.brief = None;
+    };
+    let (_dir, git) = landed_job(forged, true);
+    // The first commit closes nothing, so it is not judged for provenance.
+    assert_eq!(provenance_of(&git, "HEAD~1"), vec![]);
+    // The gate without provenance accepts the second commit.
+    assert_eq!(judge(&git, "HEAD"), vec![]);
+    assert_eq!(job_records_of(&git, "HEAD"), vec![]);
+    let found = provenance_of(&git, "HEAD");
+    assert_refused(&found, "brief-producer.md", "athena go");
+    assert_refused(&found, "before the job was dispatched", "athena go");
+    assert_refused(&found, "before the producer invocation ended", "athena go");
+    // The commit-msg hook refuses it.
+    assert!(
+        gate_of(&git, "HEAD")
+            .iter()
+            .any(|v| v.detail.starts_with(crate::jobs::PROVENANCE))
+    );
+
+    // A brief_sha256 copied from another job, and no brief committed with it.
+    let (_dir, git) = landed_job(
+        |p| {
+            from_an_earlier_job(p);
+            p.brief = None;
+            p.job.brief_sha256 = Some("d".repeat(64));
+        },
+        true,
+    );
+    assert_refused(
+        &provenance_of(&git, "HEAD"),
+        "brief-producer.md is not in the tree",
+        "athena go",
+    );
+
+    // A matching brief leaves only the copied times.
+    let (_dir, git) = landed_job(from_an_earlier_job, true);
+    let found = provenance_of(&git, "HEAD");
+    assert_refused(&found, "before the job was dispatched", "athena go");
+    assert!(
+        !found.iter().any(|v| v.detail.contains("brief-producer.md")),
+        "{found:?}"
+    );
+
+    // No request record: nothing shows that a request was received.
+    let (_dir, git) = landed_job(
+        |p| {
+            from_an_earlier_job(p);
+            p.request = None;
+        },
+        true,
+    );
+    assert_refused(
+        &provenance_of(&git, "HEAD"),
+        "has no request record",
+        "athena ask",
+    );
+}
+
+#[test]
+fn a_job_written_by_hand_with_every_link_consistent_still_passes() {
+    // The recorded limit: records are not signed, so a forger who writes every link in order, with a
+    // brief whose hash matches, is not refused.
+    let (_dir, git) = landed_job(|_| {}, true);
+    assert_eq!(provenance_of(&git, "HEAD~1"), vec![]);
+    assert_eq!(provenance_of(&git, "HEAD"), vec![]);
+}
+
+#[test]
+fn a_forged_landing_of_a_dispatched_job_that_never_closed_is_refused() {
+    // A job that was read and dispatched genuinely (two commits) and then closed by one forged commit.
+    // Each variant breaks one link the forger has to mimic.
+    type Break = Box<dyn Fn(&mut Parts)>;
+    let cases: Vec<(&str, Break, &str)> = vec![
+        (
+            "a producer started before the dispatch",
+            Box::new(|p| p.producer.started_at = ts("2026-10-10T15:01:50Z")),
+            "before the job was dispatched",
+        ),
+        (
+            "a verifier started before the producer ended",
+            Box::new(|p| p.verifier.started_at = ts("2026-10-10T15:04:00Z")),
+            "before the producer invocation ended",
+        ),
+        (
+            "an outcome recorded before the verifier ended",
+            Box::new(|p| p.outcome.at = ts("2026-10-10T15:06:30Z")),
+            "before the verifier invocation ended",
+        ),
+        (
+            "a job.json with no dispatch time",
+            Box::new(|p| p.job.dispatched_at = None),
+            "lacks dispatched_at",
+        ),
+        (
+            "a job.json with another defaults hash than the reading's",
+            Box::new(|p| p.job.defaults_sha256 = Some("c".repeat(64))),
+            "differs from the accepted reading's",
+        ),
+        (
+            "a job.json with another config hash than the reading's",
+            Box::new(|p| p.job.config_sha256 = Some("c".repeat(64))),
+            "differs from the accepted reading's",
+        ),
+        (
+            "a brief that is not the one job.json hashes",
+            Box::new(|p| p.brief = Some("Another brief.\n".into())),
+            "brief-producer.md hashes to",
+        ),
+        (
+            "no brief at all",
+            Box::new(|p| p.brief = None),
+            "brief-producer.md is not in the tree",
+        ),
+        (
+            "no job.json",
+            Box::new(|p| p.job.id = JobId::parse("20261010-153012-zzzz").unwrap()),
+            "has no job.json",
+        ),
+    ];
+    for (name, tweak, wanted) in cases {
+        let (_dir, git) = landed_job(tweak, false);
+        // The first two commits are the genuine `ask` and `go`.
+        assert_eq!(provenance_of(&git, "HEAD~2"), vec![], "{name}");
+        assert_eq!(provenance_of(&git, "HEAD~1"), vec![], "{name}");
+        let found = provenance_of(&git, "HEAD");
+        assert_refused(&found, wanted, "athena go");
+    }
+}
+
+#[test]
+fn a_reading_recorded_after_the_dispatch_is_refused_by_the_gate() {
+    // The existing prediction rule owns this fault, and the commit-msg hook runs it beside provenance;
+    // provenance does not repeat it.
+    let (_dir, git) = landed_job(|p| p.reading.at = ts("2026-10-10T15:02:30Z"), false);
+    assert_eq!(provenance_of(&git, "HEAD"), vec![]);
+    let found = gate_of(&git, "HEAD");
+    assert!(
+        found
+            .iter()
+            .any(|v| v.rule == Rule::Invariant && v.detail.contains("after the job was dispatched")),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn a_forged_landing_of_a_dispatched_job_written_with_current_times_still_passes() {
+    // The recorded limit: a forger who stamps the closing records after the dispatch, in order, and copies
+    // nothing from another job, leaves no contradiction for the check to find.
+    let (_dir, git) = landed_job(
+        |p| {
+            p.producer.started_at = ts("2026-11-01T10:00:00Z");
+            p.producer.ended_at = ts("2026-11-01T10:05:00Z");
+            p.verifier.started_at = ts("2026-11-01T10:06:00Z");
+            p.verifier.ended_at = ts("2026-11-01T10:07:00Z");
+            p.outcome.at = ts("2026-11-01T10:08:00Z");
+        },
+        false,
+    );
+    assert_eq!(provenance_of(&git, "HEAD"), vec![]);
+}
+
+/// A proposal as `athena ask` commits it and `athena close` closes it: a score and a dropped outcome.
+/// `tweak` changes the records first. Returns the repository; `HEAD` is the close.
+fn closed_proposal(tweak: impl FnOnce(&mut Parts)) -> (tempfile::TempDir, Git) {
+    let (dir, git) = genuine_repo();
+    let root = dir.path();
+    let base = git.head().unwrap().unwrap();
+    let mut parts = Parts::genuine(&base);
+    tweak(&mut parts);
+    write_records(root, &parts.asked());
+    commit(&git, &format!("Read a request: t\n\nAthena-Job: {JOB}\n"));
+    let dropped = Outcome {
+        state: OutcomeState::Dropped,
+        reason: "closed: not wanted".into(),
+        at: ts("2026-10-10T15:09:00Z"),
+        totals: None,
+        ..outcome()
+    };
+    write_records(root, &[AnyRecord::Outcome(Box::new(dropped))]);
+    git.run(["add", "-A"]).unwrap();
+    let tree = git.write_index_tree().unwrap();
+    let score = crate::jobs::expected_score(
+        &git,
+        &tree,
+        &job_id(),
+        None,
+        ts("2026-10-10T15:09:00Z"),
+        athena_score::RulesVersion::CURRENT,
+    )
+    .unwrap();
+    write_records(root, &[AnyRecord::Score(Box::new(score))]);
+    commit(&git, &format!("Dropped: t\n\nAthena-Job: {JOB}\n"));
+    (dir, git)
+}
+
+#[test]
+fn a_hand_made_proposal_closed_with_athena_close_is_refused() {
+    // A reading with invented forecasts, with no request and no reader invocation behind it.
+    let (_dir, git) = closed_proposal(|p| {
+        p.request = None;
+        p.reader = None;
+    });
+    // The scoring and outcome rules alone accept it; that is the forgery.
+    assert_eq!(job_records_of(&git, "HEAD"), vec![]);
+    let found = provenance_of(&git, "HEAD");
+    assert_refused(&found, "has no request record", "athena ask");
+    assert_refused(&found, "no reader invocation", "athena ask");
+    // The commit-msg hook, which `athena close` also runs, refuses it.
+    let gated = gate_of(&git, "HEAD");
+    assert!(
+        gated
+            .iter()
+            .any(|v| v.rule == Rule::JobRecords && v.detail.starts_with(crate::jobs::PROVENANCE)),
+        "{gated:?}"
+    );
+
+    // One missing link is enough.
+    let (_dir, git) = closed_proposal(|p| p.request = None);
+    assert_refused(
+        &provenance_of(&git, "HEAD"),
+        "has no request record",
+        "athena ask",
+    );
+    let (_dir, git) = closed_proposal(|p| p.reader = None);
+    assert_refused(
+        &provenance_of(&git, "HEAD"),
+        "no reader invocation",
+        "athena ask",
+    );
+    // A request received after its reading, and a reader that ended after it.
+    let (_dir, git) = closed_proposal(|p| {
+        p.request.as_mut().unwrap().received_at = ts("2026-10-10T15:02:00Z");
+    });
+    assert_refused(
+        &provenance_of(&git, "HEAD"),
+        "before its request was received",
+        "athena ask",
+    );
+    let (_dir, git) = closed_proposal(|p| {
+        p.reader.as_mut().unwrap().ended_at = ts("2026-10-10T15:02:00Z");
+    });
+    assert_refused(
+        &provenance_of(&git, "HEAD"),
+        "before the reader invocation it names ended",
+        "athena ask",
+    );
+    // A defaults hash that does not belong to the defaults.toml at the reading's base commit.
+    let (_dir, git) = closed_proposal(|p| p.reading.defaults_sha256 = "b".repeat(64));
+    assert_refused(
+        &provenance_of(&git, "HEAD"),
+        "does not match defaults.toml at its base commit",
+        "athena ask",
+    );
+    // An invocation number that names a producer, not a reader.
+    let (_dir, git) = closed_proposal(|p| {
+        p.reader.as_mut().unwrap().role = Role::Producer;
+    });
+    assert_refused(
+        &provenance_of(&git, "HEAD"),
+        "no reader invocation",
+        "athena ask",
+    );
+}
+
+#[test]
+fn a_proposal_made_by_athena_ask_and_closed_with_athena_close_is_accepted() {
+    let (_dir, git) = closed_proposal(|_| {});
+    assert_eq!(provenance_of(&git, "HEAD"), vec![]);
+    let gated = gate_of(&git, "HEAD");
+    assert!(
+        !gated
+            .iter()
+            .any(|v| v.detail.starts_with(crate::jobs::PROVENANCE)),
+        "{gated:?}"
+    );
+    // A reading whose base commit is not held cannot have its defaults hash recomputed; it is not refused.
+    let (_dir, git) = closed_proposal(|p| {
+        p.reading.base_commit = "1".repeat(40);
+        p.reading.defaults_sha256 = "b".repeat(64);
+    });
+    assert_eq!(provenance_of(&git, "HEAD"), vec![]);
+}
+
+#[test]
+fn the_older_build_job_in_a_non_cutover_history_is_not_refused() {
+    // The fixtures of the tests above are the shape an older build wrote: a job.json with no dispatch
+    // fields, no request record, and a base commit that is gone. The history walk judges commits already
+    // made and does not call provenance; the live gate would refuse the same commit.
+    let (dir, git) = owner_repo();
+    let base = git.head().unwrap().unwrap();
+    stage_landing(dir.path(), &git, &base, &HONEST);
+    commit(&git, "Change a (#1)\n");
+    let walked = history_of(&git);
+    assert!(
+        !walked
+            .iter()
+            .any(|v| v.detail.starts_with(crate::jobs::PROVENANCE)),
+        "{walked:?}"
+    );
+    let live = provenance_of(&git, "HEAD");
+    assert_refused(&live, "has no request record", "athena ask");
+    assert_refused(&live, "lacks ", "athena go");
 }

@@ -1,0 +1,76 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-082023-06bz",
+  "round": 2,
+  "at": "2026-11-05T03:24:13.194468771Z",
+  "invocation_seq": 11,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/lib.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/lib.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/legacy.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/legacy.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "A gated test fixture commits a reading and job.json together; the new R3 rule refuses it, and the dependents list leaves it out",
+      "evidence": "seed_accepted_jobs pushes Request, Reading and Job (accepted_reading 1, all dispatch fields null) into one `athena.commit_records(..).unwrap()`. commit_records goes through Committer::build_commit_in, which calls `gate(.., Scope::Commit)` at commits.rs:202. The plan wires `jobs::provenance` into that scope. R3 refuses job.json added without closing records when the accepted reading is not in the parent tree, so all three replay tests panic. The plan's dependents grep looked only for `.close(` and for CLI suites. It names neither this file nor any other `commit_records` caller that builds job records by hand. Step 7's rule ('fix the check, never the writer's records') does not tell the producer whether to change a fixture. Fix: Add crates/athena-core/src/run/tests.rs to Dependents and Files. Say how the fixture changes: commit request and reading first, then job.json, or seed through plain git so the gate is not involved. Re-run the dependents grep over every `commit_records`/`commit_records_with` caller in athena-core and athena-cli tests that builds Reading/Job/Score/Outcome records by hand, and list each one with the test that covers it. In Step 7, separate real writers (fix the check) from hand-built fixtures (update the fixture).",
+      "location": "Dependents / Files; crates/athena-core/src/run/tests.rs:1413-1451 (seed_accepted_jobs), called at 1488, 1605, 1641",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "With no cutover configured, the CI walk applies the no-leniency rules to the whole history, so genuine older and squash-landed jobs are refused",
+      "evidence": "Decision 5 says 'Old genuine commits are protected by the frozen legacy path, not by leniency'. That path is reached only when attribution::cutover_state is Shown (history.rs:50-53). For any repository without `[history] cutover_job`, every past commit goes through `walk(.., true)`. On such commits R2 requires dispatch fields that are Options and absent in older builds: records.rs:607-629, and dispatch_branch is `serde(default)`. R1 requires the reading's base_commit to be held. That commit is the local head when the reading was made (reading.rs:793). The host squash-merges pull requests (system facts), so that head can be missing from the CI clone. The live gate has a similar gap: `athena close` on an open job dispatched by an older build fails R2. `[history] exempt` is keyed by commit sha, which does not exist before the commit is made, so the owner has no remedy. The plan's 5% figure is an estimate and does not cover these repositories. Fix: Do not run provenance in the non-cutover walk. Keep it to the live gate and the post-C0 loop, or limit the walk to commits after a point the records themselves show. Alternatively, make R1's 'base not held' and R2's field-presence checks apply only when the closing outcome is Landed and the job.json was written by a build that writes those fields. Then say in the docs which older shapes are let through. Add a test: a non-cutover history holding an older-build genuine job (null dispatch_branch) and a reading whose base commit is unreachable is not refused.",
+      "location": "Decision 2 / Decision 5 / Step 4 (`check_history` calls `walk(.., true)` on the `cutover_job == None` branch, history.rs:47-49)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The required dispatch fields are not listed, and genuine dispatches leave several of them null",
+      "evidence": "run/mod.rs:983-988 writes request_path: None, request_sha256: None, cost: None, tokens: None, note: None, and pin is None for any job that is not a study (records.rs:626-627, 'Absent for other work'). Read literally, 'every dispatch field is present' refuses every genuine job. Fix: Name the required set exactly: accepted_reading, accepted_by, caps, base_commit, config_sha256, defaults_sha256, athena, driver, brief_sha256, dispatched_at, and dispatch_branch if older-build leniency is not adopted. State that the other fields are not checked.",
+      "location": "Approach R2 / Step 2 ('every dispatch field is present')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "How a job counts as a request job is not defined for a closed proposal, which has no job.json; that is forgery (c)'s shape",
+      "evidence": "A proposal closed with `athena close` adds a score and an outcome but no job.json (manage.rs:160-216). JobKind exists only on job.json (records.rs:246, Request vs Bootstrap). If the producer infers 'request job' from job.json kind or from a request record, the forged proposal in (c), which has neither, is skipped. Fix: Define request jobs as any `records/jobs/<id>/` whose id parses as a JobId and is not bootstrap, whether or not job.json or a request record exists. Make test (c) include a proposal with no job.json.",
+      "location": "Step 2 ('request jobs only')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The legacy test proves nothing unless its fixture triggers a rule and a control shows the provenance walk flags it",
+      "evidence": "check_legacy calls check_history_with_exempt (legacy.rs:192), so 'equals check_history_with_exempt' is true by construction. The 'none starts with provenance:' assertion fails without the frozen path only if the fixture triggers R1-R4, for example job.json added with its reading, or a closing score. The plan says only 'a commit adding null-shape job records'. Fix: Make the fixture include a trigger (job.json and reading in one commit, plus a closing score). In the same test, assert that `walk(.., true)` or the non-cutover check_history does report a provenance violation for it, so the test would fail if the frozen path ran provenance.",
+      "location": "Step 6 / legacy.rs test `a_pre_c0_commit_with_old_shape_job_records_gets_no_provenance_finding`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A long-open genuine proposal can be refused at `athena close` after its base commit is garbage-collected",
+      "evidence": "reading.base_commit is the local head when the reading was made. If local main is later reset, for example to a host squash commit, that commit is unreachable and goes after gc. The live gate has no exempt remedy (see the second major). Fix: When closing a proposal that was never dispatched (no job.json, outcome not Landed), report a missing base commit as a note or skip it, and say so in the residuals.",
+      "location": "Approach R1 (base commit held) on the live gate",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Step references are wrong",
+      "evidence": "Helpers are said to be 'Added by Step 4' but Step 5 adds them. The doc edit is said to be 'made in Step 6' but is Step 8. The CHANGELOG edit is said to be 'Step 7' but is Step 9. Fix: Correct the step numbers.",
+      "location": "Demonstrations (criteria 1, 3, 5, 6)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. It covers all three §16.2 forgeries and keeps the new rules out of the frozen legacy walk. The code it names exists and matches what it says: gate() at lib.rs:357 and 372, the history.rs branches at lines 41-63 and 122, legacy.rs:192 and 304, landing_tests.rs history_of at line 306 and job_records_of at line 823, the Dispatch commit at run/mod.rs:949-1004, and the reading fields at reading.rs:788-796. Each demonstration names a real seam and would fail on the base code. I read two problems that block acceptance. First, the dependents list misses athena-core's run/tests.rs. Its seed_accepted_jobs commits a request, a reading and job.json in one commit through the gated commit_records (commits.rs:202), so the new R3 rule refuses it and three replay tests panic. Second, the non-cutover history walk runs the new no-leniency rules over the whole history. The plan's claim that \"old genuine commits are protected by the frozen legacy path\" holds only once a cutover is shown. Any repository without `[history] cutover_job` would have genuine older-build jobs refused in CI, and so would squash-landed jobs whose base commit the host squash discarded. `athena close` on a still-open job from an older build would also be refused, with no exempt remedy at commit time. Smaller gaps: \"every dispatch field\" is not listed, although genuine dispatches leave several fields null. \"Request jobs only\" is not defined for a proposal with no job.json, which is exactly forgery (c). The legacy.rs test needs a fixture that actually triggers a rule. Athena's two out-of-deliverables findings, lib.rs and legacy.rs, are justified: the wiring needs them. I weigh them as minor."
+}
