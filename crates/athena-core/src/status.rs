@@ -77,6 +77,10 @@ pub struct JobLine {
     /// its kept candidate by the next drain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold: Option<String>,
+    /// The id of the retry that stands for this job, for an interrupted job that was already retried
+    /// ([`crate::reading::retries_by_job`]); absent otherwise. `athena retry` refuses such a job.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retried_as: Option<String>,
 }
 
 /// How job planning ended for one job: the round of the last critique and whether it let the job go on.
@@ -1588,6 +1592,7 @@ fn job_line(job: &JobRecords, state: &str) -> JobLine {
         plan: plan_state(job).map(PlanState::text),
         priority: job.priority(),
         hold: None,
+        retried_as: None,
     }
 }
 
@@ -1677,6 +1682,7 @@ impl Athena {
         let mut recent = Vec::new();
         let mut open = Vec::new();
         let mut first_round: Option<FirstRoundCounts> = None;
+        let retries = crate::reading::retries_by_job(&records);
         for job in records.request_jobs() {
             if let Some(accepted) = first_round_accepted(job)
                 && let Some(state) = plan_state(job)
@@ -1695,7 +1701,11 @@ impl Athena {
             let state = self.state_name(job);
             *jobs_by_state.entry(state.clone()).or_default() += 1;
             let mut line = job_line(job, &state);
-            if state == "proposed" || state == "interrupted" {
+            if state == "interrupted" {
+                line.retried_as = retries.get(job.id().as_str()).cloned();
+            }
+            // An interrupted job that was already retried is not resumed again, so its hold is not shown.
+            if state == "proposed" || (state == "interrupted" && line.retried_as.is_none()) {
                 line.hold = crate::disk::read_hold(&self.state, job.id()).map(|h| h.text());
             }
             // Queued requests have not run; they show under open work.
@@ -1788,7 +1798,21 @@ impl Athena {
                 "queued" => next.push(format!("athena go {id}   # reads it first, then asks to run it · or: athena close {id} --why \"...\"")),
                 "proposed" => next.push(format!("athena go {id}   # or: athena correct {id} \"<line>\" · athena close {id} --why \"...\"")),
                 "declined" => next.push(format!("athena correct {id} \"<line>\"   # or: athena close {id} --why \"...\"")),
-                "interrupted" => next.push(format!("athena retry {id}   # reads it again to resume · or: athena close {id} --why \"...\" (commits what the interrupted job left)")),
+                "interrupted" => match &line.retried_as {
+                    Some(new) => {
+                        let state = records
+                            .jobs
+                            .get(new.as_str())
+                            .map_or("unknown", |j| j.state().name());
+                        let follow_up = crate::reading::retry_follow_up(
+                            &records,
+                            new,
+                            self.running(new),
+                        );
+                        next.push(format!("retried as {new} ({state})   # {follow_up} · or: athena close {id} --why \"...\" (commits what the interrupted job left)"));
+                    }
+                    None => next.push(format!("athena retry {id}   # reads it again to resume · or: athena close {id} --why \"...\" (commits what the interrupted job left)")),
+                },
                 "blocked" => next.push(format!("athena go {id}   # after resolving local edits; or: athena close {id} --why \"...\"")),
                 _ => {}
             }

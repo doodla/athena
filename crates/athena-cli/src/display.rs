@@ -902,7 +902,11 @@ fn plan_suffix(j: &athena_core::status::JobLine) -> String {
             format!(" · {hold} (still queued)")
         }
     });
-    format!("{priority}{plan}{hold}")
+    let retried = j
+        .retried_as
+        .as_ref()
+        .map_or(String::new(), |new| format!(" · retried as {new}"));
+    format!("{priority}{plan}{hold}{retried}")
 }
 
 /// The lines of work the scope guard flagged or paused, one block each: level, first id and signals (T1 to
@@ -2043,12 +2047,29 @@ mod tests {
             plan: Some("plan accepted r1".into()),
             priority,
             hold: None,
+            retried_as: None,
         };
         assert_eq!(
             plan_suffix(&line(Priority::High)),
             " · priority high · plan accepted r1"
         );
         assert_eq!(plan_suffix(&line(Priority::Normal)), " · plan accepted r1");
+    }
+
+    #[test]
+    fn status_line_shows_retried_as() {
+        let line = athena_core::status::JobLine {
+            id: "old".into(),
+            state: "interrupted".into(),
+            title: "t".into(),
+            class: None,
+            cost_usd: 0.0,
+            plan: None,
+            priority: athena_core::plan::Priority::Normal,
+            hold: None,
+            retried_as: Some("20260101-000000-abcd".into()),
+        };
+        assert_eq!(plan_suffix(&line), " · retried as 20260101-000000-abcd");
     }
 
     #[test]
