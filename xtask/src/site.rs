@@ -632,8 +632,9 @@ fn array_of_value<'a>(value: &'a Value, file: &str) -> Result<&'a Vec<Value>> {
 }
 
 /// Builds the site: reads the study under `root` and writes `index.html` into `out`, then writes the owner
-/// decision briefs page `decisions.html` beside it from the records branch of the repository at `root`, with work decisions read from the records branch and
-/// from main.
+/// decision briefs page `decisions.html` beside it from the records branch of the repository at `root`, with
+/// work decisions read from the records branch and from main. The page lists only open proposals above the
+/// raising role's limit.
 pub fn build(root: &Path, out: &Path) -> Result<()> {
     let html = render(&load(&root.join(STUDY_DIR))?)?;
     std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
