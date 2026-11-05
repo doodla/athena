@@ -1,0 +1,173 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261105-205932-ppfv",
+  "n": 1,
+  "at": "2026-11-05T21:00:01.905191904Z",
+  "invocation_seq": 1,
+  "base_commit": "a4cc479242c11f4d3955e91f18864b2f81edbeee",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add drain pid file with status, stop-and-wait, restart, stale-build",
+  "summary": "Replace hand-written pkill/pgrep/wait with tracked commands: `athena drain` writes a pid/lock file in the state directory, and `athena drain-status` and `athena drain-restart` find the drain only through it. The existing `drain-stop` gains a wait for exit. Drain refuses to start on a binary older than landed code. Audience: the person running Athena.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "Tests for each new command and the refusal; clippy and fmt criteria."
+    },
+    {
+      "id": "rust",
+      "how": "All code is Rust in athena-cli."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests exercising stop/status with self-containing command lines, stale pid, stale binary."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced by a pid file and refusal in code, not prose."
+    },
+    {
+      "id": "root-cause",
+      "how": "Removes text-matching for the whole class, not one instance."
+    },
+    {
+      "id": "small",
+      "how": "Resume command left out as a separate change."
+    },
+    {
+      "id": "strangers",
+      "how": "Help text and CHANGELOG written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-cli/src/main.rs (Command::Drain at ~1182 removes a stale stop file, then runs drain_concurrent and follow_restart; Command::DrainStop at ~1234 only writes the stop file; warn_if_stale at 574 only prints a line from athena.stale_build()), crates/athena-cli/src/drain.rs (stop_file at ~970 is state_root/drain.stop; reinstall_note and Stop::RebuildFailed handle rebuild), crates/athena-cli/src/wiring.rs (installed_binary, open).",
+    "Existing code: extends crates/athena-cli/src/drain.rs stop_file and the drain-stop command, and reuses Athena::stale_build and the wiring installed_binary / reexec path; no new record type or data file under crates/, so no check_record_file or AnyRecord change is needed.",
+    "The pid file lives next to drain.stop in the state directory. It holds the pid and a process start marker, so a recycled pid is not signalled. Status and stop never match command-line text.",
+    "Stale-binary refusal reuses the existing stale_build detection, promoted from a warning to a refusal at drain start, with a clear message. This new refusal affects only drain starts on a stale binary: expected 5% of newly refused readings.",
+    "restart runs the setup.sh rebuild step first, waits for the old drain to exit, starts the new one, and prints the build it started. The resume-command proposal (class 20261105-003814-52qd) is a separate item and not done here.",
+    "Existing `athena drain-stop` keeps its name and behavior (finish the job in progress) and gains an optional wait for the pid to exit; new subcommand names follow the existing hyphenated style.",
+    "The producer must check whether the `athena --help` text or docs/ and README mention drain-stop and update them for the new commands; CHANGELOG.md gets an entry."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-cli`: a test starts a fake drain pid file, and `drain-status` and `drain-stop` find it correctly when the surrounding command line contains the word `drain`; they never match command text.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli`: a missing pid file, or one naming a dead or recycled pid, is reported as not running by status and stop, and no unrelated process is signalled.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli`: a drain start with a binary older than the landed code is refused with a message naming why, and dispatches no job.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli`: restart performs the rebuild step before starting the new drain, waits for the old drain to exit, and prints the build it started; a failed rebuild means no drain starts.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli`: a drain writes the pid file at start and removes it on exit; a second drain start with a live pid file is refused.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The change refuses more drain starts (stale binary): expected 5% of newly refused readings.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo clippy --all-targets` is clean and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Grep of crates/athena-cli/src/main.rs shows the new drain-status and drain-restart subcommands with help text telling the person running Athena to use them instead of pkill/pgrep; no pgrep/pkill-style command-text matching is added in the code.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for the drain lifecycle commands and stale-binary refusal, and any docs naming drain-stop describe the new commands.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "The tracked `athena resume` command and the `athena status` no-process warning (failure class 20261105-003814-52qd)",
+    "Changes to athena.toml, defaults.toml, setup.sh or workflow files",
+    "Changes to records/"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 1.0,
+        "p50": 2.6,
+        "p90": 6.0
+      },
+      "wall_time_s": {
+        "p10": 1200.0,
+        "p50": 3000.0,
+        "p90": 6500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6731234866828087,
+      "p_user_intervenes": 0.08453159041394336,
+      "cost_usd": {
+        "p10": 0.5587896952989296,
+        "p50": 1.3542264000000002,
+        "p90": 4.029167344027033
+      },
+      "wall_time_s": {
+        "p10": 547.7337148993971,
+        "p50": 1986.0791872658963,
+        "p90": 4201.070700084442
+      }
+    }
+  },
+  "departures": "Higher cost and lower pass chance than the reference: drain.rs is very large and the change adds a pid file, three commands and a refusal rule with process-handling tests.",
+  "urgent_reason": "Cuts repeated wasted time: three self-matching kills and idle queues from hand-written drain commands.",
+  "hard_reason": "Adds a refusal rule (drain refuses to dispatch on a stale binary) and changes the drain run pipeline's start, stop and restart.",
+  "producer_effort": "high"
+}

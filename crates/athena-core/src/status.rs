@@ -1141,8 +1141,26 @@ pub fn build_measurement_line(latest: Option<&BuildMeasurement>) -> String {
             first.hits, first.misses, second.hits, second.misses
         ),
     };
+    // Records from before memory and cores were measured have neither, and print without them.
+    let memory = |b: Option<u64>| b.map_or("unknown".to_string(), format_bytes);
+    let cores = |c: Option<f64>| c.map_or("unknown".to_string(), |c| format!("{c:.2}"));
+    let used = if m.first_peak_resident_bytes.is_some()
+        || m.second_peak_resident_bytes.is_some()
+        || m.first_cores_used.is_some()
+        || m.second_cores_used.is_some()
+    {
+        format!(
+            " · peak memory build 1 {}, build 2 {} · cores used build 1 {}, build 2 {}",
+            memory(m.first_peak_resident_bytes),
+            memory(m.second_peak_resident_bytes),
+            cores(m.first_cores_used),
+            cores(m.second_cores_used)
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "build      measurement: T {} target (one cold target directory) · S {} source (one worktree) · build 1 {:.2}s, build 2 {:.2}s · {cache} · commit {} at {}",
+        "build      measurement: T {} target (one cold target directory) · S {} source (one worktree) · build 1 {:.2}s, build 2 {:.2}s{used} · {cache} · commit {} at {}",
         format_bytes(m.target_bytes),
         format_bytes(m.source_bytes),
         m.first_build_seconds,
@@ -2284,6 +2302,10 @@ mod build_measurement_tests {
             first_build_seconds: 61.5,
             second_build_seconds: 12.25,
             sccache,
+            first_peak_resident_bytes: None,
+            first_cores_used: None,
+            second_peak_resident_bytes: None,
+            second_cores_used: None,
         }
     }
 
@@ -2321,6 +2343,23 @@ mod build_measurement_tests {
             "sccache build 1 0 hits / 9 misses",
             "build 2 4 hits / 5 misses",
             "commit 0123456789ab",
+        ] {
+            assert!(line.contains(want), "{want:?} not in {line}");
+        }
+        // An old record has no memory or cores, and its line says nothing about them.
+        assert!(
+            !line.contains("peak memory") && !line.contains("cores"),
+            "{line}"
+        );
+        let mut sized = measured.clone();
+        sized.first_peak_resident_bytes = Some(3_500_000_000);
+        sized.second_peak_resident_bytes = Some(2_500_000_000);
+        sized.first_cores_used = Some(5.75);
+        sized.second_cores_used = Some(3.5);
+        let line = build_measurement_line(Some(&sized));
+        for want in [
+            "peak memory build 1 3.5 GB, build 2 2.5 GB",
+            "cores used build 1 5.75, build 2 3.50",
         ] {
             assert!(line.contains(want), "{want:?} not in {line}");
         }

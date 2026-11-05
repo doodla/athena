@@ -1,0 +1,409 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261105-205932-ppfv",
+  "round": 2,
+  "at": "2026-11-05T21:13:37.458443307Z",
+  "invocation_seq": 5,
+  "approach": "Add a pid file (`<state root>/drain.pid`, next to `drain.stop`) that `athena drain` writes at start and removes on exit, holding pid, a process start marker, the build string and a timestamp. All lifecycle code goes in `crates/athena-cli/src/drain.rs`. A `Procs` trait (`start_marker(pid)`) is the only way code asks whether a drain is alive. `RealProcs` reads /proc/<pid>/stat field 22 on Linux and runs `ps -o lstart=,stat= -p <pid>` elsewhere (lookup by pid, never by name); a zombie counts as gone. Nothing matches command text and nothing sends a signal; stop uses the existing stop file. New pieces: `drain_state()`, `PidGuard::acquire()`, `stop_and_wait()`, `restart()` over a `Lifecycle` trait, and `guarded()` (the stale check is an injected closure). Revision for round 1 findings: (1) `restart` no longer trusts its first rebuild. It rebuilds, then stops and waits for the old drain, then asks `Lifecycle::installed_stale()` whether the INSTALLED binary is behind HEAD (reads `<installed> --version`, not the running binary's build) and rebuilds again, now with nothing landing, before it spawns; a failed or still-stale rebuild spawns nothing and says so. (2) Waiting for the old drain has no limit by default and prints progress; on `--timeout` the error says the stop is still asked, no new drain will start, and what to run next. (3) When there is no pid file, `restart` says an older-build drain cannot be seen, writes no stop file (the new drain would delete it anyway) and spawns; README and CHANGELOG state this one-time transition. (4) `guarded` keeps `drain.stop` when the pid file already names this pid (the exec carry-over) and removes it only when the file was missing, dead or recycled. (5) Help and README say the restarted drain runs in the background in its own process group, not a new session, and logs to `<state>/drain.log`. Every new test lives in `#[cfg(test)]` modules of drain.rs, main.rs and display.rs.",
+  "decisions": [
+    {
+      "choice": "Identify the drain by pid file plus a process start marker (Linux /proc/<pid>/stat field 22 parsed after the last ')', state Z means gone; elsewhere `ps -o lstart=,stat= -p <pid>`).",
+      "reason": "A pid can be recycled and `athena_agent::procs::process_alive` (kill -0) cannot tell a recycled pid from the drain. The start time survives exec, so the drain that execs into the rebuilt binary (`follow_restart` -> `reexec`, main.rs:583) keeps a valid file. setup.sh supports Darwin (setup.sh:16-17), so a `ps -p` fallback keeps macOS from a weaker check without matching text.",
+      "rejected": [
+        {
+          "option": "pgrep/pkill, or matching /proc/<pid>/cmdline against 'athena drain'",
+          "why": "This is the failure class: it matches the matcher's own command line and any process whose arguments contain the word."
+        },
+        {
+          "option": "Pid only, checked with process_alive",
+          "why": "A recycled pid would be reported as the drain."
+        },
+        {
+          "option": "flock on the pid file",
+          "why": "Needs unsafe libc calls or a new dependency (the workspace denies unsafe_code), and a lock cannot report pid, build and start time."
+        }
+      ]
+    },
+    {
+      "choice": "`drain-stop` keeps writing `drain.stop`; `--wait [--timeout SECS]` polls the pid file until the drain has exited, with no limit unless `--timeout` is given, printing a progress line every 30 s. No signal is sent.",
+      "reason": "Stop semantics (finish the job, stop at a job boundary, main.rs:1234-1243, drain.rs:133) stay. 'No unrelated process is signalled' holds by construction. A single job can run for hours, so a default timeout would only abandon a stop that is still correctly pending.",
+      "rejected": [
+        {
+          "option": "SIGTERM the pid from the file",
+          "why": "Kills mid-job, contradicting 'stop at a job boundary'; needs unsafe or a new dependency; could hit a recycled pid."
+        },
+        {
+          "option": "A default timeout (e.g. 10 minutes)",
+          "why": "One job can outlast it, leaving the stop pending while the caller believes it failed (finding 2)."
+        }
+      ]
+    },
+    {
+      "choice": "`restart` order: (a) rebuild, a failure returns at once touching nothing; (b) read `drain_state`; (c) if Running, `stop_and_wait`; if NotRunning(Missing), print that a drain started by a build without the pid file cannot be seen, write NO stop file, and go on; (d) once the old drain is gone and the first rebuild was `Installed`, call `Lifecycle::installed_stale()`; if it gives a line, rebuild again (nothing lands now, the old drain has exited) and check again; a failed rebuild or a line that remains returns Err naming that no drain is running and the command to run (`./setup.sh`, then `athena drain`); (e) spawn the installed binary with the drain flags (via `reexec_args`, drain.rs:485); (f) poll until the pid file names a live pid other than the old one, then print pid and build; if the new process dies first, fail naming `drain.log` and its last lines.",
+      "reason": "Answers finding 1: rebuild_if_due holds `self.landing` for the whole setup.sh run because a landing moves the checkout the build reads (drain.rs:2430-2436). `restart` cannot take that lock in another process, so a landing by the old drain between the first rebuild and its exit can leave the installed binary behind HEAD or built from a half-updated tree. Re-checking after the old drain exits closes that window, since nothing lands once it is gone. The first rebuild still comes first, so a broken build never takes the old drain down. The check must read the INSTALLED binary: `Athena::stale_build` (status.rs:1709) compares `self.build`, which is the running restart process's own old build and would always look stale after a rebuild. `RealLifecycle::installed_stale` runs `<wiring::installed_binary()> --version` (output `athena <version> (commit <sha>[, dirty])`, tests/version.rs:48), parses the commit with a pure function, and calls `athena_core::status::stale_build_line(&athena.git, commit, &athena.head()?)` (status.rs:35, lib.rs:229). `run_setup` and the installed binary are the same build: setup.sh runs xtask `setup` which installs to `paths::athena_home().join(\"bin/athena\")` (xtask/src/main.rs:538) = `installed_binary()` (wiring.rs:63).",
+      "rejected": [
+        {
+          "option": "Stop the old drain first, then rebuild only",
+          "why": "A failed rebuild would leave no drain running; the chosen order keeps the old drain until a rebuild has succeeded at least once."
+        },
+        {
+          "option": "Let the new drain's `guarded` find the stale build and report that the process died",
+          "why": "The queue sits idle (the evidence-1 failure) and the person learns it only from drain.log."
+        },
+        {
+          "option": "Use `Athena::stale_build` for the re-check",
+          "why": "It reads the running binary's build, not the installed one, so it is wrong in `restart`."
+        },
+        {
+          "option": "Take the drain's landing lock from `restart`",
+          "why": "The lock is an in-process Mutex; another process cannot hold it."
+        }
+      ]
+    },
+    {
+      "choice": "`drain-restart` and `drain-stop --wait` take `--timeout`; without it they wait without limit. On timeout `restart` returns an error saying: the stop is still asked for, no new drain was started, the old drain (pid N) will exit at its next job boundary, then run `athena drain-restart` again or `athena drain`. Exit code 2.",
+      "reason": "Answers finding 2: a timeout must not leave an idle queue unexplained.",
+      "rejected": [
+        {
+          "option": "Remove the stop file on timeout",
+          "why": "Would silently cancel a stop the person asked for."
+        }
+      ]
+    },
+    {
+      "choice": "`guarded(state_root, procs, build, stale, run)`: call `stale()`; refuse with 'refusing to start the drain: <line>; nothing was dispatched'; else `PidGuard::acquire`, which reports whether the previous record was this very pid (exec carry-over); remove `drain.stop` only when it was not (file missing, dead or recycled); then run.",
+      "reason": "Answers finding 4: after an in-drain rebuild the exec'd binary has the same pid (drain.rs:3021 checks `stop_requested` before `restart` is set, then `reexec`), so a stop written in that window belongs to this run and must survive. Acquiring before clearing means a refused second start does not delete the first drain's pending stop. One production entry point, testable in drain.rs with the existing `Stub`.",
+      "rejected": [
+        {
+          "option": "Always remove drain.stop after acquire",
+          "why": "Loses a stop requested between the last check and the exec."
+        },
+        {
+          "option": "`guarded` takes `&Athena`",
+          "why": "Needs the Fixture from tests/common, which only integration tests can use, forcing a test file outside the deliverables."
+        },
+        {
+          "option": "Put the stale check inside `drain_concurrent`",
+          "why": "Shared with `Steps` stubs and has no `Athena`."
+        }
+      ]
+    },
+    {
+      "choice": "`spawn_detached` uses `process_group(0)` (safe `CommandExt`), stdin null, output appended to `<state>/drain.log`. Help and README say the restarted drain runs in the background in its own process group, not its own session, and logs to `<state>/drain.log`.",
+      "reason": "Answers finding 5 without unsafe code (the workspace denies it). Claiming a full detach would be wrong.",
+      "rejected": [
+        {
+          "option": "Start through `setsid` by path",
+          "why": "Not present on every host (macOS); adds a dependency on an external tool for a nit. Left as a possible follow-up."
+        }
+      ]
+    },
+    {
+      "choice": "Exit codes: `drain-status` 0 running, 2 not running; `drain-stop --wait` and `drain-restart` 2 on timeout; errors 1.",
+      "reason": "Matches the convention that 2 means 'did not reach the state' (main.rs:1218); scripts can test without parsing text.",
+      "rejected": [
+        {
+          "option": "Always exit 0",
+          "why": "A script cannot tell running from not running."
+        }
+      ]
+    },
+    {
+      "choice": "All new tests go in the `#[cfg(test)]` modules of drain.rs (from line ~3962; `Kept` UI at drain.rs:4199 captures lines), main.rs (tests at ~1492, which already render `Cli::command()` help) and display.rs (tests at ~1762). tempfile is a dev-dependency.",
+      "reason": "Keeps every file inside the reading's six deliverables.",
+      "rejected": [
+        {
+          "option": "New tests/drain_lifecycle.rs or append to tests/drain.rs",
+          "why": "Outside the listed deliverables."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal-corpus case is added.",
+      "reason": "The change adds no parser, stem list, stop list or reading check over request text. The new refusals are process and build checks. `crates/athena-core/tests/refusal_corpus.rs` has no match for drain, stale or pid (searched in round 1); it still runs in `cargo test --locked`.",
+      "rejected": [
+        {
+          "option": "Corpus cases for the new refusals",
+          "why": "The corpus covers request-form inputs, not process state."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add the pid-file API: `pid_file()`, `PidRecord`, `Procs`/`RealProcs`, `DrainState`, `drain_state()`, `write_record()`, `PidGuard`, `guarded()`, `stop_and_wait()`, `Lifecycle` (rebuild, installed_stale, spawn) / `RealLifecycle`, `commit_in_version()`, `restart()`. Add the unit tests for criteria 1-6 in the existing tests module. Do not change `follow_restart`, `stop_file`, `rebuild_if_due` or the `Steps` trait.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Add `DrainStatus`, `DrainRestart` and `DrainStop --wait/--timeout` with help text pointing away from pkill/pgrep and stating the background/log behaviour. Run `Command::Drain` inside `drain::guarded`. Add dispatch arms and exit codes. Add the unit tests for criteria 8 and 9.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/wiring.rs",
+      "action": "modify",
+      "purpose": "Add `spawn_detached(binary, args, cwd, log) -> io::Result<u32>` (stdin null, output appended to the log, own process group, no unsafe).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Add the `drain_status`, `drain_stop` and `drain_restart` printers (each says in words why a drain counts as not running; restart prints the build started and, on timeout or stale failure, what to run next), with a small test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased/Added entry: root cause (processes found by matching text), `drain-status`, `drain-restart`, `drain-stop --wait`, the pid file, the stale-binary refusal, the 5% figure labelled an estimate, the one-time transition for drains started without a pid file, and that the resume command is a separate item.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "Extend 'Stopping a drain' with `--wait`; add a paragraph on the pid file, `drain-status`, `drain-restart` (rebuild, wait, re-check, start in the background, log at `<state>/drain.log`), the stale-build refusal and the one-time transition.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "drain.rs: add `pid_file(state_root)` (`drain.pid`), `PidRecord {pid, started, build, at}` (serde JSON), the `Procs` trait and `RealProcs`. Linux: read /proc/<pid>/stat, take the text after the last ')', read the state and starttime, return None if the file is missing or the state is Z. Elsewhere: `ps -o lstart=,stat= -p <pid>`. Each parser is a pure function with unit tests (a command name containing spaces and parentheses; sample `ps` text).",
+    "drain.rs: add `DrainState` (`Running(PidRecord)` or `NotRunning(Reason)`, Reason = Missing, Unreadable(why), Dead(pid), Recycled(pid)), `drain_state(state_root, procs)`, `write_record`, and `PidGuard::acquire(state_root, procs, pid, build)` using `create_new`. A live record naming another pid is refused with 'a drain is already running (pid N)'. A stale record, or one naming this pid, is replaced; `acquire` reports whether the previous record named this pid. `Drop` removes the file only if it still names the guard's pid.",
+    "drain.rs: add `stop_and_wait(state_root, procs, wait: Option<Duration>, poll, ui)`: always writes `drain.stop` (creating the directory), sends no signal, prints a progress line every 30 s while waiting, and returns Asked, Exited, TimedOut or NotRunning. Add the `Lifecycle` trait (`procs`, `rebuild() -> Result<Rebuild, String>`, `installed_stale() -> Option<String>`, `spawn() -> Spawned {pid, log}`) and `restart(state_root, &dyn Lifecycle, Waiting, ui)` in the order: rebuild (Err returns at once, touching nothing); `drain_state`; if Running, `stop_and_wait` (a TimedOut returns Err saying the stop is still asked for, no new drain was started, the old pid and what to run next); if Missing, print the older-build notice and write no stop file; once the old drain is gone and the first rebuild was `Installed`, call `installed_stale()` and, on a line, rebuild again and check again (Err naming that no drain is running and the command to run if the rebuild fails or the line remains); spawn; poll until the pid file names a live pid other than the old one; if the spawned pid dies first, Err with the log path and its last lines. Return a `RestartReport` with old pid, new pid and build.",
+    "drain.rs: add `RealLifecycle` (rebuild = `run_setup(athena.git.dir())`; `installed_stale` = run `wiring::installed_binary() --version`, parse the commit with the pure `commit_in_version`, then `athena_core::status::stale_build_line(&athena.git, commit, &athena.head()?)`, None when anything cannot be read; spawn = `wiring::spawn_detached` with `reexec_args(..)`). Add `guarded(state_root, procs, build: &str, stale: &dyn Fn() -> Option<String>, run)`: call `stale()` first and return Err('refusing to start the drain: <line>; nothing was dispatched'); then `PidGuard::acquire`; remove `drain.stop` only when the previous record did not name this pid; then call `run`.",
+    "wiring.rs: add `spawn_detached(binary, args, cwd, log) -> io::Result<u32>` (`Command` with stdin null, stdout/stderr appended to the log, `process_group(0)`, no unsafe). main.rs: add `DrainStatus {json}`, `DrainRestart {budget, rating_threshold, job_limit, timeout}` and `DrainStop {wait, timeout}`, with help text saying to use these instead of pkill/pgrep/wait loops, that the pid file is the only thing consulted, and that a restarted drain runs in the background in its own process group and logs to `<state>/drain.log`. Wire `Command::Drain` to run `drain_concurrent` and `follow_restart` inside `drain::guarded`, passing `wiring::version_string(&athena.build)` and `&|| athena.stale_build()`, and drop the `warn_if_stale` call there only. Exit codes: status 0/2, `--wait` and restart timeout 2.",
+    "display.rs: add `drain_status(&DrainState, stop_asked: bool)`, `drain_stop(&StopOutcome)` and `drain_restart(&RestartReport)`. Each says in words why a drain counts as not running; restart prints the build started. Add a small test in display.rs's tests module.",
+    "drain.rs tests module: write the lifecycle tests named in the demonstrations (criteria 1-6, with 6 sharing criterion 3's test), using `tempfile`, `Stub`, `Kept` and real children from `Command::new(\"sleep\")` / `sh -c`, with `arg0` for the self-naming case. Reap every child, and join the watcher threads.",
+    "main.rs tests module: write `the_new_commands_are_in_the_help_and_the_code_does_no_text_matching` (criterion 8) and `the_changelog_and_readme_describe_the_drain_lifecycle_commands` (criterion 9).",
+    "CHANGELOG.md: add the Unreleased/Added entry (root cause: processes found by matching text; the fix: pid file, three commands, stale refusal, re-check after the old drain exits; the 5% estimate, not measured; the one-time transition for a drain started without a pid file; the resume command is a separate item).",
+    "README.md: extend 'Stopping a drain' and add a paragraph on `drain-status`, `drain-restart`, the pid file, the stale-build refusal, the background run and the transition. Then run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "A landing by the old drain between `restart`'s first rebuild and the old drain's exit leaves the installed binary behind HEAD or torn, so the new drain would refuse to start (finding 1).",
+      "mitigation": "After the old drain has exited, `restart` asks `installed_stale()` (installed binary's commit versus HEAD) and rebuilds again with nothing landing; a failed or still-stale result spawns nothing and tells the person no drain is running and to run ./setup.sh. Criterion 4 cases (c) and (d) test it."
+    },
+    {
+      "risk": "The old drain runs a long job, so `restart` waits a long time, and a timeout would leave a pending stop and no new drain (finding 2).",
+      "mitigation": "No limit by default with a progress line every 30 s; with `--timeout` the error states the stop is still asked for, no new drain started, and what to run next. Tested in case (e)."
+    },
+    {
+      "risk": "On the first restart after this ships a running older drain has no pid file, so `restart` cannot see it and starts a second drain beside it (finding 3).",
+      "mitigation": "`restart` prints the notice, writes no stop file (the new drain would clear it), and the README and CHANGELOG state the one-time transition and tell the person to run `athena drain-stop` and wait for the old drain before the first restart. The job lock (athena-core/src/run/mod.rs:365) still stops one job running twice."
+    },
+    {
+      "risk": "A stop requested between the old image's last stop check and the exec is lost (finding 4).",
+      "mitigation": "`guarded` keeps `drain.stop` when the record names this pid; tested in criterion 5 case (3)."
+    },
+    {
+      "risk": "The restarted drain is in its own process group but the caller's session, so a terminal hangup might still reach it (finding 5).",
+      "mitigation": "Help and README say plainly it runs in the background in its own process group, logs to `<state>/drain.log`, and that `athena drain-status` shows whether it is alive. `restart` confirms the new pid before reporting success."
+    },
+    {
+      "risk": "After an in-drain rebuild the exec'd binary can refuse to start if its build commit is still behind HEAD, ending a long run with an error.",
+      "mitigation": "This is the intended protection; the message says to run ./setup.sh or `athena drain-restart`. `stale_build_line` returns None when the build commit is unknown or not an ancestor (status.rs:36-40), so odd builds are not blocked. The guard returns Err and removes the pid file."
+    },
+    {
+      "risk": "A drain killed with SIGKILL leaves a stale `drain.pid`.",
+      "mitigation": "The start-marker check counts a dead or recycled pid as not running, status says why, and the next `acquire` replaces the file."
+    },
+    {
+      "risk": "Two drains start at the same moment.",
+      "mitigation": "`acquire` creates the file with `create_new`; if it exists it is inspected, a stale one removed and `create_new` retried once, so only one start wins."
+    },
+    {
+      "risk": "Tests with real child processes are flaky (timing, zombies).",
+      "mitigation": "Children are reaped explicitly, poll intervals are short, waits have generous timeouts, and the zombie case is handled in code (state Z means gone), not by timing."
+    },
+    {
+      "risk": "The detached spawn loses output or its working directory.",
+      "mitigation": "`spawn_detached` runs in the repository root and appends output to `<state>/drain.log`; if the pid file does not show the new pid in time, `restart` fails and prints the log path and its last lines."
+    },
+    {
+      "risk": "The non-Linux `ps -p` marker cannot be run in this environment's tests.",
+      "mitigation": "Its parser is a pure function tested on sample `ps` text; the criterion 8 scan requires `-p` on every `ps` call; the CHANGELOG states which platforms were tested."
+    },
+    {
+      "risk": "`guarded` takes the stale check as a closure, so a wiring mistake in main.rs would not be caught by the unit test.",
+      "mitigation": "The wiring is one line, `&|| athena.stale_build()`, required by plan step 5; the detection is covered by the existing tests/drain.rs test."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "drain start sequence (stale warning becomes refusal; pid file acquired before the stop file is removed; stop file kept on own-pid carry-over)",
+      "dependent": "crates/athena-cli/src/main.rs `Command::Drain` (main.rs:1182-1219): `warn_if_stale`, then removes drain.stop, then `drain_concurrent` + `follow_restart`",
+      "kind": "code",
+      "test": "drain.rs tests: the_pid_file_is_written_at_start_removed_on_exit_and_a_second_live_start_is_refused and a_stale_binary_start_is_refused_and_dispatches_no_job",
+      "reason": null
+    },
+    {
+      "name": "pid file across the rebuild exec",
+      "dependent": "crates/athena-cli/src/drain.rs `follow_restart` (drain.rs:3087), `Stop::Rebuilt`, and `reexec` (main.rs:583), which exec the rebuilt binary in the same pid",
+      "kind": "code",
+      "test": "drain.rs tests: the own-pid case (3) in the_pid_file_is_written_at_start_removed_on_exit_and_a_second_live_start_is_refused, including that drain.stop survives. Existing follow_restart tests in tests/drain.rs still pass since `follow_restart` is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "drain.stop file path and meaning (`stop_file`, drain.rs:970)",
+      "dependent": "drain.rs `RealSteps::stop_requested` and tests/drain.rs `the_stop_file_is_in_the_state_directory`",
+      "kind": "code",
+      "test": "tests/drain.rs::the_stop_file_is_in_the_state_directory and the stop tests near it. Path and 'asked only between jobs' semantics are unchanged; the only change is when `guarded` clears the file (not on an own-pid carry-over, not when a live drain refuses a second start).",
+      "reason": null
+    },
+    {
+      "name": "separate kill switch",
+      "dependent": "crates/athena-agent/src/procs.rs `Registry` (`STOP` kill-switch file; `athena stop` / `athena start`)",
+      "kind": "code",
+      "test": null,
+      "reason": "It uses a different file (`STOP`, not `drain.stop`/`drain.pid`) and a process-group registry. athena-agent is not touched and `athena stop` is unchanged."
+    },
+    {
+      "name": "stale_build detection reused",
+      "dependent": "main.rs `warn_if_stale` callers (other agent-running commands), `Athena::stale_build` (status.rs:1709), `stale_build_line` (status.rs:35), `display::status` stale line (status.rs:1940)",
+      "kind": "code",
+      "test": "tests/drain.rs::status_prints_the_stale_build_line_after_a_crates_change_and_none_after_docs_or_records_changes (unchanged). The function is reused as it is; `restart` calls `stale_build_line` directly with the installed binary's commit, and only the drain start treats the answer as a refusal; other commands still warn.",
+      "reason": null
+    },
+    {
+      "name": "`athena --version` output format, parsed by `restart`'s freshness check",
+      "dependent": "crates/athena-cli/tests/version.rs (line 48) and `wiring::version_string` (wiring.rs:69), main.rs:503",
+      "kind": "code",
+      "test": "tests/version.rs (unchanged) pins the format; the new `commit_in_version` unit test parses the same format, including `unknown` and `dirty`. A version text with no parseable commit gives no stale line, like `stale_build_line` for an unknown commit.",
+      "reason": null
+    },
+    {
+      "name": "drain help text and stop reasons",
+      "dependent": "crates/athena-cli/tests/drain.rs `drain_help_documents_the_flags_and_lists_every_stop_reason` and `Stop::ALL`",
+      "kind": "code",
+      "test": "tests/drain.rs::drain_help_documents_the_flags_and_lists_every_stop_reason. The `Stop` enum is unchanged; the drain help gains at most one line about the pid file; the test checks only listed flags, labels and phrases.",
+      "reason": null
+    },
+    {
+      "name": "documented behavior of `athena drain-stop`",
+      "dependent": "docs/design/parallel-jobs.md:21, docs/design/roles-and-ladder.md:59, docs/decisions.md (~2425, ~3657), CHANGELOG.md:2549",
+      "kind": "rule",
+      "test": null,
+      "reason": "The documented behavior (finish the job, stop at the next boundary, nothing killed, a stale stop cleared at the next drain start) is unchanged; `--wait` and the new commands are additions. README.md is updated; the design docs describe unchanged behavior and are left alone."
+    },
+    {
+      "name": "state directory files `<state root>/drain.pid` and `drain.log`",
+      "dependent": "Nested runs (`wiring::open` under `ATHENA_NESTED`, scratch state dir) and `athena plan` (`open(true)`, never goes through `guarded`)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "A nested run's state root is its scratch copy, so its pid file never collides with the real one, and `athena plan` writes no pid file. No athena.toml key or records file is read or written."
+    },
+    {
+      "name": "refusal corpus (request-text refusal and matching rules)",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "No request-text refusal or matching rule changes. The file has no match for drain, stale or pid (searched). It still runs in `cargo test --locked`."
+    },
+    {
+      "name": "`drain_concurrent`, `drain`, `run_setup`, `reexec_args`, `rebuild_if_due`",
+      "dependent": "Every caller of `drain_concurrent`/`drain` (main.rs:1198, tests/drain.rs) and of `run_setup` (the in-drain rebuild, drain.rs:2443)",
+      "kind": "code",
+      "test": null,
+      "reason": "These are called, not changed. `guarded` wraps the call site in main.rs, so tests that call `drain_concurrent` directly are unaffected. `RealLifecycle` reuses `run_setup` and `reexec_args` as they are; `rebuild_if_due` and its landing lock (drain.rs:2435) are untouched."
+    },
+    {
+      "name": "a drain started by an older build has no pid file (first restart after this ships)",
+      "dependent": "`restart` when `drain_state` is NotRunning(Missing); README and CHANGELOG",
+      "kind": "rule",
+      "test": "restart_ case (f) in criterion 4: the notice is printed, no stop file is written, and spawn happens; the criterion 9 test checks the README and CHANGELOG mention the transition.",
+      "reason": null
+    },
+    {
+      "name": "`RealProcs` start marker (Linux /proc, otherwise `ps -p`)",
+      "dependent": "Other platforms: setup.sh supports Darwin (setup.sh:16-17), and `reexec` is cfg(unix)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Only the Linux path can run in this environment's tests. The `ps -o lstart=,stat= -p <pid>` fallback looks up by pid, never by name, and the criterion 8 scan requires `-p` on every `ps` call; its parser is a pure function tested on sample text."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in drain.rs's tests module over the production `drain_state`, `display::drain_status` and `stop_and_wait`, with real children and a tempdir state root. The 'drain' child is a `sleep` whose argv[0] is `athena drain --budget 5` (safe `CommandExt::arg0`). A decoy `sleep` also has `athena drain` in its argv and no pid file. The test writes `drain.pid` for the drain child through the production `write_record` with the marker from `RealProcs.start_marker(child.id())`.",
+      "command": "cargo test -p athena-cli --lib status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain",
+      "observes": "`drain_state` returns Running with the drain child's pid and never the decoy. The printed status holds that pid, the build and 'running'. `stop_and_wait` with no wait returns Asked and creates `drain.stop`. With a wait and a child that exits once the stop file appears, it returns Exited. The decoy is still alive at the end. No code path reads command text.",
+      "fails_without": "A text-matching implementation reports the decoy (or none) as running. With no pid-file lookup, status says 'not running' for the live child and the Running assertion fails. With no wait, the Exited assertion fails.",
+      "seam": "Entry points `drain::drain_state`, `drain::stop_and_wait`, `display::drain_status`. The injection point is the `Procs` trait; the test passes `&RealProcs` over real child processes, so there is no fake. `Procs`, `RealProcs`, `write_record`, `drain_state`, `stop_and_wait` are added in plan steps 1-3, `display::drain_status` in step 6. `drain::stop_file` (drain.rs:970) exists."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test of `drain_state` and `stop_and_wait` over: no file; unreadable JSON; a file naming a child killed and reaped (true marker saved while alive); a file naming a killed but unreaped child (zombie); a file naming a live unrelated `sleep` child with a wrong marker (recycled pid).",
+      "command": "cargo test -p athena-cli --lib a_missing_dead_or_recycled_pid_file_is_not_running_and_signals_nothing",
+      "observes": "Each case returns NotRunning with its own reason (missing, unreadable, dead, recycled). The status printer says 'no drain is running' and the exit-code mapping function returns 2. `stop_and_wait` returns NotRunning and still writes `drain.stop`. The recycled-pid child is still alive afterward (`try_wait()` is None), so nothing signalled it.",
+      "fails_without": "A pid-only check (`process_alive`) reports the recycled and zombie cases as running. With no unreadable-file guard, the garbage file is treated as running or panics.",
+      "seam": "`drain::drain_state`, `drain::stop_and_wait`, `RealProcs`, real children, tempdir state root. Added in plan steps 1-3; no fake."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test calling the production `drain::guarded(state_root, &RealProcs, build, &stale, || drain::drain(&stub, limits, &Kept::default()))`. `stale` is a closure returning `Some(\"stale build: this athena was built from aaaaaaaaaaaa, and 3 file(s) under crates/ ... changed by bbbbbbbbbbbb; run ./setup.sh\")`. `stub` is the existing `Stub` steps in drain.rs's tests module (drain.rs:3968), which logs every call. A control case passes a closure returning None.",
+      "command": "cargo test -p athena-cli --lib a_stale_binary_start_is_refused_and_dispatches_no_job",
+      "observes": "With the stale closure `guarded` returns Err containing 'refusing to start' and the stale line (both commit ids and 'crates/'). The `Stub` call log is empty (no read, run or land), `drain.pid` does not exist, and a pre-existing `drain.stop` is untouched. In the control case the closure runs, the log is non-empty and the pid file is gone afterward. The stale-build detection itself (`stale_build_line`) is unchanged and covered by tests/drain.rs `status_prints_the_stale_build_line_after_a_crates_change_and_none_after_docs_or_records_changes` (line 1993).",
+      "fails_without": "Without the refusal in `guarded`, the closure runs, the Stub log is non-empty and the result is Ok, so the Err and empty-log assertions fail.",
+      "seam": "`drain::guarded` is added in plan step 4; the stale answer is injected as a closure parameter, and only the yes/no answer is canned, the refusal logic is in `guarded`. `Stub`, `Kept` and `drain::drain` exist (drain.rs:3968, 4201, 2797). main.rs passes `&|| athena.stale_build()` in step 5."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit tests calling the production `drain::restart(state_root, &life, waiting, &Kept)` with a `Lifecycle` double `Rec`. `Rec.rebuild` appends 'rebuild' to a shared log and returns a scripted Ok/Err. `Rec.spawn` appends 'spawn', starts a real `sleep` child and writes its pid file through the production `write_record` with build 'athena 0.0.0 (commit abcdef123456)'. `Rec.installed_stale` returns Some(line) while a fake HEAD flag is ahead of the count of successful rebuilds. The old drain is a real `sh -c 'while [ ! -e <stop file> ]; do sleep 0.05; done'` child with a pid file, so it exits only when `restart` creates the stop file; a watcher thread reaps it, logs 'old exited', and (in the race case) advances the fake HEAD, standing in for a landing. Cases: (a) happy path; (b) failed first rebuild; (c) the old drain advances HEAD while restart waits; (d) the second rebuild fails; (e) the old drain never exits and `--timeout` is short; (f) no pid file; (g) the spawned child exits at once.",
+      "command": "cargo test -p athena-cli --lib restart_",
+      "observes": "(a) log is exactly rebuild, old exited, spawn; the report names old pid, new pid and build and `display::drain_restart` prints the build. (b) rebuild Err: restart returns Err carrying the build output, the log is only 'rebuild', no stop file, the old child is alive, no spawn. (c) log is rebuild, old exited, rebuild, spawn: a second rebuild runs before spawn. (d) log is rebuild, old exited, rebuild with no spawn, and the Err says no drain is running and to run ./setup.sh. (e) Err says the stop is still asked for, no new drain was started, and to run `athena drain-restart` again; `drain.stop` still exists; log has no second rebuild and no spawn. (f) the Kept lines contain the notice about drains from builds without a pid file, no `drain.stop` is written, and spawn is logged. (g) Err names `drain.log`. Also a pure-function test of `commit_in_version` on `athena 0.1.0 (commit abc123def456)` and `(commit unknown, dirty)`.",
+      "fails_without": "If restart spawned before the old drain exited, 'spawn' would precede 'old exited'. If it skipped the rebuild, 'rebuild' would be missing. If a failed rebuild did not abort, 'spawn' would appear or the stop file would exist. Without the post-exit freshness check, case (c) has no second 'rebuild'. Without the timeout message, (e) fails its text assertions.",
+      "seam": "`drain::restart` and the `Lifecycle` trait are added in plan step 3 (`installed_stale` included). The double supplies only the rebuild result, the stale answer, and the process standing in for the new binary, and it uses the production pid-file writer. Ordering, waiting, the re-check, the timeout and verification are all in `restart`. `RealLifecycle` (which calls `run_setup` at drain.rs:3317, runs the installed `--version` and `wiring::spawn_detached`) is not used in this test; `spawn_detached` is added in step 5. `Kept` exists (drain.rs:4201)."
+    },
+    {
+      "criterion": 5,
+      "method": "Unit test of `PidGuard::acquire` and `drain::guarded` with a tempdir state root. Cases: (1) read `drain.pid` inside the closure; (2) a second `guarded` while a pid file names a live `sleep` child (real pid and marker), with a `drain.stop` present; (3) a file naming the test's own pid and marker (exec carry-over) with a `drain.stop` present; (4) a closure that panics under `catch_unwind`; (5) a leftover file naming a dead pid, with a `drain.stop` present; (6) no file, with a `drain.stop` present.",
+      "command": "cargo test -p athena-cli --lib the_pid_file_is_written_at_start_removed_on_exit_and_a_second_live_start_is_refused",
+      "observes": "(1) During the closure the file exists with the test's pid and the build string; after `guarded` returns it is gone. (2) Err 'a drain is already running (pid N)', the closure did not run, the first drain's `drain.stop` still exists. (3) accepted, and `drain.stop` still exists inside the closure (the carried-over stop is kept). (4) the file is gone after the panic. (5) the leftover is replaced and `drain.stop` is removed. (6) `drain.stop` is removed.",
+      "fails_without": "Without the write, the in-closure read fails. Without the Drop removal, the after-exit check fails. Without the live check, the second start runs its closure. If `guarded` always removed the stop file, case (3) or (2) fails.",
+      "seam": "`drain::guarded`, `PidGuard::acquire` and `Drop` are added in plan steps 2 and 4. `RealProcs` with real children is injected as `&dyn Procs`."
+    },
+    {
+      "criterion": 6,
+      "method": "The same unit test as criterion 3. Its control half injects a closure that returns None, as a docs-only or records-only change after the build gives (`stale_build_line`, status.rs:35-58, returns None unless BUILD_PATHS changed), and shows the guard runs the closure. The 5% figure is an estimate carried over from the reading and is not measured; the CHANGELOG entry says so.",
+      "command": "cargo test -p athena-cli --lib a_stale_binary_start_is_refused_and_dispatches_no_job",
+      "observes": "A start with a stale answer is refused and a start with none is not, so the new refusals are limited to genuinely stale builds. The test does not show the 5% rate.",
+      "fails_without": "If the guard refused every start or ignored the closure's answer, the control assertion fails.",
+      "seam": "Same as criterion 3: `drain::guarded` (plan step 4) with the stale closure injected."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the workspace lint with warnings denied, then the format check. The workspace denies `unsafe_code` (athena-cli Cargo.toml:34-35), so new code uses only safe APIs (`CommandExt::process_group` and `arg0`, /proc reads, `ps` by pid, `<installed> --version`).",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Exit 0 with no warnings. The verifier then runs `cargo fmt --all --check`, which prints no diff and exits 0.",
+      "fails_without": "A new `unsafe` block, an unused helper (a `Procs` or `Lifecycle` method or `pid_file` with no caller), a needless clone, or unformatted code makes the command exit non-zero.",
+      "seam": "The whole workspace compiled under the workspace `[lints]` configuration; no fake or fixture. The seam exists today; the code from plan steps 1-6 and its tests are what is compiled."
+    },
+    {
+      "criterion": 8,
+      "method": "Unit test in main.rs's tests module (`Cli::command().render_help()` is used at main.rs:1685). It renders help for the top level and for `drain-status`, `drain-restart` and `drain-stop`. A second assertion takes `include_str!` of `drain.rs`, `main.rs` and `wiring.rs`, keeps the text before `#[cfg(test)]`, and asserts none contains `Command::new(\"pgrep\")`, `Command::new(\"pkill\")`, `Command::new(\"pidof\")` or a `/cmdline` read. The needles are built with `format!` so the test file does not contain them. It also asserts that every `Command::new(\"ps\")` argument list contains `-p`.",
+      "command": "cargo test -p athena-cli --bin athena the_new_commands_are_in_the_help_and_the_code_does_no_text_matching",
+      "observes": "The top-level help lists `drain-status` and `drain-restart`. Each command's help tells the person to use it instead of pkill or pgrep; `drain-stop --help` mentions `--wait`; `drain-restart --help` says the new drain runs in the background and logs to drain.log. No command-text matching appears in the three files.",
+      "fails_without": "With the subcommands missing or their help lacking the pkill/pgrep wording, the help assertions fail. If a pgrep, pkill, pidof or /cmdline read were added, the scan fails.",
+      "seam": "`Cli::command()` in main.rs (used at main.rs:504). The clap variants are added in plan step 5. The scan reads source text with `include_str!`; nothing is injected."
+    },
+    {
+      "criterion": 9,
+      "method": "Unit test in main.rs's tests module, which already uses `include_str!(\"../../../athena.toml\")` (main.rs:1716), so repository-relative includes work. It reads `CHANGELOG.md` and `README.md`, cuts the CHANGELOG at its first released-version heading to get the Unreleased section, and checks both texts.",
+      "command": "cargo test -p athena-cli --bin athena the_changelog_and_readme_describe_the_drain_lifecycle_commands",
+      "observes": "The Unreleased section names `drain-status`, `drain-restart`, `drain-stop --wait`, the pid file, the stale-binary refusal and the one-time transition for a drain started without a pid file, and labels the 5% figure an estimate. The README 'Stopping a drain' section mentions `--wait`, `drain-status` and `drain-restart`, and a README paragraph states how the pid file, the stale-build refusal, the background run (`drain.log`) and the transition work.",
+      "fails_without": "If the CHANGELOG entry or README text were missing or omitted a command name, the substring assertions fail.",
+      "seam": "`include_str!` of `CHANGELOG.md` and `README.md` from the main.rs tests module. No injection. The text is written in plan steps 9-10."
+    }
+  ],
+  "open_questions": [
+    "User: `drain-restart` takes the same flags as `drain` (budget required, defaults for the rest) because a stopped drain does not record its remaining limits. Is that acceptable, or should the drain record its limits in the pid file so a restart can reuse them?"
+  ],
+  "producer_section_sha256": "2eb27c6ebcc5f0d0a5d228d039e28190d5c32d4584262bbefa4cfc4113f62409"
+}

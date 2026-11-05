@@ -37,7 +37,7 @@ pub fn stall_reason(secs: u64) -> String {
 
 #[allow(unsafe_code)]
 mod sys {
-    //! The only unsafe code in Athena: three libc calls, each with its contract stated.
+    //! The only unsafe code in Athena: a few libc calls, each with its contract stated.
 
     /// Sends `signal` to every process in group `pgid`. Returns false if no such group exists.
     pub fn signal_group(pgid: i32, signal: i32) -> bool {
@@ -80,9 +80,54 @@ mod sys {
 
     #[cfg(not(target_os = "linux"))]
     pub fn set_parent_death_signal(_cmd: &mut std::process::Command) {}
+
+    /// Waits for child `pid` and returns its exit status with the resource use of it and of every
+    /// descendant it waited for.
+    pub fn wait_with_usage(
+        pid: u32,
+    ) -> std::io::Result<(std::process::ExitStatus, super::ChildUsage)> {
+        use std::os::unix::process::ExitStatusExt;
+        let pid = libc::pid_t::try_from(pid).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "pid out of range")
+        })?;
+        let mut status: libc::c_int = 0;
+        // SAFETY: an all-zero rusage is a valid value of that plain-integer struct.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        loop {
+            // SAFETY: wait4(2) writes only through the two pointers, which point at live locals of the
+            // right types; a failure leaves them unread.
+            let waited = unsafe { libc::wait4(pid, &mut status, 0, &mut usage) };
+            if waited == pid {
+                break;
+            }
+            let err = std::io::Error::last_os_error();
+            if waited >= 0 || err.kind() != std::io::ErrorKind::Interrupted {
+                return Err(err);
+            }
+        }
+        let seconds = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
+        // ru_maxrss is in kilobytes on Linux and in bytes elsewhere.
+        let unit: u64 = if cfg!(target_os = "linux") { 1024 } else { 1 };
+        Ok((
+            std::process::ExitStatus::from_raw(status),
+            super::ChildUsage {
+                peak_resident_bytes: u64::try_from(usage.ru_maxrss).unwrap_or(0) * unit,
+                cpu_seconds: seconds(usage.ru_utime) + seconds(usage.ru_stime),
+            },
+        ))
+    }
 }
 
-pub use sys::{process_alive, signal_group};
+pub use sys::{process_alive, signal_group, wait_with_usage};
+
+/// What a finished child and the descendants it waited for used.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChildUsage {
+    /// The largest resident set of any one process in the tree, in bytes.
+    pub peak_resident_bytes: u64,
+    /// User plus system CPU time of the whole tree, in seconds.
+    pub cpu_seconds: f64,
+}
 
 /// Puts a command in its own process group and ties it to its parent's life.
 pub fn isolate(cmd: &mut Command) {
@@ -233,6 +278,18 @@ mod tests {
         cmd.arg("30");
         isolate(&mut cmd);
         cmd.spawn().unwrap()
+    }
+
+    #[test]
+    fn wait_with_usage_returns_the_exit_status_and_a_nonzero_peak_resident_set() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 3"]);
+        #[allow(clippy::zombie_processes)] // reaped by wait4 inside wait_with_usage
+        let child = cmd.spawn().unwrap();
+        let (status, usage) = wait_with_usage(child.id()).unwrap();
+        assert_eq!(status.code(), Some(3));
+        assert!(usage.peak_resident_bytes > 0, "{usage:?}");
+        assert!(usage.cpu_seconds >= 0.0 && usage.cpu_seconds.is_finite());
     }
 
     #[test]

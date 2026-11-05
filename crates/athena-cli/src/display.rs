@@ -1758,6 +1758,81 @@ pub fn trace(t: &JobTrace) -> String {
     out
 }
 
+/// `athena drain-status`: whether a drain is running, found through the pid file only, and if not, why not.
+pub fn drain_status(state: &crate::drain::DrainState, stop_asked: bool) -> String {
+    use crate::drain::DrainState;
+    let mut out = match state {
+        DrainState::Running(drain) => format!(
+            "drain running: pid {}, {}, started {}\n",
+            drain.pid, drain.build, drain.at
+        ),
+        DrainState::NotRunning(why) => format!("no drain is running: {}\n", why.reason()),
+    };
+    if stop_asked {
+        out.push_str(match state {
+            DrainState::Running(_) => {
+                "stop asked for: it finishes its current job and starts no further one\n"
+            }
+            DrainState::NotRunning(_) => {
+                "a stop file is left over; the next drain removes it when it starts\n"
+            }
+        });
+    }
+    out
+}
+
+/// `athena drain-stop`: what was asked and what was found.
+pub fn drain_stop(outcome: &crate::drain::StopOutcome) -> String {
+    use crate::drain::StopOutcome;
+    match outcome {
+        StopOutcome::Asked(drain) => format!(
+            "stop asked for: drain pid {} finishes its current job and starts no further one; run `athena drain-stop --wait` or `athena drain-status` to see when it has exited\n",
+            drain.pid
+        ),
+        StopOutcome::Exited(drain) => {
+            format!("drain pid {} finished its job and exited\n", drain.pid)
+        }
+        StopOutcome::TimedOut(drain, waited) => format!(
+            "drain pid {} is still on its job after {}s; the stop is still asked for and it will exit at the next job boundary; run `athena drain-stop --wait` to wait again\n",
+            drain.pid,
+            waited.as_secs()
+        ),
+        StopOutcome::NotRunning(why) => format!(
+            "stop asked for, but no drain is running: {}; a drain started by a build before the pid file existed would still stop at its next job boundary\n",
+            why.reason()
+        ),
+    }
+}
+
+/// `athena drain-restart`: the build the new drain runs, or why the old one has not exited yet.
+pub fn drain_restart(outcome: &crate::drain::RestartOutcome) -> String {
+    use crate::drain::RestartOutcome;
+    match outcome {
+        RestartOutcome::Started(report) => {
+            let mut out = String::new();
+            if let Some(old) = &report.old {
+                let _ = writeln!(out, "old drain pid {} exited", old.pid);
+            }
+            let _ = writeln!(
+                out,
+                "drain restarted: pid {} runs {}",
+                report.new.pid, report.new.build
+            );
+            let _ = writeln!(
+                out,
+                "it runs in the background, in its own process group, and logs to {}; `athena drain-status` shows whether it is alive",
+                report.log.display()
+            );
+            out
+        }
+        RestartOutcome::StillStopping(old, waited) => format!(
+            "drain pid {} is still on its job after {}s. The stop is still asked for and no new drain was started; it exits at its next job boundary. Run `athena drain-restart` again then, or `athena drain` to start one yourself.\n",
+            old.pid,
+            waited.as_secs()
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1781,6 +1856,52 @@ mod tests {
             failing_test: test.map(str::to_string),
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_drain_printers_say_why_no_drain_runs_and_which_build_started() {
+        use crate::drain::{
+            DrainState, NotRunning, PidRecord, RestartOutcome, RestartReport, StopOutcome,
+        };
+        use std::time::Duration;
+        let record = |pid| PidRecord {
+            pid,
+            started: "123".into(),
+            build: "athena 0.1.0 (commit abcdef123456)".into(),
+            at: "2026-11-05T20:00:00Z".into(),
+        };
+        let running = drain_status(&DrainState::Running(record(41)), true);
+        assert!(running.contains("drain running: pid 41"), "{running}");
+        assert!(running.contains("abcdef123456"), "{running}");
+        assert!(running.contains("stop asked for"), "{running}");
+        for (why, words) in [
+            (NotRunning::Missing, "no pid file"),
+            (NotRunning::Unreadable("bad json".into()), "bad json"),
+            (NotRunning::Dead(7), "has exited"),
+            (NotRunning::Recycled(7), "different process"),
+        ] {
+            let text = drain_status(&DrainState::NotRunning(why.clone()), false);
+            assert!(text.starts_with("no drain is running"), "{text}");
+            assert!(text.contains(words), "{text}");
+            assert!(drain_stop(&StopOutcome::NotRunning(why)).contains(words));
+        }
+        let started = drain_restart(&RestartOutcome::Started(RestartReport {
+            old: Some(record(41)),
+            new: record(42),
+            log: "/state/drain.log".into(),
+        }));
+        assert!(started.contains("old drain pid 41 exited"), "{started}");
+        assert!(
+            started.contains("pid 42 runs athena 0.1.0 (commit abcdef123456)"),
+            "{started}"
+        );
+        assert!(started.contains("/state/drain.log"), "{started}");
+        let waiting = drain_restart(&RestartOutcome::StillStopping(
+            record(41),
+            Duration::from_secs(90),
+        ));
+        assert!(waiting.contains("no new drain was started"), "{waiting}");
+        assert!(waiting.contains("athena drain-restart"), "{waiting}");
     }
 
     #[test]
