@@ -1,0 +1,128 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261105-093606-199q",
+  "base_commit": "03a4910eafe46f73e4bce9de8083eb26576f2a63",
+  "base_fingerprint": "sha256:ffe471de2203e64dd5726f8d929b9352d76586bcf065633b67f994f9cb18618b",
+  "previous_job": "20261017-205547-cgzb",
+  "candidate_commit": "999e5b0deb69ca7fe9cffc9f223a3ceb7c47b12f",
+  "candidate_tree": "42212fa59c5c446c3aeb2ef848fd8e78da6547e2",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 327309
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32682
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 185886
+    },
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 108252
+    },
+    {
+      "path": "docs/design/checks-stage-slowdown.md",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 3677
+    }
+  ],
+  "fingerprint": "sha256:da7bfdd4adeb0e34826b655602dfcfd4d214178151262f435a3ff19b72a3ec4d",
+  "violations": [],
+  "producer_report": {
+    "summary": "The checks stage grew because each planned \"fails without the fix\" demonstration compiled the same broken tree again. The fix reuses the first compile failure for later demonstrations with the same build scope.\n\nCause: reused CI results are stored with a 0 s duration, so the stage time comes from checks that ran locally. Those are the `fails-without-<n>` demonstration runs in `Athena::demonstration_runs` (`run/checks.rs`). Up to three distinct `cargo test` commands run one after another in one reverted scratch copy. When the tests do not compile without the fix, every command for the same package starts its own `cargo test` and fails at the same place. Example from the records: job `20261104-141009-hsg4` ran three `-p athena-core` demonstrations that took 41.7 s, 16.8 s and 16.8 s and stopped at the same 43 compile errors. That job spent 33.6 s of 75.3 s on repeats. I did not recompute the median over the last 20 landed jobs, so the share of the 0.4-minute rise explained here is an estimate.\n\nChange:\n- `verify::build_scope` returns the flags and their values, without the test filter and anything after `--`.\n- `verify::failed_to_build` is true for a nonzero exit, no test run, and \"could not compile\" in the output.\n- `demonstration_runs` keeps each failed build. A later demonstration with the same scope takes that result with a 0 s duration and a note naming the run it repeats, so it is still recorded.\n- Other scopes, runs that compiled and unfinished runs still run in full.\n\nTests:\n- New integration test `demonstrations_of_one_build_scope_compile_once_when_the_build_fails`: three demonstrations (two for `-p demo`, one for `-p other`) give two runs, not three.\n- Two new unit tests in `verify.rs`.\n\nThe new note is `docs/design/checks-stage-slowdown.md`, and `CHANGELOG.md` has an entry under Changed.",
+    "files": [
+      "crates/athena-core/src/run/checks.rs",
+      "crates/athena-core/src/verify.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "docs/design/checks-stage-slowdown.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed; run after the note and changelog were written"
+      },
+      {
+        "command": "cargo clippy -p athena-core --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "athena-core only, not the whole workspace"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p athena-core --lib run::",
+        "result": "pass",
+        "note": "73 passed, including the new test"
+      },
+      {
+        "command": "cargo test -p athena-core --lib verify::tests",
+        "result": "pass",
+        "note": "61 passed, including the 2 new tests"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "not-run",
+        "note": "Full workspace suite left to Athena"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A note under docs/design/ (or the change's commit text/doc comment) states the cause of the longer checks stage, citing the specific crates/ code path and the evidence (measured or labeled estimate).",
+        "status": "met",
+        "evidence": "Created docs/design/checks-stage-slowdown.md. It names status::check_minutes and Athena::demonstration_runs in run/checks.rs as the code path. It cites measured durations from records of jobs 20261104-141009-hsg4 and 20261104-124034-ysc4, and labels the share of the median rise as an estimate. cargo test -p xtask --test policy passed (17 tests)."
+      },
+      {
+        "criterion": "The diff to crates/ removes or bounds the identified cause (extra check run, wait, repeated work or snapshot restore) in the checks path, rather than a symptom such as raising a limit.",
+        "status": "met",
+        "evidence": "run/checks.rs demonstration_runs no longer starts cargo for a demonstration whose build scope already failed to compile. verify.rs adds build_scope and failed_to_build. MAX_DEMONSTRATION_RUNS and other limits are unchanged."
+      },
+      {
+        "criterion": "A new or updated test in crates/ exercises the fixed behavior, failing on the old behavior; run `cargo test` and it passes.",
+        "status": "met",
+        "evidence": "New test demonstrations_of_one_build_scope_compile_once_when_the_build_fails in run/tests.rs counts runs and expects 2; the old code runs 3. Plus build_scope_drops_the_filter_and_keeps_what_is_compiled and only_a_nonzero_run_that_could_not_compile_counts_as_a_failed_build in verify.rs. I ran cargo test -p athena-core --lib run:: (73 passed) and verify::tests (61 passed). I did not run the full workspace suite; Athena runs it."
+      },
+      {
+        "criterion": "`cargo clippy --all-targets` is clean and `cargo fmt --check` passes.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran cargo clippy -p athena-core --all-targets --locked -- -D warnings (clean) and cargo fmt --all --check (clean)."
+      },
+      {
+        "criterion": "Existing checks behavior is preserved: the same routed checks still run and failures still hold or reject the job; existing tests in crates/athena-core/src/run/tests.rs still pass.",
+        "status": "met",
+        "evidence": "Only the demonstration loop changed. routing.rs, SnapExec, the baseline and the CI result reading are untouched. All 73 run:: tests pass, including ci_reuse_*, a_real_nonzero_check_failure_is_still_rejected and the existing demonstration tests."
+      }
+    ],
+    "open_issues": [
+      "I did not recompute the median of the last 20 landed jobs from the records. The share of the 0.2 to 0.6 rise caused by repeated builds is an estimate, based on two sampled jobs.",
+      "Two commands with the same scope would not be reused if the first one compiled and failed at run time, by design: a filter picks different tests."
+    ],
+    "mistakes": [
+      "My first draft of the integration test used three demonstrations for criterion 1. Admission rejects that, so the job never reached the verifier. I added a helper that gives the request extra criteria.",
+      "I left a temporary debug print in the test helper while diagnosing this, then removed it."
+    ],
+    "learnings": [
+      "status::check_minutes sums the measured durations of every stored check except those with basis 'not run'. Reused CI results are stored with 0 s, so locally run checks and the stored fails-without-N demonstration runs make up the checks stage.",
+      "A plan must have exactly one demonstration per criterion, so a test of several demonstrations needs a request with several criteria. run_demonstration_job_with now adds them.",
+      "The fake reader, producer and verifier in run/tests.rs return one criterion by default."
+    ],
+    "desires": [
+      "A command to compute the status stage medians from the evidence snapshot per job, to confirm the demonstration share of the checks median exactly."
+    ]
+  }
+}
