@@ -1,12 +1,14 @@
 //! The owner decision briefs page: `decisions.html`, built beside `index.html` by `cargo run -p xtask -- site`.
 //!
-//! The page lists the Steward's open proposals (work items of kind proposal that no work decision names) read
-//! from the records branch `athena/records`. Work decisions are read from both places: the records branch and
-//! the tree of main (the checkout's HEAD). Approve-work and reject-work record their decisions under
-//! `records/work-decisions/` on main, which the records branch does not hold, so reading the branch alone
-//! left every proposal looking undecided. Each proposal becomes a short brief: its title, rung, source,
-//! evidence, a recommendation, and a link to the record on GitHub at the branch tip. The style is the owner's
-//! (`docs/conventions/owner-style.md`): plain words, nothing invented.
+//! The page lists only the proposals that wait for the owner: work items of kind proposal that no work
+//! decision names and whose rung is above the raising role's recorded limit (or whose role has no recorded
+//! definition). They are read from the records branch `athena/records`. A proposal the role may change itself
+//! is not listed. With none left, the page says "Nothing waiting for you". Work decisions are read from both
+//! places: the records branch and the tree of main (the checkout's HEAD). Approve-work and reject-work record
+//! their decisions under `records/work-decisions/` on main, which the records branch does not hold, so
+//! reading the branch alone left every proposal looking undecided. Each proposal becomes a short brief: its
+//! title, rung, source, evidence, a recommendation, and a link to the record on GitHub at the branch tip. The
+//! style is the owner's (`docs/conventions/owner-style.md`): plain words, nothing invented.
 //!
 //! The words of a card are written by the steward, not by this page: when it raises a proposal above its
 //! limit it stores five plain-language fields in the work item (question, if_yes, if_no, cost, recommendation).
@@ -85,6 +87,12 @@ fn role_limit(roles: &[RoleDefinition], name: &str) -> Option<Ladder> {
         .filter(|r| r.name == name)
         .max_by_key(|r| r.version)
         .map(|r| r.highest_rung)
+}
+
+/// Whether `item` is for the owner to decide: its rung is above the raising role's recorded limit, or the
+/// role has no recorded definition. A proposal the role may change itself is not listed.
+fn needs_owner(item: &WorkItem, roles: &[RoleDefinition]) -> bool {
+    role_limit(roles, &item.role).is_none_or(|limit| !may_change(limit, item.rung))
 }
 
 /// The recommendation line, from the raising role's recorded limit.
@@ -359,6 +367,9 @@ pub fn render(records: &Records) -> String {
             let mut count = 0;
             let mut refused = snapshot.unreadable.clone();
             for found in &snapshot.proposals {
+                if !needs_owner(&found.item, &snapshot.roles) {
+                    continue;
+                }
                 match Brief::new(&found.item, &found.path, &snapshot.tip, &snapshot.roles) {
                     Ok(brief) => {
                         count += 1;
@@ -368,7 +379,7 @@ pub fn render(records: &Records) -> String {
                 }
             }
             if count == 0 {
-                body.push_str("<section><h2>No proposals waiting</h2><p>No proposal is waiting for a decision.</p></section>");
+                body.push_str("<section><p>Nothing waiting for you</p></section>");
             } else {
                 let _ = write!(
                     body,
@@ -694,7 +705,8 @@ mod tests {
                 reason: "no".into(),
             },
         };
-        let steward = role("steward", Ladder::DesignDecisions);
+        // The steward's limit is below the first proposal's rung, so that proposal is for the owner.
+        let steward = role("steward", Ladder::DefaultsConventions);
         let mut changes = Vec::new();
         for item in [&first, &second, &third] {
             changes.push(put(
@@ -785,6 +797,7 @@ mod tests {
         (dir, first, second)
     }
 
+    /// A regression guard: the base already drops proposals decided on main, so this passes there too.
     #[test]
     fn proposals_decided_on_main_drop_off_the_page() {
         let (dir, first, second) = decided_on_main(true, true);
@@ -803,7 +816,7 @@ mod tests {
         assert!(!html.contains(first.id.as_str()), "{html}");
         assert!(!html.contains(second.id.as_str()), "{html}");
         assert!(!html.contains("<article"), "{html}");
-        assert!(html.contains("No proposal is waiting for a decision"));
+        assert!(html.contains("Nothing waiting for you"));
     }
 
     #[test]
@@ -816,6 +829,120 @@ mod tests {
         assert!(html.contains("Name an owner for reviews"));
         assert!(html.contains(second.id.as_str()));
         assert!(!html.contains(first.id.as_str()));
+    }
+
+    /// A proposal by the steward (limit: defaults-conventions) on `rung`, titled `title`.
+    fn steward_item(id: &str, title: &str, rung: Ladder) -> WorkItem {
+        item(id, "steward", title, rung, Reference::path("a.md"))
+    }
+
+    /// A temp repository whose records branch holds `items` and the steward role. An approval is written
+    /// where approve-work writes it (the records branch); a rejection where reject-work writes it (the
+    /// current branch, main).
+    fn page_with(items: &[&WorkItem], approved: &[&WorkItem], rejected: &[&WorkItem]) -> String {
+        let (dir, git) = init_repo();
+        let steward = AnyRecord::Role(Box::new(role("steward", Ladder::DefaultsConventions)));
+        let mut changes = vec![put(steward.canonical_path(), steward)];
+        for i in items {
+            changes.push(put(path_of(i), AnyRecord::WorkItem(Box::new((*i).clone()))));
+        }
+        for (n, i) in approved.iter().enumerate() {
+            let d = decision_of(&format!("20261027-074524-ap{n:02}"), &i.id, true);
+            changes.push(put(d.canonical_path(), d));
+        }
+        RecordsWriter::new(&git)
+            .append("records", &changes)
+            .unwrap();
+        for (n, i) in rejected.iter().enumerate() {
+            let d = decision_of(&format!("20261027-074525-rj{n:02}"), &i.id, false);
+            commit_to_main(dir.path(), &git, &d);
+        }
+        render(&locate(dir.path()))
+    }
+
+    #[test]
+    fn with_only_decided_and_within_limit_proposals_the_page_says_nothing_is_waiting() {
+        let approved = steward_item(
+            "20261015-003901-aaaa",
+            "Approved one",
+            Ladder::DesignDecisions,
+        );
+        let rejected = steward_item(
+            "20261015-003902-bbbb",
+            "Rejected one",
+            Ladder::DesignDecisions,
+        );
+        let within = steward_item(
+            "20261015-003903-cccc",
+            "Within limit",
+            Ladder::DefaultsConventions,
+        );
+        let html = page_with(&[&approved, &rejected, &within], &[&approved], &[&rejected]);
+        assert!(html.contains("Nothing waiting for you"), "{html}");
+        assert!(!html.contains("<article"), "{html}");
+        assert!(!html.contains("waiting</h2>"), "{html}");
+        for title in ["Approved one", "Rejected one", "Within limit"] {
+            assert!(!html.contains(title), "{title}");
+        }
+    }
+
+    #[test]
+    fn only_the_open_above_limit_proposal_is_a_card() {
+        let approved = steward_item(
+            "20261015-003901-aaaa",
+            "Approved one",
+            Ladder::DesignDecisions,
+        );
+        let rejected = steward_item(
+            "20261015-003902-bbbb",
+            "Rejected one",
+            Ladder::DesignDecisions,
+        );
+        let above = steward_item(
+            "20261015-003903-cccc",
+            "Above limit",
+            Ladder::DesignDecisions,
+        );
+        let below = steward_item(
+            "20261015-003904-dddd",
+            "Below limit",
+            Ladder::Implementation,
+        );
+        let html = page_with(
+            &[&approved, &rejected, &above, &below],
+            &[&approved],
+            &[&rejected],
+        );
+        assert_eq!(html.matches("<article").count(), 1, "{html}");
+        assert!(html.contains("<h2>1 waiting</h2>"), "{html}");
+        assert!(html.contains("Above limit"));
+        for title in ["Approved one", "Rejected one", "Below limit"] {
+            assert!(!html.contains(title), "{title}");
+        }
+        assert!(!html.contains("Nothing waiting for you"));
+    }
+
+    #[test]
+    fn a_proposal_from_a_role_with_no_recorded_definition_is_still_listed() {
+        let (dir, git) = init_repo();
+        let ghost = item(
+            "20261015-003903-cccc",
+            "ghost",
+            "Unknown limit",
+            Ladder::Implementation,
+            Reference::path("a.md"),
+        );
+        RecordsWriter::new(&git)
+            .append(
+                "records",
+                &[put(
+                    path_of(&ghost),
+                    AnyRecord::WorkItem(Box::new(ghost.clone())),
+                )],
+            )
+            .unwrap();
+        let html = render(&locate(dir.path()));
+        assert_eq!(html.matches("<article").count(), 1, "{html}");
     }
 
     #[test]
@@ -841,7 +968,8 @@ mod tests {
             .append("role", &[put(steward.canonical_path(), steward)])
             .unwrap();
         let html = render(&locate(dir.path()));
-        assert!(html.contains("No proposal is waiting for a decision"));
+        assert!(html.contains("Nothing waiting for you"));
+        assert!(!html.contains("No proposals listed"));
     }
 
     /// Whether the workflow text fetches the records branch in a line before the site render step. Comment
