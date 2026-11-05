@@ -3337,6 +3337,585 @@ pub fn run_setup(dir: &std::path::Path) -> Result<Rebuild, String> {
     ))
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// The drain's life cycle: one pid file, and the commands that read it.
+//
+// Root cause of the hand-written `pkill`, `pgrep` and wait loops that matched themselves: Athena kept no record
+// of its own drain, so a person found it by matching text in the process list, and the command doing the
+// matching contains that text. A drain now writes `drain.pid` in the state directory when it starts and removes
+// it when it ends. Every command here finds the drain only through that file. Nothing reads or matches command
+// text, and nothing sends a signal: a stop is the stop file, which the drain reads at a job boundary.
+// ---------------------------------------------------------------------------------------------------------
+
+/// The file that names the running drain, inside the repository's state directory, next to [`stop_file`].
+pub fn pid_file(state_root: &Path) -> PathBuf {
+    state_root.join("drain.pid")
+}
+
+/// Where a drain started by `athena drain-restart` writes what it prints.
+pub fn log_file(state_root: &Path) -> PathBuf {
+    state_root.join("drain.log")
+}
+
+/// What `drain.pid` holds: who the drain is, and when and as which build it started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PidRecord {
+    /// The drain's process id.
+    pub pid: u32,
+    /// The process start marker taken when the file was written (see [`Procs::start_marker`]). A pid that
+    /// another process has since been given has a different marker, so it is not mistaken for the drain.
+    pub started: String,
+    /// The build that runs the drain, as `athena --version` shows it.
+    pub build: String,
+    /// When the drain started (UTC).
+    pub at: String,
+}
+
+/// The one way code asks whether a process is alive: by its pid, never by its name or command line.
+pub trait Procs {
+    /// A string that is the same for as long as process `pid` lives (and across an exec), and different for any
+    /// later process that is given the same pid. `None` when there is no such process, or it has already
+    /// exited and is only waiting to be reaped.
+    fn start_marker(&self, pid: u32) -> Option<String>;
+}
+
+/// The real processes of this machine.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RealProcs;
+
+impl Procs for RealProcs {
+    fn start_marker(&self, pid: u32) -> Option<String> {
+        if cfg!(target_os = "linux") {
+            linux_marker(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+        } else {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "lstart=,stat=", "-p", &pid.to_string()])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            ps_marker(&String::from_utf8_lossy(&out.stdout))
+        }
+    }
+}
+
+/// The start marker in the text of a Linux `/proc/<pid>/stat`: field 22, the start time in clock ticks since
+/// boot. The command name (field 2) is in parentheses and may hold spaces and parentheses, so the fields are
+/// counted after the last `)`. A zombie or dead process has no marker.
+fn linux_marker(stat: &str) -> Option<String> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let mut fields = rest.split_whitespace();
+    let state = fields.next()?;
+    if state.starts_with('Z') || state.starts_with('X') {
+        return None;
+    }
+    // Field 3 is the state; field 22 is the 19th after it.
+    fields.nth(18).map(str::to_string)
+}
+
+/// The start marker in the output of `ps -o lstart=,stat= -p <pid>` (macOS and other systems without
+/// `/proc`): the start time and the state, such as `Thu Nov  5 20:59:32 2026 S`. A zombie has no marker.
+fn ps_marker(text: &str) -> Option<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let (state, start) = words.split_last()?;
+    if start.is_empty() || state.starts_with('Z') {
+        return None;
+    }
+    Some(start.join(" "))
+}
+
+/// Why no drain counts as running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotRunning {
+    /// There is no pid file.
+    Missing,
+    /// The pid file could not be read or is not a pid record.
+    Unreadable(String),
+    /// The pid file names a process that no longer exists.
+    Dead(u32),
+    /// The pid file names a pid that another process now holds.
+    Recycled(u32),
+}
+
+impl NotRunning {
+    /// The reason in words.
+    pub fn reason(&self) -> String {
+        match self {
+            NotRunning::Missing => {
+                "there is no pid file, so no drain started by this build is running".into()
+            }
+            NotRunning::Unreadable(why) => {
+                format!("the pid file cannot be used ({why}), so it names no drain")
+            }
+            NotRunning::Dead(pid) => format!(
+                "the pid file names process {pid}, which has exited (the drain ended without removing it)"
+            ),
+            NotRunning::Recycled(pid) => format!(
+                "the pid file names process {pid}, but that pid now belongs to a different process that started later; it is not the drain"
+            ),
+        }
+    }
+}
+
+/// Whether a drain is running, from the pid file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrainState {
+    Running(PidRecord),
+    NotRunning(NotRunning),
+}
+
+impl DrainState {
+    /// The exit code `athena drain-status` gives: 0 when a drain is running, 2 when none is.
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            DrainState::Running(_) => 0,
+            DrainState::NotRunning(_) => 2,
+        }
+    }
+}
+
+/// Reads the pid file and checks the process it names by pid and start marker. A missing, unreadable, dead or
+/// recycled entry is reported as not running, and no process is touched.
+pub fn drain_state(state_root: &Path, procs: &dyn Procs) -> DrainState {
+    let text = match std::fs::read_to_string(pid_file(state_root)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return DrainState::NotRunning(NotRunning::Missing);
+        }
+        Err(e) => return DrainState::NotRunning(NotRunning::Unreadable(e.to_string())),
+    };
+    let record: PidRecord = match serde_json::from_str(&text) {
+        Ok(record) => record,
+        Err(e) => return DrainState::NotRunning(NotRunning::Unreadable(e.to_string())),
+    };
+    match procs.start_marker(record.pid) {
+        None => DrainState::NotRunning(NotRunning::Dead(record.pid)),
+        Some(marker) if marker != record.started => {
+            DrainState::NotRunning(NotRunning::Recycled(record.pid))
+        }
+        Some(_) => DrainState::Running(record),
+    }
+}
+
+/// Writes `record` as the pid file, replacing any file there. The new file is complete when it appears.
+pub fn write_record(state_root: &Path, record: &PidRecord) -> std::io::Result<()> {
+    std::fs::create_dir_all(state_root)?;
+    let temp = temp_pid_file(state_root);
+    std::fs::write(&temp, serde_json::to_vec_pretty(record)?)?;
+    std::fs::rename(&temp, pid_file(state_root))
+}
+
+fn temp_pid_file(state_root: &Path) -> PathBuf {
+    state_root.join(format!("drain.pid.{}.tmp", std::process::id()))
+}
+
+/// Creates the pid file only if there is none. The file is complete when it appears, and of two starts at the
+/// same moment only one succeeds (`AlreadyExists` for the other).
+fn publish_record(state_root: &Path, record: &PidRecord) -> std::io::Result<()> {
+    std::fs::create_dir_all(state_root)?;
+    let temp = temp_pid_file(state_root);
+    std::fs::write(&temp, serde_json::to_vec_pretty(record)?)?;
+    let linked = std::fs::hard_link(&temp, pid_file(state_root));
+    let _ = std::fs::remove_file(&temp);
+    linked
+}
+
+/// The pid file while this drain runs. Dropping it removes the file, if the file still names this process.
+#[derive(Debug)]
+pub struct PidGuard {
+    state_root: PathBuf,
+    pid: u32,
+}
+
+impl PidGuard {
+    /// Takes the pid file for process `pid`. A live drain already named there refuses the start. A file that is
+    /// missing, unreadable, dead or recycled is replaced. A file that names `pid` itself is the drain that
+    /// replaced its own image after a rebuild (`exec` keeps the pid): it is replaced too, and the second value
+    /// is `true`.
+    pub fn acquire(
+        state_root: &Path,
+        procs: &dyn Procs,
+        pid: u32,
+        build: &str,
+    ) -> Result<(PidGuard, bool), String> {
+        let started = procs
+            .start_marker(pid)
+            .ok_or_else(|| format!("cannot read the start time of process {pid}"))?;
+        let record = PidRecord {
+            pid,
+            started,
+            build: build.to_string(),
+            at: jiff::Timestamp::now().to_string(),
+        };
+        let guard = || PidGuard {
+            state_root: state_root.to_path_buf(),
+            pid,
+        };
+        for _ in 0..3 {
+            match publish_record(state_root, &record) {
+                Ok(()) => return Ok((guard(), false)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(format!(
+                        "cannot write {}: {e}",
+                        pid_file(state_root).display()
+                    ));
+                }
+            }
+            let before = std::fs::read_to_string(pid_file(state_root)).ok();
+            match drain_state(state_root, procs) {
+                DrainState::Running(old) if old.pid == pid => {
+                    return write_record(state_root, &record)
+                        .map(|()| (guard(), true))
+                        .map_err(|e| {
+                            format!("cannot write {}: {e}", pid_file(state_root).display())
+                        });
+                }
+                DrainState::Running(old) => {
+                    return Err(format!(
+                        "a drain is already running (pid {}, {}, started {}); it is named in {}. Run \
+                         `athena drain-status` to see it, or `athena drain-stop --wait` to stop it first",
+                        old.pid,
+                        old.build,
+                        old.at,
+                        pid_file(state_root).display()
+                    ));
+                }
+                DrainState::NotRunning(_) => {
+                    // Remove it only if it is still the file judged stale.
+                    if std::fs::read_to_string(pid_file(state_root)).ok() == before {
+                        let _ = std::fs::remove_file(pid_file(state_root));
+                    }
+                }
+            }
+        }
+        Err(format!(
+            "could not take {}: it keeps changing; run `athena drain-status`",
+            pid_file(state_root).display()
+        ))
+    }
+}
+
+impl Drop for PidGuard {
+    fn drop(&mut self) {
+        let file = pid_file(&self.state_root);
+        let ours = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<PidRecord>(&text).ok())
+            .is_some_and(|record| record.pid == self.pid);
+        if ours {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+}
+
+/// Runs a drain (`run`) as the one drain of this state directory. It refuses, and runs nothing, when `stale`
+/// says the running build is older than the landed code (a drain on an old build lacks fixes that have
+/// landed). It then takes the pid file (a second live drain is refused) and, unless this is a drain carrying on
+/// after its own rebuild, removes a stop file left by an earlier run. The pid file is removed when `run` ends,
+/// however it ends.
+pub fn guarded<T>(
+    state_root: &Path,
+    procs: &dyn Procs,
+    build: &str,
+    stale: &dyn Fn() -> Option<String>,
+    run: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if let Some(line) = stale() {
+        anyhow::bail!("refusing to start the drain, so nothing was dispatched: {line}");
+    }
+    let (guard, carried_over) = PidGuard::acquire(state_root, procs, std::process::id(), build)
+        .map_err(anyhow::Error::msg)?;
+    if !carried_over {
+        // A stop asked for before this run started belongs to an earlier run. After an exec into the rebuilt
+        // binary the stop belongs to this run, so it stays.
+        let _ = std::fs::remove_file(stop_file(state_root));
+    }
+    let result = run();
+    drop(guard);
+    result
+}
+
+/// How long the stop and restart commands wait, and how often they look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StopWait {
+    /// How long to wait for the old drain to exit; `None` waits as long as it takes (a job can run for hours).
+    pub limit: Option<Duration>,
+    /// How often the pid file is looked at.
+    pub poll: Duration,
+    /// How often a progress line is printed while waiting.
+    pub notice: Duration,
+    /// How long a new drain has to show itself in the pid file.
+    pub start: Duration,
+}
+
+impl StopWait {
+    pub fn new(limit: Option<Duration>) -> StopWait {
+        StopWait {
+            limit,
+            poll: Duration::from_millis(500),
+            notice: Duration::from_secs(30),
+            start: Duration::from_secs(60),
+        }
+    }
+}
+
+/// What `athena drain-stop` found and did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopOutcome {
+    /// The stop is asked for and a drain is running; no wait was asked for.
+    Asked(PidRecord),
+    /// The stop is asked for and the drain has exited.
+    Exited(PidRecord),
+    /// The stop is asked for and the drain was still running when the wait ended.
+    TimedOut(PidRecord, Duration),
+    /// No drain is running (the stop file is left; the next drain removes it).
+    NotRunning(NotRunning),
+}
+
+/// Asks the drain to stop at the next job boundary by creating the stop file (always, so a drain started by
+/// an older build that wrote no pid file still stops), and, when `wait` is given, waits until the drain named
+/// in the pid file has exited. No signal is sent to any process.
+pub fn stop_and_wait(
+    state_root: &Path,
+    procs: &dyn Procs,
+    wait: Option<&StopWait>,
+    ui: &dyn Ui,
+) -> std::io::Result<StopOutcome> {
+    std::fs::create_dir_all(state_root)?;
+    std::fs::write(stop_file(state_root), "stop at the next job boundary\n")?;
+    let old = match drain_state(state_root, procs) {
+        DrainState::NotRunning(why) => return Ok(StopOutcome::NotRunning(why)),
+        DrainState::Running(old) => old,
+    };
+    let Some(wait) = wait else {
+        return Ok(StopOutcome::Asked(old));
+    };
+    let began = std::time::Instant::now();
+    let mut told = began;
+    loop {
+        std::thread::sleep(wait.poll);
+        match drain_state(state_root, procs) {
+            DrainState::Running(now) if now.pid == old.pid && now.started == old.started => {}
+            _ => return Ok(StopOutcome::Exited(old)),
+        }
+        let waited = began.elapsed();
+        if wait.limit.is_some_and(|limit| waited >= limit) {
+            return Ok(StopOutcome::TimedOut(old, waited));
+        }
+        if told.elapsed() >= wait.notice {
+            told = std::time::Instant::now();
+            ui.line(&format!(
+                "still waiting: drain pid {} is finishing its job ({}s so far)",
+                old.pid,
+                waited.as_secs()
+            ));
+        }
+    }
+}
+
+/// What `athena drain-restart` needs from the world, so the order of its steps can be tested.
+pub trait Lifecycle {
+    /// The state directory.
+    fn state_root(&self) -> &Path;
+    /// How processes are looked up.
+    fn procs(&self) -> &dyn Procs;
+    /// Builds and installs Athena from the checkout (`./setup.sh`).
+    fn rebuild(&self) -> Result<Rebuild, String>;
+    /// The stale-build line when the INSTALLED binary is older than the checkout, else `None`.
+    fn installed_stale(&self) -> Option<String>;
+    /// Starts the installed binary as a drain in the background.
+    fn spawn(&self) -> Result<Spawned, String>;
+}
+
+/// A drain process that was started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Spawned {
+    pub pid: u32,
+    /// The file its output goes to.
+    pub log: PathBuf,
+}
+
+/// The new drain `athena drain-restart` started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestartReport {
+    /// The drain that was stopped, if one was running.
+    pub old: Option<PidRecord>,
+    /// The new drain, as its pid file records it: its pid and the build it runs.
+    pub new: PidRecord,
+    pub log: PathBuf,
+}
+
+/// What `athena drain-restart` ended with, short of an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestartOutcome {
+    Started(RestartReport),
+    /// The old drain was still on its job when the wait ended. The stop stays asked for and no new drain was
+    /// started.
+    StillStopping(PidRecord, Duration),
+}
+
+/// Restarts the drain on a fresh build, in this order: rebuild (a failure ends it, with the running drain left
+/// alone); ask the running drain to stop and wait for it to exit; check that the INSTALLED binary is not behind
+/// the checkout (a landing by the old drain while this waited can leave it so) and rebuild again, now that
+/// nothing lands; start the new drain; wait until its pid file shows it. A drain that cannot be seen (no pid
+/// file) is not stopped: this says so and goes on.
+pub fn restart(
+    life: &dyn Lifecycle,
+    waiting: &StopWait,
+    ui: &dyn Ui,
+) -> anyhow::Result<RestartOutcome> {
+    use anyhow::anyhow;
+    let root = life.state_root();
+    let procs = life.procs();
+    let first = life.rebuild().map_err(|e| {
+        anyhow!("the rebuild failed, so the running drain (if any) was left alone and nothing was started:\n{e}")
+    })?;
+    ui.line("rebuilt and installed");
+    let old = match drain_state(root, procs) {
+        DrainState::Running(old) => {
+            ui.line(&format!(
+                "stop asked for; waiting for drain pid {} to finish its job and exit",
+                old.pid
+            ));
+            if let StopOutcome::TimedOut(_, waited) = stop_and_wait(root, procs, Some(waiting), ui)?
+            {
+                return Ok(RestartOutcome::StillStopping(old, waited));
+            }
+            Some(old)
+        }
+        DrainState::NotRunning(why) => {
+            ui.line(&format!("no drain to stop: {}", why.reason()));
+            if why == NotRunning::Missing {
+                ui.line("a drain started by a build before the pid file existed cannot be seen from here; if one is running, run `athena drain-stop` and let it finish before the next restart");
+            }
+            None
+        }
+    };
+    if first == Rebuild::Installed
+        && let Some(line) = life.installed_stale()
+    {
+        ui.line(&format!(
+            "the installed build is behind the checkout ({line}); building again now that nothing lands"
+        ));
+        life.rebuild().map_err(|e| {
+            anyhow!("the second rebuild failed, so no drain is running and none was started; fix the build, then run ./setup.sh and `athena drain`:\n{e}")
+        })?;
+        if let Some(line) = life.installed_stale() {
+            anyhow::bail!(
+                "the installed build is still behind the checkout after a second rebuild ({line}), so no drain is running and none was started; run ./setup.sh, then `athena drain`"
+            );
+        }
+    }
+    let spawned = life
+        .spawn()
+        .map_err(|e| anyhow!("could not start the drain, so no drain is running: {e}"))?;
+    let began = std::time::Instant::now();
+    loop {
+        if let DrainState::Running(new) = drain_state(root, procs)
+            && new.pid == spawned.pid
+        {
+            return Ok(RestartOutcome::Started(RestartReport {
+                old,
+                new,
+                log: spawned.log,
+            }));
+        }
+        if procs.start_marker(spawned.pid).is_none() {
+            anyhow::bail!(
+                "the new drain (pid {}) exited before it took the pid file, so no drain is running; its output in {}:\n{}",
+                spawned.pid,
+                spawned.log.display(),
+                tail_lines(&spawned.log, 10)
+            );
+        }
+        if began.elapsed() >= waiting.start {
+            anyhow::bail!(
+                "the new drain (pid {}) is running but has not taken the pid file within {}s; see {}:\n{}",
+                spawned.pid,
+                waiting.start.as_secs(),
+                spawned.log.display(),
+                tail_lines(&spawned.log, 10)
+            );
+        }
+        std::thread::sleep(waiting.poll);
+    }
+}
+
+/// The last `count` lines of a text file, or a note that it cannot be read.
+fn tail_lines(file: &Path, count: usize) -> String {
+    match std::fs::read_to_string(file) {
+        Ok(text) => {
+            let lines: Vec<&str> = text.lines().collect();
+            lines[lines.len().saturating_sub(count)..].join("\n")
+        }
+        Err(e) => format!("(cannot read {}: {e})", file.display()),
+    }
+}
+
+/// The commit in the text `athena --version` prints (`athena 0.1.0 (commit abc123, dirty)`), or `None` when
+/// it names none (`unknown`) or the text has no such part.
+pub fn commit_in_version(text: &str) -> Option<String> {
+    let rest = &text[text.find("(commit ")? + "(commit ".len()..];
+    let commit = rest.split([',', ')']).next()?.trim();
+    (!commit.is_empty() && commit != "unknown").then(|| commit.to_string())
+}
+
+/// The restart against the real repository: `./setup.sh`, the installed binary, and a detached drain.
+#[derive(Debug)]
+pub struct RealLifecycle<'a> {
+    pub athena: &'a Athena,
+    /// What the new drain is given: the same limits and `--json` as `athena drain`.
+    pub limits: Limits,
+    pub json: bool,
+}
+
+impl Lifecycle for RealLifecycle<'_> {
+    fn state_root(&self) -> &Path {
+        self.athena.state.root()
+    }
+
+    fn procs(&self) -> &dyn Procs {
+        &RealProcs
+    }
+
+    fn rebuild(&self) -> Result<Rebuild, String> {
+        run_setup(self.athena.git.dir())
+    }
+
+    fn installed_stale(&self) -> Option<String> {
+        let out = std::process::Command::new(crate::wiring::installed_binary())
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let commit = commit_in_version(&String::from_utf8_lossy(&out.stdout))?;
+        athena_core::status::stale_build_line(&self.athena.git, &commit, &self.athena.head().ok()?)
+    }
+
+    fn spawn(&self) -> Result<Spawned, String> {
+        let log = log_file(self.state_root());
+        let pid = crate::wiring::spawn_detached(
+            &crate::wiring::installed_binary(),
+            &reexec_args(&self.limits, self.json),
+            self.athena.git.dir(),
+            &log,
+        )
+        .map_err(|e| {
+            format!(
+                "could not run {}: {e}",
+                crate::wiring::installed_binary().display()
+            )
+        })?;
+        Ok(Spawned { pid, log })
+    }
+}
+
 /// The default priority of the work a role raises (it applies when the job's own words give none): the `Priority: <level>` line in the standing instruction of
 /// the role's newest recorded definition, normal when the role is not recorded or states none.
 fn role_priority(records: &Records, role: &str) -> athena_core::plan::Priority {
@@ -4350,6 +4929,611 @@ mod tests {
         }
         assert!(Stop::QueueEmpty.meaning().contains("not success"));
         assert!(Stop::NeedsReinstall.meaning().contains("reinstall"));
+    }
+
+    // ---- The drain's life cycle: pid file, status, stop, restart, stale-build refusal ----
+
+    /// A child process that is killed and reaped when the test ends, however it ends.
+    struct Reaped(std::process::Child);
+
+    impl Reaped {
+        fn id(&self) -> u32 {
+            self.0.id()
+        }
+    }
+
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A process that sleeps, with `arg0` as the first word of its command line.
+    fn sleeper(arg0: &str) -> Reaped {
+        use std::os::unix::process::CommandExt;
+        Reaped(
+            std::process::Command::new("sleep")
+                .arg0(arg0)
+                .arg("60")
+                .spawn()
+                .unwrap(),
+        )
+    }
+
+    /// The pid record of a live process, with its real start marker.
+    fn record_of(pid: u32, build: &str) -> PidRecord {
+        PidRecord {
+            pid,
+            started: RealProcs.start_marker(pid).expect("the process is alive"),
+            build: build.into(),
+            at: "2026-11-05T20:00:00Z".into(),
+        }
+    }
+
+    const BUILD: &str = "athena 0.0.0 (commit abcdef123456)";
+
+    /// A wait with short polls.
+    fn quick(limit: Option<Duration>) -> StopWait {
+        StopWait {
+            limit,
+            poll: Duration::from_millis(20),
+            notice: Duration::from_secs(30),
+            start: Duration::from_secs(10),
+        }
+    }
+
+    /// The state once the drain stops showing as running (a killed child that is not yet reaped takes a
+    /// moment to become a zombie), or after ten seconds.
+    fn settled(root: &Path) -> DrainState {
+        for _ in 0..500 {
+            let state = drain_state(root, &RealProcs);
+            if !matches!(state, DrainState::Running(_)) {
+                return state;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drain_state(root, &RealProcs)
+    }
+
+    #[test]
+    fn the_start_marker_is_read_by_pid_from_the_stat_text_or_the_ps_text() {
+        // A command name with spaces and parentheses must not shift the fields.
+        let stat =
+            "1234 (a b) c) S 1 1234 1234 0 -1 4194560 100 0 0 0 0 0 0 0 20 0 1 0 987654 1000 100";
+        assert_eq!(linux_marker(stat).as_deref(), Some("987654"));
+        assert_eq!(linux_marker(&stat.replace(") S 1", ") Z 1")), None);
+        assert_eq!(linux_marker("garbage"), None);
+        assert_eq!(
+            ps_marker("Thu Nov  5 20:59:32 2026 Ss\n").as_deref(),
+            Some("Thu Nov 5 20:59:32 2026")
+        );
+        assert_eq!(ps_marker("Thu Nov  5 20:59:32 2026 Z+\n"), None);
+        assert_eq!(ps_marker(""), None);
+        let own = RealProcs.start_marker(std::process::id());
+        assert!(own.is_some());
+        assert_eq!(own, RealProcs.start_marker(std::process::id()));
+    }
+
+    #[test]
+    fn commit_in_version_reads_the_commit_athena_version_prints() {
+        assert_eq!(
+            commit_in_version("athena 0.1.0 (commit abc123def456)\n").as_deref(),
+            Some("abc123def456")
+        );
+        assert_eq!(
+            commit_in_version("athena 0.1.0 (commit abc123def456, dirty)").as_deref(),
+            Some("abc123def456")
+        );
+        assert_eq!(
+            commit_in_version("athena 0.1.0 (commit unknown, dirty)"),
+            None
+        );
+        assert_eq!(commit_in_version("athena 0.1.0"), None);
+    }
+
+    #[test]
+    fn status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain() {
+        use std::os::unix::process::CommandExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Two processes whose command lines read `athena drain ...`. Only one is named in the pid file.
+        let script = r#"while [ ! -e "$1" ]; do sleep 0.05; done"#;
+        let drain_child = Reaped(
+            std::process::Command::new("sh")
+                .arg0("athena drain --budget 5")
+                .args(["-c", script, "sh"])
+                .arg(stop_file(root))
+                .spawn()
+                .unwrap(),
+        );
+        let decoy = sleeper("athena drain --budget 9");
+        let record = record_of(drain_child.id(), BUILD);
+        write_record(root, &record).unwrap();
+
+        match drain_state(root, &RealProcs) {
+            DrainState::Running(found) => assert_eq!(found, record),
+            other => panic!("expected the drain to be running: {other:?}"),
+        }
+        let status = crate::display::drain_status(&drain_state(root, &RealProcs), false);
+        assert!(
+            status.contains(&format!("pid {}", drain_child.id())),
+            "{status}"
+        );
+        assert!(
+            status.contains(BUILD) && status.contains("running"),
+            "{status}"
+        );
+        assert!(!status.contains(&decoy.id().to_string()), "{status}");
+
+        // A stop with no wait only asks.
+        let asked = stop_and_wait(root, &RealProcs, None, &Quiet).unwrap();
+        assert_eq!(asked, StopOutcome::Asked(record.clone()));
+        assert!(stop_file(root).exists());
+        // Asking again with a wait returns once the drain has exited, which its loop does at the stop file.
+        let waited = stop_and_wait(
+            root,
+            &RealProcs,
+            Some(&quick(Some(Duration::from_secs(20)))),
+            &Quiet,
+        )
+        .unwrap();
+        assert_eq!(waited, StopOutcome::Exited(record));
+        assert!(matches!(
+            settled(root),
+            DrainState::NotRunning(NotRunning::Dead(_))
+        ));
+        let mut decoy = decoy;
+        assert!(
+            decoy.0.try_wait().unwrap().is_none(),
+            "the decoy was not touched"
+        );
+    }
+
+    #[test]
+    fn a_missing_dead_or_recycled_pid_file_is_not_running_and_signals_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let status = |state: &DrainState| crate::display::drain_status(state, false);
+
+        // No file.
+        let state = drain_state(root, &RealProcs);
+        assert_eq!(state, DrainState::NotRunning(NotRunning::Missing));
+        assert_eq!(state.exit_code(), 2);
+        assert!(status(&state).contains("no drain is running"));
+        let stopped = stop_and_wait(root, &RealProcs, None, &Quiet).unwrap();
+        assert_eq!(stopped, StopOutcome::NotRunning(NotRunning::Missing));
+        assert!(stop_file(root).exists(), "the stop is still asked for");
+
+        // A file that is not a pid record.
+        std::fs::write(pid_file(root), "not json").unwrap();
+        let state = drain_state(root, &RealProcs);
+        assert!(
+            matches!(state, DrainState::NotRunning(NotRunning::Unreadable(_))),
+            "{state:?}"
+        );
+        assert_eq!(state.exit_code(), 2);
+
+        // A process that exited and was reaped.
+        let mut gone = sleeper("athena drain");
+        let record = record_of(gone.id(), BUILD);
+        gone.0.kill().unwrap();
+        gone.0.wait().unwrap();
+        write_record(root, &record).unwrap();
+        let state = drain_state(root, &RealProcs);
+        assert_eq!(state, DrainState::NotRunning(NotRunning::Dead(record.pid)));
+        assert!(status(&state).contains("has exited"));
+
+        // A process that exited and is not yet reaped (a zombie) is not the drain either.
+        let zombie = sleeper("athena drain");
+        let record = record_of(zombie.id(), BUILD);
+        let mut zombie = zombie;
+        zombie.0.kill().unwrap();
+        write_record(root, &record).unwrap();
+        assert_eq!(
+            settled(root),
+            DrainState::NotRunning(NotRunning::Dead(record.pid))
+        );
+        drop(zombie);
+
+        // A pid that another process holds now: the file's marker is from an earlier process.
+        let mut other = sleeper("athena drain --budget 5");
+        let recycled = PidRecord {
+            started: "1".into(),
+            ..record_of(other.id(), BUILD)
+        };
+        write_record(root, &recycled).unwrap();
+        let state = drain_state(root, &RealProcs);
+        assert_eq!(
+            state,
+            DrainState::NotRunning(NotRunning::Recycled(other.id()))
+        );
+        assert_eq!(state.exit_code(), 2);
+        assert!(status(&state).contains("different process"));
+        let stopped = stop_and_wait(
+            root,
+            &RealProcs,
+            Some(&quick(Some(Duration::from_secs(5)))),
+            &Quiet,
+        )
+        .unwrap();
+        assert_eq!(
+            stopped,
+            StopOutcome::NotRunning(NotRunning::Recycled(other.id()))
+        );
+        assert!(
+            other.0.try_wait().unwrap().is_none(),
+            "the other process was not signalled"
+        );
+    }
+
+    #[test]
+    fn a_stale_binary_start_is_refused_and_dispatches_no_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(stop_file(root), "stop\n").unwrap();
+        let stub = Stub {
+            calls: RefCell::new(Vec::new()),
+            read_cost: 0.1,
+            run_cost: 0.1,
+            outcome: OutcomeState::Landed,
+        };
+        let stale = || {
+            Some(
+                "stale build: this athena was built from aaaaaaaaaaaa, and 3 file(s) under crates/, xtask/, Cargo.toml, Cargo.lock or setup.sh changed by bbbbbbbbbbbb; run ./setup.sh"
+                    .to_string(),
+            )
+        };
+        let error = guarded(root, &RealProcs, BUILD, &stale, || {
+            drain(&stub, limits(5.0), &Quiet)
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("refusing to start the drain"), "{error}");
+        assert!(error.contains("nothing was dispatched"), "{error}");
+        assert!(
+            error.contains("aaaaaaaaaaaa") && error.contains("bbbbbbbbbbbb"),
+            "{error}"
+        );
+        assert!(error.contains("./setup.sh"), "{error}");
+        assert!(stub.calls.borrow().is_empty(), "{:?}", stub.calls.borrow());
+        assert!(!pid_file(root).exists());
+        assert!(stop_file(root).exists(), "a refused start changes nothing");
+
+        // The same start with a build that is not stale goes ahead.
+        guarded(root, &RealProcs, BUILD, &|| None, || {
+            drain(&stub, limits(5.0), &Quiet)
+        })
+        .unwrap();
+        assert!(!stub.calls.borrow().is_empty());
+        assert!(
+            !pid_file(root).exists(),
+            "the pid file is removed when the run ends"
+        );
+    }
+
+    #[test]
+    fn the_pid_file_is_written_at_start_removed_on_exit_and_a_second_live_start_is_refused() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let own = std::process::id();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |root: &Path, f: &mut dyn FnMut()| {
+            guarded(root, &RealProcs, BUILD, &|| None, || {
+                f();
+                Ok(())
+            })
+        };
+
+        // (1) Written at start, removed at exit.
+        let mut inside = None;
+        run(root, &mut || {
+            inside = std::fs::read_to_string(pid_file(root)).ok();
+        })
+        .unwrap();
+        let written: PidRecord =
+            serde_json::from_str(&inside.expect("written while running")).unwrap();
+        assert_eq!((written.pid, written.build.as_str()), (own, BUILD));
+        assert_eq!(Some(written.started), RealProcs.start_marker(own));
+        assert!(!pid_file(root).exists());
+
+        // (2) A live drain is named in the file: the second start is refused and changes nothing.
+        let live = sleeper("athena drain");
+        let first = record_of(live.id(), BUILD);
+        write_record(root, &first).unwrap();
+        std::fs::write(stop_file(root), "stop\n").unwrap();
+        let mut ran = false;
+        let error = run(root, &mut || ran = true).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("a drain is already running (pid {}", live.id())),
+            "{error}"
+        );
+        assert!(!ran);
+        assert!(
+            stop_file(root).exists(),
+            "the first drain's pending stop is kept"
+        );
+        let kept: PidRecord =
+            serde_json::from_str(&std::fs::read_to_string(pid_file(root)).unwrap()).unwrap();
+        assert_eq!(kept, first, "the first drain's file is not touched");
+        drop(live);
+
+        // (3) The file names this very process: the drain carrying on after its own rebuild. It is taken
+        // over and the stop file, which belongs to this run, stays.
+        write_record(root, &record_of(own, "athena 0.0.0 (commit 000000000000)")).unwrap();
+        let mut stop_seen = false;
+        run(root, &mut || stop_seen = stop_file(root).exists()).unwrap();
+        assert!(stop_seen, "a stop asked for before the exec is kept");
+        assert!(!pid_file(root).exists());
+
+        // (4) A panic still removes the file.
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            let _ = run(root, &mut || panic!("the drain panicked"));
+        }));
+        assert!(caught.is_err());
+        assert!(!pid_file(root).exists());
+
+        // (5) A leftover naming a dead process is replaced, and an old stop file is removed.
+        let mut dead = sleeper("athena drain");
+        write_record(root, &record_of(dead.id(), BUILD)).unwrap();
+        dead.0.kill().unwrap();
+        dead.0.wait().unwrap();
+        let mut seen = (None, true);
+        run(root, &mut || {
+            seen = (
+                std::fs::read_to_string(pid_file(root)).ok(),
+                stop_file(root).exists(),
+            )
+        })
+        .unwrap();
+        assert!(seen.0.unwrap().contains(&format!("\"pid\": {own}")));
+        assert!(!seen.1, "a stop left by an earlier run is removed");
+
+        // (6) No file at all, and an old stop file.
+        std::fs::write(stop_file(root), "stop\n").unwrap();
+        let mut stop_seen = true;
+        run(root, &mut || stop_seen = stop_file(root).exists()).unwrap();
+        assert!(!stop_seen);
+    }
+
+    /// The `Lifecycle` of the restart tests: it logs each step to a file that the old drain's script also
+    /// writes to, so the order of events across processes is the order in the file.
+    struct Rec {
+        root: PathBuf,
+        rebuilds: RefCell<VecDeque<Result<Rebuild, String>>>,
+        /// The count of the checkout that the installed binary was built from.
+        built: std::cell::Cell<usize>,
+        /// The spawned drain exits at once instead of taking the pid file.
+        exits_at_once: bool,
+        children: RefCell<Vec<Reaped>>,
+    }
+
+    impl Rec {
+        fn new(root: &Path, rebuilds: Vec<Result<Rebuild, String>>) -> Rec {
+            Rec {
+                root: root.to_path_buf(),
+                rebuilds: RefCell::new(rebuilds.into()),
+                built: std::cell::Cell::new(0),
+                exits_at_once: false,
+                children: RefCell::new(Vec::new()),
+            }
+        }
+        fn event(&self, what: &str) {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.root.join("events"))
+                .unwrap();
+            writeln!(file, "{what}").unwrap();
+        }
+        fn events(&self) -> Vec<String> {
+            std::fs::read_to_string(self.root.join("events"))
+                .unwrap_or_default()
+                .lines()
+                .map(String::from)
+                .collect()
+        }
+        /// The checkout moved on when the old drain landed something as it ended.
+        fn head(&self) -> usize {
+            usize::from(self.root.join("landed").exists())
+        }
+    }
+
+    impl Lifecycle for Rec {
+        fn state_root(&self) -> &Path {
+            &self.root
+        }
+        fn procs(&self) -> &dyn Procs {
+            &RealProcs
+        }
+        fn rebuild(&self) -> Result<Rebuild, String> {
+            self.event("rebuild");
+            let result = self
+                .rebuilds
+                .borrow_mut()
+                .pop_front()
+                .expect("a scripted rebuild");
+            if result.is_ok() {
+                self.built.set(self.head());
+            }
+            result
+        }
+        fn installed_stale(&self) -> Option<String> {
+            (self.built.get() < self.head())
+                .then(|| "stale build: the installed binary is behind the checkout".to_string())
+        }
+        fn spawn(&self) -> Result<Spawned, String> {
+            self.event("spawn");
+            let log = log_file(&self.root);
+            if self.exits_at_once {
+                std::fs::write(&log, "refusing to start the drain: boom\n").unwrap();
+                let child = Reaped(std::process::Command::new("true").spawn().unwrap());
+                let pid = child.id();
+                self.children.borrow_mut().push(child);
+                return Ok(Spawned { pid, log });
+            }
+            let child = sleeper("athena drain --budget 5");
+            let pid = child.id();
+            write_record(&self.root, &record_of(pid, BUILD)).unwrap();
+            self.children.borrow_mut().push(child);
+            Ok(Spawned { pid, log })
+        }
+    }
+
+    /// An old drain that leaves when the stop file appears, writing `old exited` first and, when `lands`,
+    /// moving the checkout on as its last act.
+    fn old_drain(root: &Path, lands: bool) -> Reaped {
+        use std::os::unix::process::CommandExt;
+        let script = r#"while [ ! -e "$1" ]; do sleep 0.05; done; echo 'old exited' >> "$2"; if [ "$3" = land ]; then : > "$4"; fi"#;
+        let child = Reaped(
+            std::process::Command::new("sh")
+                .arg0("athena drain --budget 5")
+                .args(["-c", script, "sh"])
+                .arg(stop_file(root))
+                .arg(root.join("events"))
+                .arg(if lands { "land" } else { "no" })
+                .arg(root.join("landed"))
+                .spawn()
+                .unwrap(),
+        );
+        write_record(
+            root,
+            &record_of(child.id(), "athena 0.0.0 (commit 111111111111)"),
+        )
+        .unwrap();
+        child
+    }
+
+    fn installed() -> Result<Rebuild, String> {
+        Ok(Rebuild::Installed)
+    }
+
+    #[test]
+    fn restart_rebuilds_then_waits_for_the_old_drain_then_starts_and_names_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let old = old_drain(root, false);
+        let life = Rec::new(root, vec![installed()]);
+        let ui = Kept::default();
+        let outcome = restart(&life, &quick(Some(Duration::from_secs(20))), &ui).unwrap();
+        assert_eq!(life.events(), ["rebuild", "old exited", "spawn"]);
+        let RestartOutcome::Started(report) = outcome else {
+            panic!("expected a started drain: {outcome:?}");
+        };
+        assert_eq!(report.old.as_ref().map(|o| o.pid), Some(old.id()));
+        assert_eq!(report.new.build, BUILD);
+        assert_eq!(
+            Some(report.new.pid),
+            life.children.borrow().first().map(Reaped::id)
+        );
+        let text = crate::display::drain_restart(&RestartOutcome::Started(report));
+        assert!(text.contains(BUILD), "{text}");
+        assert!(!ui.0.lock().unwrap().is_empty(), "progress is told");
+    }
+
+    #[test]
+    fn restart_with_a_failed_rebuild_starts_nothing_and_leaves_the_old_drain_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut old = old_drain(root, false);
+        let life = Rec::new(root, vec![Err("setup.sh failed: boom".into())]);
+        let error = format!("{:#}", restart(&life, &quick(None), &Quiet).unwrap_err());
+        assert!(
+            error.contains("boom") && error.contains("left alone"),
+            "{error}"
+        );
+        assert_eq!(life.events(), ["rebuild"]);
+        assert!(!stop_file(root).exists(), "no stop was asked for");
+        assert!(
+            old.0.try_wait().unwrap().is_none(),
+            "the old drain still runs"
+        );
+        assert!(life.children.borrow().is_empty(), "nothing was spawned");
+    }
+
+    #[test]
+    fn restart_builds_again_when_the_old_drain_landed_before_it_exited() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let _old = old_drain(root, true);
+        let life = Rec::new(root, vec![installed(), installed()]);
+        let outcome = restart(&life, &quick(Some(Duration::from_secs(20))), &Quiet).unwrap();
+        assert!(matches!(outcome, RestartOutcome::Started(_)));
+        assert_eq!(life.events(), ["rebuild", "old exited", "rebuild", "spawn"]);
+    }
+
+    #[test]
+    fn restart_starts_nothing_when_the_second_rebuild_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let _old = old_drain(root, true);
+        let life = Rec::new(root, vec![installed(), Err("second build broke".into())]);
+        let error = format!(
+            "{:#}",
+            restart(&life, &quick(Some(Duration::from_secs(20))), &Quiet).unwrap_err()
+        );
+        assert!(error.contains("second build broke"), "{error}");
+        assert!(
+            error.contains("no drain is running") && error.contains("./setup.sh"),
+            "{error}"
+        );
+        assert_eq!(life.events(), ["rebuild", "old exited", "rebuild"]);
+        assert!(life.children.borrow().is_empty());
+    }
+
+    #[test]
+    fn restart_that_times_out_says_the_stop_is_asked_for_and_starts_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let busy = sleeper("athena drain --budget 5");
+        write_record(root, &record_of(busy.id(), BUILD)).unwrap();
+        let life = Rec::new(root, vec![installed()]);
+        let outcome = restart(&life, &quick(Some(Duration::from_millis(200))), &Quiet).unwrap();
+        let RestartOutcome::StillStopping(old, _) = &outcome else {
+            panic!("expected a timeout: {outcome:?}");
+        };
+        assert_eq!(old.pid, busy.id());
+        let text = crate::display::drain_restart(&outcome);
+        assert!(
+            text.contains("still asked for") && text.contains("no new drain was started"),
+            "{text}"
+        );
+        assert!(text.contains("athena drain-restart"), "{text}");
+        assert!(stop_file(root).exists(), "the stop stays asked for");
+        assert_eq!(life.events(), ["rebuild"], "no second rebuild and no spawn");
+    }
+
+    #[test]
+    fn restart_with_no_pid_file_says_an_older_drain_cannot_be_seen_and_writes_no_stop_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let life = Rec::new(root, vec![installed()]);
+        let ui = Kept::default();
+        let outcome = restart(&life, &quick(None), &ui).unwrap();
+        let RestartOutcome::Started(report) = outcome else {
+            panic!("expected a started drain: {outcome:?}");
+        };
+        assert!(report.old.is_none());
+        assert_eq!(life.events(), ["rebuild", "spawn"]);
+        assert!(!stop_file(root).exists());
+        let lines = ui.0.lock().unwrap().join("\n");
+        assert!(lines.contains("before the pid file existed"), "{lines}");
+    }
+
+    #[test]
+    fn restart_names_the_log_when_the_new_drain_exits_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut life = Rec::new(root, vec![installed()]);
+        life.exits_at_once = true;
+        let error = format!("{:#}", restart(&life, &quick(None), &Quiet).unwrap_err());
+        assert!(error.contains("drain.log"), "{error}");
+        assert!(
+            error.contains("refusing to start the drain: boom"),
+            "{error}"
+        );
+        assert!(error.contains("no drain is running"), "{error}");
     }
 }
 

@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-205932-ppfv",
+  "round": 2,
+  "at": "2026-11-05T21:16:22.579758666Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The criterion 8 scan stops at the first #[cfg(test)], so it can miss new code in drain.rs.",
+      "evidence": "drain.rs has test modules at lines 3906, 3961, 4357, 4468 and 5434. Its first `#[cfg(test)]` (3906, `mod batches_tests`) is not the end of the file. Production code the producer puts after any test module would never be scanned, so the check could pass even if text matching were added. Fix: Remove each `#[cfg(test)] mod ... { }` block, or scan the whole file with needles built by `format!` (the plan already builds them that way). Otherwise state that all new code goes before drain.rs:3906 and assert that the cut point is the first test module.",
+      "location": "Demonstrations, criterion 8 (main.rs scan: 'keeps the text before #[cfg(test)]')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The own-pid carry-over check should compare the start marker as well as the pid.",
+      "evidence": "Step 2 says acquire reports whether the previous record 'named this pid', and the stop file is kept only in that case. Suppose an earlier drain died and the new drain happens to get its old pid. A pid-only comparison would treat that as the exec carry-over, keep a stale `drain.stop`, and the new drain would stop at once. The start marker tells the two cases apart: it survives exec but differs for a new process. Fix: Count it as a carry-over only when both the pid and the start marker match this process. Add a case to the criterion 5 test: a record with this pid and a wrong marker, plus a `drain.stop`, must remove the stop file.",
+      "location": "Plan step 2 / Decision 5 (PidGuard::acquire's 'previous record named this pid')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The risk text says a stale refusal removes the pid file, but the step order never takes the file.",
+      "evidence": "Step 4 runs `stale()` before `PidGuard::acquire`. So when an exec'd image refuses to start, the guard has never taken the record left by the previous image, and the plan does not say the file is removed. The record stays until the process exits, and is then reported as Dead. The risk text says the opposite. Fix: Pick one behavior. Either state that the record is left and is reported as dead after exit, or have `guarded` remove a record that names this pid and marker when it refuses on a stale build. Make the risk text match, and test whichever you choose.",
+      "location": "Risks ('the guard returns Err and removes the pid file') vs Plan step 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "No test runs the real stale-build wiring in main.rs; the refusal is shown only with a canned closure.",
+      "evidence": "`guarded` gets the stale answer as a closure. The real wiring, `&|| athena.stale_build()` in main.rs, is never run with a stale build in any test. tests/drain.rs:1993 already builds a real stale `Athena` (`athena.build.source_commit = fx.head()`, then a change under crates/), so the detection and the refusal can be joined cheaply. Fix: Add one integration test in tests/drain.rs that calls `drain::guarded(..., &|| athena.stale_build(), ...)` on that fixture after a crates change and asserts the refusal. Or move the closure into a small pub function that takes `&Athena`, and test that function there. tests/drain.rs is the natural place, even though it is not in the listed deliverables.",
+      "location": "Demonstrations, criterion 3; Risks (last item)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The new process-group spawn and the arg0 tests are Unix only.",
+      "evidence": "`CommandExt::process_group` and `arg0` are Unix only, and `reexec` is already `#[cfg(unix)]` (main.rs:582). Fix: Mark `spawn_detached`, `RealLifecycle::spawn` and the `arg0`-based tests `#[cfg(unix)]`, or give them a non-Unix stub, so non-Unix builds and clippy stay clean.",
+      "location": "Plan step 5 (wiring::spawn_detached with process_group)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot by reading and grepping the code, and I ran nothing. The functions and places it builds on are where it says: `warn_if_stale` at main.rs:574, `reexec` at main.rs:583, the drain start at main.rs:1182-1219, the drain-stop command at main.rs:1234, `reexec_args` at drain.rs:485, `stop_file` at drain.rs:970, the stop check at drain.rs:3021, `follow_restart` at drain.rs:3087, `run_setup` at drain.rs:3317, `Stub` at drain.rs:3968, `Kept` at drain.rs:4201, `stale_build_line` at status.rs:35 and `stale_build` at status.rs:1709. `tempfile` is already a dev-dependency, and the workspace lints apply. The design fixes the root cause. A pid file plus a process start marker replaces text matching. No signal is sent. Stop keeps its job-boundary meaning. Restart rebuilds first, so a broken build never takes the old drain down, and it checks the installed binary again once the old drain has exited, which closes the race with a landing. Each demonstration calls production code through a real seam (`Procs` with real child processes, `Lifecycle` or an injected stale answer) and would fail without the behavior. The dependents list matches what I found: the only readers of `DrainStop` and `drain.stop` are in main.rs, drain.rs, tests/drain.rs and the docs it names, and the in-drain rebuild still runs again after each landing, so the exec'd binary is fresh. The findings that remain are minor: the no-text-matching scan has a coverage gap, the own-pid carry-over should also compare the start marker, one risk statement contradicts the step order, and the main.rs wiring of the stale check is untested."
+}
