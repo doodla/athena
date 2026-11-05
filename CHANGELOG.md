@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A design note, `docs/design/warm-baseline-build.md`, answering throughput review 20261029-155931-wfkr. It
+  first describes how checks get results today (a CI result is requested first and polled up to `ci_wait_s`;
+  local checks are the fallback), splits the 14.1-minute checks stage by path, corrects the freshness claim
+  (stable Cargo uses mtimes, so only third-party dependencies are reused), and scales the 8.0-minute predicted
+  saving to the local-fallback share (about 0.6 minutes, an estimate). It recommends extending CI-result reuse
+  or warming the CI cache over a local warm baseline. Design only; no code changes.
 - The gate now detects the three ways a job's records could be written by hand (design §16.2): a whole job
   written across two commits, one forged commit that lands a job that was dispatched but never closed, and a
   hand-made proposal closed with `athena close`. A new check, `jobs::provenance`, runs for a commit being made
