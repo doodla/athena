@@ -1,0 +1,115 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261105-172032-pm9h",
+  "base_commit": "49454c58782cc9582cf48e7beed32aaa367d6cc7",
+  "base_fingerprint": "sha256:5e67daf4525b67c7171906715cb6b30d4cf1a0e7d94db584e11fd8a4a4804c26",
+  "previous_job": "20261105-103610-h1cj",
+  "candidate_commit": "d68463748c7a72acd702f1f27b28fd9cd8ff12ae",
+  "candidate_tree": "be6e37adfcf5ce325121686e145d5f822b24b37b",
+  "changes": [
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 39260
+    }
+  ],
+  "fingerprint": "sha256:a3a7a4200c7415a9a5dee935228cb37280f88e1822dc9b3eda99b8786731490c",
+  "violations": [],
+  "producer_report": {
+    "summary": "Added docs/design/agent-and-build-slots.md. It reuses the existing code (parallel drain, `max_check_slots`, disk guard, `sccache` support, landing queue design) and splits agent slots from queued build slots. It measures a 5-job sample (35.0% model, 7.2% local build and test, 57.8% waiting) and states which jobs and directories were left out. It also finds that status.rs picks the newest landing record, which inflates the landing-and-rebuild stage (about 1337 min against 4.6 min to the first record in the sample). It sizes the machine at 1 build now and 2 after slot-owned warm target directories, with 12 to 16 agents, and lists 7 independently landable build jobs, each with files and a metric. `cargo test -p xtask --test policy` passes.",
+    "files": [
+      "docs/design/agent-and-build-slots.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed. It reads tracked files only, so the new file was also checked with a case-insensitive regex search for every banned word and fragment (no match)."
+      },
+      {
+        "command": "git status --short",
+        "result": "pass",
+        "note": "Only `?? docs/design/agent-and-build-slots.md`."
+      },
+      {
+        "command": "cargo run -p athena-cli -- status --snapshot <evidence dir>",
+        "result": "pass",
+        "note": "Output cited in the note (stage medians, landing counts)."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Exactly one new file is added under docs/design/ and no other path changes (git status / git diff shows a single added .md file; athena.toml, defaults.toml and workflows are untouched).",
+        "status": "met",
+        "evidence": "`git status --short` prints only `?? docs/design/agent-and-build-slots.md`. CHANGELOG.md is not touched (see unchanged_planned_files)."
+      },
+      {
+        "criterion": "The note has an Existing code section that reuses or extends docs/design/parallel-jobs.md, docs/design/warm-baseline-build.md, docs/design/continuous-landing.md, crates/athena-core/src/status.rs, crates/athena-core/src/run/checks.rs and crates/athena-git/src/snapshot.rs, saying what each already does and what the new design adds.",
+        "status": "met",
+        "evidence": "Section 1 is a table with a row each for parallel-jobs.md, warm-baseline-build.md, continuous-landing.md, status.rs, run/checks.rs and snapshot.rs, plus async-drain.md, disk.rs, env.rs, policy.rs and paths.rs, each with a 'What this design adds' column. I read each file or the relevant lines before writing."
+      },
+      {
+        "criterion": "A measurement section splits job wall time into model time, local build and test time, and waiting, with each figure citing the specific job record files it was computed from; a reader can open the cited records and reproduce each number.",
+        "status": "met",
+        "evidence": "Section 2.2 gives a per-job table for 5 jobs (`b4f5`, `hsg4`, `pzfw`, `911m`, `s8v3`) with the definitions used, the invocation files (`invocations/NN-role.json` wall_time and started_at/ended_at), `verification.json` check durations and the landings/ file names. Totals: 13637.2 s = 4778.4 model (35.0%) + 978.5 local (7.2%) + 7880.3 waiting (57.8%). I summed these by hand from Grep output of those files; section 2.3 breaks `b4f5` into three gaps with timestamps."
+      },
+      {
+        "criterion": "The note states exactly which job directories were left out of the sample (e.g. directories holding only a request that never ran) and each stated exclusion is true of the directories named or counted, checked against the records listing.",
+        "status": "met",
+        "evidence": "Section 2.1 names the 9 of the 14 landed-on-2026-11-04 jobs that were not read; names `20261104-123907-qrwr` and `20261104-142256-p9e4` (checked with ls: only request.json, outcome.json, score.json) and `20261104-074021-6z29` and `20261104-102639-h6ep` (ls checked); counts 16 audience/steward directories (42 first-invocation files minus 26 readers) and the 638 job.json and 909 first-invocation file totals from Glob. It says the remaining directories were not classified."
+      },
+      {
+        "criterion": "The note separates agent slots (model work) from build slots (cargo runs limited by disk and CPU), with a queue for build slots and its ordering and timeout behaviour described.",
+        "status": "met",
+        "evidence": "Section 3 compares the two slot kinds; section 4 gives the lock-file semaphore, three priority classes with FIFO and ageing (`build_age_promote_s`), and timeout behaviour per requester (`build_wait_s`: hold not fail for checks, exit 75 for producer commands, no timeout for the landing rebuild)."
+      },
+      {
+        "criterion": "The note proposes a shared compiled-output scheme (for example shared CARGO_TARGET_DIR, sccache or a warm baseline copy) with a disk-per-build estimate that is labeled as measured or estimate, and records the buy-first call on existing tools.",
+        "status": "met",
+        "evidence": "Section 5.2 compares shared target dir, sccache, warm copy, slot-owned warm directories and smaller profile outputs, with a verdict each; 5.3 gives the scheme and '5 to 6 GB per slot (estimate)' against the stated 10 to 12 GB; the 'Buy-first call' paragraph records Cargo profile settings and the existing sccache support coming first."
+      },
+      {
+        "criterion": "The note covers the local landing-and-rebuild step, citing the status --snapshot output or code (crates/athena-core/src/status.rs) that shows it as the longest stage, and proposes how to shorten it.",
+        "status": "met",
+        "evidence": "Section 6.1 cites the status --snapshot line (landing and rebuild 1069.2 min vs 21.5 for the rest) and status.rs `landed_jobs` / `landing_end` / `landing_record_time` (.max()); shows b4f5 listed in 19 of 174 landing records and a first-vs-newest table; 6.2 lists four ways to shorten it; build jobs 2 and 7 implement them."
+      },
+      {
+        "criterion": "The note gives numbers for how many agents and how many builds this machine can run at once, derived from 4 CPUs, 15 GB memory, ~27 GB free disk and 10-12 GB per build, with the arithmetic shown.",
+        "status": "met",
+        "evidence": "Section 7: builds floor(17/12)=1 today, existing formula gives 0 extra, slots floor(17/6)=2 with CPU also 2; agents (15-1.5-6)/0.5=15 (range 9 to 25), recommend 12 then 16; disk 5/0.2=25 worktrees; all memory/CPU figures labeled estimate."
+      },
+      {
+        "criterion": "The note lists the build order as small numbered changes, each landable on its own; each names the crates/ files it touches and how its effect will be measured (a named metric and where it is read).",
+        "status": "met",
+        "evidence": "Section 8 lists 7 numbered build jobs, each with 'Touches' (crates/ paths), 'Effect measured by' (named metric and the record or status line that reads it) and 'Depends on'. Job 5 also names athena.toml as a separate governance job."
+      }
+    ],
+    "open_issues": [
+      "Only 5 of the 14 landed-on-2026-11-04 jobs were read; the other 9 are listed by id as not read. A fuller sample would tighten the split.",
+      "Why later landing records re-list earlier jobs' commits, and whether the first record is the real merge, is inferred, not checked; build job 2 starts by confirming it against the pull request merge time.",
+      "All memory, CPU and filesystem figures are labeled estimates; no record or tool in this job measured them.",
+      "The body of the env.rs build-directory check (lexical or resolving links) was not read; the slot-directory symlink idea depends on it.",
+      "The plan-group size (cap on agents that can run side by side) is not measured.",
+      "Criterion 1 and the request say one file only, so CHANGELOG.md was left unchanged although the brief's changelog default and expected-deliverables list name it."
+    ],
+    "mistakes": [
+      "I printed a whole landing record early (a 1300-line file) and spent budget; later queries used narrower patterns.",
+      "I first assumed the 14 landed jobs on 2026-11-04 would all be readable within budget; I read only 5 and the note says so."
+    ],
+    "learnings": [
+      "status.rs `landing_record_time` takes the newest landing record that lists the job's commit, and one job's job_landing commit appears in many consecutive landing records (b4f5 is in 19 of 174). This makes the 'landing and rebuild' stage of ~1069 min mostly a result of record choice; the first record is 4 to 11 min after the verifier for the five sampled jobs.",
+      "`max_check_slots` exists in config.rs and disk.rs but is read only inside the disk formula; nothing in crates/athena-cli uses it, so no build count is enforced.",
+      "`athena.toml` has no [drain.pipeline] and sets [parallel] max_concurrency = 2; MAX_CONCURRENCY_CEILING is 8.",
+      "env.rs refuses a CARGO_TARGET_DIR outside the job directory (D46); policy.rs refuses cargo options that set build configuration.",
+      "In the 5 sampled jobs, 4 reused CI for all checks (0.0 s); the 'fails-without-N' checks in verification.json are the local build/test time (911m: 903 s).",
+      "No athena.build-measurement/1 records exist in the evidence snapshot's records/ directory, so the 10 to 12 GB per build is the request's figure, not a record.",
+      "The brief's expected deliverables list three filenames and CHANGELOG.md, but criterion 1 and the request say exactly one new file with no other path changed."
+    ],
+    "desires": [
+      "A way to count directories (Glob and Grep show only 100 lines or per-file output), so exclusion counts could be exact instead of listed.",
+      "Read access to df, free, and the filesystem type on the real machine, to replace the memory, CPU and filesystem estimates.",
+      "Permission for Read and Grep on the tool-result overflow files, so large Grep outputs could be summed instead of re-queried."
+    ]
+  }
+}
