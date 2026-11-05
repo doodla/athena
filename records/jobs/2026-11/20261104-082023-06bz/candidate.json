@@ -1,0 +1,153 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261104-082023-06bz",
+  "base_commit": "c3a7a179409625a016e9b10db28a30e216f9867f",
+  "base_fingerprint": "sha256:5489e89fcf249de77a6bb50165f543f27de406420c0a8e2831a9e69b7903b84d",
+  "previous_job": "20261104-215733-rf7z",
+  "candidate_commit": "5c4a5455d4b6649be35bd09ddb3c3a067c1e63ac",
+  "candidate_tree": "26e168fae2e6f505ed25f2e64ef3e417f5b508e2",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 321774
+    },
+    {
+      "path": "crates/athena-gate/src/jobs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 33938
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 65633
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 153792
+    },
+    {
+      "path": "docs/enforcement.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 24346
+    }
+  ],
+  "fingerprint": "sha256:8d54cc1d689cd8203d0e570b4e6232ae3029afc74e267989bdbb772a2712341d",
+  "violations": [],
+  "producer_report": {
+    "summary": "The gate now has a provenance check that refuses the three hand-written-record forgeries of design §16.2 when records lack, copy or contradict the links Athena's own writers leave. A fully consistent forgery still passes, because nothing is signed. It is the new `jobs::provenance` in crates/athena-gate/src/jobs.rs. `jobs::check` is now `check_records` (the old body, unchanged) plus `provenance`, and provenance runs only when `history` is `None`. That is a commit being made: the commit-msg hook, Athena's own commits, and `athena close`. The history walk, the legacy path and the D111 cutover rule are untouched, so no past commit is re-judged.\n\nA job the commit closes (a closing score or any outcome) is judged on three rules:\n- **R1, per reading:** it needs `request.json` received at or before the reading, and the reader invocation the reading names, ended at or before the reading. When the reading's base commit is held, `defaults.toml` there must hash to the reading's `defaults_sha256`.\n- **R2, landed outcome only:** `job.json` must have the ten dispatch fields. Its config and defaults hashes must equal the accepted reading's. `brief-producer.md` must be in the tree and hash to `brief_sha256`.\n- **R4, landed outcome only:**\n  - Non-reader invocations start at or after `dispatched_at`.\n  - The named verifier starts at or after the latest lower-numbered producer ended.\n  - The outcome is at or after the verifier ended.\n\nEvery refusal is a `Rule::JobRecords` violation whose detail starts with \"provenance: \", names the missing or contradicting record, and carries a repair naming `athena ask` or `athena go`. The check does not repeat `prediction_problem` or the verifier-invocation check from `invariant`, which run beside it in the same gate. No record field was added.\n\nTests are in landing_tests.rs. Each forgery is built and asserted refused:\n- (a) a job written by hand across two commits, in the shape acceptance review 2 describes, with variants;\n- (b) a forged landing of a dispatched job that never closed, with nine one-link variants;\n- (c) a hand-made proposal closed with `athena close`, with variants.\n\nControl tests record the limits. A fully consistent hand-made job passes, and so does a (b) forgery stamped with current times. Further tests cover a genuine ask → go → landing that is not refused, the older-build history walk that provenance leaves alone, and a reading recorded after dispatch, which `crate::gate` reports through the existing rule.\n\n§16.2 and its table row in the design doc, the M27 row and the \"Records are Athena's own\" bullet in docs/enforcement.md, and CHANGELOG.md now say what is detected and what still passes.\n\nResiduals the docs state:\n- A forger who writes every link consistently, or a (b) forger who stamps current times and copies nothing, passes.\n- A commit made with `--no-verify` is not judged, and `check_pr_head` does not run provenance yet.\n- History, main after the cutover and the history walk are not re-judged.\n- A reading whose base commit is not held skips the defaults-hash check.\n- Job records kept only on the records branch are not judged.\n- A reading from a build that wrote no request record or reader invocation can no longer be closed with `athena close`.",
+    "files": [
+      "crates/athena-gate/src/jobs.rs",
+      "crates/athena-gate/src/landing_tests.rs",
+      "docs/design/athena-v0.md",
+      "docs/enforcement.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-gate",
+        "result": "pass",
+        "note": "132 passed, including the new provenance tests and all existing landing, chain and history tests"
+      },
+      {
+        "command": "cargo clippy --workspace --all-targets -- -D warnings",
+        "result": "pass",
+        "note": "clean; run after the code changes, and only docs changed afterwards"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test --workspace --locked --no-fail-fast -q",
+        "result": "pass",
+        "note": "every test target passed, including lifecycle (72 tests, real writers through the live gate), athena-core, athena-cli drain and job_plan, and xtask. A first run of `cargo test --workspace --locked` exited 101; I could not read its output. It started before I rewrote the enforcement map row, which had backticked `brief_sha256` and failed the M24 policy test. I fixed that row and the rerun was clean."
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed after the M27 row rewrite; boundary-word scan and the M24 enforcement-map test pass"
+      },
+      {
+        "command": "cargo test -p athena-data",
+        "result": "pass",
+        "note": "157 unit tests plus the repo_config tests; no record field added"
+      },
+      {
+        "command": "cargo test -p athena-core --test refusal_corpus",
+        "result": "pass",
+        "note": "11 passed; no-regression check only"
+      },
+      {
+        "command": "cargo test -p athena-cli --test lifecycle",
+        "result": "pass",
+        "note": "72 passed; real ask, go and close through the fake driver pass the new links"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-gate`: new tests in crates/athena-gate/src/landing_tests.rs build (a) a job whose records were all written by hand across two commits, (b) a single forged commit landing a job that was dispatched but never closed, and (c) a hand-made proposal closed with athena close; each yields at least one Violation, and the existing genuine-landing tests still pass.",
+        "status": "met",
+        "evidence": "`cargo test -p athena-gate`: 132 passed, 0 failed. New tests in landing_tests.rs: a_job_written_by_hand_across_two_commits_is_refused (a), a_forged_landing_of_a_dispatched_job_that_never_closed_is_refused (b), a_hand_made_proposal_closed_with_athena_close_is_refused (c). Each asserts through provenance_of / gate_of that a Rule::JobRecords violation exists. In (a), (b) and (c) the existing record rules (judge / job_records_of) return no violation for the forged commit. All existing landing, chain, intervention and exemption tests pass, and job_records_of now calls check_records."
+      },
+      {
+        "criterion": "Run `cargo clippy --workspace --all-targets` and `cargo fmt --check`: both clean; `cargo test --workspace` passes.",
+        "status": "met",
+        "evidence": "left to Athena's checks. For reference, I ran `cargo clippy --workspace --all-targets -- -D warnings` (clean), `cargo fmt --all --check` (clean) and `cargo test --workspace --locked --no-fail-fast -q` (all targets passed)."
+      },
+      {
+        "criterion": "The change refuses more readings than before and the higher refusal rate is intended: expected 5% of newly refused readings against the repository's own genuine job history; `cargo test -p athena-gate` includes a test that the repository's real history shape (a genuine landing) is not refused.",
+        "status": "met",
+        "evidence": "a_genuine_landing_is_not_refused builds the shape Athena writes (ask, go, landing as three commits). It asserts provenance_of and the commit-msg gate give no violation at each commit, judge is empty, and history_of has no 'provenance: ' violation. a_proposal_made_by_athena_ask_and_closed_with_athena_close_is_accepted and the 72-test lifecycle suite show real writers pass. The 5% rate is not measured, because records/ is absent from the snapshot; it is the request's estimate."
+      },
+      {
+        "criterion": "Each refusal Violation's detail and repair text names the missing or contradicting evidence, so the owner can tell what to fix; checkable by Grep in crates/athena-gate/src/jobs.rs and history.rs.",
+        "status": "met",
+        "evidence": "Every violation in jobs::provenance is built by one local `fail(path, detail, repair)` whose detail begins with the PROVENANCE constant 'provenance: '. Details name the evidence, for example 'has no request record', 'no reader invocation', 'does not match defaults.toml at its base commit', 'lacks dispatched_at', 'brief-producer.md is not in the tree', 'before the job was dispatched'. Repairs name `athena ask` or `athena go`. assert_refused in landing_tests.rs checks the prefix, detail, repair and commit for each case. history.rs gains no text because the history walk is unchanged."
+      },
+      {
+        "criterion": "docs/design/athena-v0.md §16.2 and docs/enforcement.md no longer say the three forgeries pass; they state what is detected and the residual (consistent, fully mimicked records still pass without signing).",
+        "status": "met",
+        "evidence": "§16.2 'Records are not signed', its Appendix table row, and the M27 row and 'Records are Athena's own' bullet in docs/enforcement.md are rewritten. They state the detected cases and the residuals (a consistent job, current-timestamp (b), --no-verify, check_pr_head, history, an unheld base commit, older-build readings). `cargo test -p xtask --test policy` passes, including M24 (every test named on a row exists)."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry describing the new detection.",
+        "status": "met",
+        "evidence": "A new bullet under [Unreleased] / Added in CHANGELOG.md describes jobs::provenance, the three forgeries, where it runs, and the limits."
+      },
+      {
+        "criterion": "Any new record field is accepted by the records allow-list: Grep shows check_record_file / the AnyRecord round-trip test covering it, and the change does not touch athena.toml, defaults.toml, workflows or prompt files.",
+        "status": "met",
+        "evidence": "No record field was added (the check reads only existing Reading, Request, Job and Invocation fields and brief-producer.md as a blob). `cargo test -p athena-data` passes (157 plus 3 repo_config). `git status` lists only CHANGELOG.md, jobs.rs, landing_tests.rs, athena-v0.md and enforcement.md; no governance, workflow, prompt or records file changed."
+      }
+    ],
+    "open_issues": [
+      "Open question 1 (for the user): should a follow-up run `jobs::provenance` inside `check_pr_head` (crates/athena-core/src/pr_check.rs), over a pull request's own commits only and including records-only commits? That would catch a commit made with `--no-verify`, which the hook-only live gate misses. I did not change pr_check.rs, since it is not a listed deliverable and the choice is a design decision.",
+      "Open question 2 (for the user): a reading written by a build that recorded no request record or no reader invocation now fails R1 when its job is closed with `athena close`, and the live gate has no exempt list to excuse it. How many past jobs this affects could not be measured, because records/ is absent from the snapshot. Is a remedy wanted, such as an owner-declared intervention that excuses R1 for one named job, or is closing such jobs another way acceptable?",
+      "The 5% newly-refused share in the criteria is the request's estimate. I could not measure it against the repository's real job history.",
+      "Departure from the plan: the plan said the (a) forgery carries a copied verifier and shows 'brief-producer.md' and 'before the job was dispatched'. In the tests I also set the reading, request and reader times to an earlier date (`from_an_earlier_job`). Otherwise the existing `prediction_problem` rule already refuses the copied verifier, and the test would not show what provenance adds."
+    ],
+    "mistakes": [
+      "My first enforcement.md edit backticked `brief_sha256` on the M27 row, which failed the M24 policy test and made the first background workspace run fail. I removed the backticks and reran the policy and workspace tests green.",
+      "I first wrote the detail for a missing job.json without the phrase 'has no job.json'. My own test caught it and I reworded the message."
+    ],
+    "learnings": [
+      "`jobs::check(.., history)` is called with `None` at only two sites, in `gate()` in lib.rs for Scope::CommitMsg and for Commit/CommitLegacyUsage. `Some` is the frozen history walk. That split is the seam for running a check only on a commit being made.",
+      "In `closed_proposal`, `closing_a_dropped_proposal...` and the `athena close` path (manage.rs), a closed Queued, Proposed or Declined job always commits a Score and an outcome through the live gate. A new rule on closings therefore reaches `athena close` of a proposal.",
+      "Genuine dispatch writes `brief_sha256` and `brief-producer.md` together (run/mod.rs ~981 and 994), and `defaults_sha256` is the sha256 of the raw `defaults.toml` bytes at the reading's base commit (capability.rs:51). Planning runs after the dispatch commit, so non-reader invocations start at or after `dispatched_at`.",
+      "`invariant::prediction_problem` already refuses a reading recorded after dispatch or after a non-reader invocation starts. Fabrications that copy a verifier from an earlier job therefore only slip past it if the reading's own time is also made earlier; the tests use `from_an_earlier_job` for that.",
+      "xtask policy test M24 fails on any backticked snake_case token on an `| M` row of docs/enforcement.md that is not a test fn name, for example a field name such as `brief_sha256`.",
+      "Bash in this environment denies grep, tail and polling outside the working directory. Background cargo output could not be read, so a failed background run had to be rerun in the foreground."
+    ],
+    "desires": [
+      "A way to read a background command's output file from inside the working directory, or a Monitor-style wait, so a failed background `cargo test --workspace` need not be rerun to see why it failed."
+    ]
+  }
+}

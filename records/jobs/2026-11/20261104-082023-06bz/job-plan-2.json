@@ -1,0 +1,357 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261104-082023-06bz",
+  "round": 2,
+  "at": "2026-11-05T03:18:35.377236033Z",
+  "invocation_seq": 10,
+  "approach": "Add one new gate function, `jobs::provenance(git, change, judged, history)`, in crates/athena-gate/src/jobs.rs. It judges a job's records against the cross-links that Athena's own writers always leave. It is separate from `jobs::check`, so `jobs::check`, `job_records_of` and every existing landing test keep their present behavior. Every refusal is a `Rule::JobRecords` violation whose detail starts with the constant `jobs::PROVENANCE` (\"provenance: \") and names the record path and the missing or contradicting evidence. The repair names the Athena command that writes the evidence.\n\nThe function fires in two cases.\n- A commit adds a closing score (no `cause`) or any outcome of a request job. The check then covers:\n  - (R1) For each reading of the job: a request record with `received_at <= reading.at`; a Reader invocation whose `seq == invocation_seq` and whose `ended_at <= reading.at`; a `base_commit` the repository holds; and a `defaults_sha256` equal to `sha256_hex(defaults.toml at base_commit)`. This is what refuses a hand-made proposal closed with `athena close` (forgery c).\n  - (R2) When `job.json` exists: every dispatch field is present. The config and defaults hashes equal the accepted reading's. `base_commit` is held and its `defaults.toml` matches.\n  - (R4) When the outcome is Landed: Producer and Verifier invocations start at or after `dispatched_at`. The named verifier invocation starts at or after every producer's `ended_at`. `outcome.at >= verifier.ended_at`. This is the contradiction test for a forged landing of a dispatched job that never closed (forgery b).\n- A commit adds `job.json` but none of the job's candidate, verification or outcome files. (R3) The accepted reading must already be in the parent tree (`judged.base`), because Athena commits the reading first. This refuses records written in one batch across two commits (forgery a). A squash adds the closing records too, so it is exempt.\n\nWhere it runs (this answers findings 1 and 2).\n- The live gate: `gate()` in lib.rs for Scope::CommitMsg, Scope::Commit and Scope::CommitLegacyUsage. That covers `athena close`, which calls `gate` from manage.rs:188-190, and the commit-msg hook.\n- The history walk only when it is not frozen legacy. `check_history_with_exempt` becomes a thin wrapper over a private `walk(git, tip, exempt, provenance)` with `provenance = false`. So legacy.rs:192 (`check_legacy`) is byte-for-byte what it is today. `check_history` calls `walk(.., true)` only on the branch where the tip config has no `cutover_job` (history.rs:47-49).\n- The pending-cutover and cutover-configured fall-backs (history.rs:55 and 63) stay frozen. Their commits become pre-C0 history.\n- After C0: `check_after_cutover` also loops over `c0..tip` (`rev-list --reverse`) and runs `jobs::provenance` on each commit. A job written by hand on main after the cutover is therefore judged by CI.\n\nNot covered, and stated as such: job records written only to the `athena/records` branch (own root, a different layout, with its audit checking only append-only). The docs and CHANGELOG say so, and an open question names the follow-up.\n\nNo record field is added, so records.rs and reconcile.rs stay untouched. Reconcile already checks outcome totals against invocation sums (reconcile.rs header). Tests go in the existing landing_tests.rs (new genuine-shaped helpers, old helpers untouched), plus one test each in history.rs and legacy.rs. The docs and CHANGELOG state what is detected and the residual: fully mimicked records pass, forgery (b) is caught only when its times or fields contradict the dispatch, and nothing is signed.",
+  "decisions": [
+    {
+      "choice": "Make the provenance check a separate pub function `jobs::provenance`, called from `gate()` (Scope::CommitMsg, Scope::Commit, Scope::CommitLegacyUsage) and from the non-legacy history walk. Do not put it inside `jobs::check`.",
+      "reason": "`jobs::check` is reached from the frozen legacy walk (legacy.rs:192 -> check_history_with_exempt -> history.rs:255) with `history = Some(..)`. Putting the new rules there would re-judge pre-C0 genuine records that may lack dispatch fields (every dispatch field on `Job` is an Option, records.rs:607-620). The exempt list at that path comes from legacy-exempt.json and cannot grow (records-history.md section 4). A separate function lets each caller choose. It also leaves `job_records_of`, which calls `jobs::check`, and every existing landing test as they are (finding 4).",
+      "rejected": [
+        {
+          "option": "Run the checks inside `jobs::check` for every history (the round-1 design)",
+          "why": "Re-judges frozen pre-C0 history and offers no usable remedy there (critic finding 1)."
+        },
+        {
+          "option": "Add a `provenance` flag field to `invariant::HistoryState`",
+          "why": "Needs an edit to invariant.rs for no gain. A private `walk(.., provenance: bool)` parameter in history.rs carries the same switch."
+        },
+        {
+          "option": "Date cutoff by job id",
+          "why": "A forger picks an old id."
+        }
+      ]
+    },
+    {
+      "choice": "The history walk applies provenance only when the tip config has no `cutover_job`. The frozen/pending/not-shown branches pass `false`. After the cutover is shown, `check_after_cutover` runs provenance over the commits `c0..tip`.",
+      "reason": "Pre-C0 main cannot gain commits, so nothing is lost by freezing it. Commits after C0 are not judged by `jobs::check` today (check_after_cutover uses classify_pre_merge, attribution and reconcile only), so without the new loop a hand-written job on main after C0 would only meet the commit-time hook, which a person can skip. The loop reuses the same function, with no exemption needed (history = None).",
+      "rejected": [
+        {
+          "option": "Narrow the claim to commit time only after C0",
+          "why": "Weaker than a cheap loop that exists. Kept as the stated residual for the records branch only."
+        },
+        {
+          "option": "Judge `athena/records` branch commits too",
+          "why": "That branch has a root-level layout and its only audit is append-only (records_branch.rs audit_commits). The run of the check on it needs a layout adapter and a fixture, which is a separate job; see open question."
+        }
+      ]
+    },
+    {
+      "choice": "No new record field. records.rs and reconcile.rs are listed as expected deliverables but are not touched.",
+      "reason": "Every link used is written today: reading `base_commit` / `defaults_sha256` / `invocation_seq` (reading.rs:788-796), the request record, and the dispatch fields of job.json (run/mod.rs:952-991). A stamped witness field is a value a forger recomputes and adds allow-list surface for no assurance. Criterion 7 then holds because nothing new is stored.",
+      "rejected": [
+        {
+          "option": "A chain hash or witness field on Score or Outcome",
+          "why": "Recomputable by the forger; real signing is out of scope."
+        },
+        {
+          "option": "Link forgery (b) through the verifier invocation's `InvocationContext` hashes (records.rs:658-664)",
+          "why": "I read the struct. Its hashes are values the writer chooses, so they bind nothing a forger cannot invent. Verification.verified_fingerprint is already compared by the landing invariant."
+        }
+      ]
+    },
+    {
+      "choice": "`defaults_sha256` is recomputed from `defaults.toml` at the reading's `base_commit`. `config_sha256` is only compared between job.json and the accepted reading, never recomputed.",
+      "reason": "`defaults_sha256` is `sha256_hex(defaults.toml bytes at commit)` (capability.rs:38-51), so it recomputes exactly in any later build. `config_sha256` hashes `Config::reading_inputs()` (capability.rs:45), which follows the code of the build that wrote it; recomputing would falsely refuse old genuine readings. Dispatch itself forces job and reading hashes to be equal (run/mod.rs:798).",
+      "rejected": [
+        {
+          "option": "Recompute `config_sha256` from athena.toml at the base",
+          "why": "A later change to `reading_inputs` or the config schema would refuse genuine records."
+        }
+      ]
+    },
+    {
+      "choice": "A missing dispatch or reading field is a refusal on the live and non-legacy paths, with no leniency for null.",
+      "reason": "The old hand-written fixture shape is all-null (landing_tests.rs `job_record`); leniency on null would let the forger omit the field. Old genuine commits are protected by the frozen legacy path, not by leniency.",
+      "rejected": [
+        {
+          "option": "Require fields only when `dispatch_branch` is present",
+          "why": "A forger omits `dispatch_branch`."
+        }
+      ]
+    },
+    {
+      "choice": "Judge commit order per commit (job.json added without closing records needs the accepted reading in `judged.base`), with no new state in HistoryState.",
+      "reason": "Athena commits the reading before dispatch (the Dispatch commit message in run/mod.rs says so). The parent tree shows the order, so the hook, the pre-merge gate and the CI walk all give the same verdict. Step 1 re-confirms in reading.rs and run/mod.rs that no genuine writer puts reading and job.json in one commit.",
+      "rejected": [
+        {
+          "option": "Compare record timestamps with commit dates",
+          "why": "A squash or rebase makes commit dates arbitrary."
+        },
+        {
+          "option": "Track `opened: BTreeMap<job, commit>` in HistoryState",
+          "why": "Helps only the CI walk, not the hook."
+        }
+      ]
+    },
+    {
+      "choice": "Forgery (b) is detected only through its contradictions with the dispatch (missing dispatch fields, producer or verifier before `dispatched_at`, verifier before producers ended, outcome before verifier end, base or defaults mismatch). The docs and CHANGELOG say exactly that and call it the weakest of the three.",
+      "reason": "Finding 3: a (b) forgery whose times reconcile still passes; I found no committed value that a forger cannot compute alone. Saying so plainly is more useful than a stronger claim.",
+      "rejected": [
+        {
+          "option": "Claim (b) is refused",
+          "why": "Untrue for a consistent forgery."
+        }
+      ]
+    },
+    {
+      "choice": "Existing tests keep their old fixtures. `landing_tests.rs::history_of` is changed to call `check_history_with_exempt(git, \"HEAD\", None)` (the frozen judgment it exercised before), and history.rs:317 does the same. New tests use new genuine-shaped helpers and new `provenance_of` / `provenance_history_of` helpers.",
+      "reason": "Finding 4: the fixture migration of round 1 touched `opening` at every call site. The grep shows the exact-equality callers are `history_of` (12 sites in landing_tests.rs) and history.rs:317. The CLI suites use real writers, which are genuine. athena-cli reconcile.rs and labeled.rs build outcomes but go through attribution/status, not `check_history`, so they are unaffected.",
+      "rejected": [
+        {
+          "option": "Migrate `opening` and all call sites to genuine shape",
+          "why": "Open-ended and not needed once provenance is a separate function."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal_corpus case is added.",
+      "reason": "I read the header of crates/athena-core/tests/refusal_corpus.rs: it feeds request and reading text through `refusing_check` (the reading gate), and its replay compares reading checkers. This plan adds no parser, stem list, stop list or reading check. The input forms are record shapes, mapped to the new tests: whole job by hand (test a), forged landing (test b), hand-made proposal (test c), genuine records (test d). The producer and verifier still run `cargo test -p athena-core --test refusal_corpus` as a no-regression command; I cite no case ids and no result.",
+      "rejected": [
+        {
+          "option": "Add corpus cases for forged record shapes",
+          "why": "The corpus runs request text, not commit records."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-gate/src/jobs.rs",
+      "action": "modify",
+      "purpose": "Add `pub const PROVENANCE`, a `request` field on `JobFiles` filled by `load` (canonical path only), and `pub fn provenance(git, change, judged, history)` with the R1-R4 rules, each refusal a `Rule::JobRecords` violation with path, evidence-naming detail and a repair naming the Athena command. It returns early for an exempt commit. Update the module doc. `check` is not changed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/lib.rs",
+      "action": "modify",
+      "purpose": "In `gate()`, call `jobs::provenance(git, change, &judged, None)` after `jobs::check` in Scope::CommitMsg (line 357) and Scope::Commit / CommitLegacyUsage (line 372). Two added lines and a comment.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/history.rs",
+      "action": "modify",
+      "purpose": "Split `check_history_with_exempt` into a private `walk(git, tip, exempt, provenance)`; the public function calls it with `false`. `check_history` calls `walk(.., true)` only when the tip config has no `cutover_job` (line 48). `check_after_cutover` loops over `rev-list --reverse c0..tip` and runs `jobs::provenance` on each commit. Change the test at line 317 to the frozen call. Add the post-C0 test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "purpose": "Change the body of `history_of` to the frozen `check_history_with_exempt(git, \"HEAD\", None)`. Add the genuine-shaped helpers (`genuine_repo` with defaults.toml, `genuine_reading`, `genuine_job`, `request_record`), `provenance_of`, `provenance_history_of`, and the tests a, b (with variants and control), c, d. Old helpers and tests are otherwise unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/legacy.rs",
+      "action": "modify",
+      "purpose": "Test module only: add `a_pre_c0_commit_with_old_shape_job_records_gets_no_provenance_finding`, extending the comparison at line 304. No production code changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/athena-v0.md",
+      "action": "modify",
+      "purpose": "Rewrite §16.2 'Records are not signed' and the table row near line 1964: the detected cases, where the check runs, the residuals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/enforcement.md",
+      "action": "modify",
+      "purpose": "Update the M27 row (near line 41) and the 'Records are Athena's own' bullet (near lines 71-78) with the detected cases, the new test names and the residuals.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased / Added entry for the new provenance detection and its limits.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read in the working copy: jobs.rs (done in planning), `reading.rs` around the places that commit a reading and `run/mod.rs` ~952-1000 (the Dispatch commit), to re-confirm that no genuine writer commits job.json in the same commit as its reading (else drop R3 for that path). Read `manage.rs::close_with` to build the (c) fixture from the same records. Read landing_tests.rs lines 1-150 for the `reading`, `job_record`, `invocation`, `Times`, `HONEST` builders. Find the field names of `Caps`, `Build`, `DriverInfo` and `AcceptedBy` in records.rs for the genuine job.json, and check `Violation` exposes `detail`, `repair`, `path`, `commit`.",
+    "jobs.rs: add `pub const PROVENANCE: &str = \"provenance: \"`, `pub request: Option<Request>` on `JobFiles` (filled in `load` from `AnyRecord::Request`, canonical path only). Add `pub fn provenance(git, change, judged, history) -> Result<Vec<Violation>>`. Return empty if `invariant::is_exempt(change, judged, history)`. Scan added `records/jobs/` files with the same parse and 'from another parent' skip as `check`. Collect the jobs whose closing score (cause None) or any outcome is added (request jobs only), and the jobs whose `job.json` is added with none of candidate / verification / outcome files. For each: (R3, per added job.json) accepted reading present in `JobFiles::load(git, &judged.base, job)`. For each closing-triggered job, load `JobFiles` at `change.tree` and check R1 per reading, R2 when job.json exists, and R4 when outcome or later_outcome is Landed. Use `athena_data::sha256_hex`; treat a missing `defaults.toml` at the base as missing evidence. Ask `git.rev_parse(base)` before `show_file`, and require no ancestry, so a shallow or separate-root repo reports the commit by name rather than failing. Every detail starts with `PROVENANCE`, quotes the record path and names the evidence; every repair names `athena ask`, `athena go` or `athena close`. Update the module doc comment.",
+    "lib.rs: add `violations.extend(jobs::provenance(git, change, &judged, None)?);` after each existing `jobs::check` call in `gate()`.",
+    "history.rs: rename the body of `check_history_with_exempt` into private `walk(git, tip, exempt, provenance: bool)`, add `check_history_with_exempt` as `walk(.., false)`, and call `jobs::provenance(git, &change, &judged, Some(&state))` in the loop when `provenance`. In `check_history`, call `walk(git, tip, None, true)` only at the `cutover_job == None` branch (line 48). In `check_after_cutover`, after the own-commits loop, run `git rev-list --reverse c0..tip`, build `Change::of_commit` and `Judged::new` for each, and push `jobs::provenance(.., None)` violations. Change history.rs:317 to `check_history_with_exempt(&git, \"HEAD\", None)`. Add the post-C0 test on the existing cutover `world(true)`: after `record_cutover`, commit hand-made job records (a reading with no request record plus a closing score and a Dropped outcome) on top, and assert a violation whose detail starts with `PROVENANCE` at that commit; assert the pre-C0 `hand` commit gets none.",
+    "landing_tests.rs: change `history_of` to the frozen call. Add `genuine_repo()` (owner_repo plus a committed defaults.toml), `genuine_reading(git, times)` (the existing `reading` builder with `base_commit` = HEAD and `defaults_sha256` = the file's hash), `genuine_job(git, times)` (all dispatch fields set), `request_record`, `provenance_of(git, rev)` and `provenance_history_of(git)`. Add tests (a) with both variants, (b) with its five variants and a control, (c) with its control and the Scope::CommitMsg wiring assertion, and (d) `a_genuine_landing_is_not_refused` with the exempt-commit check. Each refused case asserts `detail.contains(..)` for the named evidence and `repair.contains(..)` for the command.",
+    "legacy.rs tests: add the pre-C0 old-shape test. Build `world()`-style history with a commit adding null-shape job records, call `check_legacy` with a record excusing nothing, and assert its history violations equal `check_history_with_exempt(.., Some(vec![]))` and none has a detail starting with the provenance prefix.",
+    "Run `cargo test -p athena-gate`, then `cargo test --workspace`, `cargo clippy --workspace --all-targets` and `cargo fmt --check`. If a lifecycle or job_plan test fails on a real writer's records, fix the check (it found a false refusal), never the writer's records to match a rule. Confirm with `git status` that records.rs, reconcile.rs, invariant.rs, athena.toml, defaults.toml, the workflows and the prompt files are untouched.",
+    "Rewrite docs/design/athena-v0.md §16.2 and its table row (near line 1964), and docs/enforcement.md (M27 row near line 41, bullet near lines 71-78): the evidence each forgery now has to carry, the new test names, where the check runs, that older genuine commits are protected by the frozen legacy rule, and the four residuals. Avoid the banned words and email-like text.",
+    "Add the CHANGELOG.md bullet under `## [Unreleased]` / `### Added`. Finish with `cargo fmt --check`, `cargo clippy --workspace --all-targets` and `cargo test --workspace`."
+  ],
+  "risks": [
+    {
+      "risk": "A real writer's records fail a new link (a false refusal), for example a flow that commits job.json together with its reading, or a reader invocation recorded after the reading.",
+      "mitigation": "Step 1 re-reads the writers. The lifecycle, job_plan and drain suites run real writers through the gate and the non-cutover walk, and Step 7 treats a failure there as a bug in the check. Orderings compare with `<=` in one direction only. The check never requires ancestry."
+    },
+    {
+      "risk": "Genuine jobs from older builds lack dispatch fields and would be refused.",
+      "mitigation": "The frozen legacy path (history.rs:192, check_history_with_exempt) never runs the check, so pre-C0 history is untouched. The live gate only sees new commits. The legacy.rs test pins this."
+    },
+    {
+      "risk": "After the cutover, job records written only to `athena/records` are not judged by this check.",
+      "mitigation": "Stated as a residual in the docs and CHANGELOG, and raised as an open question. Main commits after C0 are judged by the new loop, and the live gate judges Athena's own commits."
+    },
+    {
+      "risk": "Forgery (b) with consistent times still passes, and the new docs could be read as stronger than they are.",
+      "mitigation": "Docs and CHANGELOG name (b) as 'detected only when its times or fields contradict the dispatch'. The (b) control test shows a consistent forgery passes, so the limit is recorded in a test."
+    },
+    {
+      "risk": "A base commit that exists in the author's clone but not in a shallow checkout is reported as missing.",
+      "mitigation": "The detail names the commit and says it is not held. ci.yml checks out with fetch-depth: 0 for the history check (Host question below confirms the CI step)."
+    },
+    {
+      "risk": "Changing `history_of` to the frozen call could look like weakening the existing tests.",
+      "mitigation": "Those tests exercise the invariant and landing rules, which the frozen judgment still runs. The new tests and the genuine-landing test use `provenance_history_of`, and `jobs::check` is unchanged. The plan names the exact lines changed (landing_tests.rs:306 and history.rs:317)."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`gate()` now also runs `jobs::provenance` for Scope::CommitMsg, Scope::Commit and Scope::CommitLegacyUsage (lib.rs:357 and 372)",
+      "dependent": "crates/athena-core/src/commits.rs (`commit_records`, `commit_records_in`, line 202 `gate(..)`) and manage.rs:188-190 (`athena close`, Scope::Commit / CommitLegacyUsage)",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/lifecycle.rs (the close tests at lines 1121, 1365, 3359, 3586, 3618, 3637, 3660 and the ask/go landing tests) and job_plan.rs (closes at 1546 and 1569, jobs that died before a reading) run real writers through this gate; `cargo test --workspace` stays green. A job closed with no reading, or with a reading from `athena ask`, has the evidence. `hand_written_scores_and_outcomes_are_refused` still refuses. Tests that closed hand-made readings would now be refused; the grep for `.close(` found none outside lifecycle, job_plan, drain.rs:4776 and hestia.rs, which use `ask` or the real writers.",
+      "reason": null
+    },
+    {
+      "name": "commit-msg hook now judges job-record provenance",
+      "dependent": "crates/athena-cli/src/hooks.rs:34-43 (pre-commit and commit-msg hooks call `gate(.., Scope::CommitMsg)`)",
+      "kind": "code",
+      "test": "New test (c) runs the forged commit through `crate::gate(.., Scope::CommitMsg)` and asserts the provenance violation appears; the existing hook tests in lifecycle.rs keep passing on genuine commits.",
+      "reason": null
+    },
+    {
+      "name": "the frozen legacy judgment of commits up to and including C0",
+      "dependent": "crates/athena-gate/src/legacy.rs:192 (`check_legacy` -> `check_history_with_exempt`) and `check_attribution_with_legacy` (legacy.rs:210), reached by `check_after_cutover` (history.rs:169)",
+      "kind": "code",
+      "test": "legacy.rs `a_pre_c0_commit_with_old_shape_job_records_gets_no_provenance_finding` plus the existing `each_named_commit_fails_as_today_when_its_entry_is_absent` (legacy.rs:291-322) and history.rs `a_commit_before_c0_is_judged_by_the_old_rules_and_one_after_only_by_records` (history.rs:877). `check_history_with_exempt` keeps its signature and calls `walk(.., false)`.",
+      "reason": null
+    },
+    {
+      "name": "which history paths run provenance",
+      "dependent": "crates/athena-gate/src/history.rs `check_history` branches (lines 41, 45, 48, 55, 63) and `check_after_cutover` (line 122)",
+      "kind": "code",
+      "test": "history.rs `same_as_today` (line 930): `with_no_cutover_job_the_check_is_unchanged_even_when_records_show_a_landing` and `before_the_landing_record_exists_the_check_is_unchanged` compare `check_history` with `check_history_with_exempt`; their fixtures hold no job records, so the comparison stays equal. The pending-cutover test (line 968) stays frozen. The new post-C0 test covers the added loop.",
+      "reason": null
+    },
+    {
+      "name": "the CI history check",
+      "dependent": ".github/workflows/ci.yml `athena check --history` step (and its fetch-depth: 0 checkouts)",
+      "kind": "host_setting",
+      "test": "New history.rs post-C0 test shows CI's walk flags a hand-made job record on main after C0. The legacy.rs test shows pre-C0 history is judged as before.",
+      "reason": "In this repository's current state (cutover shown, athena.toml:153), CI's walk does not newly refuse any pre-C0 commit. It does refuse a hand-made job record that arrives on main after C0. A base commit named by a record must be held by the checkout; ci.yml checks out with fetch-depth: 0 (Host: confirmed in the open question)."
+    },
+    {
+      "name": "exemption of a commit",
+      "dependent": "athena.toml `[history] exempt` read through `invariant::is_exempt` (invariant.rs:90) and legacy-exempt.json",
+      "kind": "rule",
+      "test": "`jobs::provenance` returns early on `invariant::is_exempt(change, judged, history)`; the new genuine-landing test (d) asserts an exempt commit gets no provenance violation. Existing exemption tests in history.rs (lines 419-660) run through `check_history` and still pass, since their assertions are `any`-style or concern the exempt commit.",
+      "reason": null
+    },
+    {
+      "name": "existing job-record rules and the pre-merge and landing audits",
+      "dependent": "crates/athena-gate/src/jobs.rs `check`, `expected_score`, `score_difference` and the landed-outcome rule (M27, D55, D56); invariant.rs `landing_job` / `job_problem`; athena-core pr_check.rs and land.rs (`JobFiles::load`, `prediction_problem`)",
+      "kind": "rule",
+      "test": "landing_tests.rs `a_squash_with_a_forged_rescore_is_still_refused`, `a_squash_with_an_intervention_and_its_rescore_lands`, jobs.rs `every_landed_outcome_of_a_chain_squash_is_accepted` and `the_landed_outcomes_of_a_broken_chain_are_refused` run unchanged.",
+      "reason": "`jobs::check` is not edited. `JobFiles` gains a `request: Option<Request>` field only if the producer needs it for R1; it derives Default and is built only by `load`, so athena-core callers (pr_check.rs, land.rs) are unaffected."
+    },
+    {
+      "name": "record schemas, totals reconciliation and the records allow-list",
+      "dependent": "crates/athena-gate/src/reconcile.rs (`check_outcome`, `check_records`, `check_tree`) and the allow-list `check_record_file` / AnyRecord round-trip tests in crates/athena-data/src/records.rs",
+      "kind": "rule",
+      "test": "`cargo test -p athena-data` and the reconcile tests run unchanged.",
+      "reason": "No field or record is added or changed. The new check reads only fields already in `Reading`, `Request`, `Job` and `Invocation`. Outcome totals are already reconciled against invocation sums by reconcile.rs."
+    },
+    {
+      "name": "refusal and matching rules for requests and readings",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (reading gate: `refusing_check`) and the reading replay",
+      "kind": "rule",
+      "test": "`cargo test -p athena-core --test refusal_corpus` run as a no-regression command; I read only the file header and cite no case ids.",
+      "reason": "No parser, bullet form, stem list, stop list or reading check changes. The new rule's input forms are record shapes, mapped to landing_tests.rs tests (a), (b), (c), (d). The corpus runs request text, not commit records."
+    },
+    {
+      "name": "the ordering assumptions of R1, R3 and R4 (all clocks are `jiff::Timestamp::now()` in one process)",
+      "dependent": "crates/athena-agent/src/fake.rs (invocation timestamps) and athena-core `now()` (lib.rs:267), `dispatched_at` and outcome `at` writers",
+      "kind": "code",
+      "test": "The lifecycle tests, which write real timestamps through the fake driver, pass `provenance` on every commit. Orderings are compared in one direction with `<=`, so ties pass.",
+      "reason": "An interrupted record sets `started_at` to `dispatched_at`, which passes with equality. Planner and critic invocations are not constrained."
+    },
+    {
+      "name": "documentation edits",
+      "dependent": "docs/design/athena-v0.md, docs/enforcement.md, CHANGELOG.md, and the prompt-budget test `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs) and `boundary_words()` in xtask/tests/policy.rs",
+      "kind": "rule",
+      "test": "`cargo test --workspace` runs the policy and budget tests.",
+      "reason": "These docs are not in an always-loaded prompt set (previous reading of crates/athena-context found no reference), so budgets do not change. The new text avoids the banned words and email-like text."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Run the athena-gate test suite. New tests in landing_tests.rs (a, b, c, d) build real temporary git repositories and assert Violations from `jobs::provenance` and from the history walk. One new test in history.rs and one in legacy.rs cover the post-C0 and pre-C0 paths. Fixtures use the new genuine-shaped helpers.\n(a) `a_job_written_by_hand_across_two_commits_is_refused`: commit 1 adds the old all-null `opening(&HONEST)` (reading, job.json, reader invocation); commit 2 adds the hand change plus `closing(fp)`. A second variant has full genuine evidence but the reading and job.json in the same commit.\n(b) `a_forged_landing_of_a_dispatched_job_that_never_closed_is_refused`: a genuine Read commit and Dispatch commit, then one forged commit with the change and closing records. Variants, each breaking one link: producer started before `dispatched_at`; verifier started before the producer ended; outcome before the verifier ended; a dispatch field missing; the job's defaults hash differing from the reading's. A control with consistent times is accepted.\n(c) `a_hand_made_proposal_closed_with_athena_close_is_refused`: a reading with invented forecasts and no request or reader invocation, closed by the records `manage.rs::close_with` writes (a closing score from `jobs::expected_score` and a Dropped outcome). The same proposal with a request record, a reader invocation, a held base commit and a matching defaults hash is accepted. The refused commit is also run through `crate::gate(.., Scope::CommitMsg)` to show the wiring.\n(d) `a_genuine_landing_is_not_refused` (see criterion 3).\nhistory.rs: `provenance_is_judged_on_main_commits_after_c0` builds the existing cutover `world(true)` with `record_cutover`, adds a commit on top that holds hand-made job records, and asserts a violation with the provenance prefix at that commit. legacy.rs: `a_pre_c0_commit_with_old_shape_job_records_gets_no_provenance_finding` gives the same violations as `check_history_with_exempt(.., Some(vec![]))` (the comparison at legacy.rs:304) and none starts with the provenance prefix.",
+      "command": "cargo test -p athena-gate",
+      "observes": "Each forged history gives at least one `Rule::JobRecords` violation whose detail begins `provenance: ` and names the evidence. The control, the genuine landing and the pre-C0 legacy comparison give none. All existing landing, chain, intervention, rebase and exemption tests still pass unchanged apart from the `history_of` body and history.rs:317.",
+      "fails_without": "On the base code there is no `jobs::provenance`, and `jobs::check` plus `history::check_history` return nothing for these records because they never read the request record, the reader invocation, the dispatch fields, `defaults.toml` at the base, or the commit order. Tests (a), (b), (c) and the post-C0 test therefore fail on `!violations.is_empty()` and on the `detail.contains(..)` assertions. With the check but without the `gate()` wiring, the Scope::CommitMsg assertion in (c) fails. If the check ran in the frozen legacy path, the legacy.rs test fails.",
+      "seam": "Entry points: `crate::jobs::provenance` (new, called through a new helper `provenance_of(git, rev)` that builds `Change::of_commit` and `Judged::new`, like the existing `job_records_of` at landing_tests.rs:823), `crate::history::check_history` (through the new `provenance_history_of(git)`, since the existing `history_of` at landing_tests.rs:306 is now the frozen judgment), and `crate::gate` for Scope::CommitMsg. Fixture: a real temporary git repository from the existing `testutil::{repo, write, commit}` and `owner_repo()`, with a `defaults.toml` committed by a new `genuine_repo()`. Records are written to disk with the existing `write_records`. Nothing in the gate is stubbed. Existing: `job_records_of`, `testutil`, `write_records`, `opening`, `closing`, the history.rs cutover `world`/`record_cutover`/`record_landing`/`flagged` helpers. Added by Step 4: `genuine_repo`, `genuine_reading`, `genuine_job`, `request_record`, `provenance_of`, `provenance_history_of`."
+    },
+    {
+      "criterion": 2,
+      "method": "The verifier runs clippy, fmt and the whole workspace tests. The workspace run compiles and runs the athena-core and athena-cli suites, whose lifecycle tests (`crates/athena-cli/tests/lifecycle.rs`) drive real ask/go/close through the fake driver (athena-agent fake.rs, which uses real clocks at lines 95 and 123) and the production writers. They then assert `check_history()` is empty, so the new links are shown to hold for Athena's own records.",
+      "command": "cargo clippy --workspace --all-targets",
+      "observes": "No diagnostics and exit 0. Then `cargo fmt --check` prints nothing and `cargo test --workspace` passes, including the lifecycle tests that close real proposals (lines 1121, 3637, 3660) and land real jobs.",
+      "fails_without": "Not a refusal behavior. A warning, a formatting difference, or a genuine writer that fails the new check (a false refusal in lifecycle.rs, job_plan.rs, drain.rs) fails these commands.",
+      "seam": "The production binaries and test targets run as they are. No double. Existing."
+    },
+    {
+      "criterion": 3,
+      "method": "New test `a_genuine_landing_is_not_refused` in landing_tests.rs builds the shape Athena writes: commit 1 'Read' (request.json, reading with the repository's real `base_commit` and `defaults_sha256`, reader invocation); commit 2 'Dispatch' (a full job.json); commit 3 the landing (code, producer and verifier invocations in order, candidate, verification, outcome and a closing score from `jobs::expected_score`). It asserts `provenance_of` is empty for each commit and that no violation of `provenance_history_of(git)` starts with the provenance prefix. The same test also checks that a `[history] exempt` entry for a commit makes `jobs::provenance` return nothing for it. The verifier also runs the lifecycle suite, whose real writers are the repository's real history shape.",
+      "command": "cargo test -p athena-gate && cargo test -p athena-cli --test lifecycle && cargo test -p athena-core --test refusal_corpus",
+      "observes": "No provenance violation on any genuine commit or on the walk. The refusal rate rises only for records that lack or contradict the evidence. I cannot measure the share of the repository's real past jobs that would be newly refused, because `records/` is absent from the snapshot; the 5% is the user's estimate, not measured. The refusal_corpus run is a no-regression command only: the reading checkers are untouched, and I cite no case ids and no result.",
+      "fails_without": "If the check refused genuine records, `a_genuine_landing_is_not_refused` and the lifecycle tests fail. If no check existed, the criterion 1 forged tests fail. Together they show the refusal is by evidence, not blanket.",
+      "seam": "Same `provenance_of` / `provenance_history_of` entry points on a real temporary repository with the new genuine-shaped helpers (added by Step 4); the lifecycle suite uses the existing Fixture and fake driver with production writers."
+    },
+    {
+      "criterion": 4,
+      "method": "The criterion 1 tests assert on `detail` and `repair` text, and Grep checks the source. Every `fail(..)` in `jobs::provenance` builds its detail from `PROVENANCE` plus the record path plus the evidence missing or contradicted, and its repair from the Athena command that writes it.",
+      "command": "cargo test -p athena-gate",
+      "observes": "Assertions such as `v.detail.contains(\"no request record\")`, `\"no reader invocation\"`, `\"does not exist in this repository\"`, `\"does not match defaults.toml\"`, `\"in the same commit as its accepted reading\"`, `\"before the job was dispatched\"`, `\"before the producer invocation ended\"` and `v.repair.contains(\"athena ask\")` / `\"athena go\"` / `\"athena close\"` pass. Grep `provenance:` in crates/athena-gate/src/jobs.rs lists every refusal text. history.rs adds no new text; its post-C0 loop reuses these violations.",
+      "fails_without": "A generic message such as 'records are not valid' fails the `contains` assertions in each forged test.",
+      "seam": "The `Violation { detail, repair, path }` values returned by `jobs::provenance`, read through `provenance_of`. Existing type; assertions added in Step 4."
+    },
+    {
+      "criterion": 5,
+      "method": "Content check on the diff. §16.2 of docs/design/athena-v0.md ('Records are not signed' and its sub-bullets, and the table row near line 1964 that says making them detectable is a queued request) and docs/enforcement.md (M27 row near line 41 and the 'Records are Athena's own' bullet near lines 71-78) are rewritten. They list the evidence each of the three forgeries now has to carry, name the new tests, and say where the check runs: the live gate, the non-cutover history walk, and main commits after C0. They state the residuals: (1) fully mimicked, consistent records still pass because nothing is signed; (2) forgery (b) is caught only when its times or fields contradict the dispatch; (3) job records written only to `athena/records` are not judged; (4) pre-C0 history stays under the frozen legacy rule.",
+      "command": "git diff -- docs/design/athena-v0.md docs/enforcement.md",
+      "observes": "The old text saying the three forgeries pass is replaced by the detected cases and the residual. The test names the docs cite exist in the code (the verifier greps each name in landing_tests.rs, history.rs and legacy.rs).",
+      "fails_without": "With no doc edit the diff is empty and the text 'still passes' remains.",
+      "seam": "Not applicable: content criterion on documentation. The edit is made in Step 6."
+    },
+    {
+      "criterion": 6,
+      "method": "Content check: one new bullet under `## [Unreleased]` / `### Added` in CHANGELOG.md names the new provenance check, the three forgeries it refuses, the places it runs, the frozen legacy path, forgery (b)'s limit, and the residual (consistent forgeries pass without signing).",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new bullet under Unreleased describes the detection and the residual.",
+      "fails_without": "No Unreleased entry would appear in the diff.",
+      "seam": "Not applicable: content criterion. The edit is made in Step 7."
+    },
+    {
+      "criterion": 7,
+      "method": "The verifier checks that no record field or governance file changed, and runs the athena-data tests that hold the allow-list and round-trip coverage. The provenance code reads only existing fields: `Reading.base_commit/defaults_sha256/config_sha256/invocation_seq/at`, `Request.received_at`, the `Job` dispatch fields, and `Invocation.role/seq/started_at/ended_at`.",
+      "command": "git diff --stat",
+      "observes": "Only these files appear: crates/athena-gate/src/{jobs,lib,history,legacy,landing_tests}.rs, docs/design/athena-v0.md, docs/enforcement.md and CHANGELOG.md. None of athena.toml, defaults.toml, .github/workflows, setup.sh, prompt files, records/, crates/athena-data/src/records.rs or crates/athena-gate/src/reconcile.rs appears. `cargo test -p athena-data` passes unchanged (check_record_file and the AnyRecord round-trip tests).",
+      "fails_without": "A new record field added without allow-list and round-trip coverage fails `cargo test -p athena-data`; an edit to a governance file shows in the stat.",
+      "seam": "The repository diff and the existing athena-data tests. Existing; nothing is added."
+    }
+  ],
+  "open_questions": [
+    "User: Job records written only to the `athena/records` branch (stage 1 of records-history.md) are not judged by this check, and the branch's only audit is append-only. Should a follow-up job run the provenance check on that branch's commits? It needs a layout adapter for its root-level paths. I recommend yes.",
+    "Host: Does the `athena check --history` step in .github/workflows/ci.yml run on a checkout with fetch-depth: 0 at every place it runs? The check names a missing base commit when a clone is shallow, and I read the workflow only from the earlier survey, not in this round."
+  ],
+  "producer_section_sha256": "8762827315880b142d9f2db5bd3d39e165e181353f824ecbc61378c0be00f4cf"
+}

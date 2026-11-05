@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261104-082023-06bz",
+  "round": 3,
+  "at": "2026-11-05T03:34:42.720579288Z",
+  "invocation_seq": 13,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The new loop over c0..tip reverses D111 without saying so, re-judges commits made before the check existed, and offers no remedy when it flags a genuine commit.",
+      "evidence": "docs/decisions.md:2902-2907 (D111 item 7) says commits after C0 are judged 'only by the attribution check against records'. The doc comment at history.rs:36-37 and the comment at athena.toml:152 ('later commits only by the attribution check') say the same, and athena.toml is out of scope, so its comment would go stale. The loop judges every main commit since C0 (2026-10-25), all made by builds without provenance. Nobody can measure how many would fail: records/ is missing from the snapshot, as criterion 3 itself admits. The loop calls `provenance(.., None)`, so `is_exempt` reads the parent's `[history] exempt` (invariant.rs:90-94). Excusing a flagged commit that is already on main would need an exempt entry in that commit's parent, which cannot be written after the fact. One false positive would turn CI red for good, possibly on this job's own pull request. The loop also adds little. After C0, attribution already flags any main commit that no landing names, which covers hand-committed forgeries (a) and (b). Forgery (c) runs through `athena close`, which the live gate already covers. Fix: Drop the c0..tip loop and its history.rs test. Keep detection in the live gate, which is what the reading asks for ('Extend the gate'). List CI re-judging after C0 as a residual and a follow-up next to the athena/records open question. If the loop stays: record a new decision that amends D111, update docs/design/records-history.md and history.rs's doc comment, give the loop a remedy (for example, judge with the tip's `[history] exempt` through a HistoryState rather than None), and add a dependents entry for this job's own CI run on real history.",
+      "location": "Plan: Decision 2, Files (history.rs), Step 4, history.rs test `provenance_is_judged_on_main_commits_after_c0`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan never says that provenance violations carry the commit, but the cutover test's `flagged` helper finds violations only by commit.",
+      "evidence": "history.rs:867-873: `flagged` keeps only violations where `v.commit.as_deref() == Some(&commit[..12])`. Violations built with `Violation::new(..)` and no `.in_commit(change.commit.as_deref())` have commit None, so the post-C0 test would fail even if the check works. Fix: State that `fail` calls `.in_commit(change.commit.as_deref())`, as the other gate checks do. This is moot if the post-C0 loop is dropped.",
+      "location": "Plan: Step 3 / `fail(path, detail, repair)`; Step 6 assertion `flagged(&report, &forged)`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan skips a cheap cross-link Athena always writes: `brief_sha256` should equal the hash of the committed brief-producer.md.",
+      "evidence": "run/mod.rs:981 and 992-995: the Dispatch commit writes `brief_sha256: Some(sha256_hex(brief.as_bytes()))` together with `{dir}/brief-producer.md`. R2 only checks that `brief_sha256` is present. Fix: For a Landed outcome, require `<job dir>/brief-producer.md` to be in the tree with sha256 equal to `job.brief_sha256`, and add a variant to test (a) or (b).",
+      "location": "Plan: R2 (dispatch fields checked for presence only)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "R4 adds a second set of ordering rules for landed jobs next to an existing one, with no link between them.",
+      "evidence": "`prediction_problem` already refuses a landed job whose accepted reading comes after `dispatched_at` or after any non-reader invocation's `started_at`/seq. R4 adds producer and verifier after dispatch, verifier after producer, and outcome after verifier, in a different module with different wording. Fix: Put R4's ordering checks next to `prediction_problem`, or call it from `provenance`, so landed-job ordering is defined in one place. At minimum, cite it in the jobs.rs doc comment and the enforcement map so the two rules do not drift.",
+      "location": "Plan: R4 ordering rules vs crates/athena-gate/src/invariant.rs `prediction_problem` (lines 754-780)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The policy test that checks test names in docs/enforcement.md is a reader of the docs edit but is not listed as a dependent.",
+      "evidence": "xtask/tests/policy.rs:483-517 (`every_test_named_in_the_enforcement_map_exists`, M24) reads every backticked snake_case name on lines starting `| M` in docs/enforcement.md and fails when no matching `fn` exists. The plan rewrites the M27 row with new test names. Its dependents entry names only `boundary_words()` and the budgets test. Fix: Add M24 / `every_test_named_in_the_enforcement_map_exists` to the dependents list. Make sure every test name cited in the M27 row is a real `fn` name; in particular, drop the history.rs test name if that test is dropped.",
+      "location": "Plan: Dependents (documentation entry), Criterion 5 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Using `history == None` to mean 'a commit being made' makes a new rule depend on an argument documented for something else.",
+      "evidence": "invariant.rs:101 documents `history` as 'set during a history walk'. Any future caller of `jobs::check(.., None)` on old commits would silently get provenance too. Fix: Keep the split, but name the behavior in `check`'s doc comment, and add a debug assertion or a short comment that `None` callers must be judging a new commit.",
+      "location": "Plan: Decision 1 (`check` adds provenance when `history.is_none()`)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan relies on. Most of the round-3 plan holds up. `jobs::check` is called with `None` only from lib.rs:357 and 372 (plus the test helper at landing_tests.rs:827), and with `Some` only from history.rs:255. So splitting it into `check_records` plus `provenance` when `history.is_none()` reaches the live gate without touching lib.rs or legacy.rs. Every production reading goes through `read_once` → `build_reading`, which records the reader invocation first (reading.rs:621-651). Both `first_reading` and `reread_after_configuration_change` commit the request and invocations with the reading. Dispatch writes all ten required fields (run/mod.rs:952-991). Clocks are real (`now()`, fake.rs, claude.rs), and `defaults_sha256` is the hash of defaults.toml's bytes at the head commit (capability.rs:51). R1, R2 and R4 should therefore pass for Athena's own records. The named helpers exist: `owner_repo`, `opening`, `closing`, `job_records_of`, `history_of`, `check_head`, and `world`/`record_cutover`/`record_landing`/`flagged`. The `judge` helper calls only `invariant::check`, so existing landing tests are not newly refused. The lifecycle forgery tests use `.any(..)` assertions, so extra violations do not break them. One design problem remains: the new loop over `c0..tip` in `check_after_cutover`. It reverses D111 item 7 without saying so. It judges every main commit made since C0 by builds that never ran this check. It cannot be measured, because records are missing from the snapshot. It has no exemption remedy. And it adds little, because attribution already flags hand commits on main after C0, and forgery (c) goes through the live gate. A few smaller fixes follow."
+}
