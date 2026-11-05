@@ -615,12 +615,11 @@ pub fn plan(report: &crate::drain::PlanReport) -> String {
 /// What `athena drain` prints: why it stopped, each job and whether it landed, the money, the rating against
 /// the target and whether it was taken after a landing, and what is still queued or waiting for a person.
 pub fn drain(report: &crate::drain::Report) -> String {
-    let mut out = match (report.stop, &report.failed_item) {
-        (crate::drain::Stop::RepeatedFailure, Some(item)) => {
-            format!("stopped     repeated failure: item {item} failed twice\n")
-        }
-        (stop, _) => format!("stopped     {}: {}\n", stop.label(), stop.meaning()),
-    };
+    let mut out = format!(
+        "stopped     {}: {}\n",
+        report.stop.label(),
+        report.stop.meaning()
+    );
     if let Some(output) = &report.rebuild_output {
         out.push_str("build output:\n");
         out.push_str(output);

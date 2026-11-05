@@ -102,6 +102,9 @@ struct Stub {
     /// When set, the configuration cannot be read once a landing has happened, with this read error: the
     /// landing added something only a newer build understands.
     config_unreadable_after_landing: Option<&'static str>,
+    /// When set, every run's closing reason is this text instead of `ended <outcome>`, as a job closed for an
+    /// environment cause carries one (`environment: producer login expired: ...`).
+    run_reason: Option<&'static str>,
 }
 
 impl Stub {
@@ -254,7 +257,9 @@ impl Steps for Stub {
         };
         Run {
             outcome: Some(outcome),
-            reason: format!("ended {}", outcome.as_str()),
+            reason: self
+                .run_reason
+                .map_or_else(|| format!("ended {}", outcome.as_str()), String::from),
             cost: self.run_cost.unwrap_or(0.5),
             ..Run::default()
         }
@@ -638,7 +643,6 @@ fn drain_passes_over_an_item_on_a_paused_line_unread_with_one_line_and_runs_the_
     // The paused item was neither read nor run; the ordinary one ran and landed.
     assert_eq!(stub.log(), ["read b", "run b", "land b", "rate"]);
     assert_eq!(report.stop, Stop::QueueEmpty);
-    assert_eq!(report.failed_item, None, "no failure is counted");
     assert_eq!(report.landed, 1);
     assert!(
         report.jobs.iter().all(|j| j.item == "b"),
@@ -669,7 +673,7 @@ fn drain_passes_over_an_item_on_a_paused_line_unread_with_one_line_and_runs_the_
 }
 
 #[test]
-fn drain_does_not_stop_on_repeated_failure_for_items_of_a_paused_line_and_works_the_next_item() {
+fn drain_does_not_stop_for_items_of_a_paused_line_and_works_the_next_item() {
     // Three queued items of one paused line, the second waiting on the first, then an ordinary item.
     let stub = Stub {
         items: vec!["a1", "a2", "a3", "c"],
@@ -692,7 +696,6 @@ fn drain_does_not_stop_on_repeated_failure_for_items_of_a_paused_line_and_works_
     let report = drain::drain(&stub, limits(9.0), &ui).unwrap();
     assert_eq!(stub.log(), ["read c", "run c", "land c", "rate"]);
     assert_eq!(report.stop, Stop::QueueEmpty);
-    assert_eq!(report.failed_item, None);
     assert_eq!(report.landed, 1);
     for item in ["a1", "a2", "a3"] {
         let lines = ui.lines.borrow();
@@ -728,7 +731,6 @@ fn drain_passes_over_an_item_whose_line_is_paused_by_its_own_failed_attempt_with
         "x is not read again or run again"
     );
     assert_eq!(report.stop, Stop::QueueEmpty);
-    assert_eq!(report.failed_item, None);
     assert_eq!(report.landed, 1);
     let printed = ui.lift_lines("x");
     assert_eq!(printed.len(), 1, "{printed:?}");
@@ -740,7 +742,7 @@ fn drain_passes_over_an_item_whose_line_is_paused_by_its_own_failed_attempt_with
 
 #[test]
 fn drain_passes_over_an_item_whose_second_failure_pauses_its_line_and_runs_the_next_item() {
-    // a is rejected twice; the second failure is what pauses its line. That is not a repeated failure.
+    // a is rejected twice; the second failure is what pauses its line. That is the scope guard's pause, not a double failure.
     let stub = Stub {
         items: vec!["a", "b"],
         outcomes: RefCell::new(vec![
@@ -772,8 +774,6 @@ fn drain_passes_over_an_item_whose_second_failure_pauses_its_line_and_runs_the_n
         ]
     );
     assert_eq!(report.stop, Stop::QueueEmpty);
-    assert_ne!(report.stop, Stop::RepeatedFailure);
-    assert_eq!(report.failed_item, None);
     assert_eq!(report.landed, 1);
     assert_eq!(report.jobs.iter().filter(|j| j.item == "a").count(), 2);
     // The item is recorded, once, with the pause reason: after its two runs and before b ran.
@@ -825,8 +825,6 @@ fn drain_passes_over_an_item_whose_second_failure_pauses_its_line_and_holds_back
             "rate"
         ]
     );
-    assert_ne!(report.stop, Stop::RepeatedFailure);
-    assert_eq!(report.failed_item, None);
     assert_eq!(report.landed, 1);
     let lines = ui.lines.borrow();
     let c: Vec<_> = lines
@@ -877,8 +875,6 @@ fn drain_passes_over_an_item_that_fails_twice_on_a_flagged_line_and_runs_the_nex
         "a is tried twice, then b runs"
     );
     assert_eq!(report.stop, Stop::QueueEmpty);
-    assert_ne!(report.stop, Stop::RepeatedFailure);
-    assert_eq!(report.failed_item, None, "a is passed over, not failed");
     assert_eq!(report.landed, 1);
     let b: Vec<_> = report.jobs.iter().filter(|j| j.item == "b").collect();
     assert_eq!(b.len(), 1, "{:?}", report.jobs);
@@ -912,8 +908,74 @@ fn drain_passes_over_an_item_that_fails_twice_on_a_flagged_line_and_runs_the_nex
 }
 
 #[test]
-fn drain_still_stops_on_repeated_failure_when_another_item_is_flagged_but_this_one_is_not() {
-    // a fails twice on a line with no flag and no pause; only b's line is flagged. The batch stops at a.
+fn an_item_that_fails_twice_on_an_unflagged_unpaused_line_is_passed_over_and_the_next_item_runs() {
+    // a fails twice on a line with no flag and no pause. The scope guard and Hestia judge a; the batch does
+    // not stop. b runs and lands. (On 4 Nov a batch with $43 and 3 job slots left stopped at such an item.)
+    let stub = Stub {
+        items: vec!["a", "b"],
+        outcomes: RefCell::new(vec![
+            OutcomeState::Rejected,
+            OutcomeState::Rejected,
+            OutcomeState::Landed,
+        ]),
+        ratings: RefCell::new(vec![1]),
+        plan: vec![
+            planned("a", Ladder::Implementation, &["src/a.rs"], &[]),
+            planned("b", Ladder::Implementation, &["src/b.rs"], &[]),
+        ],
+        ..Stub::default()
+    };
+    let ui = Stamped::new(&stub);
+    let report = drain::drain(&stub, limits(9.0), &ui).unwrap();
+    assert_eq!(
+        stub.log(),
+        [
+            "read a",
+            "run a",
+            "reread a",
+            "run a-retry",
+            "read b",
+            "run b",
+            "land b",
+            "rate"
+        ],
+        "a is tried twice, then b runs"
+    );
+    // No stop names a; the run ends because the queue is empty.
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_eq!(report.landed, 1);
+    assert_eq!(report.jobs.iter().filter(|j| j.item == "a").count(), 2);
+    let b: Vec<_> = report.jobs.iter().filter(|j| j.item == "b").collect();
+    assert_eq!(b.len(), 1, "{:?}", report.jobs);
+    assert_eq!(b[0].outcome, "passed");
+    assert_eq!(b[0].landing, "landed");
+
+    // a is recorded once as passed over, with a reason, after its two runs and before b ran.
+    let printed: Vec<(usize, String)> = ui
+        .lines
+        .borrow()
+        .iter()
+        .filter(|(_, l)| l.starts_with("plan       a passed over:"))
+        .cloned()
+        .collect();
+    assert_eq!(printed.len(), 1, "{printed:?}");
+    let (runs_before, line) = &printed[0];
+    assert_eq!(*runs_before, 2, "printed after a's two runs, before b ran");
+    assert_eq!(
+        line,
+        "plan       a passed over: failed twice; left for the scope guard and Hestia: ended rejected"
+    );
+
+    // The summary names no item-level stop.
+    let text = display::drain(&report);
+    assert!(!text.contains("repeated failure"), "{text}");
+    assert!(text.contains("stopped     queue empty"), "{text}");
+}
+
+#[test]
+fn an_unflagged_item_that_fails_twice_is_passed_over_when_another_item_is_flagged() {
+    // a fails twice on a line with no flag and no pause; only b's line is flagged. a is passed over with the
+    // double-failure reason, and b, tried twice as well, is passed over with its flag reason.
     let stub = Stub {
         items: vec!["a", "b"],
         ratings: RefCell::new(vec![5]),
@@ -924,24 +986,107 @@ fn drain_still_stops_on_repeated_failure_when_another_item_is_flagged_but_this_o
     let report = drain::drain(&stub, limits(5.0), &ui).unwrap();
     assert_eq!(
         stub.log(),
+        [
+            "read a",
+            "run a",
+            "reread a",
+            "run a-retry",
+            "read b",
+            "run b",
+            "reread b",
+            "run b-retry"
+        ],
+        "b runs after a's second failure"
+    );
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    let lines: Vec<String> = ui
+        .lines
+        .borrow()
+        .iter()
+        .map(|(_, l)| l.clone())
+        .filter(|l| l.contains(" passed over: "))
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[0].starts_with(
+            "plan       a passed over: failed twice; left for the scope guard and Hestia"
+        ),
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].starts_with("plan       b passed over: line b is flagged"),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn an_item_whose_producer_login_expired_twice_stops_the_batch_and_the_next_item_does_not_run() {
+    // The expired login is not about item a: b would fail the same way, so the run ends. a is still
+    // recorded as passed over, with the reason on its job line.
+    let stub = Stub {
+        items: vec!["a", "b"],
+        outcomes: RefCell::new(vec![OutcomeState::Failed, OutcomeState::Failed]),
+        run_reason: Some("environment: producer login expired: API Error: 401"),
+        ratings: RefCell::new(vec![5]),
+        ..Stub::default()
+    };
+    let ui = Stamped::new(&stub);
+    let report = drain::drain(&stub, limits(5.0), &ui).unwrap();
+    assert_eq!(
+        stub.log(),
         ["read a", "run a", "reread a", "run a-retry"],
-        "the loop stops there; b is not started"
+        "b is not started"
     );
-    assert_eq!(report.stop, Stop::RepeatedFailure);
-    assert_eq!(report.failed_item.as_deref(), Some("a"));
+    assert_eq!(report.stop, Stop::Environment);
+    let lines: Vec<String> = ui
+        .lines
+        .borrow()
+        .iter()
+        .map(|(_, l)| l.clone())
+        .filter(|l| l.starts_with("plan       a passed over:"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("producer login expired"), "{lines:?}");
     let text = display::drain(&report);
-    assert!(
-        text.contains("repeated failure: item a failed twice"),
-        "{text}"
-    );
-    assert!(
-        ui.lines
-            .borrow()
-            .iter()
-            .all(|(_, l)| !l.starts_with("plan       a passed over")),
-        "{:?}",
-        ui.lines.borrow()
-    );
+    assert!(text.contains("stopped     environment: "), "{text}");
+    assert!(!text.contains("repeated failure"), "{text}");
+}
+
+#[test]
+fn a_usage_limit_or_low_disk_failing_an_item_twice_also_stops_the_batch() {
+    for reason in [
+        "environment: usage limit reached: API Error: 429",
+        "environment: low disk",
+    ] {
+        let stub = Stub {
+            items: vec!["a", "b"],
+            outcomes: RefCell::new(vec![OutcomeState::Failed, OutcomeState::Failed]),
+            run_reason: Some(reason),
+            ..Stub::default()
+        };
+        let report = drain::drain(&stub, limits(5.0), &Stamped::new(&stub)).unwrap();
+        assert_eq!(report.stop, Stop::Environment, "{reason}");
+        assert!(!stub.log().iter().any(|l| l == "read b"), "{reason}");
+    }
+}
+
+#[test]
+fn a_check_timeout_or_a_work_failure_failing_an_item_twice_does_not_stop_the_batch() {
+    // Only a cause that every later item would share (login, usage limit, disk) ends the run.
+    for reason in [
+        "environment: check timed out",
+        "the verifier rejected the candidate",
+    ] {
+        let stub = Stub {
+            items: vec!["a", "b"],
+            outcomes: RefCell::new(vec![OutcomeState::Failed; 4]),
+            run_reason: Some(reason),
+            ..Stub::default()
+        };
+        let report = drain::drain(&stub, limits(9.0), &Stamped::new(&stub)).unwrap();
+        assert_eq!(report.stop, Stop::QueueEmpty, "{reason}");
+        assert!(stub.log().iter().any(|l| l == "run b-retry"), "{reason}");
+    }
 }
 
 #[test]
@@ -962,7 +1107,7 @@ fn drain_holds_the_items_that_depend_on_an_item_of_a_paused_line() {
     let report = drain::drain(&stub, limits(9.0), &ui).unwrap();
     // b waits on a, which is not worked: b does not run on its own.
     assert_eq!(stub.log(), ["read c", "run c", "land c", "rate"]);
-    assert_eq!(report.failed_item, None);
+    assert_eq!(report.stop, Stop::QueueEmpty);
     let lines = ui.lines.borrow();
     let b: Vec<_> = lines
         .iter()
@@ -1170,8 +1315,10 @@ fn a_rating_is_never_taken_before_a_landing() {
     }
     // The first rating follows the landing of a, and b's failed landing is followed by no rating.
     assert_eq!(&log[..4], ["read a", "run a", "land a", "rate"]);
-    assert_eq!(report.stop, Stop::RepeatedFailure);
-    assert_eq!(report.failed_item.as_deref(), Some("b"));
+    // b is passed over after its second failed landing, and c is worked after it.
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_eq!(report.landed, 2);
+    assert!(log.contains(&"land c".to_string()), "{log:?}");
 }
 
 #[test]
@@ -1278,33 +1425,49 @@ fn an_empty_queue_stops_at_once_with_no_spend_and_is_not_success() {
 }
 
 #[test]
-fn the_same_item_failing_twice_is_a_repeated_failure_naming_the_item() {
+fn every_item_failing_twice_is_passed_over_and_none_stops_the_batch() {
     let stub = Stub {
         items: vec!["a", "b"],
         ratings: RefCell::new(vec![5]),
         ..Stub::default()
     };
-    let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
-    // The second attempt re-reads the failed job (a retry) and runs the new job.
+    let ui = Stamped::new(&stub);
+    let report = drain::drain(&stub, limits(5.0), &ui).unwrap();
+    // The second attempt re-reads the failed job (a retry) and runs the new job; then b is worked the same way.
     assert_eq!(
         stub.log(),
-        ["read a", "run a", "reread a", "run a-retry"],
-        "the loop stops there; b is not started"
+        [
+            "read a",
+            "run a",
+            "reread a",
+            "run a-retry",
+            "read b",
+            "run b",
+            "reread b",
+            "run b-retry"
+        ],
+        "b is started after a's second failure"
     );
-    assert_eq!(report.stop, Stop::RepeatedFailure);
-    assert_eq!(report.failed_item.as_deref(), Some("a"));
-    assert_eq!(report.jobs.len(), 2);
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_eq!(report.jobs.len(), 4);
+    assert_eq!(report.landed, 0);
+    // Neither item landed, so both stay queued.
     assert_eq!(report.queued.len(), 2);
+    let passed_over: Vec<String> = ui
+        .lines
+        .borrow()
+        .iter()
+        .map(|(_, l)| l.clone())
+        .filter(|l| l.contains(" passed over: failed twice; left for the scope guard and Hestia"))
+        .collect();
+    assert_eq!(passed_over.len(), 2, "{passed_over:?}");
     let text = display::drain(&report);
-    assert!(
-        text.contains("repeated failure: item a failed twice"),
-        "{text}"
-    );
+    assert!(!text.contains("repeated failure"), "{text}");
     assert!(text.contains("rejected"), "{text}");
 }
 
 #[test]
-fn a_job_that_does_not_land_twice_still_ends_as_repeated_failure_when_the_config_is_readable() {
+fn a_job_that_does_not_land_twice_is_passed_over_with_its_landing_text_and_the_next_item_runs() {
     let stub = Stub {
         items: vec!["a", "b"],
         outcomes: passing(),
@@ -1313,15 +1476,28 @@ fn a_job_that_does_not_land_twice_still_ends_as_repeated_failure_when_the_config
         config_unreadable_after_landing: None,
         ..Stub::default()
     };
-    let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
-    assert_eq!(report.stop, Stop::RepeatedFailure);
-    assert_eq!(report.failed_item.as_deref(), Some("a"));
-    assert_eq!(report.landed, 0);
-    let text = display::drain(&report);
+    let ui = Stamped::new(&stub);
+    let report = drain::drain(&stub, limits(5.0), &ui).unwrap();
     assert!(
-        text.contains("repeated failure: item a failed twice"),
-        "{text}"
+        stub.log().contains(&"land b".to_string()),
+        "{:?}",
+        stub.log()
     );
+    assert_eq!(report.landed, 1);
+    let passed_over: Vec<String> = ui
+        .lines
+        .borrow()
+        .iter()
+        .map(|(_, l)| l.clone())
+        .filter(|l| l.starts_with("plan       a passed over:"))
+        .collect();
+    assert_eq!(passed_over.len(), 1, "{passed_over:?}");
+    assert!(
+        passed_over[0].ends_with("left for the scope guard and Hestia: not landed: checks failed"),
+        "{passed_over:?}"
+    );
+    let text = display::drain(&report);
+    assert!(!text.contains("repeated failure"), "{text}");
     assert!(!text.contains("reinstall"), "{text}");
 }
 
@@ -1341,8 +1517,6 @@ fn a_landing_whose_config_the_running_build_cannot_read_ends_the_run_with_a_rein
     let report = drain::drain(&stub, limits(9.0), &Quiet).unwrap();
     let text = display::drain(&report);
     assert_eq!(report.stop, Stop::NeedsReinstall, "{text}");
-    assert_ne!(report.stop, Stop::RepeatedFailure);
-    assert_eq!(report.failed_item, None, "{text}");
     assert_eq!(report.landed, 1, "{text}");
     // The job is recorded as landed, and no job line is a failure.
     assert_eq!(report.jobs.len(), 1, "{text}");
@@ -1418,7 +1592,6 @@ fn a_run_with_no_outcome_is_run_again_and_never_retried() {
     assert!(!log.iter().any(|l| l.starts_with("reread")), "{log:?}");
     assert_eq!(report.jobs[0].outcome, "no outcome");
     assert_eq!(report.jobs[1].outcome, "passed");
-    assert_ne!(report.stop, Stop::RepeatedFailure);
     assert_eq!(report.landed, 1);
 }
 
@@ -1483,7 +1656,6 @@ fn a_run_that_needs_accepting_leaves_the_item_queued_without_a_failure() {
     let report = drain::drain(&steps, limits(5.0), &Quiet).unwrap();
     // `a` is run once, not retried; the drain goes on to `b`.
     assert_eq!(*steps.0.borrow(), ["run a", "run b", "land b"]);
-    assert_ne!(report.stop, Stop::RepeatedFailure);
     assert_eq!(report.jobs[0].outcome, "needs accepting");
     assert!(report.notes.iter().any(|n| n.contains("needs accepting")));
     assert_eq!(report.landed, 1);
@@ -1503,8 +1675,7 @@ fn a_landing_failure_is_a_failure_and_no_rating_is_taken_as_success() {
     let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
     // The job passed, so the second attempt lands again; it does not run the job again.
     assert_eq!(stub.log(), ["read a", "run a", "land a", "land a"]);
-    assert_eq!(report.stop, Stop::RepeatedFailure);
-    assert_eq!(report.failed_item.as_deref(), Some("a"));
+    assert_eq!(report.stop, Stop::QueueEmpty);
     assert_eq!(report.landed, 0);
     assert!(report.rating.is_none());
     assert!(!report.target_met());
@@ -1573,7 +1744,7 @@ fn the_json_report_names_the_stop_the_money_the_rating_and_what_is_left() {
     let report = drain::drain(&stub, limits(5.0), &Quiet).unwrap();
     let value = serde_json::to_value(&report).unwrap();
     assert_eq!(value["stop"], "target-met");
-    assert_eq!(value["failed_item"], json!(null));
+    assert!(value.get("failed_item").is_none(), "{value}");
     assert_eq!(value["jobs"][0]["outcome"], "passed");
     assert_eq!(value["jobs"][0]["landing"], "landed");
     assert!(value["jobs"][0]["cost_usd"].as_f64().unwrap() > 0.0);
@@ -2597,8 +2768,6 @@ fn the_real_steps_hold_a_job_on_low_disk_without_a_failure_and_a_later_drain_run
     // First drain: the disk is low, so the job is held. It is not a failure, not rejected, not dispatched.
     let first = drain::drain(&steps, work_everything(), &Quiet).unwrap();
     let text = display::drain(&first);
-    assert_ne!(first.stop, Stop::RepeatedFailure, "{text}");
-    assert_eq!(first.failed_item, None);
     assert_eq!(first.landed, 0);
     assert_eq!(first.jobs.len(), 1, "{text}");
     assert_eq!(first.jobs[0].outcome, "environment: low disk");
@@ -2721,8 +2890,6 @@ fn low_disk_after_the_build_holds_the_job_and_does_not_fail_it() {
 
     let first = drain::drain(&steps, work_everything(), &Quiet).unwrap();
     let text = display::drain(&first);
-    assert_ne!(first.stop, Stop::RepeatedFailure, "{text}");
-    assert_eq!(first.failed_item, None, "{text}");
     assert_eq!(first.landed, 0);
     assert_eq!(first.jobs.len(), 1, "attempted once, not retried: {text}");
     assert_eq!(first.jobs[0].job, held.job);
@@ -2773,7 +2940,6 @@ fn a_later_pass_resumes_the_held_job_from_its_kept_candidate() {
     set_free(&held.athena, 500_000_000_000);
     let second = drain::drain(&steps, work_everything(), &Quiet).unwrap();
     let text = display::drain(&second);
-    assert_eq!(second.failed_item, None, "{text}");
     assert_eq!(second.landed, 1, "{text}");
     assert_eq!(second.jobs.len(), 1, "{text}");
     assert_eq!(second.jobs[0].item, held.job);
@@ -2820,7 +2986,6 @@ fn space_that_stays_short_leaves_the_job_held_and_uses_no_attempt() {
     };
 
     let first = drain::drain(&steps, work_everything(), &Quiet).unwrap();
-    assert_eq!(first.failed_item, None);
     assert_eq!(first.jobs.len(), 1);
     assert_eq!(first.jobs[0].outcome, "environment: low disk");
     assert_eq!(job_ids(&held), std::slice::from_ref(&held.job));
@@ -2828,8 +2993,6 @@ fn space_that_stays_short_leaves_the_job_held_and_uses_no_attempt() {
     // Space stays at 3 GB. The next pass resumes the held job as one new job, which the dispatch gate holds.
     let second = drain::drain(&steps, work_everything(), &Quiet).unwrap();
     let text = display::drain(&second);
-    assert_ne!(second.stop, Stop::RepeatedFailure, "{text}");
-    assert_eq!(second.failed_item, None, "{text}");
     assert_eq!(second.landed, 0);
     // The new job is queued work like any held job, so the pass may meet it again: every line is a hold.
     assert!(!second.jobs.is_empty(), "{text}");
@@ -2849,8 +3012,6 @@ fn space_that_stays_short_leaves_the_job_held_and_uses_no_attempt() {
     // A third pass makes no new job: the same one is held again.
     let third = drain::drain(&steps, work_everything(), &Quiet).unwrap();
     let text = display::drain(&third);
-    assert_ne!(third.stop, Stop::RepeatedFailure, "{text}");
-    assert_eq!(third.failed_item, None, "{text}");
     assert_eq!(third.landed, 0);
     assert_eq!(job_ids(&held), ids, "no new job: {text}");
     assert!(lander.0.lock().unwrap().is_empty());
@@ -2910,7 +3071,6 @@ fn a_landing_whose_config_the_running_build_cannot_read_is_recorded_landed_and_e
     let text = display::drain(&report);
 
     assert_eq!(report.stop, Stop::NeedsReinstall, "{text}");
-    assert_eq!(report.failed_item, None, "{text}");
     assert_eq!(report.landed, 1, "{text}");
     assert_eq!(report.jobs.len(), 1, "only one item was started: {text}");
     assert_eq!(report.jobs[0].outcome, "passed", "{text}");
@@ -3016,7 +3176,6 @@ fn a_change_to_max_concurrency_alone_does_not_invalidate_a_reading() {
     assert_eq!(report.landed, 1, "{text}");
     assert_eq!(report.jobs.len(), 1, "{text}");
     assert_eq!(report.jobs[0].outcome, "passed", "{text}");
-    assert_ne!(report.stop, Stop::RepeatedFailure, "{text}");
     assert_eq!(reads, 1, "no reading was made again");
     assert!(
         !said.iter().any(|l| l.contains("reading again")),
@@ -3042,7 +3201,6 @@ fn a_relevant_config_change_rereads_and_drain_accepts_a_reading_of_the_same_scop
     assert_eq!(report.landed, 1, "{text}");
     assert_eq!(report.jobs.len(), 1, "{text}");
     assert_eq!(report.jobs[0].outcome, "passed", "{text}");
-    assert_ne!(report.stop, Stop::RepeatedFailure, "{text}");
     let records = Records::load(&fx.git, &fx.head()).unwrap();
     assert_eq!(records.jobs[&job].readings.len(), 2);
     assert_eq!(
@@ -3072,7 +3230,6 @@ fn a_reread_whose_scope_changed_is_left_for_a_person_and_is_not_a_failure() {
     // One reading in each scenario: the first, and the one made after the change.
     assert_eq!(reads + readers(&later_calls), 2);
     assert_eq!(report.landed, 0, "{text}");
-    assert_ne!(report.stop, Stop::RepeatedFailure, "{text}");
     assert_eq!(report.jobs.len(), 1, "no second attempt: {text}");
     assert_eq!(report.jobs[0].outcome, "needs accepting", "{text}");
     assert!(
@@ -3082,9 +3239,84 @@ fn a_reread_whose_scope_changed_is_left_for_a_person_and_is_not_a_failure() {
             .is_some_and(|r| r.contains("needs accepting") && r.contains("scope differs")),
         "{text}"
     );
-    assert_eq!(report.queued.len(), 1, "{text}");
+    // The job line and the note name `athena go`; the request is no longer in the queue the next batch
+    // works (see `a_reread_whose_scope_changed_still_waits_for_a_person_in_every_batch`).
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("is left queued") && n.contains("athena go")),
+        "{:?}",
+        report.notes
+    );
+    assert!(report.queued.is_empty(), "{text}");
     let records = Records::load(&fx.git, &fx.head()).unwrap();
     assert_eq!(records.jobs[&job].state(), JobState::Proposed);
+}
+
+#[test]
+fn a_reread_whose_scope_changed_still_waits_for_a_person_in_every_batch() {
+    let fx = Fixture::new();
+    let after = with_job_usd(&test_config(), "51.0");
+    let first = Scenario::default();
+    let invocations = first.invocations.clone();
+    let mut later = Scenario::default();
+    later.reading = reading(
+        &[("src/lib.rs", "modify")],
+        &[
+            ("content", "README.md ends with a greeting line"),
+            ("behavior", "the tests still pass"),
+        ],
+    );
+    let later_calls = later.invocations.clone();
+    let athena = fx.athena(readings_then(first, later));
+    let (job, _) = athena.queue("add a greeting to the readme").unwrap();
+    let job = job.as_str().to_string();
+    // Read under the first settings, then the settings change.
+    athena.go(&job, AcceptedBy::User, &Quiet).unwrap();
+    commit_config(&fx, &after);
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    // Batch 1 reads the request again; the new reading's scope differs, so it is left for a person.
+    let one = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&one);
+    assert_eq!(one.landed, 0, "{text}");
+    assert_eq!(one.jobs.len(), 1, "{text}");
+    assert_eq!(one.jobs[0].outcome, "needs accepting", "{text}");
+    let reads = readers(&invocations) + readers(&later_calls);
+    assert_eq!(reads, 2, "the first reading and the one after the change");
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].state(), JobState::Proposed);
+    assert_eq!(records.jobs[&job].readings.len(), 2);
+
+    // Batch 2 finds the new reading stored under the current settings. It must not run it: the scope still
+    // changed, and nobody has accepted it.
+    assert!(
+        queued_ids(&fx).is_empty(),
+        "the request is held for a person"
+    );
+    let two = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&two);
+    assert!(two.jobs.is_empty(), "{text}");
+    assert_eq!(two.landed, 0, "{text}");
+    assert!(lander.0.lock().unwrap().is_empty());
+    assert_eq!(
+        readers(&invocations) + readers(&later_calls),
+        reads,
+        "nothing was read again: {text}"
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].state(), JobState::Proposed);
+    assert!(records.jobs[&job].job.is_none(), "not dispatched");
+
+    // A person's `athena go` still runs it.
+    let _ = athena.go(&job, AcceptedBy::User, &Quiet);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert!(
+        records.jobs[&job].job.is_some(),
+        "a person's go dispatches the held request"
+    );
 }
 
 #[test]
@@ -3302,11 +3534,9 @@ fn a_reader_that_gives_no_reading_is_read_once_more_then_skipped_with_its_error(
     assert!(committed.contains("Read a request (the reader failed)"));
     assert!(committed.contains("Read a request again (the reader failed)"));
 
-    // The item is skipped with its reason; that is not a repeated failure.
-    assert_ne!(report.stop, Stop::RepeatedFailure, "{text}");
+    // The item is skipped with its reason, and the next item runs.
     // The second item landed and met the target, which is what ended the run.
     assert_eq!(report.stop, Stop::TargetMet, "{text}");
-    assert_eq!(report.failed_item, None);
     assert_eq!(report.jobs[0].item, first.as_str());
     assert_eq!(report.jobs[0].outcome, "not read");
     assert!(
@@ -3354,7 +3584,6 @@ fn a_re_read_that_succeeds_runs_the_item() {
     let text = display::drain(&report);
 
     assert_eq!(reads.load(Ordering::SeqCst), 2, "{text}");
-    assert_ne!(report.stop, Stop::RepeatedFailure, "{text}");
     assert_eq!(report.landed, 1, "{text}");
     assert_eq!(report.jobs.len(), 2, "{text}");
     assert_eq!(report.jobs[0].outcome, "not read");
@@ -3371,6 +3600,319 @@ fn a_re_read_that_succeeds_runs_the_item() {
         [first.as_str()]
     );
     assert!(report.notes.iter().all(|n| !n.contains("skipped")));
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// A deferred request in state proposed: the batch runs it when its latest reading passes the reading checks
+
+/// The request in the words of `UNREAD_FIRST` with no acceptance bullet: its own words give no acceptance, so
+/// the pass has to read it before it can be planned.
+const UNREAD_FIRST_NO_BULLET: &str = "Add the first demo study to the studies directory.";
+
+/// Queues `text` as `ask --later` does and lets a person's `athena go` try to read it. The script makes that
+/// first read fail, so the request is left in state proposed with a recorded reader call and no stored
+/// reading. Returns the job id.
+fn deferred_with_a_failed_first_read(fx: &Fixture, athena: &Athena, text: &str) -> String {
+    let (job, _) = athena.queue(text).unwrap();
+    let _ = athena.go(job.as_str(), AcceptedBy::User, &Quiet);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let record = &records.jobs[job.as_str()];
+    assert_eq!(record.state(), JobState::Proposed);
+    assert!(record.readings.is_empty(), "no reading was stored");
+    assert!(!record.invocations.is_empty(), "the reader was run");
+    job.as_str().to_string()
+}
+
+/// The jobs the lander was asked to land, in order.
+fn landed_jobs(lander: &RecordingLander) -> Vec<String> {
+    lander
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(job, _)| job.clone())
+        .collect()
+}
+
+/// The items of a report in the order they were first started.
+fn items_in_start_order(report: &drain::Report) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for line in &report.jobs {
+        if !seen.contains(&line.item) {
+            seen.push(line.item.clone());
+        }
+    }
+    seen
+}
+
+/// A deferred request whose first read failed is proposed with no stored reading. The batch reads it like a
+/// queued request and runs it: it lands, and the reader ran twice in all (the failed read, the batch's read).
+fn assert_the_batch_runs_a_deferred_request_whose_first_read_failed(request: &str) {
+    use std::sync::atomic::Ordering;
+    let fx = Fixture::new();
+    let (script, reads) = reader_fails_for_first_request(1);
+    let athena = fx.athena(script);
+    let job = deferred_with_a_failed_first_read(&fx, &athena, request);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = real_steps_with(&athena, &lander, &lines);
+
+    let report = drain::drain(&steps, work_everything(), &lines).unwrap();
+    let text = display::drain(&report);
+
+    assert_eq!(report.landed, 1, "{text}");
+    assert_eq!(landed_jobs(&lander), std::slice::from_ref(&job), "{text}");
+    let last = report
+        .jobs
+        .iter()
+        .rev()
+        .find(|j| j.item == job)
+        .unwrap_or_else(|| panic!("the batch did not start the request: {text}"));
+    assert_eq!(last.outcome, "passed", "{text}");
+    assert!(!text.contains("needs accepting"), "{text}");
+    assert!(report.refused.is_empty(), "{text}");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        2,
+        "the failed read, then the batch's read: {text}"
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].readings.len(), 1);
+    assert!(records.jobs[&job].job.is_some(), "dispatched");
+}
+
+#[test]
+fn a_proposed_deferred_request_with_no_stored_reading_is_read_and_run_by_the_batch() {
+    assert_the_batch_runs_a_deferred_request_whose_first_read_failed(UNREAD_FIRST);
+}
+
+#[test]
+fn a_proposed_deferred_request_without_acceptance_words_is_read_and_run_by_the_batch() {
+    assert_the_batch_runs_a_deferred_request_whose_first_read_failed(UNREAD_FIRST_NO_BULLET);
+}
+
+#[test]
+fn a_proposed_deferred_request_with_a_passing_stored_reading_runs_without_a_second_reading() {
+    // This case already ran in a batch before the selection was changed: it guards that the stored reading
+    // is run as it is and not read again.
+    use std::sync::atomic::Ordering;
+    let fx = Fixture::new();
+    let (script, reads) = reader_fails_for_first_request(0);
+    let athena = fx.athena(script);
+    let (job, _) = athena.queue(UNREAD_FIRST).unwrap();
+    // A person's `athena go` reads it; it waits, proposed, with its reading stored.
+    let first = athena.go(job.as_str(), AcceptedBy::User, &Quiet).unwrap();
+    assert!(matches!(first, GoResult::Reread(_)));
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[job.as_str()].state(), JobState::Proposed);
+    assert_eq!(records.jobs[job.as_str()].readings.len(), 1);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&report);
+
+    assert_eq!(report.landed, 1, "{text}");
+    assert_eq!(landed_jobs(&lander), [job.as_str().to_string()], "{text}");
+    assert_eq!(report.jobs[0].outcome, "passed", "{text}");
+    assert_eq!(reads.load(Ordering::SeqCst), 1, "not read again: {text}");
+}
+
+#[test]
+fn a_proposed_request_whose_reading_was_refused_twice_is_read_again_then_skipped_and_not_run() {
+    let fx = Fixture::new();
+    // The reading modifies a file the repository does not have, so the reading rules refuse it each time.
+    let absent = "docs/absent-note.md";
+    let tree = fx
+        .git
+        .run(["ls-tree", "-r", "--name-only", "HEAD"])
+        .unwrap();
+    assert!(!tree.lines().any(|l| l == absent), "{tree}");
+    let mut scenario = Scenario::default();
+    scenario.reading = reading(
+        &[(absent, "modify")],
+        &[
+            ("content", "the absent note gains a line"),
+            ("behavior", "the tests still pass"),
+        ],
+    );
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let (job, _) = athena.queue(UNREAD_FIRST).unwrap();
+    let job = job.as_str().to_string();
+    let _ = athena.go(&job, AcceptedBy::User, &Quiet);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].state(), JobState::Proposed);
+    assert!(records.jobs[&job].readings.is_empty(), "no reading stored");
+    // A refused reading is read once more at once, so the person's `go` made two reader calls.
+    let setup_reads = readers(&invocations);
+    assert_eq!(setup_reads, 2);
+    let lander = RecordingLander::default();
+    let lines = Lines::default();
+    let steps = real_steps_with(&athena, &lander, &lines);
+
+    let report = drain::drain(&steps, work_everything(), &lines).unwrap();
+    let text = display::drain(&report);
+
+    // The batch reads it like a queued request: two reads of two reader calls each, then it is skipped.
+    assert_eq!(readers(&invocations) - setup_reads, 4, "{text}");
+    assert_eq!(report.landed, 0, "{text}");
+    assert!(landed_jobs(&lander).is_empty(), "{text}");
+    let line = report
+        .jobs
+        .iter()
+        .find(|j| j.item == job)
+        .unwrap_or_else(|| panic!("the batch did not try the request: {text}"));
+    assert_eq!(line.outcome, "not read", "{text}");
+    assert!(
+        line.reason
+            .as_deref()
+            .is_some_and(|r| r.contains("base commit")),
+        "{line:?}"
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("skipped") && n.contains(&job)),
+        "{:?}",
+        report.notes
+    );
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[&job].state(), JobState::Proposed);
+    assert!(records.jobs[&job].job.is_none(), "not dispatched");
+}
+
+/// The stored reading `job` has, copied as reading number 2 with `criteria`, committed as a record.
+fn seed_second_reading(
+    fx: &Fixture,
+    job: &str,
+    criteria: Vec<athena_data::records::Criterion>,
+) -> athena_data::records::Reading {
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let mut copy = records.jobs[job].readings[0].clone();
+    copy.n = 2;
+    copy.acceptance_criteria = criteria;
+    commit_records_to(
+        fx,
+        &[AnyRecord::Reading(Box::new(copy.clone()))],
+        "Store a second reading",
+    );
+    copy
+}
+
+#[test]
+fn a_proposed_request_whose_latest_reading_fails_a_reading_check_is_not_run_by_the_batch() {
+    use athena_core::reading::{ReadingCheck, check_reading_text};
+    use athena_data::records::{Criterion, CriterionKind};
+    let fx = Fixture::new();
+    let scenario = rated_scenario();
+    let invocations = scenario.invocations.clone();
+    let athena = fx.athena(scenario.script());
+    let (held, _) = athena.queue(UNREAD_FIRST).unwrap();
+    let (control, _) = athena.queue(UNREAD_SECOND).unwrap();
+    for job in [&held, &control] {
+        athena.go(job.as_str(), AcceptedBy::User, &Quiet).unwrap();
+    }
+    // The latest reading of `held` has a behavior criterion that names no command to run. The reader's own
+    // read would have been refused for it, so it is stored by hand. `control` gets a second reading that
+    // passes.
+    let bad = seed_second_reading(
+        &fx,
+        held.as_str(),
+        vec![Criterion {
+            text: "the producer's report lists the caller-check Grep".into(),
+            kind: CriterionKind::Behavior,
+        }],
+    );
+    assert!(
+        matches!(
+            check_reading_text(&bad, UNREAD_FIRST),
+            ReadingCheck::Refuse(_)
+        ),
+        "the seeded reading must fail a reading check"
+    );
+    let good = seed_second_reading(
+        &fx,
+        control.as_str(),
+        vec![
+            Criterion {
+                text: "the demo study has a pin, claims and an intro".into(),
+                kind: CriterionKind::Content,
+            },
+            Criterion {
+                text: "the tests still pass".into(),
+                kind: CriterionKind::Behavior,
+            },
+        ],
+    );
+    assert_eq!(
+        check_reading_text(&good, UNREAD_SECOND),
+        ReadingCheck::Accept
+    );
+    let reads = readers(&invocations);
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&report);
+
+    assert_eq!(
+        landed_jobs(&lander),
+        [control.as_str().to_string()],
+        "{text}"
+    );
+    assert!(
+        report.jobs.iter().all(|j| j.item != held.as_str()),
+        "the request with the failing reading was not started: {text}"
+    );
+    assert_eq!(readers(&invocations), reads, "nothing was read again");
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    assert_eq!(records.jobs[held.as_str()].state(), JobState::Proposed);
+    assert!(records.jobs[held.as_str()].job.is_none(), "not dispatched");
+    assert!(
+        records.jobs[control.as_str()].job.is_some(),
+        "the control ran"
+    );
+}
+
+#[test]
+fn proposed_and_queued_requests_are_run_in_priority_order() {
+    let fx = Fixture::new();
+    let (script, reads) = reader_fails_for_first_request(1);
+    let athena = fx.athena(script);
+    // Oldest first: a normal request that a person has read (proposed, reading stored), a low one nobody has
+    // read (queued), and last an urgent one whose first read failed (proposed, no reading). Age order alone
+    // would put the urgent one last.
+    let (normal, _) = athena.queue(UNREAD_SECOND).unwrap();
+    athena
+        .go(normal.as_str(), AcceptedBy::User, &Quiet)
+        .unwrap();
+    let low_text = "Add the third demo study to studies/demo/\n- the demo study has a pin, claims and an intro\nPriority: low";
+    let (low, _) = athena.queue(low_text).unwrap();
+    let urgent_text = format!("{UNREAD_FIRST}\nPriority: urgent");
+    let urgent = deferred_with_a_failed_first_read(&fx, &athena, &urgent_text);
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let ids = queued_ids(&fx);
+    assert_eq!(ids, [normal.as_str(), low.as_str(), urgent.as_str()]);
+    let lander = RecordingLander::default();
+    let steps = real_steps(&athena, &lander);
+
+    let report = drain::drain(&steps, work_everything(), &Quiet).unwrap();
+    let text = display::drain(&report);
+
+    assert_eq!(
+        items_in_start_order(&report),
+        [
+            urgent.clone(),
+            normal.as_str().to_string(),
+            low.as_str().to_string()
+        ],
+        "{text}"
+    );
+    assert_eq!(landed_jobs(&lander).first(), Some(&urgent), "{text}");
 }
 
 /// Commits two recorded introspections of one cause, in two jobs, so the error review backfill has a repeated
@@ -3953,8 +4495,6 @@ fn in_flight_row_goes_when_an_item_fails_twice() {
     second.verdict = rejecting_second_criterion();
     let watched = drain_watched(&fx, phased(first, second), |_| {});
     assert_eq!(watched.report.landed, 0);
-    assert_eq!(watched.report.failed_item, None);
-    assert_ne!(watched.report.stop, Stop::RepeatedFailure);
     assert_eq!(
         watched
             .report
@@ -4535,7 +5075,9 @@ fn an_approved_job_still_in_state_proposed_is_run_once_and_not_read_again() {
             "run approved-job-retry"
         ]
     );
-    assert_eq!(report.stop, Stop::RepeatedFailure);
+    // The item is passed over after its second failure; nothing else is queued.
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    assert_eq!(report.landed, 0);
 }
 
 #[test]
@@ -4600,8 +5142,8 @@ fn rejecting_second_criterion() -> serde_json::Value {
 }
 
 /// A drain over the real steps in which the one queued request is rejected twice, with the given verdicts, so
-/// its two attempts are on one line for the scope guard. The report is returned: the item is its failed item
-/// unless the second rejection paused the line.
+/// its two attempts are on one line for the scope guard. The report is returned: the item is passed over
+/// whether or not the second rejection paused the line, and the run ends with an empty queue.
 fn rejected_twice(
     first_verdict: serde_json::Value,
     second_verdict: serde_json::Value,
@@ -4626,8 +5168,7 @@ fn drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_re
     // Two rejections of one criterion: the scope guard pauses the line.
     let (fx, athena, job, first) = rejected_twice(rejecting_verdict(), rejecting_verdict());
     // The second rejection paused the line, so the item is passed over and the batch does not stop on it.
-    assert_eq!(first.failed_item, None);
-    assert_ne!(first.stop, Stop::RepeatedFailure);
+    assert_eq!(first.stop, Stop::QueueEmpty);
     let file = pause_path(&athena.state, &job);
     assert!(file.exists(), "the line is paused");
     let mark: LineMark = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -4645,8 +5186,7 @@ fn drain_real_steps_pass_over_the_item_of_a_line_that_is_still_paused_without_re
     let head = fx.head();
     let ui = Lines::default();
     let report = drain::drain(&steps, work_everything(), &ui).unwrap();
-    assert_eq!(report.failed_item, None);
-    assert_ne!(report.stop, Stop::RepeatedFailure);
+    assert_eq!(report.stop, Stop::QueueEmpty);
     assert_eq!(fx.head(), head, "nothing was read or run");
     let lines = ui.0.lock().unwrap().clone();
     let passed: Vec<&String> = lines
@@ -4683,8 +5223,6 @@ fn drain_real_steps_pass_over_the_item_of_a_line_that_is_flagged_after_two_failu
     assert_eq!(mark.level, "flag");
     // Both attempts were made; the item is then passed over and is not the failed item of the run.
     assert_eq!(report.jobs.iter().filter(|j| j.item == job).count(), 2);
-    assert_eq!(report.failed_item, None);
-    assert_ne!(report.stop, Stop::RepeatedFailure);
     assert!(!display::drain(&report).contains("failed twice"));
     let note = athena.flag_note(&mark);
     assert_eq!(
@@ -4718,8 +5256,7 @@ fn drain_real_steps_do_not_hold_an_item_for_a_stored_pause_that_no_longer_holds(
     let (_fx, athena, job, first) =
         rejected_twice(rejecting_verdict(), rejecting_second_criterion());
     // The flagged line is passed over after its second failure, so the batch does not stop on the item.
-    assert_eq!(first.failed_item, None);
-    assert_ne!(first.stop, Stop::RepeatedFailure);
+    assert_eq!(first.stop, Stop::QueueEmpty);
     assert!(!pause_path(&athena.state, &job).exists());
     let flag: LineMark =
         serde_json::from_slice(&std::fs::read(flag_path(&athena.state, &job)).unwrap()).unwrap();
@@ -6463,6 +7000,8 @@ mod parallel {
         plan: Vec<PlanEntry>,
         /// Jobs whose run is rejected (a retry is `<job>-retry`).
         failing: Vec<&'static str>,
+        /// The closing reason of a failing run; empty when not set.
+        failing_reason: &'static str,
         /// Runs of these jobs wait, for up to five seconds, until two runs are in flight at once.
         meet: Vec<&'static str>,
         /// How long a run takes, in milliseconds.
@@ -6567,14 +7106,19 @@ mod parallel {
             std::thread::sleep(Duration::from_millis(self.run_ms));
             self.log.lock().unwrap().push(format!("end {job}"));
             self.active.fetch_sub(1, Ordering::SeqCst);
-            let outcome = if self.failing.iter().any(|f| job.starts_with(f)) {
+            let failing = self.failing.iter().any(|f| job.starts_with(f));
+            let outcome = if failing {
                 OutcomeState::Rejected
             } else {
                 OutcomeState::Landed
             };
             Run {
                 outcome: Some(outcome),
-                reason: String::new(),
+                reason: if failing {
+                    self.failing_reason.to_string()
+                } else {
+                    String::new()
+                },
                 cost: 0.5,
                 ..Run::default()
             }
@@ -6735,9 +7279,9 @@ mod parallel {
             ..Shared::default()
         };
         let report = run_with(&shared, 2, 9.0);
-        // a is rejected twice (its retry runs alone), b lands beside it, and v is refused with its reason.
-        assert_eq!(report.stop, Stop::RepeatedFailure);
-        assert_eq!(report.failed_item.as_deref(), Some("a"));
+        // a is rejected twice (its retry runs alone) and passed over, b lands beside it, and v is refused with
+        // its reason. Nothing stops the run: the queue just runs out.
+        assert_eq!(report.stop, Stop::QueueEmpty);
         assert_eq!(landed_jobs(&report), ["b"]);
         assert_eq!(report.refused.len(), 1);
         assert_eq!(report.refused[0].id, "v");
@@ -6807,12 +7351,13 @@ mod parallel {
     #[test]
     fn a_landing_with_an_unreadable_config_after_another_workers_stop_is_landed_and_ends_with_reinstall()
      {
-        // Worker one's item `bad` is rejected twice, which stores a repeated failure. Worker two's item
-        // `new` waits for that, then lands a config this build cannot read.
+        // Worker one's item `bad` is rejected twice because the producer's login expired, which stores the
+        // environment stop. Worker two's item `new` waits for that, then lands a config this build cannot read.
         let shared = Shared {
             items: vec!["bad", "new"],
             plan: independent(&["bad", "new"]),
             failing: vec!["bad"],
+            failing_reason: LOGIN_EXPIRED,
             unreadable_for: vec!["new"],
             unreadable_error: NEWER_CONFIG,
             wait_for: vec![("new", "end bad-retry")],
@@ -6830,8 +7375,6 @@ mod parallel {
         );
 
         assert_eq!(report.stop, Stop::NeedsReinstall, "{text}");
-        assert_ne!(report.stop, Stop::RepeatedFailure, "{text}");
-        assert_eq!(report.failed_item, None, "{text}");
         let new = report.jobs.iter().find(|j| j.item == "new").expect("new");
         assert_eq!(
             (new.outcome.as_str(), new.landing.as_str()),
@@ -6847,7 +7390,7 @@ mod parallel {
             "{:?}",
             report.notes
         );
-        // The failure is still visible: in the job lines and in a note naming the item.
+        // The failure is still visible in the job lines.
         assert!(
             report
                 .jobs
@@ -6855,19 +7398,17 @@ mod parallel {
                 .any(|j| j.item == "bad" && j.outcome == "rejected"),
             "{text}"
         );
-        assert!(
-            report.notes.iter().any(|n| n.contains("bad")),
-            "{:?}",
-            report.notes
-        );
         assert!(!text.contains("repeated failure"), "{text}");
     }
+
+    /// The closing reason of a job whose producer's login expired.
+    const LOGIN_EXPIRED: &str = "environment: producer login expired: API Error: 401";
 
     /// What was stored before the unreadable landing.
     #[derive(Clone, Copy, Debug, PartialEq)]
     enum Before {
         Nothing,
-        RepeatedFailure,
+        Environment,
         Requested,
         Rebuilt,
     }
@@ -6929,10 +7470,11 @@ mod parallel {
                 plan: independent(&["new"]),
                 ..shared
             },
-            Before::RepeatedFailure => Shared {
+            Before::Environment => Shared {
                 items: vec!["bad", "new"],
                 plan: independent(&["bad", "new"]),
                 failing: vec!["bad"],
+                failing_reason: LOGIN_EXPIRED,
                 wait_for: vec![("new", "end bad-retry")],
                 ..shared
             },
@@ -6965,7 +7507,6 @@ mod parallel {
     ) {
         let text = display::drain(report);
         assert_eq!(report.stop, Stop::NeedsReinstall, "{what}: {text}");
-        assert_eq!(report.failed_item, None, "{what}: {text}");
         assert!(report.restart.is_none(), "{what}: no restart: {text}");
         let line = report
             .jobs
@@ -7098,7 +7639,7 @@ mod parallel {
         let paths = [Path::Stub, Path::Shared(1), Path::Shared(2), Path::Real];
         let befores = [
             Before::Nothing,
-            Before::RepeatedFailure,
+            Before::Environment,
             Before::Requested,
             Before::Rebuilt,
         ];
@@ -7151,11 +7692,13 @@ mod parallel {
             assert!(!text.contains("Reinstall Athena"), "bound {bound}: {text}");
             assert_eq!(shared.rated_unreadable.load(Ordering::SeqCst), 0);
         }
-        // Another worker's earlier reason stands: the item `bad` still failed twice, and nothing restarts.
+        // Another worker's earlier reason stands: the item `bad` failed twice on an expired login, and
+        // nothing restarts.
         let shared = Shared {
             items: vec!["bad", "new"],
             plan: independent(&["bad", "new"]),
             failing: vec!["bad"],
+            failing_reason: LOGIN_EXPIRED,
             unreadable_for: vec!["new"],
             build_jobs: vec!["new"],
             rebuild: true,
@@ -7165,8 +7708,7 @@ mod parallel {
         };
         let report = run_with(&shared, 2, 9.0);
         let text = display::drain(&report);
-        assert_eq!(report.stop, Stop::RepeatedFailure, "{text}");
-        assert_eq!(report.failed_item.as_deref(), Some("bad"), "{text}");
+        assert_eq!(report.stop, Stop::Environment, "{text}");
         assert!(report.restart.is_none(), "{text}");
         assert!(!text.contains("Reinstall Athena"), "{text}");
     }
@@ -7495,8 +8037,8 @@ mod rebase_recheck {
         assert_eq!(steps.count("land a"), 0, "{:?}", steps.log());
         assert_eq!(steps.count("rerun a"), 2, "{:?}", steps.log());
         assert_eq!(report.landed, 0);
-        assert_eq!(report.stop, Stop::RepeatedFailure);
-        assert_eq!(report.failed_item.as_deref(), Some("a"));
+        // The item is passed over after its second failed landing; nothing else is queued.
+        assert_eq!(report.stop, Stop::QueueEmpty);
         assert!(
             landing_of(&report, "a").starts_with("not landed: checks failed after rebase"),
             "{:?}",
@@ -7548,7 +8090,6 @@ mod rebase_recheck {
         );
         assert_eq!(report.landed, 0);
         assert_eq!(report.stop, Stop::BudgetSpent);
-        assert_eq!(report.failed_item, None, "a budget stop is not a failure");
         let why = "the re-check after the rebase does not fit the budget";
         assert!(landing_of(&report, "a").contains(why), "{:?}", report.jobs);
         let said = lines_of(&lines);
@@ -7923,8 +8464,6 @@ fn in_flight_bound_holds_a_start_in_a_drain_without_a_failure_and_a_later_drain_
     let text = display::drain(&first);
     assert_eq!(first.jobs.len(), 1, "{text}");
     assert_eq!(first.jobs[0].outcome, "environment: low disk");
-    assert_eq!(first.failed_item, None, "{text}");
-    assert_ne!(first.stop, Stop::RepeatedFailure, "{text}");
     assert_eq!(first.landed, 0);
     let records = Records::load(&fx.git, &fx.head()).unwrap();
     assert_eq!(

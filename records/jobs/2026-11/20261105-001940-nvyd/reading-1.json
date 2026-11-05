@@ -1,0 +1,146 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261105-001940-nvyd",
+  "n": 1,
+  "at": "2026-11-05T00:20:24.391314826Z",
+  "invocation_seq": 1,
+  "base_commit": "c4a8f9490e796cebee34ef259ee74db1fb051ba8",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Let the drain run proposed deferred requests whose reading passes checks",
+  "summary": "Retry of job 20261105-001814-tw8d (dispatched, never verified, no findings, no candidate, so nothing to fix or keep): `athena drain` should run a request queued by `ask --later`, the Steward or Hestia whose latest reading is proposed and passes every reading check, in priority order. A changed-scope re-read after a settings change still waits for a person. Audience: the operator relying on unattended batches.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New drain tests, and cargo test, clippy and fmt pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the drain running or leaving the item, through tests."
+    },
+    {
+      "id": "root-cause",
+      "how": "The producer finds where proposed items are skipped and fixes it there."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the drain selection."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and the CHANGELOG entry are written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261105-001814-tw8d left no candidate and no findings, so its work is neither kept nor dropped. Its scope is reused: drain.rs, tests/drain.rs, steward.rs, CHANGELOG.md. Its out_of_scope items are carried over unchanged.",
+    "Code survey: I read crates/athena-cli/src/drain.rs and crates/athena-core/src/steward.rs. In steward.rs, `queued_work` already lists Queued and Proposed jobs on DRAINED_CHANNELS (steward and cli) and marks proposed ones `read`. In drain.rs, `queue()` builds items from `approved_work`, `queued_work` and `interrupted_work`. `run_job` skips the second reading for a pre-read item. `run.needs_accepting` maps to outcome `needs accepting`, which is not a failure. `athena-core/src/run/mod.rs` `go` takes `AcceptedBy::Flag` from the drain, so a re-read with the same scope is accepted at once and a changed scope is not. The entry point is `drain()` in drain.rs. Selection and ordering run through the plan, then `pick_ahead`. No records or data files are added, so `check_record_file`, `AnyRecord` and the round-trip test are not involved. The measurement is the drain's own report lines in crates/athena-cli/tests/drain.rs.",
+    "The listing code already appears to include proposed requests, so the producer must first find where a proposed, deferred, checks-passing request is actually skipped. Candidates are plan selection, the reading-check gate before the run, and priority ordering of read items. It then fixes that root cause, not the listing.",
+    "This change does not add a refusal rule. It runs more items and refuses none, so no newly-refused rate applies.",
+    "Changes to athena.toml, defaults.toml or .github/workflows are not needed. They stay untouched and are listed in out_of_scope."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A new test in crates/athena-cli/tests/drain.rs has a deferred request (channel from `ask --later`) in state proposed whose latest reading passes the reading checks. The drain runs it and reports it as passed. Check with `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A new test in crates/athena-cli/tests/drain.rs has a request re-read with a changed scope after a settings change. The drain does not run it, reports outcome `needs accepting`, counts no failure, and does not stop the batch. Check with `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows a proposed deferred request whose latest reading fails a reading check is not run by the batch. Another test shows a mixed run of proposed and queued items goes in priority order, with the urgent one before the lower priority one. Check with `cargo test -p athena-cli --test drain`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`git diff` touches only crates/athena-cli/src/drain.rs, crates/athena-cli/tests/drain.rs, crates/athena-core/src/steward.rs (only if selection lives there) and CHANGELOG.md. It shows no change to athena.toml, defaults.toml or .github/workflows, and no change to the reading checks themselves.",
+      "kind": "content"
+    },
+    {
+      "text": "The module docs in crates/athena-cli/src/drain.rs (the bullet 'A read request stays queued') state the new rule, and CHANGELOG.md has an entry for it.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo test`, `cargo clippy` and `cargo fmt --check` pass for the workspace.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    }
+  ],
+  "out_of_scope": [
+    "Changing the reading checks themselves",
+    "Changing `athena go` or `athena ask` behavior",
+    "Changing the rule that a changed-scope re-read needs a person",
+    "Running the 42 existing proposed requests",
+    "Changes to athena.toml, defaults.toml or workflows"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.3,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1900.0,
+        "p90": 4300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.67,
+      "p_user_intervenes": 0.08719101123595505,
+      "cost_usd": {
+        "p10": 0.5584188368931989,
+        "p50": 1.3460483,
+        "p90": 3.8720571843369203
+      },
+      "wall_time_s": {
+        "p10": 544.4413564344393,
+        "p50": 1980.2520507261522,
+        "p90": 4206.327679514252
+      }
+    }
+  },
+  "departures": "The drain code is large and the gap is not yet located, so cost and time sit slightly above the reference.",
+  "hard_reason": "It changes the drain's item selection, which is the run pipeline and decides which work runs unattended, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
