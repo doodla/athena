@@ -9,6 +9,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The gate now detects the three ways a job's records could be written by hand (design §16.2): a whole job
+  written across two commits, one forged commit that lands a job that was dispatched but never closed, and a
+  hand-made proposal closed with `athena close`. A new check, `jobs::provenance`, runs for a commit being made
+  (the commit-msg hook, Athena's own commits and `athena close`) and judges a job the commit closes against
+  the links Athena's writers always leave: a request record received before each reading, the reader
+  invocation the reading names, and (when its base commit is held) the defaults hash that `defaults.toml`
+  has there; for a landed job also the dispatch fields of `job.json`, hashes equal to the accepted reading's,
+  the `brief-producer.md` that `brief_sha256` names, and times in the order of a real run (no non-reader
+  invocation before the dispatch, the verifier after the producer, the outcome after the verifier). Each
+  refusal names the missing or contradicting record and the command that writes it. No record field is
+  added. Limits: records are still unsigned, so a forger who writes every link consistently passes, and a
+  forged commit for a dispatched job that carries current timestamps and copies nothing passes (it is caught
+  only when records are copied, back-dated or contradict the dispatch). A commit made with `--no-verify`
+  is not judged, because the per-pull-request CI check does not run provenance yet (a follow-up). Commits
+  already in history, including main after the cutover, and the history walk are not re-judged. A reading
+  from a build that recorded no request or reader invocation can no longer be closed with `athena close`.
 - A read-only evidence snapshot, written at dispatch, and `athena status --snapshot <dir>`. The producer's
   working copy has no `records/` or history by design, so a check of real records (how many jobs landed, what
   an earlier job's records say) had nothing to read. Dispatch now copies `records/`, `landings/` (the tree's
