@@ -1,0 +1,471 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-195941-prtf",
+  "round": 1,
+  "at": "2026-11-05T00:49:37.225730765Z",
+  "invocation_seq": 5,
+  "approach": "At dispatch, after the disk gates and before the producer brief is built, `Athena::dispatch` (crates/athena-core/src/run/mod.rs ~line 898) calls a new `snapshot::write(git, head, <state>/jobs/<id>/evidence)`. It copies `records/` at `head`, a merged `landings/` (the tree's plus the `athena/records` tip's, the same two sources `Records::load` uses), and a `history.json` (base commit plus the last 200 first-parent commits: hash, commit time, subject, trailers). It then locks the directory read-only, root-proof, with the write bits plus `chattr +i` and a write probe that fails the dispatch if the lock does not hold. `Records::load` is split so it and a new `Records::load_dir` share one `from_parts` assembly. That makes records read from the snapshot and from git go through the same code, so the throughput computation is untouched and its text matches. New `producer_brief_with_evidence` and `verifier_brief_with_evidence` (the old functions delegate with None, so no struct literal changes) add an \"Evidence snapshot\" section only when a path is given. The stored briefs show `<state>/jobs/<id>/evidence`. The text sent to the agent has the real path substituted, so no machine path is committed. The agent hook gets a read-only exemption: `Policy` gains `evidence: Option<PathBuf>` (serde default), set for producer and verifier only. `HookSpec` gains `read_dirs`, which the Claude driver passes as `--add-dir`. `athena status --snapshot <dir>` is handled in `main.rs` before `open()`, so it needs no repository. It calls `snapshot::status(dir)`, which prints job counts, a history summary and the unchanged `Throughput::text()`.",
+  "decisions": [
+    {
+      "choice": "Throughput parity comes from one shared assembly path: `Records::load` and `Records::load_dir` both call a new `Records::from_parts(RecordSet, landing files)`. `Throughput::compute` is not touched.",
+      "reason": "`Throughput::compute(&Records)` reads only `Records`, including `records.landings` (status.rs ~929, `landing_record_time`). Identical records give identical text. One assembly path means the snapshot cannot drift from git. Criterion 7 forbids changing the throughput computation.",
+      "rejected": [
+        {
+          "option": "A second parser for snapshot files",
+          "why": "It could drift from `Records::load` and break the identical-text requirement."
+        },
+        {
+          "option": "Rebuild a git repository from the snapshot and call `Athena::status`",
+          "why": "`Athena::status` needs an Athena, the registry, config and code-health. The command must work with no repo or records/ in the current directory."
+        }
+      ]
+    },
+    {
+      "choice": "The snapshot lives at `<state>/jobs/<id>/evidence` (a sibling of `work` and `live`). `snapshot::write` copies `records/`, `landings/` and `history.json`, then locks it. `lock` clears write bits, tries `chattr +i`, and probes by creating a file and opening an existing one for write. If either probe succeeds it unlocks and returns an error, and dispatch fails before the prediction commit, so nothing is committed.",
+      "reason": "This mirrors `Snapshot::lock` in athena-git/src/snapshot.rs (lines 154-197), which is root-proof and already needed by the verifier's snapshot. Removal already works: `pin::remove_tree` calls `athena_git::snapshot::unlock_dir` before `remove_dir_all` (pin.rs 221-229), so `clean_job` and `JobWorktree` clean it up.",
+      "rejected": [
+        {
+          "option": "Mode bits only",
+          "why": "Root bypasses them. The behavior-evidence default requires a protection that holds for root."
+        },
+        {
+          "option": "Call `Snapshot::lock` itself",
+          "why": "It needs a git `Snapshot` value. A plain `lock_dir` in athena-core avoids touching a file outside the expected set; `unlock_dir` is reused."
+        },
+        {
+          "option": "On lock failure, warn and continue",
+          "why": "The brief would say read-only for something that is not. Dispatch fails instead, as the verifier lock already does."
+        }
+      ]
+    },
+    {
+      "choice": "The stored brief carries the placeholder `<state>/jobs/<id>/evidence`. The text sent to the agent has that exact string replaced by the real path. `brief_sha256` is the hash of the stored brief.",
+      "reason": "The producer brief is committed verbatim (`brief-producer.md`, run/mod.rs 979), and the verifier brief is stored with the diff elided (verification.rs 179-182). The `<state>` placeholder is already the redactor's name for the state root (lib.rs `redactor`). Nothing recomputes `brief_sha256`; I grepped for it.",
+      "rejected": [
+        {
+          "option": "Put the real path in the stored brief",
+          "why": "It commits a machine path (the public default)."
+        },
+        {
+          "option": "A redactor pass over the stored brief",
+          "why": "The hash would no longer match the stored text."
+        }
+      ]
+    },
+    {
+      "choice": "Briefs gain `producer_brief_with_evidence(inputs, Option<&str>)` and `verifier_brief_with_evidence(inputs, plan, Option<&str>, inline_diff)`. `producer_brief` and `verifier_brief_with_plan` delegate with None. The frames (PRODUCER_FRAME, VERIFIER_FRAME) are not edited.",
+      "reason": "There are about 12 `ProducerInputs` and `VerifierInputs` struct literals, in briefs.rs tests and reading.rs:5810; a new field would touch them all. The producer and verifier prompt sets are at 1257 of 1300 and 1298 of 1300 tokens (system-facts), so a frame edit risks `system_facts_budgets_match_computed`. Briefs sit outside those budgets.",
+      "rejected": [
+        {
+          "option": "A new `evidence` field on both input structs",
+          "why": "It forces edits to every literal for no gain."
+        },
+        {
+          "option": "Put the instruction in the frames",
+          "why": "It pushes the token budgets over."
+        }
+      ]
+    },
+    {
+      "choice": "The agent hook change is `Policy.evidence: Option<PathBuf>` with `#[serde(default, skip_serializing_if = \"Option::is_none\")]`. `confine` gets a `read_extra` argument. A resolved path (symlinks followed) under the canonical evidence dir passes only when `write` is false. `agent_spec` sets it for Producer and Verifier only, and only when the dir exists. `HookSpec.read_dirs` makes the Claude driver add `--add-dir`.",
+      "reason": "`athena-cli/src/hooks.rs::pre_tool_use` deserializes `Policy` from the file, so a defaulted optional field needs no change there and old policy files still parse. Reads, Grep and Glob, and `ls`-style arguments get the exemption. Writes and redirects never do. `cargo run -- status --snapshot <dir>` already passes: cargo arguments after the subcommand are not path-confined (policy.rs 623-652).",
+      "rejected": [
+        {
+          "option": "A symlink to the evidence inside the working copy",
+          "why": "`confine` canonicalizes and would deny it, and it puts something in the candidate tree."
+        },
+        {
+          "option": "Allow any sibling `evidence` directory of the root by convention",
+          "why": "It is implicit and weak. An explicit, canonicalized field is checkable."
+        },
+        {
+          "option": "Copy the evidence into the working copy",
+          "why": "Out of scope: records/ must stay out of the producer's working copy."
+        }
+      ]
+    },
+    {
+      "choice": "history.json is `{\"base\": <head>, \"commits\": [{hash, committed_at, subject, trailers}]}` from a new `Git::log_first_parent(rev, limit)` (athena-git/src/lib.rs). It uses `git log --first-parent -n200` with `%H`, `%cI`, `%s` and `%(trailers:only,unfold)`, parsed like `log_history`.",
+      "reason": "The existing `Git::log_history` (lib.rs 905) has only the short hash and a `YYYY-MM-DD` date, and no trailers. The brief asks for hash, commit time, subject and trailers.",
+      "rejected": [
+        {
+          "option": "Reuse `log_history`",
+          "why": "It lacks commit time and trailers, and it appends changed paths."
+        }
+      ]
+    },
+    {
+      "choice": "The status view is a smaller `SnapshotView` (snapshot dir, base, history count and newest and oldest commit, jobs by state, throughput, invalid records) in snapshot.rs. Its display is `display::snapshot_status`, and the throughput block is `Throughput::text()`, printed the same way as display.rs 1076-1078.",
+      "reason": "It gives the producer and verifier what real-records checks need without a repository. status.rs is already 142 KB, so the new code goes in snapshot.rs; status.rs gets only the parity test.",
+      "rejected": [
+        {
+          "option": "Make `StatusView` fields optional and reuse `Athena::status`",
+          "why": "It would touch every consumer of `StatusView` and its JSON."
+        }
+      ]
+    },
+    {
+      "choice": "Planner, critic and reader briefs are not changed.",
+      "reason": "The criteria name only the producer and verifier briefs. The reader, planner and critic get a plain copy without records (system-facts). `planning.rs`, `admission.rs` and `refusal_corpus.rs` change only to add `evidence: None` to existing `Policy` literals.",
+      "rejected": [
+        {
+          "option": "Also name the snapshot in the planner and reader briefs",
+          "why": "Beyond the criteria, and it would widen the sandbox for roles that do not run commands."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `Git::log_first_parent(rev, limit)` returning hash, committer time (strict ISO), subject and trailer lines per commit, with a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/snapshot.rs",
+      "action": "create",
+      "purpose": "Evidence snapshot: `evidence_dir`, `write` (copy records/, merged landings/, history.json; lock), `lock`, `HistoryFile`, `read` of a dir, `SnapshotView` and `status(dir)`; unit tests, including the unlocked-then-locked write test.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "`pub mod snapshot;` and a line in the module docs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Split `Records::load` into file gathering plus `Records::from_parts`; add `Records::load_dir`; expose a landing-file reader that merges the tree and the records-branch tip.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "In `dispatch`, call `snapshot::write` before the producer brief; build the stored brief with the placeholder path; send the real-path text to the producer (`producer_prompt`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Give the verifier brief the evidence path when the dir exists: placeholder in the stored `brief-verifier.md`, real path in `vbrief`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "`agent_spec` sets `Policy.evidence` and `HookSpec.read_dirs` for Producer and Verifier when the dir exists; add a test on the generated policy per role.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Add `evidence: None` to the `Policy` literal at line 219. Nothing else.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Add `evidence: None` to the three test `Policy` literals. Nothing else.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Test-only: add the throughput parity test (criterion 2). The computation is unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the dispatch evidence test (criterion 1): path, read-only, records and history content, stored brief placeholder, verifier prompt.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Compile fix only: add `evidence: None` to the two `Policy` literals (lines 1030, 1190). No case changes. This file is not in the expected deliverables.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `producer_brief_with_evidence` and `verifier_brief_with_evidence`, an evidence-section helper and the `<state>` placeholder builder; old functions delegate with None; tests for criterion 4.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "action": "modify",
+      "purpose": "`Policy.evidence` (serde default); `confine` gets a read-only extra root; callers pass it only when not writing; tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/lib.rs",
+      "action": "modify",
+      "purpose": "`HookSpec.read_dirs: Vec<PathBuf>`, documented.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "purpose": "`command_line` appends `--add-dir <dir>` for each `read_dirs` entry; update the test `HookSpec` literal; add a test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "`Status` gets `--snapshot <DIR>` (conflicts with `job`); handle it before `open()` and print `snapshot::status` as text or JSON.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "`snapshot_status(&SnapshotView)` that prints the history summary and `Throughput::text()` as `status` does.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/status_snapshot.rs",
+      "action": "create",
+      "purpose": "Binary test for `athena status --snapshot` run with no records/ or repository in the cwd (criterion 3).",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-cli/tests/live.rs",
+      "action": "modify",
+      "purpose": "Compile fix: add `evidence: None` to the `Policy` literal and `read_dirs: vec![]` to the `HookSpec` literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "New bullet under `## [Unreleased]` / `### Added` for the evidence snapshot and `athena status --snapshot`.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "athena-git/src/lib.rs: add `HistoryEntry`-style struct and `Git::log_first_parent(rev, limit)` using `git log --first-parent -n<limit> --format=%x01%H%x02%cI%x02%s%x02%(trailers:only,unfold)%x03`; parse trailer lines into `Key: value` strings; add a unit test in the existing test module (commits with and without trailers).",
+    "athena-core/src/store.rs: add `pub(crate) fn landing_files(git, treeish) -> Vec<(String, Vec<u8>)>` (blobs under `landings/`), have `landings_in` use it, and add `landing_files_with_tip(git, treeish)` (tree plus `RecordsWriter::new(git).tip()`). Split `Records::load` into `RecordSet::load` plus the landing files, then a new `Records::from_parts(set: RecordSet, landing_files: Vec<(String, Vec<u8>)>)` that holds all the existing assembly, sort and dedup. Add `Records::load_dir(dir)` that builds a `RecordSet` from `dir/records/**` (path kept as `records/...`, parsed with `check_record_file`) and the landing files from `dir/landings/*`, then calls `from_parts`.",
+    "athena-core/src/snapshot.rs (new) and lib.rs: add `pub mod snapshot;`. Write `evidence_dir(state, job)`, `write(git, treeish, dest)` (remove any old dir via `pin::remove_tree`; copy `records/` blobs and merged `landings/` blobs; write `history.json` from `log_first_parent(treeish, 200)`; then `lock`), `lock(dir)` (clear write bits, best-effort `chattr -R +i`, probe a new file and an existing file, unlock and `bail!` if a probe succeeds), `HistoryFile` (serde), `read`, `SnapshotView` and `status(dir)` (reads via `Records::load_dir`; counts `job.state()` names; throughput from `Throughput::compute`; history summary; invalid records). Add unit tests: unlocked copy accepts a write, the locked copy refuses one for the same user (fail, not skip, if it holds), 200-commit cap, rewrite over a locked dir, and a missing-dir error.",
+    "athena-agent/src/policy.rs: add `evidence: Option<PathBuf>` to `Policy` (serde default, skipped when None); give `confine` a `read_extra: Option<&Path>` that returns Ok for a resolved path under it only when `!write`; canonicalize the evidence root once in `evaluate` and pass it through `check_bash`, `check_segment`, `check_cargo` (--manifest-path) and `check_redirect` for read checks only. Add `evidence: None` to the test literals and add tests: read, Grep and Glob inside evidence allowed; Write, Edit and redirects into it denied; `..` and symlink escapes denied; an `evidence-other` sibling denied; an old JSON policy without the field parses.",
+    "athena-agent/src/lib.rs and claude.rs: add `read_dirs: Vec<PathBuf>` to `HookSpec`; `command_line` adds `--add-dir <dir>` per entry; update the claude.rs test literal; add a test that the flag appears only with entries.",
+    "athena-context/src/briefs.rs: add `pub fn evidence_placeholder(job: &str) -> String` (`<state>/jobs/<job>/evidence`), an `evidence_section(out, path)` helper, `producer_brief_with_evidence(inputs, evidence: Option<&str>)` and `verifier_brief_with_evidence(inputs, plan, evidence, inline_diff)`; make `producer_brief` and `verifier_brief_with_plan` delegate with None. The section names the path, says what it holds (records/, landings/, `history.json` of the last 200 first-parent commits with hash, commit time, subject, trailers), says it is read-only and that real-records checks use it (Read/Grep/Glob and `athena status --snapshot <path>`), and keeps the line that the working copy has no records/. Add the criterion 4 tests and a test that None gives the old output.",
+    "athena-core/src/run/mod.rs: in `dispatch`, after `start_hold`/`clear_hold`, preflight and the seeds, call `snapshot::write(&self.git, head, &evidence_dir)?` (a failure bails before any commit). Build `brief` with `producer_brief_with_evidence(.., Some(&placeholder))`. Use `brief` for the commit and hash, and set `producer_prompt` from `brief.replace(&placeholder, &real_path)` (also on the planned path via `producer_prompt_with_plan`). Add `evidence: None` where `Policy` literals exist in this crate's non-test code if any (planning.rs 219).",
+    "athena-core/src/run/verification.rs: compute `evidence_dir`; if it exists, pass `Some(placeholder)` to the stored `brief-verifier.md` call (line 181) and `Some(real)` to the `vbrief` call (line 199).",
+    "athena-core/src/reading.rs: in `agent_spec`, for `Role::Producer | Role::Verifier` when `<job_dir>/evidence` exists, set `Policy.evidence` and `HookSpec.read_dirs` to it; otherwise `None` and empty. Add a test on the policy file written per role. Update the `HookSpec` literal.",
+    "Compile fixes: add `evidence: None` to the `Policy` literals in run/planning.rs, admission.rs (three), tests/refusal_corpus.rs (two) and athena-cli/tests/live.rs, and `read_dirs: vec![]` to the live.rs `HookSpec`.",
+    "athena-core/src/run/tests.rs: add `dispatch_writes_a_read_only_evidence_snapshot_named_in_the_producer_brief` using `athena_with` and a script that records, inside the Producer turn, the extracted path, a failed create, a failed append to an existing file, the file bytes, and `history.json`; capture the Verifier prompt too. Assert against `git show` of the base commit and the committed `brief-producer.md` and `brief-verifier.md`.",
+    "athena-core/src/status.rs tests: add the throughput parity test (scratch repo from `timed_job` records plus landing JSON under `landings/`; compare `Throughput::compute(Records::load)` text with `snapshot::status` text; assert the 'found for each' basis line).",
+    "athena-cli: in main.rs add `#[arg(long, value_name = \"DIR\", conflicts_with = \"job\")] snapshot: Option<PathBuf>` to `Status` (help text: reads records and history from an evidence snapshot, needs no repository). In the `Command::Status` arm, handle `Some(dir)` first, before `open(false)`: call `athena_core::snapshot::status(&dir)?` and print JSON or `display::snapshot_status`. Add `display::snapshot_status` in display.rs. Create tests/status_snapshot.rs with the lifecycle landing, the binary run in an empty cwd, the JSON equality with `athena.status()`, the missing-dir error and the clap conflict.",
+    "CHANGELOG.md: add the Unreleased/Added bullet.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`; check `git diff --stat` for athena.toml, defaults.toml, workflows, records/, and for the throughput computation lines; grep the added lines for absolute home or state paths."
+  ],
+  "risks": [
+    {
+      "risk": "The immutable attribute (`chattr +i`) may not hold on the CI or sandbox file system, so dispatch would fail there.",
+      "mitigation": "The lock probes writes and fails dispatch loudly when the lock does not hold (it never silently skips), the same as the verifier's lock, which existing tests already depend on. The error text tells the user to run as a user the bits bind, or on a file system that supports the immutable attribute."
+    },
+    {
+      "risk": "The Claude host may ignore `--add-dir`, or reject it, under `--restricted`. Agents would then be unable to read the evidence despite the hook allowing it.",
+      "mitigation": "`--add-dir` is added only when `read_dirs` is non-empty (producer and verifier with an evidence dir). The open question flags it for the user. The brief section tells agents the tools to use, and `athena status --snapshot` via `cargo run` stays reachable because cargo arguments are not path-confined."
+    },
+    {
+      "risk": "The read exemption could widen the sandbox, for example by symlink tricks or a sibling directory sharing the prefix.",
+      "mitigation": "`confine` resolves symlinks and `..` first (policy.rs 406-425) and compares to the canonicalized evidence root with `starts_with` on path components. The exemption applies only when `write` is false. Tests cover `..`, symlink escape, the `evidence-other` sibling, and write and redirect denial."
+    },
+    {
+      "risk": "The `Records::load` refactor changes behavior for every caller.",
+      "mitigation": "Keep `from_parts` as the only assembly path. `load` keeps its landing sort and dedup. The parity test compares full throughput text on records with landings in both the tree and (where the fixture supports it) the records-branch tip."
+    },
+    {
+      "risk": "The copy of a large `records/` directory costs disk and time on every dispatch.",
+      "mitigation": "The copy is raw blob bytes, with no parsing, written after the disk gates. Only `records/` and `landings/` are copied, not the repo. The size is not measured here (an estimate: small next to a build)."
+    },
+    {
+      "risk": "A longer producer brief could hit a size or token limit.",
+      "mitigation": "Section text is short, added only with evidence, and the frames are not touched. The existing size-cap test (briefs.rs ~3767) compares the diff-inlining cases and is rerun by criterion 5."
+    },
+    {
+      "risk": "A resumed or retried dispatch finds an old locked evidence dir.",
+      "mitigation": "Dispatch is retried with `athena retry`; `snapshot::write` removes any earlier evidence dir through `remove_tree` (unlock first) before copying. The test covers a rewrite."
+    },
+    {
+      "risk": "The real state path could reach a committed record through a command line or brief.",
+      "mitigation": "The producer's `commands_run` are redacted with `<state>` already (lib.rs `redactor`). Stored briefs hold the placeholder, and a test asserts the temp path is absent from `brief-producer.md` and `brief-verifier.md`."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Records::load, refactored into load plus from_parts",
+      "dependent": "All callers of `Records::load` (status.rs `status`/`trace`/`mistakes`, run/mod.rs, hestia, manage, reading.rs and others) read the assembled `Records`",
+      "kind": "code",
+      "test": "New parity test in status.rs (criterion 2) and the existing store.rs tests `plans_and_critiques_are_filed_under_their_job_and_do_not_close_it` and `replay_record_loads_into_its_job`. `load` keeps its order, sort, dedup and landing sources.",
+      "reason": null
+    },
+    {
+      "name": "Throughput computation (must stay unchanged)",
+      "dependent": "`Throughput::compute` / `Throughput::text` (status.rs 929-1032), used by `Athena::status`, the throughput review in hestia.rs and display.rs 1076",
+      "kind": "code",
+      "test": "The existing throughput tests in status.rs (3254-3560) pass unchanged. The diff touches none of the computation.",
+      "reason": null
+    },
+    {
+      "name": "Policy struct (new optional `evidence` field)",
+      "dependent": "crates/athena-cli/src/hooks.rs `pre_tool_use` deserializes `Policy` from the policy file written by `agent_spec`",
+      "kind": "code",
+      "test": "The policy.rs tests plus a serde round-trip test that an old JSON without `evidence` parses. The field is `#[serde(default)]`, so hooks.rs needs no change.",
+      "reason": null
+    },
+    {
+      "name": "Policy struct literals",
+      "dependent": "Literals of `Policy { .. }` in admission.rs (688, 817, 901), run/planning.rs 219, reading.rs 358, athena-cli/tests/live.rs 170, athena-core/tests/refusal_corpus.rs (1030, 1190) and policy.rs tests (947, 1217)",
+      "kind": "code",
+      "test": "Each gains `evidence: None` and compiles; `cargo test` covers them. refusal_corpus.rs is not in the expected deliverables; it changes only for these two literals, and no case or rule changes there.",
+      "reason": null
+    },
+    {
+      "name": "HookSpec.read_dirs and the `--add-dir` argument",
+      "dependent": "Literals of `HookSpec { .. }`: reading.rs 391, claude.rs 515, athena-cli/tests/live.rs 178; and `ClaudeCodeDriver::command_line` / `check_hermetic` in claude.rs",
+      "kind": "code",
+      "test": "claude.rs test `every_command_line_is_hermetic` still passes. A new claude.rs test shows `--add-dir <dir>` appears only when `read_dirs` is non-empty.",
+      "reason": null
+    },
+    {
+      "name": "agent_spec (sets `evidence` and `read_dirs` for Producer and Verifier only)",
+      "dependent": "`Athena::agent_spec` callers: producer.rs 156, verification.rs 200, planning.rs, reading.rs (reader), invocation.rs, introspect.rs, steward, audience, auditor",
+      "kind": "code",
+      "test": "Other roles get `evidence: None` and no `read_dirs`, as shown by a reading.rs test on the generated policy file per role (step 8). Planner, reader and steward behavior is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "Producer brief text and the stored brief",
+      "dependent": "Producer prompt and `brief-producer.md` consumers: run/producer.rs `producer_loop` (`attempt_brief`), send_back.rs, `Job.brief_sha256` (no recomputation found by grep), records readers of briefs (`Records.briefs`)",
+      "kind": "code",
+      "test": "The criterion 1 test checks the stored brief has the `<state>` placeholder and the sent prompt has the real path. The existing run/tests.rs and run_pin_tests.rs tests that read prompts still pass; the section is added only when evidence exists.",
+      "reason": null
+    },
+    {
+      "name": "Verifier brief text",
+      "dependent": "Verifier brief consumers: verification.rs 179-199 (stored and sent), resume paths (`resume_candidate`) that reach `verification_stage`",
+      "kind": "code",
+      "test": "The evidence path is passed only when the dir exists, so a resume after cleanup omits the section. The criterion 1 test covers the verifier prompt, and the briefs tests cover the pure functions.",
+      "reason": null
+    },
+    {
+      "name": "New locked directory `<state>/jobs/<id>/evidence`",
+      "dependent": "`crate::state::StateDir::clean_job`, `JobWorktree::remove` and `pin::remove_tree`",
+      "kind": "code",
+      "test": "snapshot::tests has a rewrite-over-locked-dir case and a clean_job-removes-evidence case.",
+      "reason": "`remove_tree` runs `unlock_dir` and `make_writable` before `remove_dir_all` (pin.rs 221-229), and `clean_job` calls the remover on the whole job dir. `JobWorktree` removes only `work` and `produce`. A second dispatch of the same job calls `snapshot::write`, which unlocks and replaces the old dir."
+    },
+    {
+      "name": "Prompt-set budgets and the Producer snapshot fact",
+      "dependent": "Docs `docs/system-facts.md` ('Producer snapshot': records/ and history absent; budgets), the prompt-set budgets in `crates/athena-context/src/lib.rs`, `crates/athena-cli/tests/budgets.rs`",
+      "kind": "rule",
+      "test": "`system_facts_budgets_match_computed` (budgets.rs) passes unchanged.",
+      "reason": "The producer and verifier frames and sections are not edited; briefs sit outside the budgeted sets. The working copy still has no records/, so the fact stays true. The evidence snapshot is outside the working copy."
+    },
+    {
+      "name": "Free disk used by the new copy",
+      "dependent": "Disk gate and holds: crates/athena-core/src/disk.rs (`disk_gate`, `start_hold`, `verifier_environment_problem`) and the 10 GB free-space requirement named in the request",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The copy of records/ and landings/ is written after the disk gates in `dispatch` and is small next to a build. Disk hygiene is out of scope and disk.rs is not touched."
+    },
+    {
+      "name": "Refusal and matching rules of readings and plans",
+      "dependent": "Refusal corpus `crates/athena-core/tests/refusal_corpus.rs` (parser_cases, request_citing_cases, reading_check_cases, plan_side `dependents-*` cases, open-question cases) and `INPUT_FORMS`",
+      "kind": "rule",
+      "test": "`cargo test -p athena-core --test refusal_corpus` runs inside criterion 5 and is expected to behave as before; I cite no case result.",
+      "reason": "The plan adds no parser, stem list, stop list or reading check. The only new matching rule is the agent path exemption in athena-agent policy.rs, which is a tool-policy rule outside the corpus; it is tested by the policy tests. The corpus file only gets `evidence: None` in two literals."
+    },
+    {
+      "name": "Banned words and personal data in new code, tests, docs",
+      "dependent": "Boundary scan (`boundary_words()` in xtask/tests/policy.rs) and the `[personal_data]` allow-list in athena.toml",
+      "kind": "rule",
+      "test": "The xtask policy tests under `cargo test` (criterion 5).",
+      "reason": "New text uses `<state>` and temp dirs. The new brief text names no person or machine."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "In run/tests.rs, drive the real `Athena::go` after `ask` with the fake driver, so `dispatch` runs unchanged. The producer's fake turn reads `spec.user_prompt`, extracts the evidence path, and records what it sees. The test then asserts on the recorded observations.",
+      "command": "cargo test -p athena-core dispatch_writes_a_read_only_evidence_snapshot && cargo test -p athena-core snapshot::tests",
+      "observes": "Seen from inside the producer invocation: the directory at the named path exists; creating a new file and opening an existing file for write both fail; `records/` bytes equal `git show <head>:records/...` for every file; and `history.json` has the dispatch base as `base`, the first commit's hash equal to `git rev-parse <base>`, its subject, a committer time, and the `Athena-Job` trailer of the ask commit. The committed `brief-producer.md` contains `<state>/jobs/<id>/evidence` and not the temp directory path, and the verifier prompt (captured the same way) names the real path. `snapshot::tests` covers unlocked write succeeds then locked write fails, the 200-commit cap, and rewriting over an existing locked evidence dir.",
+      "fails_without": "Without the dispatch step the evidence dir does not exist at the path the producer prompt names, and the probe's reads and history assertions fail. Without `lock` the in-script write succeeds as root, so the 'write attempt fails' assertion fails; the unit test first shows the write works on the unlocked copy. If the lock cannot hold, `snapshot::write` returns an error and dispatch fails. The test fails; it never skips.",
+      "seam": "Production entry point: `Athena::go` (run/mod.rs 322), which reaches `dispatch` (781), the new `snapshot::write`, `producer_brief_with_evidence` and `agent_spec`. Fixture: `athena_with(repo, state, check, free_space, script)` in run/tests.rs 183 builds an Athena over a temp repo and a temp state dir with a `FakeAgentDriver`; the script is a `Box<dyn Fn(&AgentInvocation)->FakeTurn>` closure injected through that parameter. It exists today (I read it). The probe closure only observes; the locking and copying logic under test stays in production code. The new test is added in plan step 11."
+    },
+    {
+      "criterion": 2,
+      "method": "In status.rs tests, build a scratch git repo from the existing `timed_job` records (several landed jobs and failed ones), plus landing records written as `HistoryRecord::Landing` JSON under `landings/`, using the existing `landing_of` helper. Commit it. Compute `Throughput::compute(&Records::load(&git, \"HEAD\")).text()`. Then `snapshot::write` to a temp dir and call `snapshot::status(dir)` (the function behind `athena status --snapshot`) and compare `view.throughput.text()` byte for byte.",
+      "command": "cargo test -p athena-core status",
+      "observes": "The two throughput texts are identical and contain the landing-record basis line. The record count and the invalid list also match.",
+      "fails_without": "If `from_parts` were not shared, or `landings/` were not copied (or the records-branch tip's landings dropped), the snapshot's throughput text would differ: window_with_landing_record would drop and the text would say 'no landing record (landings/) found'. The test fails on text inequality, and it also asserts the text contains 'landing record (landings/) found for each' so an empty comparison cannot pass.",
+      "seam": "Production entry points: `Records::load` (store.rs 311) and `snapshot::write` / `snapshot::status` (step 3). The fixture is a temp git repo, with a tempdir for the snapshot. Records come from the existing `timed_job` and `landing_of` helpers in status.rs tests (3150-3357), which exist today. No double is involved; both sides are real code over real files. The test is added in step 12."
+    },
+    {
+      "criterion": 3,
+      "method": "Use the lifecycle pattern (lifecycle.rs 204-223): `Fixture::new()`, `athena.ask`, `athena.go` with the fake driver, so a job lands. Call `athena_core::snapshot::write(&fx.git, &fx.head(), dir)`. Run the real binary `athena status --snapshot <dir> --json` with the cwd set to an empty temp dir (assert it has no `records/` and no `.git`) and HOME pointed at a temp dir. Also run it without `--json` and with a missing dir.",
+      "command": "cargo test -p athena-cli --test status_snapshot",
+      "observes": "The exit code is 0. The JSON `jobs_by_state` and `throughput` equal those of `fx.athena(..).status()` (serialized values). The plain output contains `Throughput::text()` of that view and the history summary. A missing snapshot dir exits non-zero with a message naming the dir. A `--snapshot` run together with a job argument is refused by clap (`conflicts_with`).",
+      "fails_without": "Without the `--snapshot` option clap rejects the argument and the exit is non-zero. If it called `open()` it would fail with no repository in the cwd. If it read cwd records it would find none. A decoy assertion (snapshot of a repo with one landed job; cwd with an empty `records/`-less temp dir) shows the output matches the snapshot's data.",
+      "seam": "Production entry point: the `athena` binary (`env!(\"CARGO_BIN_EXE_athena\")`, as in binary.rs and common::athena_check, which exist) through `Command::Status { snapshot }`. Fixture: common::Fixture and Scenario (exist). The binary is run as a child process with `current_dir` set to a temp dir. The new test file crates/athena-cli/tests/status_snapshot.rs is added in step 13."
+    },
+    {
+      "criterion": 4,
+      "method": "In briefs.rs tests, build the existing `producer_inputs(None)` and `plain_verifier_inputs()` and call `producer_brief_with_evidence(.., Some(\"<state>/jobs/<id>/evidence\"))` and `verifier_brief_with_evidence(..)`.",
+      "command": "cargo test -p athena-context",
+      "observes": "Each brief contains the path, the phrase that real-records checks use the evidence snapshot read-only (also `history.json` and `athena status --snapshot <path>`), and still contains 'records/, the owner's private files, and history are absent by design' for the working copy. With None, the output equals the old functions' output.",
+      "fails_without": "Without the evidence section the producer and verifier briefs do not contain the path or the real-records sentence, so both tests fail. If the working-copy sentence were removed or records/ implied, the 'still absent' assertions fail. A third test shows the briefs without an evidence argument are byte-identical to `producer_brief` and `verifier_brief_with_plan`.",
+      "seam": "Production entry points: `producer_brief_with_evidence` and `verifier_brief_with_evidence` (step 6), reached by `producer_brief` and `verifier_brief_with_plan`, which delegate. Fixtures `producer_inputs` (briefs.rs 2393) and `plain_verifier_inputs` (3503) exist today. These are pure functions, so there is no double. The end-to-end version of the same claim is asserted in the criterion 1 test, where the fake driver captures both real prompts."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three Athena checks. `cargo test` includes `refusal_corpus` (the plan changes no reading rule; only two `Policy` literals there compile again) and the new policy tests, which cover reading under the evidence dir allowed, write or redirect into it denied, `..` escape denied, symlink out denied, and a sibling named like `evidence-other` denied.",
+      "command": "cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0.",
+      "fails_without": "Not a behavior-specific criterion. It fails if any `Policy` or `HookSpec` literal (admission.rs, planning.rs, reading.rs, refusal_corpus.rs, live.rs, claude.rs and policy.rs tests) misses the new field, or if `system_facts_budgets_match_computed` or the boundary scan trip.",
+      "seam": "The commands run the workspace as it stands. The new policy tests call `evaluate` directly with a `Policy` that has `evidence: Some(tempdir)`, in athena-agent/src/policy.rs tests. The helper `policy(role, root)` at 923 exists; step 9 adds the evidence variant."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "A new bullet under `## [Unreleased]` / `### Added` (CHANGELOG.md lines 8-21) describing the read-only evidence snapshot written at dispatch (records/, landings/, history.json under the job's state dir, named in the producer and verifier briefs) and `athena status --snapshot <dir>`.",
+      "fails_without": "No Unreleased entry would mention the snapshot or the `--snapshot` option, and the diff shows no CHANGELOG change."
+    },
+    {
+      "criterion": 7,
+      "method": "Read `git diff --stat` and `git diff` for protected paths and for machine-specific strings.",
+      "command": "git diff --stat",
+      "observes": "The stat lists no athena.toml, defaults.toml, .github/workflows/*, records/**, and no change to `Throughput::compute`, `Throughput::text` or the status.rs throughput helpers (status.rs changes are inside `#[cfg(test)]` only). Added lines hold no absolute home or state paths: tests use tempdirs and briefs use `<state>`. No email-like text.",
+      "fails_without": "A listed protected file or a machine path would show in the stat or in a diff grep."
+    }
+  ],
+  "open_questions": [
+    "Host: whether the pinned Claude Code host, run with `--restricted` and `--permission-prompts none`, lets the Read, Grep and Glob tools read a directory outside the working directory when the directory is given with `--add-dir`. The code cannot show this (no host code is in the repository). The plan adds the flag and the hook exemption; the live test in athena-cli/tests/live.rs is `#[ignore]`d and is not run by `cargo test`."
+  ],
+  "producer_section_sha256": "64ab23adfaf9843e9417c0d6cbc625ea11e33d98c331294c4e5d7e05a59c8e5b"
+}

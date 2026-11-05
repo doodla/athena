@@ -19,6 +19,8 @@
 //! - [`admission`], [`toolconfig`], [`checks`], [`verify`], [`land`]: the verification protocol;
 //! - [`scoring`]: forecasts resolved and scored;
 //! - [`status`]: the state of the work, from the repository alone;
+//! - [`snapshot`]: the read-only evidence snapshot written at dispatch (`records/`, `landings/` and the
+//!   first-parent history of main, outside the working copy) and `athena status --snapshot`, which reads it;
 //! - [`nested`]: Athena running inside one of its own jobs;
 //! - [`pr`]: pull-request landing in owned mode: the link store, the push guard, the merged-content check;
 //! - [`ci_result`]: the CI result record keyed by commit SHA, its stale, missing and red rules, and the local
@@ -109,6 +111,7 @@ pub mod run;
 mod run_pin_tests;
 pub mod scope_guard;
 pub mod scoring;
+pub mod snapshot;
 pub mod state;
 pub mod status;
 pub mod steward;

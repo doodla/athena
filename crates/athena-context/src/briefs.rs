@@ -419,8 +419,42 @@ fn pin_section(out: &mut String, pin: Option<&PinnedRepo>) {
     }
 }
 
+/// How a stored brief names a job's evidence snapshot. The state directory is a machine path, so the stored
+/// text carries this placeholder and the text sent to the agent has it replaced by the real path.
+pub fn evidence_placeholder(job: &str) -> String {
+    format!("<state>/jobs/{job}/evidence")
+}
+
+/// The "Evidence snapshot" section: where the real records are for a check that needs them, shown only when
+/// the job has a snapshot.
+fn evidence_section(out: &mut String, path: Option<&str>) {
+    let Some(path) = path else {
+        return;
+    };
+    let _ = writeln!(
+        out,
+        "## Evidence snapshot\n\n\
+         Athena copied the real records when this job was dispatched into a read-only directory outside your \
+         working copy:\n\n\
+         - path: {path}\n\n\
+         It holds `records/` (every file under records/ at the base commit), `landings/` (the landing records) \
+         and `history.json` (the base commit and the newest 200 first-parent commits of main: hash, commit \
+         time, subject, trailers). Every check of real records, such as counting jobs, reading an earlier job's \
+         records or comparing a claim with history, uses this snapshot and not the working copy. Read it with \
+         the Read, Grep and Glob tools, or run `cargo run -p athena-cli -- status --snapshot {path}`, which \
+         prints the job counts, the history summary and the throughput section from it. It is read-only: a \
+         write to it fails. The working copy still has no records/.\n"
+    );
+}
+
 /// The producer brief (design §7.1), stored verbatim as `brief-producer.md`.
 pub fn producer_brief(inputs: &ProducerInputs) -> String {
+    producer_brief_with_evidence(inputs, None)
+}
+
+/// The producer brief with the path of the job's evidence snapshot, when it has one. Without a path the text
+/// is exactly [`producer_brief`]'s.
+pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&str>) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Job {}: {}\n", inputs.job, inputs.reading.title);
     let _ = writeln!(out, "## Request (verbatim)\n\n{}\n", quote(&inputs.request));
@@ -464,6 +498,7 @@ pub fn producer_brief(inputs: &ProducerInputs) -> String {
             );
         }
     }
+    evidence_section(&mut out, evidence);
     let _ = writeln!(out, "## What the verifier sees\n\n{VERIFIER_VISIBILITY}\n");
     criteria_check_section(&mut out, &inputs.reading);
     let _ = writeln!(out, "{}", unchanged_files_section());
@@ -1154,6 +1189,17 @@ pub fn verifier_brief_with_plan(
     plan: Option<&VerifierPlan>,
     inline_diff: bool,
 ) -> String {
+    verifier_brief_with_evidence(inputs, plan, None, inline_diff)
+}
+
+/// The verifier brief with the path of the job's evidence snapshot, when it has one. Without a path the text
+/// is exactly [`verifier_brief_with_plan`]'s.
+pub fn verifier_brief_with_evidence(
+    inputs: &VerifierInputs,
+    plan: Option<&VerifierPlan>,
+    evidence: Option<&str>,
+    inline_diff: bool,
+) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -1212,6 +1258,7 @@ pub fn verifier_brief_with_plan(
             c.diff.len()
         );
     }
+    evidence_section(&mut out, evidence);
     let _ = writeln!(out, "## Checks Athena ran on this tree\n");
     for check in &inputs.checks {
         if let Some(run) = &check.demonstration {
@@ -3593,6 +3640,86 @@ mod tests {
         assert!(!brief.contains("## Soundness"));
         assert!(!brief.contains(SOUNDNESS_QUESTION));
         assert_eq!(brief, VERIFIER_BRIEF_WITHOUT_A_PLAN);
+    }
+
+    const EVIDENCE: &str = "<state>/jobs/20261010-153012-k7q2/evidence";
+
+    /// What a brief says about the evidence snapshot: the path, that real-records checks use it, what it
+    /// holds, that it is read-only, and that the working copy still has no `records/`.
+    fn assert_names_the_evidence_snapshot(who: &str, brief: &str) {
+        assert_eq!(brief.matches("## Evidence snapshot").count(), 1, "{who}");
+        for needed in [
+            EVIDENCE,
+            "Every check of real records",
+            "uses this snapshot and not the working copy",
+            "`records/`",
+            "`landings/`",
+            "`history.json`",
+            "hash, commit time, subject, trailers",
+            "status --snapshot",
+            "read-only",
+            "The working copy still has no records/.",
+            "records/, the owner's private files, and history are absent by design",
+        ] {
+            assert!(brief.contains(needed), "the {who} brief omits {needed:?}");
+        }
+    }
+
+    #[test]
+    fn the_producer_brief_names_the_evidence_snapshot_and_says_the_working_copy_has_no_records() {
+        let brief = producer_brief_with_evidence(&producer_inputs(None), Some(EVIDENCE));
+        assert_names_the_evidence_snapshot("producer", &brief);
+        // The section sits in the producer's own part of the brief, before what the verifier sees.
+        assert!(
+            brief.find("## Working directory").unwrap()
+                < brief.find("## Evidence snapshot").unwrap()
+        );
+        assert!(
+            brief.find("## Evidence snapshot").unwrap()
+                < brief.find("## What the verifier sees").unwrap()
+        );
+    }
+
+    #[test]
+    fn the_verifier_brief_names_the_evidence_snapshot_and_says_the_working_copy_has_no_records() {
+        for inline_diff in [true, false] {
+            let brief = verifier_brief_with_evidence(
+                &plain_verifier_inputs(),
+                None,
+                Some(EVIDENCE),
+                inline_diff,
+            );
+            assert_names_the_evidence_snapshot("verifier", &brief);
+            assert!(
+                brief.find("## The change").unwrap() < brief.find("## Evidence snapshot").unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn briefs_without_an_evidence_path_are_the_briefs_they_were() {
+        let producer = producer_inputs(None);
+        assert_eq!(
+            producer_brief_with_evidence(&producer, None),
+            producer_brief(&producer)
+        );
+        assert!(!producer_brief(&producer).contains("Evidence snapshot"));
+        let verifier = plain_verifier_inputs();
+        for inline_diff in [true, false] {
+            assert_eq!(
+                verifier_brief_with_evidence(&verifier, None, None, inline_diff),
+                verifier_brief_with_plan(&verifier, None, inline_diff)
+            );
+        }
+        assert!(!verifier_brief(&verifier, true).contains("Evidence snapshot"));
+        // With a path the brief only grows by the section.
+        let with = verifier_brief_with_evidence(&verifier, None, Some(EVIDENCE), true);
+        assert!(with.len() > verifier_brief(&verifier, true).len());
+    }
+
+    #[test]
+    fn the_evidence_placeholder_names_a_directory_of_the_job_under_the_state_placeholder() {
+        assert_eq!(evidence_placeholder("20261010-153012-k7q2"), EVIDENCE);
     }
 
     /// The verifier brief for `plain_verifier_inputs` as it was before plans existed, captured from the

@@ -1032,6 +1032,7 @@ mod plan_side {
             root: std::path::PathBuf::from("."),
             commands: Default::default(),
             writes: false,
+            evidence: None,
         };
         plan_findings(&plan_for(dependents), &reading, &verifier, &|_| false)
     }
@@ -1192,6 +1193,7 @@ mod plan_side {
             root: std::path::PathBuf::from("."),
             commands: Default::default(),
             writes: false,
+            evidence: None,
         };
         plan_findings(&plan, &reading, &verifier, &|_| false)
     }

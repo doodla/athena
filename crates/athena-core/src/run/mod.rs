@@ -26,8 +26,9 @@ use athena_agent::policy::Policy;
 use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
     PlanRevision, PlannerInputs, ProducerInputs, ReplayView, RetryFindings, RetrySeed,
-    VerifierInputs, VerifierPlan, class_summaries, critic_brief, planner_brief, producer_brief,
-    producer_prompt_with_plan, render_plan_section, verifier_brief_with_plan,
+    VerifierInputs, VerifierPlan, class_summaries, critic_brief, evidence_placeholder,
+    planner_brief, producer_brief_with_evidence, producer_prompt_with_plan, render_plan_section,
+    verifier_brief_with_evidence,
 };
 use athena_context::outputs::{
     CriticOutput, CritiqueVerdictOutput, DeliverableActionOutput, DependentKindOutput, PlanOutput,
@@ -884,6 +885,17 @@ impl Athena {
             None
         };
 
+        // The evidence snapshot: a read-only copy of records/, landings/ and main's first-parent history,
+        // outside the producer's working copy, so the producer and the verifier can check real records. It is
+        // written before the brief that names it and before anything is committed; when it cannot be locked
+        // read-only the dispatch fails here, and nothing was changed.
+        let evidence = crate::snapshot::evidence_dir(&self.state, &id);
+        crate::snapshot::write(&self.git, head, &evidence)?;
+        // The stored brief names the snapshot with a placeholder (no machine path is committed); the text
+        // sent to the agent has the real path.
+        let evidence_stored = evidence_placeholder(id.as_str());
+        let evidence_path = evidence.display().to_string();
+
         // The prediction commit: the accepted reading's job record and the producer brief, before any work.
         let producer_grant = capability.producer_grant(&jc);
         let checks = capability.checks(&jc);
@@ -895,42 +907,45 @@ impl Athena {
                 command: c.run.join(" "),
             })
             .collect();
-        let brief = producer_brief(&ProducerInputs {
-            job: id.as_str().to_string(),
-            request: job
-                .request
-                .as_ref()
-                .map(|r| r.text.clone())
-                .unwrap_or_default(),
-            reading: accepted.clone(),
-            checks: check_views.clone(),
-            commands: athena_agent::policy::describe_commands(&producer_grant.commands),
-            pin: pinned.as_ref().map(|(record, _)| record.clone()),
-            retry_from: match (&retry_seed, &resume) {
-                (Some(s), _) => Some(RetrySeed {
-                    job: s.job.as_str().to_string(),
-                    unmet: s.unmet.clone(),
-                    findings: s.findings.clone(),
-                    must_address: s.must_address.clone(),
-                    progress_note: None,
-                    candidate: None,
+        let brief = producer_brief_with_evidence(
+            &ProducerInputs {
+                job: id.as_str().to_string(),
+                request: job
+                    .request
+                    .as_ref()
+                    .map(|r| r.text.clone())
+                    .unwrap_or_default(),
+                reading: accepted.clone(),
+                checks: check_views.clone(),
+                commands: athena_agent::policy::describe_commands(&producer_grant.commands),
+                pin: pinned.as_ref().map(|(record, _)| record.clone()),
+                retry_from: match (&retry_seed, &resume) {
+                    (Some(s), _) => Some(RetrySeed {
+                        job: s.job.as_str().to_string(),
+                        unmet: s.unmet.clone(),
+                        findings: s.findings.clone(),
+                        must_address: s.must_address.clone(),
+                        progress_note: None,
+                        candidate: None,
+                    }),
+                    (None, Some(r)) => Some(RetrySeed {
+                        job: r.job.as_str().to_string(),
+                        unmet: Vec::new(),
+                        findings: Vec::new(),
+                        must_address: Vec::new(),
+                        progress_note: Some(r.note.clone()),
+                        candidate: r.commit.as_deref().map(|c| short(c).to_string()),
+                    }),
+                    (None, None) => None,
+                },
+                retry_findings: earlier_findings.map(|(job, findings)| RetryFindings {
+                    job: job.as_str().to_string(),
+                    findings,
                 }),
-                (None, Some(r)) => Some(RetrySeed {
-                    job: r.job.as_str().to_string(),
-                    unmet: Vec::new(),
-                    findings: Vec::new(),
-                    must_address: Vec::new(),
-                    progress_note: Some(r.note.clone()),
-                    candidate: r.commit.as_deref().map(|c| short(c).to_string()),
-                }),
-                (None, None) => None,
+                failure_classes: class_summaries(&records.introspections, &records.classes),
             },
-            retry_findings: earlier_findings.map(|(job, findings)| RetryFindings {
-                job: job.as_str().to_string(),
-                findings,
-            }),
-            failure_classes: class_summaries(&records.introspections, &records.classes),
-        });
+            Some(&evidence_stored),
+        );
         let dispatched_at = crate::now();
         let clock = Instant::now();
         let budget = &jc.config.budget;
@@ -1019,7 +1034,8 @@ impl Athena {
             return self.finish_dispatched(&ctx, run);
         }
         let mut closing = Closing::new();
-        let mut producer_prompt = brief.clone();
+        // What the producer is sent is the stored brief with the placeholder replaced by the real path.
+        let mut producer_prompt = brief.replace(&evidence_stored, &evidence_path);
         if planned {
             let seed = planning_resume_seed(records, request_text).map(|s| PlanRevision {
                 previous: s.plan,
@@ -1031,7 +1047,7 @@ impl Athena {
             else {
                 return self.close_dispatched(&ctx, closing);
             };
-            producer_prompt = producer_prompt_with_plan(&brief, &section);
+            producer_prompt = producer_prompt_with_plan(&producer_prompt, &section);
             let spent = ctx.spent(&closing);
             if let Err(e) = self.preflight(&jc, spent, ReserveStage::Run) {
                 self.stop_planning(&ctx, &mut closing, &format!("{e}"));

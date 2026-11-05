@@ -133,6 +133,10 @@ impl ClaudeCodeDriver {
             args.push("--allowedTools".into());
             args.extend(spec.allowed_tools.iter().map(OsString::from));
         }
+        for dir in spec.hook.iter().flat_map(|hook| &hook.read_dirs) {
+            args.push("--add-dir".into());
+            args.push(dir.into());
+        }
         args.push("--settings".into());
         args.push(settings_file.into());
         args.push("--max-budget-usd".into());
@@ -515,12 +519,43 @@ mod tests {
             hook: Some(HookSpec {
                 athena_bin: PathBuf::from("/opt/athena bin/athena"),
                 policy_file: PathBuf::from("/state/policy.json"),
+                read_dirs: Vec::new(),
             }),
             max_budget_usd: 3.0,
             timeout: Duration::from_secs(1800),
             json_schema: serde_json::json!({"type": "object"}),
             scratch: PathBuf::from("/state/jobs/x/agent"),
         }
+    }
+
+    #[test]
+    fn a_read_directory_reaches_the_command_line_as_add_dir_and_only_then() {
+        let text = |s: &AgentInvocation| -> Vec<String> {
+            ClaudeCodeDriver::command_line(s, Path::new("p.md"), Path::new("s.json"))
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let mut invocation = spec();
+        assert!(!text(&invocation).iter().any(|a| a == "--add-dir"));
+        invocation.hook.as_mut().unwrap().read_dirs = vec![PathBuf::from("/state/jobs/x/evidence")];
+        let args = text(&invocation);
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--add-dir" && w[1] == "/state/jobs/x/evidence"),
+            "{args:?}"
+        );
+        assert!(
+            check_hermetic(&ClaudeCodeDriver::command_line(
+                &invocation,
+                Path::new("p.md"),
+                Path::new("s.json")
+            ))
+            .is_ok()
+        );
+        // A run without a hook has no directory to add.
+        invocation.hook = None;
+        assert!(!text(&invocation).iter().any(|a| a == "--add-dir"));
     }
 
     #[test]

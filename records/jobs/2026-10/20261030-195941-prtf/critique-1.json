@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261030-195941-prtf",
+  "round": 1,
+  "at": "2026-11-05T00:53:11.861672736Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/tests/refusal_corpus.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/tests/refusal_corpus.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The root-proof lock is written a second time in athena-core instead of being shared with athena-git.",
+      "evidence": "athena-git/src/snapshot.rs:161-197 holds `Snapshot::lock` and `probe_write`. Its helpers `set_tree_writable` (399, which handles entries that vanish during the walk) and `set_immutable` (459) are private. Only `unlock_dir` (389) is pub. The plan writes its own `lock` in athena-core so it does not touch a file outside the expected set, which means copying both private helpers. A security primitive would then exist in two copies that can drift apart. Fix: Add a `pub fn lock_dir(dir, existing_probe: &Path)` next to `unlock_dir` in athena-git/src/snapshot.rs, have `Snapshot::lock` call it, and use it from athena-core. If the planner keeps the copy, say why. Touching one more file in athena-git is a smaller risk than having two lock implementations.",
+      "location": "Decision 2 / step 3 (snapshot::lock in athena-core)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Counting jobs by `job.state()` names will not match `athena status` for in-flight jobs or for jobs that are not request jobs.",
+      "evidence": "status.rs:1680-1696 counts only `records.request_jobs()` and maps names through `state_name`: Dispatched becomes `running` or `interrupted` (1650-1655). The plan says it 'counts `job.state()` names' over the loaded records. The criterion 3 test compares `jobs_by_state` with `athena.status()`, so it passes only on a fixture where every job has landed. Fix: Iterate `records.request_jobs()` the way status does, and give Dispatched one fixed name such as `dispatched`, with a note that a snapshot cannot tell whether the job is running. Add a dispatched-but-not-closed job to the criterion 3 fixture, or document and test the difference.",
+      "location": "Step 3 / Decision 7 (SnapshotView jobs by state)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Writing the tree's and the records-branch tip's landing files into one directory can collide on the same path, and load_dir's file order is not specified.",
+      "evidence": "store.rs:377-382 keeps both sources, then sorts by (created_at, id) and dedups by id. A flat copy that writes tip files over tree files with the same relative path can drop one version before that dedup runs. Several `Records` fields are kept 'in file order' (store.rs:229-236). `RecordSet::load` uses git's recursive tree order (athena-gate/src/records.rs:27-55), while a directory walk returns entries in no fixed order. Fix: State the collision rule: keep the tree's file and skip a tip file with the same path, or write the tip's files under a separate subdirectory that `load_dir` also reads. Have `load_dir` sort full relative paths bytewise, which reproduces git's recursive order.",
+      "location": "Step 3 (merged landings/ copy) and step 2 (Records::load_dir)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "If the host rejects `--add-dir` under `--restricted`, every producer and verifier run fails, and nothing in `cargo test` would catch it.",
+      "evidence": "claude.rs `command_line` (114-148) gains the flag for producer and verifier whenever the evidence directory exists, which after this change is every dispatch. The only real-host test, athena-cli/tests/live.rs, is `#[ignore]`d. The plan's mitigation covers the host ignoring the flag, not rejecting it. Fix: Keep the Host open question. Also either (a) say the ignored live test must be run once against the pinned host before landing, or (b) add a fallback: if an invocation fails with an unknown-option error mentioning `--add-dir`, retry once without the flag (the hook still enforces the policy). Name which one.",
+      "location": "Risks (--add-dir) and Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The system-facts entry 'Producer snapshot' stays literally true but no longer tells planners that an evidence snapshot exists.",
+      "evidence": "The system facts say producers have no `records/` or history, with the producer brief text as the source. After this change producers and verifiers can read `<state>/jobs/<id>/evidence`. Planners read this file to design real-records demonstrations, and Decision 8 keeps the evidence path out of the planner brief. Fix: Add one sentence to the system-facts entry (outside the budgeted sets) naming the evidence snapshot and `athena status --snapshot`, or list it as a named follow-up.",
+      "location": "Dependents: 'Prompt-set budgets and the Producer snapshot fact'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Building the sent prompt by string replacement is less direct than rendering the brief twice.",
+      "evidence": "`producer_brief_with_evidence` is a pure function. Calling it once with `Some(placeholder)` for the stored brief and once with `Some(real)` for the prompt avoids rewriting user text that happens to contain the placeholder. The verifier side already does it this way (step 8). Fix: Call `producer_brief_with_evidence` twice, the same way as the verifier.",
+      "location": "Step 7 (producer_prompt = brief.replace(placeholder, real))",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "`read_dirs` is a host argument, not part of how the hook reaches the policy.",
+      "evidence": "crates/athena-agent/src/lib.rs:42-49 documents HookSpec as 'How the hook reaches Athena's tool policy'. Fix: Keep it there if moving it would touch many `AgentInvocation` literals, but update the HookSpec doc comment to say it also carries the extra read-only directories passed to the host.",
+      "location": "Decision 5 (HookSpec.read_dirs)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan names and found its claims true. `Records::load` (store.rs:311) is the only place records are assembled, and `Throughput::compute` (status.rs:929) reads only `Records`, so sharing `from_parts` gives identical throughput text without touching the computation. `Snapshot::lock` and `unlock_dir` (athena-git snapshot.rs:161, 389), `pin::remove_tree` (pin.rs:221) and `clean_job` (state.rs:333) work as the plan says, so a locked evidence directory is cleaned up. In dispatch (run/mod.rs:837-979) the disk gates run before the brief is built and the brief is committed verbatim, so storing a placeholder and sending the real path is correct. `brief_sha256` is never recomputed. The `Policy` and `HookSpec` literals listed are all of them (I grepped). `Policy` uses `deny_unknown_fields`, so a defaulted field still accepts old files, including the one binary.rs writes. Verifiers may run `cargo run` (athena.toml:76), so `athena status --snapshot` is reachable, and cargo arguments are not path-confined (policy.rs:623-652). The planner-side check `plan_findings` simulates a verifier policy rooted at the job directory, which already contains `evidence`, so `evidence: None` in planning.rs is harmless. Each demonstration names a real seam: `athena_with` (run/tests.rs:183), `producer_inputs` and `plain_verifier_inputs`, and the binary. Each would fail without the behavior, and the read-only test shows a write succeeding before the lock and failing after it, as root. Athena's own finding about refusal_corpus.rs is unavoidable: those two literals must compile. My findings are minor. The lock logic is copied instead of shared. The snapshot's jobs-by-state does not match `athena status`. The merged landings copy can collide and its file order is unspecified. A host that rejects `--add-dir` would break every run. The system-facts entry is now incomplete. None blocks the plan."
+}

@@ -176,9 +176,18 @@ impl Athena {
         // name their failing tests, every failing test now also failed there (`verify::is_pre_existing`).
         {
             ctx.stages.enter(&id, Stage::Verifier);
+            // The verifier is told where the evidence snapshot is when dispatch wrote one and it is still
+            // there (a resume after cleanup has none). The stored brief names it with a placeholder.
+            let evidence = crate::snapshot::evidence_dir(&self.state, &id);
+            let evidence_stored = evidence.is_dir().then(|| evidence_placeholder(id.as_str()));
             closing.files.push(NewFile::text(
                 format!("{}/brief-verifier.md", id.dir()),
-                verifier_brief_with_plan(&inputs, verifier_plan.as_ref(), false),
+                verifier_brief_with_evidence(
+                    &inputs,
+                    verifier_plan.as_ref(),
+                    evidence_stored.as_deref(),
+                    false,
+                ),
             ));
             let vcomposed = compose(&[
                 CONTRACT.into(),
@@ -196,7 +205,13 @@ impl Athena {
                     verifier_failure = Some(VerifierFailure::Incomplete(format!("{e}")));
                     break;
                 }
-                let vbrief = verifier_brief_with_plan(&inputs, verifier_plan.as_ref(), true);
+                let evidence_path = evidence.display().to_string();
+                let vbrief = verifier_brief_with_evidence(
+                    &inputs,
+                    verifier_plan.as_ref(),
+                    evidence_stored.is_some().then_some(evidence_path.as_str()),
+                    true,
+                );
                 let vspec = self.agent_spec(
                     jc,
                     &id,
