@@ -4231,3 +4231,37 @@ should replace those estimates with its figures.
 - **Reversal cost:** Low. Delete `repin_command` and its tests and restore the old message.
 - **Provenance:** Read: `crates/athena-agent/src/claude.rs`, `xtask/src/main.rs`. Measured: the tests named
   above. Not measured: how often Claude Code updates.
+
+## D155 · Landing becomes a continuous drain step
+
+- **Case:** Throughput review `20261105-070420-vq95` reported a median of 464.5 minutes per landed job, of which
+  landing and rebuild took 440.1 and the other five stages together about 21. The review proposed making landing
+  a continuous step of the drain and predicted a saving of 420.0 minutes per landed job.
+- **Decision:** Proposed, nothing built. Design note `docs/design/continuous-landing.md`. When the verifier
+  passes, the job joins the one ordered landing queue of `docs/design/async-drain.md` sections 6 and 7 and its
+  worker is free. The queue head rebases and its pull request merges automatically by the existing REST path
+  (`land_pr`, `merge_via_rest`). A job whose poll ends pending stays in the queue and is polled again inside the
+  drain, for a limit H at the head, then steps aside keeping its order, then goes back to the user. A merge the
+  host refused goes to the user at once. The rebuild keeps its lock, because a landing moves the checkout the
+  build reads, and runs once per batch at a boundary bounded by K landings or M minutes. A failed rebuild keeps
+  the rule of D140: landing is held and nothing lands on a main the drain cannot build. The first build job
+  measures the 440.1 minutes by phase; H, K and M are set from it. A change that implements the design must cite
+  the review id in its request text, and the next throughput review scores the 420.0-minute prediction.
+- **Alternatives:** (a) Raise `max_concurrency` only: jobs land racing, with no order. (b) Enable the host's
+  auto-merge at enqueue: it needs a repository setting the code does not show, and the merge would happen outside
+  the ordered queue. (c) A new merge path in the drain: it duplicates `land_pr` and its safety checks. (d) A
+  shorter CI wait: it leaves the queue, the pass-over and the lock wait. (e) First in, first out with no limit at
+  the head: one job that never clears blocks every later landing. (f) A rebuild from a fixed commit in a separate
+  worktree: it needs a second cold `target/` and changes where `setup.sh` runs; kept as a later option. (g) Do
+  nothing.
+- **Tradeoff:** The saving is the review's prediction, not a measurement, and it depends on how the 440.1
+  minutes split by phase, which no record shows today. Batching the rebuild keeps the drain on the old binary for
+  longer. Releasing the worker early lets more jobs wait in the queue at once.
+- **Reversal cost:** None while nothing is built. Once built, each build job is a separate change that can be
+  reverted on its own, and the limits H, K and M can be set to today's behavior.
+- **Provenance:** Stated: the review's figures (440.1, 464.5, about 21, 16070.4 / 366 idle, 420.0 predicted),
+  from the request text; `THROUGHPUT.md` was not in the evidence snapshot. Read: `docs/design/async-drain.md`,
+  `docs/design/native-pr-landing.md`, `docs/design/warm-baseline-build.md`, `docs/design/hestia.md`,
+  `crates/athena-cli/src/drain.rs`, `crates/athena-cli/src/wiring.rs`, `crates/athena-core/src/gh/landing.rs`,
+  `crates/athena-core/src/status.rs`. Not measured: the split of the 440.1 minutes by phase, the duration of one
+  rebuild, and whether the host's auto-merge is enabled.
