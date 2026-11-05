@@ -4,7 +4,7 @@
 mod common;
 
 use athena_data::RecordId;
-use athena_data::records::{AnyRecord, BuildMeasurement, SccacheCounts, SccacheFigures};
+use athena_data::records::{AnyRecord, BuildMeasurement, BuildPeak, SccacheCounts, SccacheFigures};
 use common::*;
 
 fn measurement() -> BuildMeasurement {
@@ -21,6 +21,14 @@ fn measurement() -> BuildMeasurement {
             first: SccacheCounts { hits: 0, misses: 9 },
             second: SccacheCounts { hits: 4, misses: 5 },
         },
+        first_build_peak: Some(BuildPeak {
+            memory_gb: 3.25,
+            processes: 6,
+        }),
+        second_build_peak: Some(BuildPeak {
+            memory_gb: 2.5,
+            processes: 4,
+        }),
     }
 }
 
@@ -55,6 +63,8 @@ fn status_prints_the_latest_build_measurement_line() {
         "S 2.5 MB",
         "build 1 61.50s, build 2 12.25s",
         "sccache build 1 0 hits / 9 misses, build 2 4 hits / 5 misses",
+        "build total peak memory build 1 3.25 GB, build 2 2.50 GB",
+        "peak concurrent processes build 1 6, build 2 4",
         "commit 0123456789ab",
     ] {
         assert!(line.contains(want), "{want:?} not in {line}");

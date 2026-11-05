@@ -1141,8 +1141,27 @@ pub fn build_measurement_line(latest: Option<&BuildMeasurement>) -> String {
             first.hits, first.misses, second.hits, second.misses
         ),
     };
+    // Whole-build totals over every process of the build, not the figures of one process; absent in old
+    // records.
+    let peaks = if m.first_build_peak.is_none() && m.second_build_peak.is_none() {
+        String::new()
+    } else {
+        let memory = |p: Option<athena_data::records::BuildPeak>| {
+            p.map_or("n/a".to_string(), |p| format!("{:.2} GB", p.memory_gb))
+        };
+        let processes = |p: Option<athena_data::records::BuildPeak>| {
+            p.map_or("n/a".to_string(), |p| p.processes.to_string())
+        };
+        format!(
+            " · build total peak memory build 1 {}, build 2 {} · peak concurrent processes build 1 {}, build 2 {}",
+            memory(m.first_build_peak),
+            memory(m.second_build_peak),
+            processes(m.first_build_peak),
+            processes(m.second_build_peak)
+        )
+    };
     format!(
-        "build      measurement: T {} target (one cold target directory) · S {} source (one worktree) · build 1 {:.2}s, build 2 {:.2}s · {cache} · commit {} at {}",
+        "build      measurement: T {} target (one cold target directory) · S {} source (one worktree) · build 1 {:.2}s, build 2 {:.2}s{peaks} · {cache} · commit {} at {}",
         format_bytes(m.target_bytes),
         format_bytes(m.source_bytes),
         m.first_build_seconds,
@@ -2284,6 +2303,8 @@ mod build_measurement_tests {
             first_build_seconds: 61.5,
             second_build_seconds: 12.25,
             sccache,
+            first_build_peak: None,
+            second_build_peak: None,
         }
     }
 
@@ -2328,6 +2349,24 @@ mod build_measurement_tests {
         let line = build_measurement_line(Some(&plain));
         assert!(line.contains("sccache not installed"), "{line}");
         assert!(!line.contains("hits"), "{line}");
+        // An old record without peaks prints no peak text at all.
+        assert!(!line.contains("peak"), "{line}");
+        let mut peaked = measured;
+        peaked.first_build_peak = Some(athena_data::records::BuildPeak {
+            memory_gb: 3.25,
+            processes: 6,
+        });
+        peaked.second_build_peak = Some(athena_data::records::BuildPeak {
+            memory_gb: 2.5,
+            processes: 4,
+        });
+        let line = build_measurement_line(Some(&peaked));
+        for want in [
+            "build total peak memory build 1 3.25 GB, build 2 2.50 GB",
+            "peak concurrent processes build 1 6, build 2 4",
+        ] {
+            assert!(line.contains(want), "{want:?} not in {line}");
+        }
         let none = build_measurement_line(None);
         assert!(none.contains("measurement: none yet"), "{none}");
         assert!(none.contains("athena measure-build"), "{none}");

@@ -3773,6 +3773,7 @@ mod tests {
             Ok(crate::disk::BuildRun {
                 seconds: 2.5,
                 sccache: None,
+                peak: None,
             })
         }
     }
@@ -3799,6 +3800,8 @@ mod tests {
             first_build_seconds: 1.0,
             second_build_seconds: 1.0,
             sccache: athena_data::records::SccacheFigures::NotInstalled,
+            first_build_peak: None,
+            second_build_peak: None,
         };
         assert!(measure_build_due(None, "aaa"));
         assert!(!measure_build_due(Some(&record("aaa")), "aaa"));
