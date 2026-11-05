@@ -3946,12 +3946,44 @@ mod produce_and_verify_order_tests {
         runs: Option<&str>,
         also_edit: Option<(&str, &str)>,
     ) -> DemoJob {
+        run_demonstration_job_with(repo, plan, runs, also_edit, 0)
+    }
+
+    /// [`run_demonstration_job`] for a request with `more` criteria besides the first, each met by the fake
+    /// producer and verifier, so that a plan can name one demonstration for each.
+    fn run_demonstration_job_with(
+        repo: &tempfile::TempDir,
+        plan: serde_json::Value,
+        runs: Option<&str>,
+        also_edit: Option<(&str, &str)>,
+        more: usize,
+    ) -> DemoJob {
         let state = tempfile::tempdir().unwrap();
         let calls = Calls::default();
         let inner = planning_script(vec![plan], vec![accepting_critique()], calls.clone());
         let extra = also_edit.map(|(p, t)| (p.to_string(), t.to_string()));
         let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
             let mut turn = inner(spec);
+            for i in 0..more {
+                let text = format!("Extra criterion {}", i + 2);
+                match spec.role {
+                    Role::Reader => turn.structured.as_mut().unwrap()["acceptance_criteria"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({ "text": text, "kind": "content" })),
+                    Role::Producer => turn.structured.as_mut().unwrap()["criteria_check"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({ "criterion": text, "status": "met", "evidence": "read it" })),
+                    Role::Verifier => turn.structured.as_mut().unwrap()["criteria"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(
+                            json!({ "criterion": text, "met": true, "evidence": "checked", "commands": [] }),
+                        ),
+                    _ => {}
+                }
+            }
             if spec.role == Role::Producer
                 && let Some((path, text)) = &extra
             {
@@ -4057,6 +4089,53 @@ mod produce_and_verify_order_tests {
             "{prompt}"
         );
         assert!(!prompt.contains("failed without the fix"), "{prompt}");
+        assert!(!job.revert_left);
+    }
+
+    #[test]
+    fn demonstrations_of_one_build_scope_compile_once_when_the_build_fails() {
+        let repo = repo_with_planning(3);
+        let counter = tempfile::tempdir().unwrap();
+        let log = counter.path().join("runs");
+        let mut plan = demonstration_plan("cargo test -p demo one");
+        let demo = |criterion: u32, command: &str| {
+            json!({
+                "criterion": criterion,
+                "method": "run the demo test",
+                "command": command,
+                "observes": "the demo test passes",
+                "fails_without": "the demo test fails"
+            })
+        };
+        plan["demonstrations"] = json!([
+            demo(1, "cargo test -p demo one"),
+            demo(2, "cargo test -p demo two"),
+            demo(3, "cargo test -p other three"),
+        ]);
+        let body = format!(
+            "echo run >> {}; echo 'error: could not compile `demo`'; exit 101",
+            log.display()
+        );
+        let job = run_demonstration_job_with(&repo, plan, Some(&body), None, 2);
+        assert_eq!(
+            job.finished.state,
+            OutcomeState::Landed,
+            "{}",
+            job.finished.reason
+        );
+        // `-p demo` builds once for two commands; `-p other` is another scope and builds on its own.
+        let runs = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(runs.lines().count(), 2, "{runs}");
+        let prompt = &job.verifier_prompt;
+        // All three commands are still recorded, each with the build failure.
+        for command in [
+            "`cargo test -p demo one`",
+            "`cargo test -p demo two`",
+            "`cargo test -p other three`",
+        ] {
+            assert!(prompt.contains(command), "{command} is recorded: {prompt}");
+        }
+        assert_eq!(prompt.matches("the test did not compile").count(), 3);
         assert!(!job.revert_left);
     }
 

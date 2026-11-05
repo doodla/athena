@@ -782,6 +782,49 @@ pub fn demonstration_groups(demonstrations: &[Demonstration]) -> Vec<Demonstrati
     groups
 }
 
+/// The part of a plain `cargo test ...` command that decides what is compiled: its flags and their values
+/// (`-p athena-core`, `--locked`, `--lib`), without the test-name filter and without anything after `--`.
+/// Two commands with the same scope build the same targets from the same tree, so they fail to compile
+/// together or not at all; the filter only picks which tests run afterwards.
+pub fn build_scope(argv: &[String]) -> Vec<String> {
+    const TAKES_VALUE: [&str; 9] = [
+        "-p",
+        "--package",
+        "--test",
+        "--bin",
+        "--example",
+        "--bench",
+        "--features",
+        "-F",
+        "--manifest-path",
+    ];
+    let mut scope = Vec::new();
+    let mut words = argv.iter().skip(2);
+    while let Some(word) = words.next() {
+        if word == "--" {
+            break;
+        }
+        if word.starts_with('-') {
+            scope.push(word.clone());
+            if TAKES_VALUE.contains(&word.as_str())
+                && let Some(value) = words.next()
+            {
+                scope.push(value.clone());
+            }
+        }
+    }
+    scope
+}
+
+/// Whether a demonstration run stopped because the tests did not compile: it exited nonzero, ran no test and
+/// cargo reported "could not compile". The same scratch tree would fail the same way for any command of the
+/// same [`build_scope`], so it need not be built again.
+pub fn failed_to_build(run: &CheckRun) -> bool {
+    matches!(run.exit_code, Some(code) if code != 0)
+        && run.tests_ran.is_none_or(|n| n == 0)
+        && run.output_tail.contains("could not compile")
+}
+
 /// Whether a path is test code that the revert keeps: a `tests` or `test` directory, `tests.rs`,
 /// `*_tests.rs`, `*_test.rs` or `test_*`.
 pub fn is_test_path(path: &str) -> bool {
@@ -1324,6 +1367,52 @@ mod tests {
             .demonstration
             .unwrap()
             .result
+    }
+
+    #[test]
+    fn build_scope_drops_the_filter_and_keeps_what_is_compiled() {
+        let scope = |c: &str| build_scope(&demonstration_command(c).unwrap());
+        assert_eq!(
+            scope("cargo test -p athena-core hestia"),
+            scope("cargo test -p athena-core hestia::tests::one -- --exact")
+        );
+        assert_ne!(
+            scope("cargo test -p athena-core x"),
+            scope("cargo test -p athena-cli x")
+        );
+        assert_ne!(scope("cargo test -p a x"), scope("cargo test -p a --lib x"));
+        assert_ne!(scope("cargo test"), scope("cargo test --locked"));
+    }
+
+    #[test]
+    fn only_a_nonzero_run_that_could_not_compile_counts_as_a_failed_build() {
+        let run = |exit_code, tests_ran, tail: &str| CheckRun {
+            exit_code,
+            tests_ran,
+            output_tail: tail.into(),
+            ..check(false)
+        };
+        assert!(failed_to_build(&run(
+            Some(101),
+            Some(0),
+            "error: could not compile `x`"
+        )));
+        assert!(!failed_to_build(&run(
+            Some(101),
+            Some(2),
+            "error: could not compile `x`"
+        )));
+        assert!(!failed_to_build(&run(
+            Some(101),
+            Some(0),
+            "test t ... FAILED"
+        )));
+        assert!(!failed_to_build(&run(
+            Some(0),
+            Some(0),
+            "could not compile"
+        )));
+        assert!(!failed_to_build(&run(None, None, "could not compile")));
     }
 
     #[test]
