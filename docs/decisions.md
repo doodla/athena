@@ -4431,3 +4431,27 @@ should replace those estimates with its figures.
   merge, a conflict, leftover markers, an empty merge and a deleted conflicted file, and the `land.rs` tests that
   refuse content that differs from the verified content. Not measured: how often stale landings recur, how often a
   stale candidate merges cleanly, or how often a conflict leaves no marker lines.
+
+## D160 · The ontology scan covers every governing document, not only the sources a term lists
+
+- **Case:** D152 made the ontology check scan `BRIEF.md` and each term's listed file sources. A governing document
+  that no term listed could use a term in a sense its definition lacked and pass; Hermes as a tool and as a named
+  role was found only at the final verdict of job 20261017-173508-0wtc. The root cause is that the checks verified
+  the file's shape and the sources an author chose to list, not each term's content against every governing source.
+- **Decision:** This supersedes the scan scope in part (1) of D152; the rest of D152 stands. For each term the
+  check scans `BRIEF.md`, `README.md`, every `docs/*.md` file and the term's file sources, whole word and
+  case-sensitive, as before. The walk lives in `athena_core::mirrors::scanned_files`, which the ontology test and
+  the hand-kept mirror registry share, and the registry's ontology entry now also runs when a change touches
+  `README.md` or a `docs/*.md` file. Decision ids are still not scanned. No decision keeps the narrower scope.
+  D152 stays unedited because the decision log is append-only; its scope text in part (1) is replaced by this entry.
+- **Alternatives:**
+  - (a) Keep the listed sources only and ask authors to list more: it relies on the choice that failed.
+  - (b) Scan `docs/` recursively: out of scope here, and it pulls in design and study files that use terms in
+    other senses.
+- **Tradeoff:** The `docs/` scan is not recursive: files in subfolders such as `docs/design/` are scanned only if a
+  term lists them as a source, so a governing document there can still drift unseen. More files are scanned, so a
+  term used in another sense in a docs file needs a sense or an excuse.
+- **Reversal cost:** Low. Restore the two-file start of `scanned_files` and the narrower watch in `Mirror::watches`.
+- **Provenance:** Stated: the request to widen the scan to all governing docs. Read: D152, `crates/athena-core/src/mirrors.rs`,
+  `crates/athena-cli/tests/ontology.rs`. Measured: the scratch-root test and the real-file test over
+  `docs/ontology.toml`. Not measured: how many future misreads sit in `docs/` subfolders.

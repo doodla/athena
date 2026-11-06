@@ -39,7 +39,7 @@ pub enum Source {
     Globs(&'static [&'static str]),
     /// The mirror's own text at the base commit.
     GitHead,
-    /// The documents the ontology scans: `BRIEF.md` and each term's file sources.
+    /// The documents the ontology scans: `BRIEF.md`, `README.md`, every `docs/*.md` and each term's file sources.
     Docs,
 }
 
@@ -463,9 +463,26 @@ pub fn names_of<'a>(name: &'a str, aliases: &'a [String]) -> Vec<&'a str> {
         .collect()
 }
 
-/// `BRIEF.md` plus the term's sources that are files. Decision ids are not scanned.
+/// Every governing document: `BRIEF.md`, `README.md` and each `docs/*.md`, for every term, plus the term's own
+/// sources that are files. Decision ids are not scanned. Scanning only the sources an author listed is the gap
+/// that let a sense named in another governing document go unseen. Subfolders of `docs/` are scanned only when
+/// a term lists them.
 pub fn scanned_files(term: &OntologyTerm, root: &Path) -> Vec<String> {
     let mut files = vec!["BRIEF.md".to_string()];
+    if root.join("README.md").is_file() {
+        files.push("README.md".to_string());
+    }
+    if let Ok(entries) = std::fs::read_dir(root.join("docs")) {
+        let mut docs: Vec<String> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".md"))
+            .map(|n| format!("docs/{n}"))
+            .filter(|p| root.join(p).is_file())
+            .collect();
+        docs.sort();
+        files.extend(docs);
+    }
     for source in &term.sources {
         if !is_decision_id(source) && root.join(source).is_file() && !files.contains(source) {
             files.push(source.clone());
@@ -659,7 +676,13 @@ impl Mirror {
                 .any(|c| globs.iter().any(|g| glob_matches(g, c))),
             Source::GitHead => false,
             Source::Docs => {
-                if touches("BRIEF.md") {
+                let governing = |p: &String| {
+                    p == "BRIEF.md"
+                        || p == "README.md"
+                        || p.strip_prefix("docs/")
+                            .is_some_and(|n| n.ends_with(".md") && !n.contains('/'))
+                };
+                if paths.iter().any(governing) {
                     return true;
                 }
                 let Some(terms) = std::fs::read_to_string(root.join(self.mirror))
@@ -1189,7 +1212,8 @@ says = "unit"
         // GitHead: the mirror only.
         assert!(watch("decision log", &["docs/decisions.md"]));
         assert!(!watch("decision log", &["README.md"]));
-        // Docs: the ontology, BRIEF.md and a term's file source; an unlisted doc and a decision id are not.
+        // Docs: the ontology, BRIEF.md, README.md, any docs/*.md and a term's file source; a docs subfolder
+        // file no term lists, and a decision id, are not.
         put(
             root,
             "docs/ontology.toml",
@@ -1198,12 +1222,15 @@ says = "unit"
         assert!(watch("ontology", &["docs/ontology.toml"]));
         assert!(watch("ontology", &["BRIEF.md"]));
         assert!(watch("ontology", &["docs/roadmap.md"]));
-        assert!(!watch("ontology", &["docs/other.md"]));
+        assert!(watch("ontology", &["docs/other.md"]));
+        assert!(watch("ontology", &["README.md"]));
+        assert!(!watch("ontology", &["docs/sub/other.md"]));
         assert!(!watch("ontology", &["D01"]));
-        // A file that does not parse watches only itself and BRIEF.md.
+        // A file that does not parse watches only itself and the governing documents.
         put(root, "docs/ontology.toml", "not toml [");
         assert!(watch("ontology", &["BRIEF.md"]));
-        assert!(!watch("ontology", &["docs/roadmap.md"]));
+        assert!(watch("ontology", &["docs/roadmap.md"]));
+        assert!(!watch("ontology", &["docs/sub/roadmap.md"]));
     }
 
     #[test]
