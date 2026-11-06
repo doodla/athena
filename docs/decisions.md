@@ -4431,3 +4431,24 @@ should replace those estimates with its figures.
   merge, a conflict, leftover markers, an empty merge and a deleted conflicted file, and the `land.rs` tests that
   refuse content that differs from the verified content. Not measured: how often stale landings recur, how often a
   stale candidate merges cleanly, or how often a conflict leaves no marker lines.
+
+## D160 · Executable stand-ins are written by one test-only helper in `athena-testkit`, and a scan guards it; D08 stands
+
+- **Case:** Tests that write a stand-in script and run it failed at random with "Text file busy". The helper added
+  by D157 lived in `athena-git`, so `athena-cli`, `xtask` and others could not share it without a production
+  dependency, and one test still wrote its script in-process. Nothing listed the write sites. The change moves the
+  helper into the new crate `athena-testkit`, converts the test fixture `user_repo` in
+  `crates/athena-git/src/snapshot.rs` to the new path, and adds a scan of test code, which touches a path D08
+  governs.
+- **Decision:** Amends D08 in prose only: D08 was checked for the `crates/athena-git/src/snapshot.rs` change and
+  stands. Only test code in that file changed; the snapshots, their throwaway repositories and the candidate
+  build are untouched. The helper has one home, `athena_testkit::write_executable`, and the integration test
+  `no_in_process_exec_writes` fails on any in-process executable write in test code.
+- **Alternatives:** Keep the helper in `athena-git`: the other crates would need it as a dependency. Put it in the
+  `athena-core` test-support module: `athena-git` and `athena-agent` could not use it. Retry at each run site: it
+  hides the race and leaves the write sites unlisted.
+- **Tradeoff:** One more workspace crate. The scan is a text check, so it flags lines that look like an executable
+  write and cannot prove a race; the stress test measures the race itself.
+- **Reversal cost:** Low; move the helper back, delete the crate and the scan.
+- **Provenance:** Read: D08, D156, D157, `crates/athena-git/src/snapshot.rs`. Measured: the stress test, 0 busy
+  files over 800 helper cycles and a nonzero count for the in-process control.

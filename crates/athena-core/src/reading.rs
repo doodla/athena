@@ -8214,26 +8214,14 @@ mod tests {
     #[cfg(unix)]
     fn stub_binary(dir: &std::path::Path, body: &str) -> PathBuf {
         let path = dir.join("athena-stub");
-        athena_git::script_writer::write_executable(&path, format!("#!/bin/sh\n{body}\n"));
+        athena_testkit::write_executable(&path, format!("#!/bin/sh\n{body}\n"));
         path
     }
 
-    /// Runs a checker, trying again while the freshly written stub is busy (a parallel test's fork can hold it).
+    /// Runs a checker over a stub written by [`stub_binary`].
     #[cfg(unix)]
     fn check_stub(bin: PathBuf, reading: &Reading) -> Result<ReadingCheck> {
-        let checker = BinaryChecker::new(bin);
-        let mut result = checker.check("add a greeting", reading);
-        for _ in 0..20 {
-            if !result
-                .as_ref()
-                .is_err_and(|e| format!("{e:#}").contains("Text file busy"))
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-            result = checker.check("add a greeting", reading);
-        }
-        result
+        BinaryChecker::new(bin).check("add a greeting", reading)
     }
 
     #[cfg(unix)]

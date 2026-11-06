@@ -1,4 +1,7 @@
-//! Writing an executable stand-in script so that running it right away cannot fail with `ETXTBSY`.
+//! Test-only helpers shared by the workspace crates. Use it as a dev-dependency only.
+//!
+//! The one helper is [`write_executable`]: writing an executable stand-in script so that running it right
+//! away cannot fail with `ETXTBSY`.
 //!
 //! Tests write small scripts and run them, sometimes through production code. On Linux, `exec` of a file
 //! fails with "Text file busy" (`ETXTBSY`) while any process holds that file open for writing. A test that
@@ -10,6 +13,9 @@
 //! to the target, sets mode 755, and renames it into place; the caller waits for the child. The calling
 //! process never opens the script for writing, so no fork in it can carry a write handle to the script. The
 //! child's own handle closes before the rename, so the final path is never open for writing in any process.
+//!
+//! The integration test `no_in_process_exec_writes` scans the workspace's test code and fails on any
+//! in-process write that makes a file executable, so new stand-ins must come through this helper.
 
 use std::io::Write;
 use std::path::Path;
@@ -46,8 +52,6 @@ pub fn write_executable(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn the_script_is_written_executable_and_replaces_an_earlier_file() {
@@ -69,40 +73,9 @@ mod tests {
     }
 
     #[test]
-    fn many_write_then_exec_cycles_succeed_while_other_threads_fork() {
-        let stop = Arc::new(AtomicBool::new(false));
-        let forkers: Vec<_> = (0..4)
-            .map(|_| {
-                let stop = Arc::clone(&stop);
-                std::thread::spawn(move || {
-                    while !stop.load(Ordering::Relaxed) {
-                        Command::new("true").status().unwrap();
-                    }
-                })
-            })
-            .collect();
-        let writers: Vec<_> = (0..4)
-            .map(|t| {
-                std::thread::spawn(move || {
-                    let dir = tempfile::tempdir().unwrap();
-                    for i in 0..100 {
-                        let path = dir.path().join(format!("stand-in-{i}"));
-                        write_executable(&path, format!("#!/bin/sh\necho {t}-{i}\n"));
-                        let out = Command::new(&path)
-                            .output()
-                            .unwrap_or_else(|e| panic!("exec of cycle {t}-{i} failed: {e}"));
-                        assert!(out.status.success());
-                        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{t}-{i}\n"));
-                    }
-                })
-            })
-            .collect();
-        for w in writers {
-            w.join().unwrap();
-        }
-        stop.store(true, Ordering::Relaxed);
-        for f in forkers {
-            f.join().unwrap();
-        }
+    #[should_panic]
+    fn a_missing_directory_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        write_executable(dir.path().join("absent").join("tool"), "x");
     }
 }
