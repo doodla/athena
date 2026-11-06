@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-062207-cbcc",
+  "round": 1,
+  "at": "2026-11-06T06:34:12.962094785Z",
+  "invocation_seq": 4,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Nothing stops a stale job from being retried twice. The first retry can land the candidate, and a second retry merges the same candidate again.",
+      "evidence": "`earlier_attempt_with` (reading.rs:1362-1374) has no 'already retried' check. Only interrupted jobs are guarded, in `Athena::retry` (reading.rs:1117-1129), which uses `retries_by_job`. A stale job keeps its `Closed(Stale)` state after a retry lands it, so `stale_seed` would accept it again. With parallel jobs, which motivate this change, two retries of the same stale job can also be in flight at once. A later one would merge an already-landed diff, giving an empty or duplicate candidate and wasting a verifier run. Fix: In `stale_seed`, or in `Athena::retry` for a `Closed(Stale)` job, refuse or fall back when `retries_by_job` already names a retry that landed or is in flight, and name that retry the way the interrupted-job message does. Add a test assertion for it.",
+      "location": "Plan step 9 (`stale_seed`) / Decision 4 gate",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Some stale outcomes come from a different branch or from rewritten history. The plan merges the candidate onto whatever branch is checked out now.",
+      "evidence": "close.rs:273-289 maps `Plan::OtherBranch` ('dispatched on branch X, but branch Y is checked out') to a Stale outcome. land.rs:97-100 also marks a job stale when its base is no longer an ancestor. `merge-tree --merge-base=<old base>` will still apply p_old→c onto Y's tip. So retrying such a job from Y lands branch X's verified work on Y. The pointer appended in close.rs would also invite that retry. Fix: Have `stale_seed` require that the current branch equals the stale job's `dispatch_branch`, falling back to the existing retry-from-base path otherwise. Alternatively, append the close.rs pointer only for the governed-change and records-replay stale reasons. Either way, state the choice in the plan.",
+      "location": "Decision 4 / step 9: the gate does not look at why the job went stale",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The only guard against leftover conflict markers is the brief text and the verifier. A cheap mechanical check is available.",
+      "evidence": "`Snapshot::unchanged_since_seed` (snapshot.rs:114) lets a seeded producer hand back its work tree unchanged. The test's conflicted file is README.md, and no check (fmt, clippy, tests) inspects marker lines in docs. The plan already knows the exact conflicted paths (`StaleConflict.paths`). Fix: Before admission, refuse or send back a conflict-seeded producer result if any listed path still contains a line starting with `<<<<<<<`, `=======` or `>>>>>>>`, or if `unchanged_since_seed()` is true. Assert this in the conflict test.",
+      "location": "Decision 3 / Risks: conflict markers left in the producer's work tree",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Because the candidate is built directly on the tip, `plan()` takes the `head == p` branch. The equality assert then checks `tree_of(c)` against its own fingerprint, which is close to a tautology.",
+      "evidence": "land.rs:114-115 returns `git.tree_of(c)` when head == p. The fingerprint passed in comes from the same commit. The end-to-end assert in run/tests.rs is what actually shows criterion 4. Fix: Add a records-only commit on top of the tip after building c', so `plan()` takes the merge_tree replay branch (land.rs:116-125), or say that the run/tests.rs assertion is the primary evidence. In the clean core test, also record the verifier's work-dir files and assert that OTHER.md and the demo README text were both present when it ran.",
+      "location": "Demonstration for criterion 4 (land.rs `a_merged_candidate_lands_content_with_the_verified_fingerprint`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Choosing words so that the supersession parser does not count D157 leaves D10 shown as unamended in the decision view.",
+      "evidence": "decision-links.toml lines 1-10 say every supersession or amend phrase is tracked there. The precedent at decisions.md:1848 ('This reverses D80') shows 'reverses' is already used without a link, so the choice is consistent with the log. The plan raises the question openly. Fix: Keep the open question. In D157's Reversal cost or Provenance, say that a follow-up link entry in docs/decision-links.toml is pending, so a reader of the log knows D10 is partly reversed.",
+      "location": "Decision 6 / step 16 (D157 wording)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan names, and it matches: `earlier_attempt_with` (reading.rs:1346), `resume_seed`/`resume_candidate`/`dispatch` (run/mod.rs:489, 522, 823), the early return for `resume_from` (mod.rs:1073), `SnapshotRepo::BaseThenTree` (snapshot.rs:39), `Git::merge_tree` (athena-git lib.rs:663, MIN_GIT_VERSION 2.40), `Verified::from_record` (verify.rs:42), the Stale arm in close.rs:293, `plan()` and its fingerprint bail (land.rs:70-144), the pinned decision log (decisions.rs:200-204, D156 is the last entry) and the backtest phrases (backtest.rs:79-81). The design fixes the problem where it starts. Retry admission is widened at the one state check. A clean merge reuses the existing no-producer resume path on a properly merged tree, and landing still goes through the unchanged `plan()` equality check. A conflict uses the existing seeded-producer path. The new log entry is appended, not edited. The demonstrations use real entry points (`Athena::retry`, `Athena::go`, `land::plan`) with the existing `counting()` double. They count producer and verifier calls directly, so they would fail without the behavior. The dependents list matches the readers I found by Grep: `job_history`, `retries_by_job`, `retry_follow_up`, display.rs:840, the lifecycle stale tests, the retry.rs message prefix, and every `RetrySeed` constructor (only in briefs.rs, mod.rs and reading.rs). I found no blocker or major problem. Four minor gaps remain: a second retry of a stale job is not guarded, a job that went stale on another branch is not handled, conflict markers are not checked mechanically, and the land.rs test is weak. One wording choice in the log entry is worth a note."
+}
