@@ -1546,6 +1546,25 @@ impl Athena {
         let recorded_checks = built.recorded_checks.take();
         let loop_replay = built.loop_replay.take();
 
+        // Decisions the change reverses are found here, at the producer's step, before the pull request, the
+        // checks and the verifier cost anything. A resume at the verifier stage passed this on its first run,
+        // and a nested run is judged by the outer job. The closing reason names each decision and the fix; the
+        // retry brief carries it to the next producer (`reading::retry_findings`).
+        if recorded_checks.is_none() && self.nested.is_none() {
+            let changed: Vec<String> = closing
+                .candidate
+                .as_ref()
+                .map(|c| c.changes.iter().map(|e| e.path.clone()).collect())
+                .unwrap_or_default();
+            if let Some(reason) = self.unreconciled_decisions(ctx, &p, &c, &changed) {
+                let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
+                closing.happened = self.failure(ctx, &reason);
+                closing.happened.changed_paths = changed_paths;
+                closing.happened.verification_passed = None;
+                return Ok(closing);
+            }
+        }
+
         // The admitted candidate goes to the job's CI branch, so the repository's CI runs on it. The branch is
         // deleted when the job closes (`finish_dispatched`). The checks below read its push run, and a failure to
         // push is a warning line only: the checks then run here once the wait bound has passed.

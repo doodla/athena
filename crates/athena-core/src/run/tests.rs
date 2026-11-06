@@ -2195,6 +2195,256 @@ mod produce_and_verify_order_tests {
         String::from_utf8(bytes).unwrap()
     }
 
+    /// The list of a repository whose README is governed by D02 and whose `src/` is governed by D12.
+    const GOVERNING: &str = "[[governs]]\ndecision = \"D02\"\npaths = [\"README.md\"]\n\n\
+                             [[governs]]\ndecision = \"D12\"\npaths = [\"src/\"]\n";
+    /// The decision log of that repository.
+    const DECISIONS: &str = "# Decisions\n\n## D02 · The README\n\n- **Provenance:** a\n\n\
+                             ## D12 · The source\n\n- **Provenance:** b\n";
+
+    /// The test repository with `links` and a decision log committed under `docs/`.
+    fn governed_repo(links: &str) -> tempfile::TempDir {
+        let repo = repo();
+        commit_file(&repo, "docs/decision-links.toml", links);
+        commit_file(&repo, "docs/decisions.md", DECISIONS);
+        repo
+    }
+
+    /// What a producer adds to reconcile D02: a new log entry that checks it, and a link from D02 to it.
+    fn reconciling_edits() -> Vec<(String, Option<String>)> {
+        vec![
+            (
+                "docs/decisions.md".into(),
+                Some(format!(
+                    "{DECISIONS}\n## D13 · The README edit\n\n- Checked D02: the edit changes nothing it decides.\n\
+                     - **Provenance:** c\n"
+                )),
+            ),
+            (
+                "docs/decision-links.toml".into(),
+                Some(format!(
+                    "{GOVERNING}\n[[link]]\nline = 1\nolder = \"D02\"\nnewer = \"D13\"\nstatus = \"amended\"\n"
+                )),
+            ),
+        ]
+    }
+
+    /// The counting script, except that the producer also makes `extra` edits, and every producer prompt is
+    /// kept in `prompts`.
+    fn editing(
+        counts: Arc<Counts>,
+        prompts: Arc<Mutex<Vec<String>>>,
+        extra: Vec<(String, Option<String>)>,
+    ) -> athena_agent::fake::Script {
+        let inner = counting(counts, None);
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            if spec.role == Role::Producer {
+                prompts.lock().unwrap().push(spec.user_prompt.clone());
+                turn.edits.extend(extra.clone());
+            }
+            turn
+        })
+    }
+
+    /// Runs one job over `repo` whose producer makes `extra` edits beside the README: its closing, the
+    /// counts of the fake agents and what the UI said.
+    fn governed_job(
+        repo: &tempfile::TempDir,
+        extra: Vec<(String, Option<String>)>,
+    ) -> (Finished, Arc<Counts>, Vec<String>) {
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            editing(counts.clone(), Arc::default(), extra),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        let said = ui.0.lock().unwrap().clone();
+        (done, counts, said)
+    }
+
+    #[test]
+    fn governed_edit_closes_before_the_verifier_starts() {
+        use athena_data::decision_links::GATE_REASON_PREFIX;
+        let repo = governed_repo(GOVERNING);
+        let (done, counts, said) = governed_job(&repo, Vec::new());
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        // The reason names the decision the change touched, its path and the fix, and not the other decision.
+        assert!(
+            done.reason.starts_with(GATE_REASON_PREFIX),
+            "{}",
+            done.reason
+        );
+        assert!(done.reason.contains("D02 (README.md)"), "{}", done.reason);
+        assert!(!done.reason.contains("D12"), "{}", done.reason);
+        assert!(done.reason.contains("[[link]]"), "{}", done.reason);
+        // It is a failure of the work, which a retry starts again, not an environment stop.
+        assert!(!crate::disk::is_environment_reason(&done.reason));
+        // Nothing after the check ran: no verifier, no checks line.
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (1, 0), "{said:#?}");
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("failed     decisions not reconciled:")),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.starts_with("verifier   ")),
+            "{said:#?}"
+        );
+    }
+
+    #[test]
+    fn governed_edit_closes_before_the_verifier_starts_for_another_decision_and_names_every_one() {
+        // D12 governs `src/`: a producer that adds a file there is named, and with the README both are.
+        let repo = governed_repo(GOVERNING);
+        let (done, counts, _) =
+            governed_job(&repo, vec![("src/lib.rs".into(), Some("// new\n".into()))]);
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(done.reason.contains("D02 (README.md)"), "{}", done.reason);
+        assert!(done.reason.contains("D12 (src/lib.rs)"), "{}", done.reason);
+        assert_eq!(counts.all().3, 0);
+    }
+
+    #[test]
+    fn governed_edit_with_an_amending_entry_and_link_reaches_the_verifier() {
+        use athena_data::decision_links::GATE_REASON_PREFIX;
+        let repo = governed_repo(GOVERNING);
+        let (done, counts, said) = governed_job(&repo, reconciling_edits());
+        assert!(
+            !done.reason.starts_with(GATE_REASON_PREFIX),
+            "{}",
+            done.reason
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(counts.all().3, 1, "the verifier ran once: {said:#?}");
+        assert!(
+            said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+    }
+
+    #[test]
+    fn ungoverned_edit_reaches_the_verifier() {
+        // The list governs `src/` only; the producer edits the README, which no decision governs here.
+        let repo = governed_repo("[[governs]]\ndecision = \"D12\"\npaths = [\"src/\"]\n");
+        let (done, counts, _) = governed_job(&repo, Vec::new());
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(counts.all().3, 1);
+        // A repository with no list at all governs nothing.
+        let (done, counts, _) = governed_job(&self::repo(), Vec::new());
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(counts.all().3, 1);
+    }
+
+    #[test]
+    fn governed_check_is_skipped_for_a_resume_at_the_verifier() {
+        // A base list that cannot be read makes the check say so with a warning line and let the job go on.
+        // The line is the sign that the check ran: it appears on the first run and not on the resume.
+        const WARNING: &str = "warning: docs/decision-links.toml could not be read";
+        let repo = governed_repo("not = [toml");
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("repo");
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::low_once_verifying,
+            editing(counts.clone(), Arc::default(), Vec::new()),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let first = proposal.job.clone();
+        let ui = Lines::default();
+        athena
+            .go(first.as_str(), AcceptedBy::User, &ui)
+            .expect_err("low space before the verifier holds the job");
+        let said = ui.0.lock().unwrap().clone();
+        assert_eq!(
+            said.iter().filter(|l| l.starts_with(WARNING)).count(),
+            1,
+            "{said:#?}"
+        );
+        assert_eq!(counts.all().3, 0);
+
+        std::fs::write(root.join("freed"), b"").unwrap();
+        let (retry, _) = athena.retry(first.as_str(), &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(retry.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter().any(|l| l.starts_with("resume     ")),
+            "{said:#?}"
+        );
+        assert!(!said.iter().any(|l| l.starts_with(WARNING)), "{said:#?}");
+        assert_eq!(counts.all().3, 1);
+    }
+
+    #[test]
+    fn a_retry_of_a_gated_job_briefs_the_producer_with_the_decision_ids() {
+        let repo = governed_repo(GOVERNING);
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            editing(counts.clone(), prompts.clone(), Vec::new()),
+        );
+        let (first, done) = finished_job(&athena);
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(!crate::disk::is_environment_reason(&done.reason));
+        assert_eq!(athena.state.read_resume(&first), None, "the mark is spent");
+
+        let proposal = athena
+            .ask(&format!("try again on {first}"), &Quiet)
+            .unwrap();
+        let second = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+                .unwrap(),
+        );
+        assert_ne!(proposal.job, first);
+        // The retry starts a fresh producer from the base; this one fails the same check again.
+        assert_eq!(second.state, OutcomeState::Failed, "{}", second.reason);
+        let prompts = prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 2, "one producer per job");
+        assert!(
+            !prompts[0].contains("## Findings you must address"),
+            "the first brief has no earlier findings"
+        );
+        let brief = &prompts[1];
+        let start = brief
+            .find("## Findings you must address")
+            .unwrap_or_else(|| panic!("no findings block in the retry brief:\n{brief}"));
+        let block = &brief[start..];
+        assert!(block.contains("D02"), "{block}");
+        assert!(block.contains("README.md"), "{block}");
+        assert!(block.contains("decisions not reconciled:"), "{block}");
+        assert_eq!(counts.all().3, 0, "no verifier ran for either job");
+    }
+
     #[test]
     fn produce_dir_is_removed_before_the_checks_whether_they_pass_or_fail() {
         for (check, passes) in [(PASSES, true), (FAILS_ON_EDIT, false)] {

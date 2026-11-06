@@ -10,6 +10,8 @@
 //! - [`id`]: time-sortable ids, and the reserved `bootstrap` job id;
 //! - [`config`]: `athena.toml`, the repository's configuration;
 //! - [`defaults`]: `defaults.toml`, the model of the user's default expectations;
+//! - [`decision_links`]: the `[[governs]]` list in `docs/decision-links.toml` and the rule that a change to a
+//!   governed path must reconcile its decision before verification;
 //! - [`paths`]: where Athena keeps machine-local things (install and state directories).
 //!
 //! This crate is a leaf: it depends on no other Athena crate.
@@ -18,6 +20,7 @@
 //! commit that changes this crate is judged by that test, run in the candidate's own `cargo test`.
 
 pub mod config;
+pub mod decision_links;
 pub mod defaults;
 pub mod history;
 pub mod id;
