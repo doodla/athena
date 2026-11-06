@@ -111,6 +111,64 @@ pub fn build(
     Ok(env)
 }
 
+/// Names the producer's environment carries so that its `cargo` wrapper finds the build-slot queue. The
+/// wrapper is the `athena` binary itself, reached through a link named `cargo`.
+pub const SLOT_DIR_ENV: &str = "ATHENA_SLOT_DIR";
+pub const SLOT_COUNT_ENV: &str = "ATHENA_SLOT_COUNT";
+pub const SLOT_WAIT_ENV: &str = "ATHENA_SLOT_WAIT_S";
+pub const SLOT_PROMOTE_ENV: &str = "ATHENA_SLOT_PROMOTE_S";
+/// The file the wrapper writes when no slot came free, which marks the job as held.
+pub const SLOT_HOLD_ENV: &str = "ATHENA_SLOT_HOLD_FILE";
+/// The wrapper's own directory, which the wrapper leaves out when it looks for the real `cargo`.
+pub const WRAPPER_DIR_ENV: &str = "ATHENA_CARGO_WRAPPER_DIR";
+
+/// Where the producer's build-slot queue is and how long a command waits in it.
+#[derive(Debug, Clone)]
+pub struct CargoWrapper<'a> {
+    /// The `athena` binary the wrapper link points at.
+    pub athena_bin: &'a Path,
+    /// A directory of the job's own that holds the link; it goes first on `PATH`.
+    pub bin_dir: &'a Path,
+    pub slots_dir: &'a Path,
+    pub slots: usize,
+    pub wait_s: u64,
+    pub promote_s: u64,
+    pub hold_file: &'a Path,
+}
+
+/// Puts a `cargo` wrapper first on the producer's `PATH`. The wrapper takes a build slot for `cargo build`,
+/// `test`, `clippy` and `check` and runs every other subcommand as it is. Only the producer's environment is
+/// passed through here: the checks' and the verifier's environments come from [`build`] alone.
+pub fn install_cargo_wrapper(
+    env: &mut BTreeMap<String, String>,
+    wrapper: &CargoWrapper<'_>,
+) -> Result<(), String> {
+    let fail =
+        |what: &str, path: &Path, e: std::io::Error| format!("{what} {}: {e}", path.display());
+    std::fs::create_dir_all(wrapper.bin_dir).map_err(|e| fail("creating", wrapper.bin_dir, e))?;
+    let link = wrapper.bin_dir.join("cargo");
+    if std::fs::symlink_metadata(&link).is_ok() {
+        std::fs::remove_file(&link).map_err(|e| fail("removing", &link, e))?;
+    }
+    std::os::unix::fs::symlink(wrapper.athena_bin, &link).map_err(|e| fail("linking", &link, e))?;
+    let dir = wrapper.bin_dir.display().to_string();
+    let path = match env.get("PATH").filter(|p| !p.is_empty()) {
+        Some(old) => format!("{dir}:{old}"),
+        None => dir.clone(),
+    };
+    env.insert("PATH".into(), path);
+    env.insert(WRAPPER_DIR_ENV.into(), dir);
+    env.insert(SLOT_DIR_ENV.into(), wrapper.slots_dir.display().to_string());
+    env.insert(SLOT_COUNT_ENV.into(), wrapper.slots.to_string());
+    env.insert(SLOT_WAIT_ENV.into(), wrapper.wait_s.to_string());
+    env.insert(SLOT_PROMOTE_ENV.into(), wrapper.promote_s.to_string());
+    env.insert(
+        SLOT_HOLD_ENV.into(),
+        wrapper.hold_file.display().to_string(),
+    );
+    Ok(())
+}
+
 /// Fills in `{job_dir}`, `{side}` and `{athena_home}` in one environment value.
 pub fn expand(template: &str, job_dir: &Path, side: Side, athena_home: &Path) -> String {
     template
@@ -408,6 +466,67 @@ mod tests {
         let error = BuildLink::create(&job_dir, &outside, &slot).unwrap_err();
         assert!(error.contains("not inside this job's directory"), "{error}");
         assert!(std::fs::symlink_metadata(&outside).is_err());
+    }
+
+    #[test]
+    fn the_producer_gets_the_cargo_wrapper_first_on_its_path_and_the_verifier_does_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let agents = agents();
+        let capability_env = BTreeMap::new();
+        let env_for = |side| {
+            build(
+                &EnvSpec {
+                    agents: &agents,
+                    job: "j",
+                    job_dir: &temp.path().join("j"),
+                    snapshot: &temp.path().join("j/work"),
+                    side,
+                    capability_env: &capability_env,
+                },
+                parent_env,
+            )
+            .unwrap()
+        };
+        let verifier = env_for(Side::Verify);
+        let mut producer = env_for(Side::Produce);
+        assert_eq!(
+            producer,
+            env_for(Side::Produce),
+            "build alone adds no wrapper"
+        );
+        let bin = temp.path().join("j/agent/bin");
+        let hold = temp.path().join("holds/j.json");
+        install_cargo_wrapper(
+            &mut producer,
+            &CargoWrapper {
+                athena_bin: Path::new("/usr/bin/athena"),
+                bin_dir: &bin,
+                slots_dir: &temp.path().join("slots"),
+                slots: 2,
+                wait_s: 1800,
+                promote_s: 600,
+                hold_file: &hold,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            producer["PATH"],
+            format!("{}:/usr/bin", bin.display()),
+            "the wrapper directory is first"
+        );
+        assert_eq!(
+            std::fs::read_link(bin.join("cargo")).unwrap(),
+            Path::new("/usr/bin/athena")
+        );
+        assert_eq!(producer[SLOT_COUNT_ENV], "2");
+        assert_eq!(producer[SLOT_WAIT_ENV], "1800");
+        assert_eq!(
+            verifier["PATH"], "/usr/bin",
+            "the verifier's PATH is untouched"
+        );
+        for key in [SLOT_DIR_ENV, SLOT_HOLD_ENV, WRAPPER_DIR_ENV] {
+            assert!(!verifier.contains_key(key), "{key}");
+        }
     }
 
     #[test]

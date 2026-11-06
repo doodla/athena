@@ -19,8 +19,8 @@
 //! [`SlotQueue::acquire`] returns [`crate::disk::SlotWait`], which the run turns into a held job, not a failed
 //! one. The caller's `stop` closure runs on every poll, so the kill switch still ends a long wait.
 //!
-//! Only [`Class::Check`] is requested today; the other classes are for the producer's commands and the landing
-//! rebuild (build jobs 4 and 7).
+//! [`Class::Check`] is requested by the checks and [`Class::Producer`] by the producer's `cargo` wrapper
+//! (`athena-cli`'s `slot_exec`); [`Class::Landing`] is for the landing rebuild (build job 7).
 
 use crate::disk::SlotWait;
 use anyhow::{Context, Result};

@@ -130,6 +130,8 @@ struct Closing {
     baseline: Option<Baseline>,
     /// The earlier job whose kept candidate this job resumed from; its resume mark is spent when this job closes.
     consumed_resume: Option<JobId>,
+    /// Set when a producer cargo command waited its whole limit for a build slot; the job is then held.
+    slot_hold: Option<crate::disk::SlotWait>,
 }
 
 /// A built candidate on its way through the checks and the verifier: what [`Athena::check_and_verify`] takes
@@ -238,6 +240,7 @@ impl Closing {
     fn new() -> Closing {
         Closing {
             consumed_resume: None,
+            slot_hold: None,
             baseline: None,
             plans: Vec::new(),
             critiques: Vec::new(),
@@ -1491,7 +1494,13 @@ impl Athena {
             work,
         } = match self.producer_loop(ctx, brief, accepted, &mut closing, seq, prepared)? {
             Flow::Go(reported) => reported,
-            Flow::Stop => return Ok(closing),
+            Flow::Stop => {
+                // No build slot came free for a producer command: held, not failed, as at the checks.
+                if let Some(wait) = closing.slot_hold.take() {
+                    return Err(self.hold_for_slot_wait(ctx, closing, wait));
+                }
+                return Ok(closing);
+            }
         };
 
         let Admitted {
