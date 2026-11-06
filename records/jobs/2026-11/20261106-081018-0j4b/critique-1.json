@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-081018-0j4b",
+  "round": 1,
+  "at": "2026-11-06T11:45:48.248434315Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The evidence string `test result` matches passing summaries, so the fallback fails to fire exactly when a failing unit's output has been pushed out of the tail.",
+      "evidence": "FAILURE_EVIDENCE = [\"test result\", \"FAILED\", \"failures:\", \"panicked at\"], and failure_tail returns the plain tail when any of these appears in it. Every passing cargo binary prints `test result: ok. N passed; 0 failed`. In xtask/src/shard.rs:316-327, test-shard runs each unit in a loop and only records a failure when a unit fails, so it keeps going. If unit 1 panics and later units pass with more than 200 lines of output, the plain tail holds `test result: ok` lines and counts as having evidence. The panic and assertion text are then lost: this is the 'failing test's output is cut off' class. The same false match also floods the fallback with passing summaries (3 lines kept per match), which can push the real panic out of the 200-line cap. Fix: Use failure-specific markers only: `test result: FAILED`, ` ... FAILED`, `panicked at`, and a `failures:` line. Decide whether the plain tail is good enough by whether it holds those markers, not any `test result`. Better still, select the failing section of each cargo section (from `failures:` through `test result: FAILED`) whenever it lies outside the tail, not only when the tail is bare. Add a test: a shard log where a failing unit is followed by more than 200 lines of passing-unit output (with `test result: ok`) and cleanup, asserting that output_tail keeps the `panicked at` line.",
+      "location": "Plan step 1-2 (FAILURE_EVIDENCE) and Decision 3; xtask/src/shard.rs:316-327",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The readers that cut the stored output_tail down again before the audience sees it are left out, so nothing shows that introspection or the verifier will see the failure.",
+      "evidence": "introspect.rs:997 quotes `clip_tail(&c.output_tail, TAIL_CAP)` with TAIL_CAP = 600 characters. briefs.rs:1091/1152 quote `clip_log_tail(.., BRIEF_TAIL_LINES = 60, BRIEF_TAIL_BYTES = 6 KiB)` to the verifier. reading.rs:2045 carries `tail(&c.output_tail, 1024)`. The reading names the verifier and introspection as the audience, and the introspections that recorded this class saw only that 600-character end. When the plain tail is kept, the failure lines can sit more than 600 characters or more than 60 lines before the end. That happens, for example, when later shard units, the xtask `units failed` line and `##[error]Process completed` follow them. The dependents list names only introspect.rs loosely ('reads lines when failed_tests is empty') and gives no test for these clips. Fix: Add these three readers to the dependents list. Either put the selected failure section at the end of output_tail, so every end-keeping clip keeps it, or explain why the order is safe. Add an assertion (or a test through introspect's failed-checks rendering or the briefs' clip_log_tail) that the last 600 characters, and the last 60 lines, of the new output_tail contain the `panicked at` or `FAILED` line for the criterion 2 and 3 logs.",
+      "location": "Dependents list; crates/athena-core/src/introspect.rs:893,997; crates/athena-context/src/briefs.rs:1087-1100,1148-1152; crates/athena-core/src/reading.rs:1932,2045",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The described call does not match the function's signature.",
+      "evidence": "gh/client.rs:248-250: `pub fn detail_from_job_logs(jobs: &[(String, String, Option<String>)])`. The existing test at gh/tests.rs:675-680 builds a `vec![(name, conclusion, Some(log))]` and passes `&jobs`. Fix: Describe the call as `detail_from_job_logs(&[(name.to_string(), \"failure\".to_string(), Some(log))])`, following job_log_parser_strips_stamps_keeps_the_indent_and_names_the_units.",
+      "location": "Demonstration for criterion 2 ('calls the production detail_from_job_logs(name, \"failure\", Some(log))')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two lines after `panicked at` cut off part of the standard assert_eq message.",
+      "evidence": "A Rust assert_eq panic prints `thread '..' panicked at file:line:col:`, then the assertion line, then `  left: ..` and ` right: ..`: three lines after the match. The `failures:` header is followed by `---- name stdout ----` and then the whole panic block, so 2 lines keep only the header. Fix: Keep the whole block: from a `---- <name> stdout ----` line or `panicked at` up to the next blank line, or through `test result: FAILED`. Or raise the context to cover the left and right lines, and test that ` right:` is kept.",
+      "location": "Plan step 2 (2 lines of context after each match)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The marker list cannot be checked against a real log in the repository, but the workflow shows which post step comes first.",
+      "evidence": "No file in the snapshot contains `Post job cleanup` or `Cleaning up orphan processes`. In .github/workflows/ci.yml:348-445 the test job uses actions/checkout (which has a post step) and actions/cache/restore and actions/cache/save (which do not), so checkout's `Post job cleanup.` is the first post-phase line. Fix: Cite ci.yml in Decision 2 as the reason the first marker is checkout's post step, and keep the open question for the exact runner text.",
+      "location": "Decision 2 / Open questions (post-job markers)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the fix in the right place. detail_from_job_logs (gh/client.rs:248) tails the whole job log at lines 293-294, and CiSource::failure_detail is its only production caller. The functions and helpers it names exist (tail_lines, tail, FAILED_TAIL_LINES, failed_test_names, the `stamped` helper, CHANGELOG `### Fixed`). The criterion 2 and 3 tests call production code with real log strings and would fail on the base commit. Two design problems need a revision. First, the \"failure evidence\" test counts any line containing `test result`, which also matches every passing `test result: ok.` line. `cargo xtask test-shard` keeps running units after one fails (xtask/src/shard.rs:316-327). So a shard whose first unit panics and whose later units pass keeps a plain tail that \"has evidence\" but has lost the panic. That is the same cut-off-output class the request asks to prevent. Second, the dependents list leaves out the readers that cut the stored tail down again before the audience sees it: introspection keeps 600 characters, the verifier brief 60 lines, the reading 1024 bytes. Nothing shows that the failure lines survive into what introspection and the verifier actually read. Minor points: the test call signature is described wrongly, and the 2-line context after each match drops part of an assert_eq message. I read the code for everything above. I did not run anything."
+}

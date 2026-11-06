@@ -1,0 +1,207 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261106-081018-0j4b",
+  "round": 1,
+  "at": "2026-11-06T11:43:54.924630605Z",
+  "invocation_seq": 3,
+  "approach": "Fix in detail_from_job_logs (crates/athena-core/src/gh/client.rs:248, tail built at 293-294), where the stored tail is built. Add two small pure helpers beside tail_lines in checks.rs: `without_post_job_cleanup(log)` cuts a CI job log at its first runner post-job marker line, and `failure_tail(text, n)` tails the text but, when that tail has no failure evidence (`test result`, `FAILED`, `failures:`, `panicked at`) and the text does, returns the evidence lines with 2 lines of context each, under the same line and byte caps. detail_from_job_logs cuts the cleanup from each readable log before assembling `text` and uses `failure_tail` instead of `tail_lines`. Name parsing, the FAILING_UNITS_PREFIX header, redaction and the local check tail (checks.rs:533) are unchanged. Add tests in gh/tests.rs (through detail_from_job_logs) and checks.rs (helpers), and a CHANGELOG Fixed entry naming the root cause. Criterion 5 is answered with an explicit seam and fails_without: the three CI commands run the new tests, so they exit non-zero on the base commit.",
+  "decisions": [
+    {
+      "choice": "Fix in detail_from_job_logs, using helpers in checks.rs next to tail_lines.",
+      "reason": "The fault is that the whole job log, which ends with runner cleanup, is tailed and failure lines are never selected. CiSource::failure_detail (gh/client.rs ~998-1025) is the only non-test caller, so every CI-reused failed check goes through the fix.",
+      "rejected": [
+        {
+          "option": "Trim in with_failure_detail (checks.rs:347-363)",
+          "why": "It receives a tail already cut at 200 lines, so the failure lines may already be lost; it also serves the routing path where the detail is a fake."
+        },
+        {
+          "option": "Parse failing test output only and drop the tail",
+          "why": "failed_test_names already does this and yields nothing for an unfinished shard or non-cargo output, which is the case that showed noise."
+        },
+        {
+          "option": "Change the local failed-check tail at checks.rs:533",
+          "why": "Local output is the command's own output with no runner cleanup; out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Cut at the first line whose trimmed text is exactly `Post job cleanup.` or `Cleaning up orphan processes`, or starts with `##[group]Post `; keep the original log if the cut would leave only whitespace.",
+      "reason": "These are the runner's markers for the post-job phase; whole-line anchoring stops test output matching by accident, and the guard keeps a log that starts with a marker readable.",
+      "rejected": [
+        {
+          "option": "Drop individual cleanup-looking lines anywhere",
+          "why": "A noise filter list grows without end and can drop real output; cutting the trailing phase is bounded."
+        }
+      ]
+    },
+    {
+      "choice": "Fall back to evidence lines only when the plain tail has none of the four evidence strings and the log has some; otherwise keep the plain tail.",
+      "reason": "Logs with evidence in the tail, or none at all, behave as before, so the existing tests keep passing.",
+      "rejected": [
+        {
+          "option": "Always return only evidence lines",
+          "why": "It would drop surrounding assertion output and change existing tail contents."
+        }
+      ]
+    },
+    {
+      "choice": "For criterion 5, no new test code; the demonstration is the three CI commands, whose test run includes the new tests.",
+      "reason": "The new behavior tests make `cargo test --locked` red on the base commit, so the command shows the fix, not only a green build.",
+      "rejected": [
+        {
+          "option": "Add a separate meta-test that runs cargo",
+          "why": "It would add logic with no gain; the new tests already exercise detail_from_job_logs."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Add FAILURE_EVIDENCE, without_post_job_cleanup and failure_tail beside tail_lines (~line 193), with doc comments naming the root cause, plus unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "purpose": "In detail_from_job_logs, cut cleanup from each readable log and build the tail with failure_tail; update the function doc (~238-247) to name the root cause.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "purpose": "Add the two detail_from_job_logs tests after job_log_parser_strips_stamps_keeps_the_indent_and_names_the_units.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add a Fixed entry under Unreleased naming the root cause and the fix in detail_from_job_logs.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In checks.rs, below tail_lines, add `const FAILURE_EVIDENCE: [&str; 4] = [\"test result\", \"FAILED\", \"failures:\", \"panicked at\"]` and `pub fn without_post_job_cleanup(log: &str) -> &str`: find the byte offset of the first line whose trim equals `Post job cleanup.` or `Cleaning up orphan processes` or starts with `##[group]Post `; return the text before it, or the whole log if no marker is found or the cut leaves only whitespace.",
+    "In checks.rs add `pub fn failure_tail(text: &str, n: usize) -> String`: let `plain = tail_lines(text, n)`; if `plain` has a line with any FAILURE_EVIDENCE string, or `text` has none, return `plain`; else collect each matching line of `text` with the 2 lines after it (no duplicates, in order), join with newlines and a final newline, and return `tail_lines(.., n)`. Doc comment names the root cause.",
+    "In gh/client.rs detail_from_job_logs, in the `readable` loop push `without_post_job_cleanup(log)` instead of the full log, and replace `tail_lines(&text, FAILED_TAIL_LINES)` (line 293) with `failure_tail(&text, FAILED_TAIL_LINES)`, keeping the `tail(.., FAILED_TAIL_BYTES)` cap (line 294). Leave the names/units code on the full plain log. Update the function doc.",
+    "In gh/tests.rs add `detail_from_job_logs_drops_the_post_job_cleanup_tail` and `detail_from_job_logs_keeps_failure_lines_when_no_test_is_named`, built with `stamped`, each asserting the content of output_tail as in the demonstrations.",
+    "In checks.rs tests add unit tests for `without_post_job_cleanup` (cut at each marker, no marker unchanged, marker first line keeps the log) and `failure_tail` (no evidence returns the plain tail; evidence only outside the last n lines is returned; the n cap holds).",
+    "Add a bullet under `## [Unreleased]` / `### Fixed` in CHANGELOG.md naming the root cause and the fix in detail_from_job_logs.",
+    "Run cargo fmt --all, then `cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked`, and fix any failure."
+  ],
+  "risks": [
+    {
+      "risk": "A post-job marker string appears earlier in a log (for example a Post step of an action before the tests) and the cut removes test output.",
+      "mitigation": "Match whole trimmed lines only; keep the uncut log if the cut leaves nothing; failed_test_names still runs on the full plain log, so names are never lost by the cut."
+    },
+    {
+      "risk": "The evidence-line fallback keeps too little context for an assertion.",
+      "mitigation": "Keep 2 lines after each match, remove overlaps, and apply it only when the plain tail has no evidence."
+    },
+    {
+      "risk": "The fallback fires on a tail that has no evidence even though the failure is in a non-cargo tool.",
+      "mitigation": "If the log has no evidence lines, failure_tail returns the plain tail, so behavior changes only when evidence exists elsewhere."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "detail_from_job_logs output_tail",
+      "dependent": "CiSource::failure_detail, crates/athena-core/src/gh/client.rs (~998-1025), the only non-test caller of detail_from_job_logs",
+      "kind": "code",
+      "test": "red_reused_run_records_names_and_the_log_end and reused_red_degrades_when_the_log_lists_no_failures in gh/tests.rs, unchanged and passing, plus the two new tests",
+      "reason": null
+    },
+    {
+      "name": "FailureDetail.output_tail shape",
+      "dependent": "routing.rs (~280-287) calls ci.failure_detail then with_failure_detail (checks.rs:347-363), which redacts and re-tails the detail",
+      "kind": "code",
+      "test": "red_reused_run_redacts_the_log_before_recording (gh/tests.rs ~536)",
+      "reason": null
+    },
+    {
+      "name": "FAILING_UNITS_PREFIX header",
+      "dependent": "verify.rs (~63-82) parses the first line of output_tail by FAILING_UNITS_PREFIX",
+      "kind": "code",
+      "test": "job_log_parser_strips_stamps_keeps_the_indent_and_names_the_units (gh/tests.rs ~673)",
+      "reason": null
+    },
+    {
+      "name": "tail_lines / tail / FAILED_TAIL_LINES",
+      "dependent": "checks.rs:533 local failed-check tail uses tail_lines and tail directly; drain.rs has its own unrelated tail_lines",
+      "kind": "code",
+      "test": "a_failed_run_keeps_its_last_200_lines_and_a_passing_run_its_byte_tail (checks.rs ~762)",
+      "reason": null
+    },
+    {
+      "name": "stored output_tail content",
+      "dependent": "failing_names in checks.rs (~211) and introspection (introspect.rs) read run.output_tail lines when failed_tests is empty",
+      "kind": "code",
+      "test": "detail_from_job_logs_keeps_failure_lines_when_no_test_is_named (new)",
+      "reason": null
+    },
+    {
+      "name": "Refusal and matching rules",
+      "dependent": "refusal_corpus (crates/athena-core/tests/refusal_corpus.rs), admission and verdict rules, host settings",
+      "kind": "rule",
+      "test": null,
+      "reason": "No rule, admission check, verdict rule or host setting reads the tail text (searched docs/system-facts.md). The change refuses and matches no request text, so the refusal corpus does not apply."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content check of the diff: the CHANGELOG entry under `## [Unreleased]` / `### Fixed` and the doc comments on the helpers and on detail_from_job_logs state the root cause (the whole CI log was tailed, it ends with post-job cleanup, failure lines were not selected).",
+      "command": "git diff -- CHANGELOG.md crates/athena-core/src/gh/client.rs crates/athena-core/src/checks.rs",
+      "observes": "A Fixed bullet in CHANGELOG.md and doc comments in client.rs and checks.rs that name the cause.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "New test `detail_from_job_logs_drops_the_post_job_cleanup_tail` in gh/tests.rs. It builds a log with the existing `stamped` helper (gh/tests.rs ~376): a failing cargo section (`Running`, `failures:`, a `panicked at` line, `test ... FAILED`, `test result: FAILED`), then `Post job cleanup.`, `[command]/usr/bin/git config --local --unset-all ...`, `Cleaning up orphan processes` and a `##[warning]Node.js 20 actions are deprecated` line. It calls the production `detail_from_job_logs(name, \"failure\", Some(log))` and asserts on the returned detail. The log is real input; nothing is faked.",
+      "command": "cargo test -p athena-core detail_from_job_logs",
+      "observes": "output_tail contains `panicked at` and `FAILED` and none of `Post job cleanup`, `unset-all`, `Cleaning up orphan processes`, `Node.js`; failed_tests names the test.",
+      "fails_without": "On the base commit the tail is the last 200 lines of the whole log, so the cleanup text is present and the not-contains assertions fail.",
+      "seam": "Entry point detail_from_job_logs (pub, gh/client.rs:248); the input is a log string built by the `stamped` helper (exists); no double. The test function is added in plan step 4."
+    },
+    {
+      "criterion": 3,
+      "method": "New test `detail_from_job_logs_keeps_failure_lines_when_no_test_is_named` in gh/tests.rs. The log has no `Running` or `Doc-tests` line, so failed_test_names yields no names: a `thread 'x' panicked at` line with an assertion message, `test result: FAILED. 0 passed; 1 failed`, `failures:`; then 250 progress lines (`compiling crate_N`, no evidence strings) and the cleanup block. Conclusion `cancelled`. It calls detail_from_job_logs.",
+      "command": "cargo test -p athena-core detail_from_job_logs",
+      "observes": "failed_tests is empty; output_tail contains `panicked at`, the assertion text, `test result: FAILED` and `failures:`, and no cleanup text.",
+      "fails_without": "On the base commit the last 200 lines are only progress lines plus cleanup, so the `panicked at` / `test result` assertions fail.",
+      "seam": "Entry point detail_from_job_logs (gh/client.rs:248) with the existing `stamped` helper (exists); no double; test added in plan step 4."
+    },
+    {
+      "criterion": 4,
+      "method": "Existing checks tests run unchanged (tail_lines at checks.rs:755-758, the 200-line cap at ~639 and ~762, the byte cap at ~783, FAILING_UNITS_PREFIX and redaction tests in gh/tests.rs). New checks.rs unit tests call the pure helpers directly: `without_post_job_cleanup` (no marker returns the text unchanged; a marker on the first line keeps the log; each marker cuts) and `failure_tail` (a log with no evidence strings returns exactly what `tail_lines` returns; the n cap holds; evidence outside the last n lines is returned). The gh test `reused_red_degrades_when_the_log_lists_no_failures` covers a no-evidence, no-cleanup log through detail_from_job_logs.",
+      "command": "cargo test -p athena-core checks",
+      "observes": "All checks tests pass, including the existing tail and cap tests and the new plain-tail equality tests.",
+      "fails_without": "If failure_tail or the cut altered ordinary logs, the plain-tail equality tests and the existing cap tests would fail.",
+      "seam": "Pure functions `without_post_job_cleanup` and `failure_tail` in checks.rs, called directly with string inputs; no double. The helpers are added in plan steps 1-2 and their tests in step 5; tail_lines, tail and the existing tests exist today."
+    },
+    {
+      "criterion": 5,
+      "method": "Run the three CI checks on the result. `cargo test --locked` runs every test binary, including the two new detail_from_job_logs tests and the new checks.rs unit tests, so it is the end-to-end proof that the behavior holds and nothing else broke. fmt and clippy check the new code's style and lints (for example unused helpers or needless allocations).",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0; the test summary lists detail_from_job_logs_drops_the_post_job_cleanup_tail and detail_from_job_logs_keeps_failure_lines_when_no_test_is_named as passed.",
+      "fails_without": "On the base commit with only the new tests added, `cargo test --locked` exits non-zero because the two detail_from_job_logs tests fail on the cleanup-tail assertions; with the helpers present but not wired into detail_from_job_logs the same tests still fail. Unformatted code or a clippy warning in the new helpers fails the first two commands.",
+      "seam": "Entry points are the cargo toolchain over the whole workspace; the production code under test is detail_from_job_logs called by the new tests from gh/tests.rs. Fixture: the `stamped` log builder (exists, gh/tests.rs ~376) injected as the `Some(log)` argument; no fakes or doubles. The new tests are added in plan steps 4 and 5, and step 7 runs the commands."
+    },
+    {
+      "criterion": 6,
+      "method": "Inspect the changed paths.",
+      "command": "git status",
+      "observes": "Only crates/athena-core/src/gh/client.rs, crates/athena-core/src/gh/tests.rs, crates/athena-core/src/checks.rs and CHANGELOG.md changed; no config.rs, records.rs, briefs.rs, admission.rs, docs or athena.toml.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "Host: The exact lines GitHub's runner prints for post-job steps in a job log (`Post job cleanup.`, `Cleaning up orphan processes`, `##[group]Post ...`) come from the brief and the reading, not from a log in the repository; the marker list was not checked against a real log."
+  ],
+  "producer_section_sha256": "5624f75d4374429af1cd94ba540f3c54487201670ddd45b271ff53bdc43fa8c1"
+}
