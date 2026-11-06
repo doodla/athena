@@ -1286,6 +1286,152 @@ fn the_send_back_names_each_unchanged_planned_file_and_says_to_change_or_explain
     assert!(!text.contains("Criteria not met or not reported"));
 }
 
+#[test]
+fn outside_allowed_paths_returns_a_path_outside_the_list_by_name() {
+    let allowed = paths(&["crates/a.rs", "README.md"]);
+    let changed = paths(&[
+        "crates/a.rs",
+        "NOTES.md",
+        "README.md",
+        "src/extra.rs",
+        "NOTES.md",
+    ]);
+    // Each outside path once, in the order of the change list.
+    assert_eq!(
+        crate::run::outside_allowed_paths(&allowed, &changed),
+        paths(&["NOTES.md", "src/extra.rs"])
+    );
+    // A deleted file outside the list is outside too: the change list carries deletions as paths.
+    assert_eq!(
+        crate::run::outside_allowed_paths(&allowed, &paths(&["OLD.md"])),
+        paths(&["OLD.md"])
+    );
+}
+
+#[test]
+fn inside_allowed_paths_a_diff_has_no_outside_path() {
+    // A ./-prefixed entry, a plain entry, a deleted allowed file (a path like any other) and a path under a
+    // directory entry are all inside; a ./-prefixed changed path is compared as written without the prefix.
+    let allowed = paths(&["./crates/a.rs", "README.md", "docs/"]);
+    let changed = paths(&[
+        "crates/a.rs",
+        "./README.md",
+        "docs/guide.md",
+        "docs/deep/x.md",
+    ]);
+    assert!(crate::run::outside_allowed_paths(&allowed, &changed).is_empty());
+    assert!(crate::run::outside_allowed_paths(&allowed, &[]).is_empty());
+    // A directory entry covers its tree only, and a file entry covers only itself.
+    assert_eq!(
+        crate::run::outside_allowed_paths(
+            &allowed,
+            &paths(&["docs", "docsx/a.md", "README.md.bak"])
+        ),
+        paths(&["docs", "docsx/a.md", "README.md.bak"])
+    );
+}
+
+fn reading_with(
+    criteria: &[&str],
+    deliverables: &[&str],
+) -> athena_context::briefs::AcceptedReading {
+    let mut reading = accepted(criteria);
+    reading.deliverables = deliverables
+        .iter()
+        .map(|p| {
+            (
+                (*p).to_string(),
+                athena_data::records::DeliverableAction::Modify,
+                false,
+            )
+        })
+        .collect();
+    reading
+}
+
+#[test]
+fn allowed_paths_equal_the_deliverables_for_a_limiting_criterion_and_are_none_otherwise() {
+    for criterion in [
+        "No file outside X changed",
+        "test-only, production unchanged",
+        "test-only change in X",
+        "only the docs may change",
+    ] {
+        let reading = reading_with(&["cargo test passes", criterion], &["./a.rs", "b.rs"]);
+        assert_eq!(
+            reading.allowed_paths(),
+            Some(paths(&["a.rs", "b.rs"])),
+            "{criterion}"
+        );
+        assert_eq!(reading.limiting_criterion(), Some(criterion));
+    }
+    // This job's own criteria, and sentences that merely use the same words, limit nothing.
+    for criterion in [
+        "A new test passes a diff touching a path outside the allowed list to the new check.",
+        "The check runs at both points, before the producer's report is accepted and again before verification.",
+        "No unrelated behavior changes: existing tests pass unmodified apart from the new field in Job constructors, and no governance file, prompt file or file under records/ is changed.",
+        "reached through a test-only seam",
+        "the helper is test-only",
+        "test-only edits in the helper",
+    ] {
+        let reading = reading_with(&[criterion], &["a.rs"]);
+        assert_eq!(reading.allowed_paths(), None, "{criterion}");
+        assert_eq!(reading.limiting_criterion(), None, "{criterion}");
+    }
+    // A reading with no limit stores no list, whatever its deliverables; a limit with no deliverable
+    // stores none either, since an empty list would flag every file.
+    assert_eq!(
+        reading_with(&["cargo test passes"], &["a.rs"]).allowed_paths(),
+        None
+    );
+    assert_eq!(
+        reading_with(&["No file outside X changed"], &[]).allowed_paths(),
+        None
+    );
+}
+
+#[test]
+fn scoped_send_back_names_each_outside_path_quotes_the_criterion_and_says_to_revert() {
+    let outside = paths(&["NOTES.md", "src/extra.rs"]);
+    let criterion = "No file outside README.md changed";
+    let text = crate::run::send_back_text_scoped(
+        "BRIEF",
+        &[],
+        &[],
+        None,
+        None,
+        Some((&outside, criterion)),
+    );
+    assert!(text.starts_with("BRIEF\n\n## Sent back"), "{text}");
+    assert!(
+        text.contains(
+            "Files changed outside the job's allowed paths (revert each):\n\n- NOTES.md\n- src/extra.rs\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains(&format!("\"{criterion}\"")), "{text}");
+    assert!(text.contains("Revert each file named above"), "{text}");
+    assert!(text.contains("deliverables the reading lists"), "{text}");
+    // With the unmet criteria and unchanged files, the section follows their lists.
+    let both = crate::run::send_back_text_scoped(
+        "BRIEF",
+        &["a criterion".to_string()],
+        &[CLI_TEST.to_string()],
+        None,
+        None,
+        Some((&outside, criterion)),
+    );
+    assert!(both.find("- a criterion").unwrap() < both.find("- NOTES.md").unwrap());
+    assert!(both.find(&format!("- {CLI_TEST}")).unwrap() < both.find("- NOTES.md").unwrap());
+    // With no scope the text is exactly the unscoped one.
+    let unmet = ["a criterion".to_string()];
+    assert_eq!(
+        crate::run::send_back_text_scoped("BRIEF", &unmet, &[], None, None, None),
+        crate::run::send_back_text("BRIEF", &unmet, &[])
+    );
+    assert!(!crate::run::send_back_text("BRIEF", &unmet, &[]).contains("allowed paths"));
+}
+
 /// What a study run showed when the producer's turns were changed by `producer_turn` (called with the
 /// attempt number from 0).
 struct StudyRun {

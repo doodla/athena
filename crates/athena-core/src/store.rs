@@ -677,6 +677,7 @@ mod tests {
             note: None,
             pin: None,
             dispatch_branch: None,
+            allowed_paths: None,
         }
     }
 

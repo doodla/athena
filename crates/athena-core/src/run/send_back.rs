@@ -115,7 +115,31 @@ pub(crate) fn send_back_text_full(
     replay: Option<(&ReplayView, usize)>,
     gate: Option<&str>,
 ) -> String {
+    send_back_text_scoped(brief, unmet, unchanged, replay, gate, None)
+}
+
+/// [`send_back_text_full`], with the files the producer changed outside the job's allowed paths. `scope` is
+/// those paths and the accepted criterion that limits the files. With a scope the intro gains one leading
+/// sentence about it and a section follows the lists: it names each path, quotes the criterion and says
+/// to restore each file to its base content, or delete it if the producer added it. With `None` the text
+/// is exactly [`send_back_text_full`]'s.
+pub(crate) fn send_back_text_scoped(
+    brief: &str,
+    unmet: &[String],
+    unchanged: &[String],
+    replay: Option<(&ReplayView, usize)>,
+    gate: Option<&str>,
+    scope: Option<(&[String], &str)>,
+) -> String {
     let mut text = format!("{brief}\n\n## Sent back\n\n");
+    if scope.is_some() {
+        text.push_str(
+            "Your change touches files outside the job's allowed paths; the section below names \
+             them. When no criteria, planned files, replay or decision gate message are listed, \
+             those files are the only reason for this send-back, and the rest of this paragraph \
+             applies to it as to any other item. ",
+        );
+    }
     if gate.is_some() {
         text.push_str(
             "Your change touches code that a logged decision governs and does not reconcile the \
@@ -171,6 +195,21 @@ pub(crate) fn send_back_text_full(
         text.push_str("Decision gate: ");
         text.push_str(message);
         text.push('\n');
+    }
+    if let Some((outside, criterion)) = scope {
+        if !unmet.is_empty() || !unchanged.is_empty() || replay.is_some() || gate.is_some() {
+            text.push_str("\n\n");
+        }
+        text.push_str("Files changed outside the job's allowed paths (revert each):\n\n");
+        for path in outside {
+            text.push_str(&format!("- {path}\n"));
+        }
+        text.push_str(&format!(
+            "\nThe accepted criterion \"{criterion}\" limits which files may change. The allowed paths \
+             are the deliverables the reading lists. Revert each file named above: restore it to its \
+             base content, or delete it if you added it. If a listed file is still outside the allowed \
+             paths afterwards, the job ends before the verifier runs.\n"
+        ));
     }
     text
 }

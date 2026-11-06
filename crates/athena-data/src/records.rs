@@ -631,6 +631,14 @@ pub struct Job {
     /// a job is not held to a branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_branch: Option<String>,
+    /// The files this job may change, when an accepted criterion limits which files may change (for
+    /// example "no file outside X changed"). The list is the accepted reading's deliverable paths, so a
+    /// reading that limits scope needs a complete deliverable list. An entry ending in `/` covers every
+    /// path under that directory. Athena compares the candidate's changed files with it before the
+    /// producer's report is accepted and again before verification. Absent when no criterion limits the
+    /// files, and in a record made before this field existed: such a job is not checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_paths: Option<Vec<String>>,
 }
 
 /// A repository ref resolved by the core to one commit: the URL and ref the configuration named, and the
@@ -5107,6 +5115,7 @@ mod tests {
             note: None,
             pin: None,
             dispatch_branch: None,
+            allowed_paths: None,
         };
         let record = AnyRecord::Job(Box::new(job));
         assert_eq!(record.canonical_path(), "records/jobs/bootstrap/job.json");
@@ -5167,5 +5176,56 @@ mod tests {
             .unwrap()
             .expect("a record");
         assert_eq!(checked, record);
+    }
+
+    /// A bootstrap job record holding the given allowed paths.
+    fn job_limited_to(paths: Option<&[&str]>) -> AnyRecord {
+        let AnyRecord::Job(mut job) = job_on(None) else {
+            panic!("a job record")
+        };
+        job.allowed_paths = paths.map(|p| p.iter().map(|s| s.to_string()).collect());
+        AnyRecord::Job(job)
+    }
+
+    #[test]
+    fn a_job_keeps_its_allowed_paths_through_a_round_trip() {
+        let record = job_limited_to(Some(&["crates/a.rs", "README.md", "docs/"]));
+        let text = record.to_json();
+        assert!(text.contains("\"allowed_paths\""), "{text}");
+        let back = AnyRecord::parse("x", text.as_bytes()).unwrap();
+        assert_eq!(back, record);
+        let AnyRecord::Job(job) = &back else {
+            panic!("a job record")
+        };
+        assert_eq!(
+            job.allowed_paths.as_deref(),
+            Some(
+                &[
+                    "crates/a.rs".to_string(),
+                    "README.md".to_string(),
+                    "docs/".to_string()
+                ][..]
+            )
+        );
+        let checked = check_record_file(&record.canonical_path(), text.as_bytes())
+            .unwrap()
+            .expect("a record");
+        assert_eq!(checked, record);
+    }
+
+    #[test]
+    fn a_job_record_made_before_allowed_paths_existed_still_parses() {
+        let record = job_limited_to(None);
+        let text = record.to_json();
+        assert!(!text.contains("allowed_paths"), "{text}");
+        let checked = check_record_file(&record.canonical_path(), text.as_bytes())
+            .unwrap()
+            .expect("a record");
+        let AnyRecord::Job(job) = &checked else {
+            panic!("a job record")
+        };
+        assert_eq!(job.allowed_paths, None);
+        assert_eq!(checked, record);
+        assert!(!checked.to_json().contains("allowed_paths"));
     }
 }
