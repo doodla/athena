@@ -7436,6 +7436,47 @@ mod parallel {
         assert_eq!(landed_jobs(&report), ["a", "b", "c"]);
     }
 
+    fn sized_groups() -> Shared {
+        // Group 1: a, b, c. Group 2: d and e (both need a). Group 3: f (needs d).
+        Shared {
+            items: vec!["a", "b", "c", "d", "e", "f"],
+            plan: vec![
+                planned("a", Ladder::Implementation, &["src/a.rs"], &[]),
+                planned("b", Ladder::Implementation, &["src/b.rs"], &[]),
+                planned("c", Ladder::Implementation, &["src/c.rs"], &[]),
+                planned("d", Ladder::Implementation, &["src/d.rs"], &["a"]),
+                planned("e", Ladder::Implementation, &["src/e.rs"], &["a"]),
+                planned("f", Ladder::Implementation, &["src/f.rs"], &["d"]),
+            ],
+            run_ms: 5,
+            ..Shared::default()
+        }
+    }
+
+    #[test]
+    fn the_report_lists_the_size_of_each_group_worked_in_order() {
+        let report = run_with(&sized_groups(), 3, 9.0);
+        assert_eq!(report.plan_groups.len(), 3, "{:?}", report.plan_groups);
+        assert_eq!(report.group_sizes, [3, 2, 1]);
+        let text = display::drain(&report);
+        assert!(
+            text.contains("groups      3 worked, sizes 3, 2, 1, mean 2.0\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn groups_the_run_did_not_reach_are_not_recorded() {
+        let limits = Limits {
+            max_jobs: 3,
+            ..limits(9.0)
+        };
+        let report = drain::drain_concurrent(&sized_groups(), limits, &Quiet, 3).unwrap();
+        assert_eq!(report.stop, Stop::JobLimit);
+        assert_eq!(report.plan_groups.len(), 3, "{:?}", report.plan_groups);
+        assert_eq!(report.group_sizes, [3]);
+    }
+
     #[test]
     fn one_items_failure_or_refusal_does_not_stop_its_siblings() {
         let mut vague = planned("v", Ladder::Implementation, &["src/v.rs"], &[]);

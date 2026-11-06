@@ -711,6 +711,20 @@ pub fn drain(report: &crate::drain::Report) -> String {
             }
         );
     }
+    if !report.group_sizes.is_empty() {
+        let sizes = &report.group_sizes;
+        let _ = writeln!(
+            out,
+            "groups      {} worked, sizes {}, mean {:.1}",
+            sizes.len(),
+            sizes
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            sizes.iter().sum::<usize>() as f64 / sizes.len() as f64
+        );
+    }
     for r in &report.refused {
         let _ = writeln!(out, "refused     {} · {}: {}", r.id, r.title, r.reason);
     }
@@ -1838,6 +1852,41 @@ mod tests {
     use super::*;
     use athena_core::gh::{Checks, PrReport};
     use athena_core::pr::{LinkState, PrLink};
+
+    fn drain_report(group_sizes: Vec<usize>) -> crate::drain::Report {
+        crate::drain::Report {
+            stop: crate::drain::Stop::BudgetSpent,
+            jobs: Vec::new(),
+            spent_usd: 0.0,
+            budget_usd: 1.0,
+            target_rating: 4,
+            landed: 0,
+            page_unchanged: true,
+            outcome_changed: false,
+            rating: None,
+            held_back: None,
+            queued: Vec::new(),
+            waiting: Vec::new(),
+            plan_groups: Vec::new(),
+            group_sizes,
+            refused: Vec::new(),
+            notes: Vec::new(),
+            rebuild_output: None,
+            restart: None,
+            rebases: Default::default(),
+        }
+    }
+
+    #[test]
+    fn drain_output_states_the_group_sizes_and_their_mean() {
+        let out = drain(&drain_report(vec![3, 1, 2]));
+        assert!(
+            out.contains("groups      3 worked, sizes 3, 1, 2, mean 2.0\n"),
+            "{out}"
+        );
+        let out = drain(&drain_report(Vec::new()));
+        assert!(!out.contains("groups      "), "{out}");
+    }
 
     fn report(checks: Checks, reruns: u32, test: Option<&str>) -> PrReport {
         PrReport {
