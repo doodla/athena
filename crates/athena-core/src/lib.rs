@@ -10,6 +10,9 @@
 //! - [`state`]: the per-repository state directory;
 //! - [`store`]: records at a commit, and state derived from them;
 //! - [`commits`]: records and landing commits built with plumbing, gated in process, fast-forwarded;
+//! - [`mirrors`]: the registry of files kept by hand as mirrors of a governing source (shard timings, the
+//!   decision log, the CI cache key against the build paths, the ontology), each with a comparison rule that
+//!   checks content against the source; run before verification and by the repo tests;
 //! - [`reading`], [`run`], [`manage`]: the commands;
 //! - [`records_import`]: the importer that copies `records/` at a commit onto the `athena/records` branch and
 //!   checks the copy; not wired into any command;
@@ -95,6 +98,7 @@ pub mod jev;
 pub mod labeled;
 pub mod land;
 pub mod manage;
+pub mod mirrors;
 pub mod nested;
 pub mod pin;
 pub mod plan;

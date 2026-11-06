@@ -1,0 +1,307 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261106-081034-jvd9",
+  "round": 1,
+  "at": "2026-11-06T12:30:44.875720554Z",
+  "invocation_seq": 3,
+  "approach": "Root cause: files that mirror a governing source by hand (xtask/shard-timings.txt, docs/decisions.md, the CI athena-bin cache key, docs/ontology.toml) are covered only by structure tests or by checks that run late (the heavy xtask lane, a pinned hash someone must bump, or the final verdict). Fix it at the origin: one registry in a new crates/athena-core/src/mirrors.rs. Each entry names a mirror file, its source and a comparison rule. Four pure rules cover the five jobs: (a) every test file under crates/*/tests and xtask/tests has a line in xtask/shard-timings.txt and no line is stale; (b) docs/decisions.md starts with the exact bytes of its HEAD version; (c) every hashFiles() list on an `athena-bin-` key in .github/workflows/ci.yml covers BUILD_PATHS from status.rs plus any non-test include_str!/include_bytes! target outside them; (d) in docs/ontology.toml, a scanned file that names a term as a definition or role must be listed by a sense or an excuse. `check_all(root, base)` runs the registry. A new athena-cli test target runs it over the real repo and iterates REGISTRY, so a new entry is covered with no other edit. `run_check` in checks.rs runs it after a passing Test-kind check, only in a tree holding mirrors.rs, and fails the check with a message naming file and fix. The producer's loop is `cargo test`, which runs the athena-cli test, so drift shows before handover. Revision: (1) criterion 6 now names its seam; (2) the xtask/shard-timings.txt line is kept and justified as forced by the deliverable crates/athena-cli/tests/mirrors.rs.",
+  "decisions": [
+    {
+      "choice": "One registry, `REGISTRY: &[Mirror]` with `Mirror { name, mirror, source, rule: Rule }`, in athena-core. Each Rule is a pure fn over text; `check_all(root, base)` runs every entry and returns `Vec<Drift>` (mirror path, message naming file and fix).",
+      "reason": "The cause is that nothing makes a mirror declare how it is compared to its source. A registry makes the declaration the unit, and the repo test iterates it, so a new entry is covered with no other edit (criterion 4). Pure fns give unit seams without git or the filesystem.",
+      "rejected": [
+        {
+          "option": "Add one more one-off test per mirror (what the five jobs did)",
+          "why": "It fixes one instance and leaves the class; the next mirror is again checked for structure only."
+        },
+        {
+          "option": "Put the registry in xtask or in athena-cli tests",
+          "why": "The producer's loop and run_check need it, and xtask tests run in a heavy shard. athena-core is reachable from run_check, the CLI test and unit tests."
+        }
+      ]
+    },
+    {
+      "choice": "Rule (d) is a file-level floor in athena-core. The fine marker/says check stays in crates/athena-cli/tests/ontology.rs (claim_problems, is_identifying). The floor's detection is no broader than is_identifying (ontology.rs 205-216): case-sensitive, whole word, same leading-character trim.",
+      "reason": "Moving the ~1000-line ontology test is larger than one producer run and risks the existing test. The floor catches a governing file naming a term as a definition or role with no sense or excuse for that file, which is the Hermes-as-tool-and-role miss. The real file already satisfies it because ontology.rs requires every identifying line to be covered by a sense or excuse for the same file (ontology.rs 413-428).",
+      "rejected": [
+        {
+          "option": "Move claim_problems into athena-core and make ontology.rs call it",
+          "why": "A large refactor of a working test, out of proportion to the root-cause fix."
+        },
+        {
+          "option": "Skip the ontology rule",
+          "why": "Criterion 3 requires a unit-tested term/sense rule, and the registry should list every known mirror."
+        }
+      ]
+    },
+    {
+      "choice": "Rule (b) compares the working docs/decisions.md with `Git::at(root).show_file(\"HEAD\", \"docs/decisions.md\")` (athena-git lib.rs 453). The base reader is injected into `check_all` as `&dyn Fn(&str) -> Option<Vec<u8>>`; None skips the rule.",
+      "reason": "The producer works in a one-commit snapshot of the base inside its own git repo (system facts), so HEAD is the base while it edits. This is the rag3 prevention. The pin PINNED_LEN/PINNED_SHA256 in crates/athena-cli/src/decisions.rs stays as the guard for committed history and is named in D158 as a remaining hand-kept mirror.",
+      "rejected": [
+        {
+          "option": "Replace the pinned-hash test in decisions.rs",
+          "why": "It guards committed history, which HEAD comparison cannot; removing it weakens a guard and it is outside the deliverables."
+        },
+        {
+          "option": "Compare against origin/main",
+          "why": "The producer snapshot has no remote."
+        }
+      ]
+    },
+    {
+      "choice": "Rule (c) checks hashFiles globs against BUILD_PATHS (status.rs line 20) plus non-test include_str!/include_bytes! targets outside it. BUILD_PATHS keeps its value; status.rs gets only a doc comment naming the mirror.",
+      "reason": "kq9v's finding was that the cache key must cover the binary's real input set. Reading the text before the first `#[cfg(test)]` in each src file (other than tests.rs and *_tests.rs) is cheap. The real non-test targets outside crates/ are docs/system-facts.md and athena.toml, and the current key lists both, so the real-repo test is expected to pass; the brief's assumption that it fails on the current key is not borne out by the key I read.",
+      "rejected": [
+        {
+          "option": "Edit ci.yml",
+          "why": "Governance and out of scope; the key is already complete."
+        }
+      ]
+    },
+    {
+      "choice": "Hook into `run_check` (checks.rs line 428): after a Test-kind check passes, if `ctx.dir` has `crates/athena-core/src/mirrors.rs`, call `mirrors::drift_note(ctx.dir)`; a Some result sets passed=false and appends the note.",
+      "reason": "Criterion 5 needs a call site in the check path. run_check is the single executor for the verifier's checks and the baseline run (baseline_runs, checks.rs 560). The marker file keeps it from touching non-Athena projects. athena.toml, which defines the checks, is governance and not editable here.",
+      "rejected": [
+        {
+          "option": "Add a new `kind` to CheckKind in athena-data config",
+          "why": "It changes the config schema and athena.toml, which are governance and out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Add one line `athena-cli --test mirrors <seconds>` to xtask/shard-timings.txt, in sorted position between `athena-cli --test live 30.00` (line 30) and `athena-cli --test ontology 6.00` (line 31). It is a consequence of the listed deliverable crates/athena-cli/tests/mirrors.rs, not an extra feature.",
+      "reason": "I read xtask/tests/ci_shards.rs 411-421: `checked_in_timings_cover_every_workspace_test_unit` asserts the timed set equals the set of workspace test units, so any new test target without a line fails `cargo test`. Rule (a) of the new registry enforces the same on itself. The file is plain data (`<package> <selector> <seconds>`), not athena.toml, defaults.toml, a workflow, or tool or lint configuration, so it is not governance. Seconds are an estimate, as the file header says.",
+      "rejected": [
+        {
+          "option": "Omit the line and leave the cover test failing",
+          "why": "Fails criterion 6 (`cargo test`) and the new real-repo mirror test."
+        },
+        {
+          "option": "Put the repo-level test inside an existing test target so no timing line is needed",
+          "why": "The deliverable list names a new crates/athena-cli/tests/mirrors.rs; folding it into another target would drop that deliverable."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/mirrors.rs",
+      "action": "create",
+      "purpose": "Registry of hand-kept mirrors (name, mirror path, source path, Rule), the four pure rule fns, `check_all`, `git_base`, `drift_note` and unit tests. The module doc names the root cause.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod mirrors;` and a one-line entry in the module list.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/mirrors.rs",
+      "action": "create",
+      "purpose": "Repo-level test target: runs the registry over the real files, iterates REGISTRY, and checks a drifted fixture per rule.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "In `run_check`, after a passing Test-kind check in an Athena tree, call `mirrors::drift_note` and fail the check with its note. Add two unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Doc comment on BUILD_PATHS saying the CI athena-bin key mirrors it and the mirrors registry enforces that. No value change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "purpose": "Add the one line `athena-cli --test mirrors <seconds>` for the new test target the deliverable crates/athena-cli/tests/mirrors.rs creates. Not a listed deliverable but forced by it: xtask's cover test (ci_shards.rs 411-421) and registry rule (a) fail without it. Data file, not governance.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet under [Unreleased] / Added naming the root cause and the registry.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D158 (append only, after D157): the registry decision, with Provenance.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Create crates/athena-core/src/mirrors.rs. The module doc names the root cause. Define `Rule`, `Mirror`, `Drift` and `REGISTRY` with four entries: shard timings (mirror xtask/shard-timings.txt, source: test files under crates/*/tests and xtask/tests); decisions (docs/decisions.md, source: its HEAD version); cache key (.github/workflows/ci.yml, source: status::BUILD_PATHS plus non-test include targets); ontology (docs/ontology.toml, source: BRIEF.md and each term's file sources). Pure fns: `missing_timing_lines(unit_files, timings_text)` (missing and stale lines; unit = `<dir name> --test <stem>` for tests/*.rs and tests/*/main.rs, skipping common), `append_only_problem(base: &[u8], new: &[u8])`, `hash_glob_problems(ci_text, build_paths, extra_inputs)` (on lines containing `athena-bin-`; a dir root needs `<root>**`, a file root needs the exact name; an extra path is covered by an exact glob or a `dir/**` prefix), `outside_includes(files)` (text before the first `#[cfg(test)]`, skipping tests.rs and *_tests.rs, regex `include_(?:str|bytes)!\\(\\s*\"([^\"]+)\"`, resolved against the file's directory, `..` normalized, kept only if `!touches_build`), and `ontology_problems(toml_text, read_file)` using toml_edit (already a workspace dep of athena-core, so Cargo.toml and Cargo.lock stay unchanged). Every message names the file and the fix.",
+    "In mirrors.rs add `check_all(root: &Path, base: &dyn Fn(&str) -> Option<Vec<u8>>) -> Vec<Drift>` that reads the files, runs each REGISTRY entry and skips the decisions rule when `base` gives None. Add `git_base(root) -> impl Fn(&str) -> Option<Vec<u8>>` using `athena_git::Git::at(root).show_file(\"HEAD\", path)`, and `drift_note(root) -> Option<String>`, which returns None unless `root` holds `crates/athena-core/src/mirrors.rs`. Write unit tests: a failing and a passing case per rule, a `check_all` tempfile fixture test with an injected base closure, and an include-scan test. Avoid the words the external-calls guard forbids.",
+    "Edit crates/athena-core/src/lib.rs: add `pub mod mirrors;` (alphabetical) and the module-list line. Add `athena-cli --test mirrors <seconds>` to xtask/shard-timings.txt between the `live` and `ontology` lines. Create crates/athena-cli/tests/mirrors.rs with the three tests named in demonstration 4, taking the root as in ontology.rs line 90.",
+    "Edit crates/athena-core/src/checks.rs `run_check`: after the zero-tests rule and before the failed-test names, when `spec.kind == CheckKind::Test && passed`, call `crate::mirrors::drift_note(ctx.dir)`. A Some value sets `passed = false` and joins its text onto `note`. Add `a_passing_test_check_fails_on_mirror_drift` and an unmarked-tree twin, copying the Registry, redactor and env setup from existing checks.rs tests. Add the doc comment on BUILD_PATHS in status.rs.",
+    "Run `cargo test -p athena-core mirrors` and `cargo test -p athena-cli --test mirrors`. If the real-repo test reports drift, fix the rule if it is a false positive (see risks); fix the mirror only for a true drift, and never edit ci.yml, athena.toml or docs/ontology.toml.",
+    "Add the CHANGELOG.md bullet under [Unreleased] / Added. Append D158 to docs/decisions.md after D157 in the existing Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance form. Include the root cause, the four rules, the HEAD-comparison limit, and that the pin in decisions.rs and xtask's BUILD_INPUT_GLOBS remain separate mirrors. Use no supersession wording. Do not touch earlier lines.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Also run `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-core --test external_calls_guard` and `cargo test -p xtask --test ci_shards` as regressions."
+  ],
+  "risks": [
+    {
+      "risk": "The include_str! scan in rule (c) reports a false positive on the real repo, such as a test-only include before the first `#[cfg(test)]`.",
+      "mitigation": "The scan only truncates at the first `#[cfg(test)]` and skips tests.rs and *_tests.rs, so it can miss targets but not invent them. The producer runs the repo test; on a false hit it narrows the scan rather than adding an excuse list. A unit test covers the scan."
+    },
+    {
+      "risk": "The ontology floor rule is broader than ontology.rs's detection and flags something the existing test accepts.",
+      "mitigation": "Copy is_identifying and names_term semantics exactly (case-sensitive, whole word, same leading-character trim). The real-repo test would show any difference."
+    },
+    {
+      "risk": "The append-only rule compares against HEAD, so it is trivially true once the change is committed.",
+      "mitigation": "Document that the rule bites on uncommitted edits (the producer's loop) and is skipped when the base is unavailable. The pinned-hash test remains for committed history. D158 states the limit."
+    },
+    {
+      "risk": "The run_check hook repeats the CLI test and doubles the failure in Athena's own tree.",
+      "mitigation": "Run only for Test-kind checks, behind the marker file. The message names the fix. Remove the call if it proves noisy; the athena-cli test still holds."
+    },
+    {
+      "risk": "A future mirror is added but never registered, so the class returns.",
+      "mitigation": "The module doc and D158 say the registry is the place to register a mirror, and the repo test iterates REGISTRY. Enforcement of 'every new mirror gets an entry' stays prose-only; D158 marks it so."
+    },
+    {
+      "risk": "Remaining hand-kept pins (PINNED_LEN/PINNED_SHA256 in decisions.rs, xtask BUILD_INPUT_GLOBS) stay outside the registry.",
+      "mitigation": "D158 names them as known remaining mirrors guarded by their existing tests; they are not edited."
+    },
+    {
+      "risk": "The shard-timings seconds value for the new target is a guess.",
+      "mitigation": "The file header says values are estimates; the cover test checks names only. Use a value near the ontology target (about 6 seconds)."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "status::BUILD_PATHS",
+      "dependent": "crates/athena-cli/src/drain.rs (re-export line 260); crates/athena-core/src/status.rs (`touches_build`, `stale_build_line`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core status (existing touches_build and stale_build_line tests)",
+      "reason": "Its value is unchanged; only a doc comment is added. mirrors.rs reads it and cannot change it."
+    },
+    {
+      "name": "checks::run_check behavior for Test-kind checks",
+      "dependent": "crates/athena-core/src/routing.rs (Exec::exec); crates/athena-core/src/run/checks.rs (SnapExec::exec); crates/athena-core/src/checks.rs (baseline_runs)",
+      "kind": "code",
+      "test": "cargo test -p athena-core checks:: (existing tests unchanged, plus a_passing_test_check_fails_on_mirror_drift and its unmarked twin)",
+      "reason": "The hook runs only after a Test-kind check passes and only when ctx.dir holds crates/athena-core/src/mirrors.rs, so a project repo never sees it. Existing unit tests in checks.rs and routing.rs use tempdirs without that file. In Athena's own tree the hook repeats what the athena-cli mirrors test checks. The baseline run on the base commit records any drift as a failing check."
+    },
+    {
+      "name": "xtask/shard-timings.txt (one added line)",
+      "dependent": "xtask/tests/ci_shards.rs checked_in_timings_cover_every_workspace_test_unit (lines 411-421); xtask/src/shard.rs (TIMINGS_FILE, line 113)",
+      "kind": "code",
+      "test": "cargo test -p xtask --test ci_shards",
+      "reason": "Gets one added line `athena-cli --test mirrors <seconds>` in the existing `<package> <selector> <seconds>` format, in sorted position between `live` and `ontology`. The oracle and the sharder read the same format; without the line the cover test fails."
+    },
+    {
+      "name": "docs/decisions.md (append-only entry D158)",
+      "dependent": "crates/athena-cli/src/decisions.rs test `the_decision_log_is_well_formed_and_only_appended_to` (PINNED_LEN/PINNED_SHA256 of D121)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli decisions",
+      "reason": "The change only appends after the last line, so the pinned prefix, the ascending-id and Provenance rules hold. D158 carries a Provenance bullet."
+    },
+    {
+      "name": "docs/decisions.md supersession phrases and the D156 governs gate",
+      "dependent": "crates/athena-cli/src/backtest.rs (parse_supersessions over decisions.md); docs/decision-links.toml [[governs]] D08 (athena-git snapshot.rs and run/candidate.rs)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test backtest",
+      "reason": "D158 avoids the supersession phrases backtest.rs lists and states it amends none. The change touches neither D08 path."
+    },
+    {
+      "name": "docs/ontology.toml (read only, not edited)",
+      "dependent": "crates/athena-cli/tests/ontology.rs (claim_problems); docs/ontology.toml",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test ontology and cargo test -p athena-cli --test mirrors",
+      "reason": "Neither file is edited. The new floor rule is implied by the passing ontology.rs rule that every identifying line is covered by a sense or excuse for the same file, so it adds no new failure on the real file."
+    },
+    {
+      "name": "CI athena-bin cache key globs (read only)",
+      "dependent": ".github/workflows/ci.yml (athena-bin key hashFiles list); xtask/src/main.rs BUILD_INPUT_GLOBS; xtask/tests/policy.rs",
+      "kind": "host_setting",
+      "test": "cargo test -p athena-cli --test mirrors (real-repo test); the xtask policy test stays the heavy-lane check",
+      "reason": "Read only; not edited. The key lists crates/**, xtask/**, Cargo.toml, Cargo.lock and setup.sh, which cover BUILD_PATHS, plus athena.toml and docs/system-facts.md, which cover the two non-test include targets found outside crates/. System-facts 'CI caches' is unaffected."
+    },
+    {
+      "name": "scan of crates/ for gh calls and HTTP-client words",
+      "dependent": "crates/athena-core/tests/external_calls_guard.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test external_calls_guard",
+      "reason": "mirrors.rs runs git only through athena_git::Git and names no forbidden word."
+    },
+    {
+      "name": "CHANGELOG.md [Unreleased] entry",
+      "dependent": "crates/athena-cli/src/main.rs test reading CHANGELOG.md (line 1966); crates/athena-core/tests/refusal_corpus.rs (includes CHANGELOG.md, line 859); reading.rs tests (6707, 8140, 8455)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli and cargo test -p athena-core",
+      "reason": "One plain bullet is added under [Unreleased] / Added in the existing style. Those tests only read the text."
+    },
+    {
+      "name": "athena-core module list",
+      "dependent": "crates/athena-core/src/lib.rs header module list and `pub mod` block",
+      "kind": "code",
+      "test": "cargo test -p athena-core",
+      "reason": "One module and one doc line are added; nothing else reads the list."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the three homes of the change description: the `//!` module doc of mirrors.rs, the CHANGELOG.md entry under [Unreleased] / Added and the new D158 entry. Each says in the same words that hand-kept mirrors of a governing source were tested for structure only, not content against the source, and that the registry is the fix.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md crates/athena-core/src/status.rs",
+      "observes": "All three name the root cause. D158 has Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance. The decisions.md diff shows only added lines after the old last line (D157), with no supersession phrasing.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read mirrors.rs and lib.rs. Grep `pub mod mirrors` in lib.rs and `REGISTRY` in mirrors.rs.",
+      "command": "git status --short",
+      "observes": "The listing includes crates/athena-core/src/mirrors.rs and lib.rs. `pub mod mirrors;` sits in alphabetical order in lib.rs with a line in its `//!` module list. REGISTRY has four entries, each with mirror path, source path and Rule.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in `mirrors::tests`, one failing case and one passing case per rule. Each calls the rule's pure fn with literal text. A further test calls `check_all` over a tempfile directory fixture with an injected base closure returning fixed old decisions bytes. An include-scan test shows a non-test `include_str!(\"../../../docs/x.md\")` in a src file requires that glob.",
+      "command": "cargo test -p athena-core mirrors",
+      "observes": "All mirrors tests pass. Negative cases show messages naming xtask/shard-timings.txt, docs/decisions.md, .github/workflows/ci.yml or docs/ontology.toml and the fix text (`add the line`, `append`, `add the glob`, `add a senses entry`). The rewritten-decisions case reports the first changed line; an append-only text passes; a None base skips the rule.",
+      "fails_without": "Without the rules: a shard-timings text missing `athena-cli --test mirrors` yields no problem, a rewritten decisions.md is accepted, a hashFiles list missing `setup.sh` passes, and an ontology term with a role line in a file no sense lists passes. The tests assert a non-empty result whose message contains the offending file and the fix text, so each fails.",
+      "seam": "Production entry points: `mirrors::check_all(root, base)` and the pure rule fns `missing_timing_lines`, `append_only_problem`, `hash_glob_problems`, `ontology_problems`. Doubles: literal strings, a tempfile fixture tree, and a closure for `base` injected as the `base` argument; the closure returns fixed bytes and holds no comparison logic. None exists today; added by plan steps 1 and 2."
+    },
+    {
+      "criterion": 4,
+      "method": "New test target crates/athena-cli/tests/mirrors.rs with three tests. (1) `the_real_repo_has_no_mirror_drift` calls `check_all(repo_root, git_base(repo_root))` and asserts an empty list, printing every Drift. (2) `every_registry_entry_names_existing_files` iterates REGISTRY and asserts each mirror and source path exists, which is how a new entry is covered with no other edit. (3) `a_drifted_fixture_is_reported_for_every_rule` builds a tempdir with a drifted copy per mirror and asserts one Drift per rule.",
+      "command": "cargo test -p athena-cli --test mirrors",
+      "observes": "All three pass. A producer who adds a test file without a timings line, rewrites an old decision, drops a BUILD_PATHS glob from the key or leaves an unlisted ontology file sees test (1) fail with a message naming file and fix.",
+      "fails_without": "Without the registry the test target does not compile. With an empty or stubbed `check_all`, `a_drifted_fixture_is_reported_for_every_rule` fails. If the real xtask/shard-timings.txt lacked the `mirrors` line, `the_real_repo_has_no_mirror_drift` fails with that message.",
+      "seam": "Production entry points: `mirrors::check_all`, `mirrors::git_base` and `mirrors::REGISTRY`; root from `Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\")` (pattern at ontology.rs line 90). Fixture: a tempfile tree with a fixed `base` closure passed to check_all. The new test target is added by plan step 3; check_all and git_base by steps 1 and 2."
+    },
+    {
+      "criterion": 5,
+      "method": "Grep `mirrors::drift_note` in crates/athena-core/src/checks.rs to show the call site in `run_check`, after the zero-tests rule. Run the unit test: it calls `run_check` with a Test-kind CheckSpec whose command prints `test result: ok. 1 passed; 0 failed` (the format count_tests reads, checks.rs line 30) in a tempdir holding the marker file crates/athena-core/src/mirrors.rs, a tests file, and a shard-timings.txt without its line. A twin test in a tempdir without the marker stays passed. `git diff -- CHANGELOG.md docs/decisions.md` shows the CHANGELOG bullet and the append-only D158.",
+      "command": "cargo test -p athena-core checks::tests::a_passing_test_check_fails_on_mirror_drift",
+      "observes": "The marked tree's check fails with a note naming xtask/shard-timings.txt; the unmarked twin still passes. CHANGELOG.md has a new bullet under [Unreleased] / Added and decisions.md has D158 after D157.",
+      "fails_without": "Without the hook, the Test-kind check built from `sh -c` that prints a passing summary stays passed even though the fixture's shard-timings.txt lacks a test file; the test asserts passed==false and that the note names xtask/shard-timings.txt.",
+      "seam": "Production entry point: `checks::run_check` (exists, checks.rs line 428), called with a `CheckContext` over the tempdir. Registry, redactor and env are built as the existing checks.rs unit tests do (exists). The hook is added by plan step 4. The drift comes from real files in the fixture tree, not a double."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs, each as its own simple command: `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked` (the command given here, which also runs the new athena-cli mirrors test and xtask's ci_shards cover test). Regression runs: `cargo test -p athena-core --test refusal_corpus` and `cargo test -p athena-core --test external_calls_guard`. No parser, stem list or reading check changes, so the corpus run is a regression check only; I read no corpus case ids and did not run it.",
+      "command": "cargo test --locked",
+      "observes": "The whole workspace passes: athena-core unit tests (mirrors, checks), `athena-cli --test mirrors` against the real repo, xtask `checked_in_timings_cover_every_workspace_test_unit`, `decisions` (append-only pin), `ontology` and `external_calls_guard`. fmt and clippy are clean when run as separate commands.",
+      "fails_without": "Without the xtask/shard-timings.txt line for the new test target, `the_real_repo_has_no_mirror_drift` (rule a) and xtask's `checked_in_timings_cover_every_workspace_test_unit` (ci_shards.rs 411-421) fail. If mirrors.rs contained a word the external-calls guard forbids, `external_calls_guard` fails. Unformatted or warning-bearing code fails fmt or clippy.",
+      "seam": "Production entry points: the cargo commands over the real repository tree. No double. The oracles are the real-repo tests `athena-cli --test mirrors` (added by plan step 3) and xtask `ci_shards` (exists, ci_shards.rs 411-421), which read the real xtask/shard-timings.txt that plan step 3 edits. Existing for the xtask test and fmt/clippy/test commands; the mirrors test target is added by step 3."
+    }
+  ],
+  "open_questions": [
+    "Host: Does the verifier's snapshot keep a git repository whose HEAD is the base commit? If not, the append-only rule (b) is skipped there (it reports nothing) and only the producer's loop is covered."
+  ],
+  "producer_section_sha256": "88daf493a26175a22abb476c943954e187eeef6dd478a8711729b0aa7cd81db6"
+}

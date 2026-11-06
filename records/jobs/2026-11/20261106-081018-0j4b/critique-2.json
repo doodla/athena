@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-081018-0j4b",
+  "round": 2,
+  "at": "2026-11-06T11:50:08.445339728Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The plan says the failing-units header \"stays the first line\". That is false in the routing path whenever the tail is full.",
+      "evidence": "In the routing path, `failure_tail` (or `tail_lines`) returns up to 200 lines, and `detail_from_job_logs` then adds the `failing units:` header on top, giving 201 lines. routing.rs passes the detail to `with_failure_detail`, which runs `tail_lines(&output_tail, FAILED_TAIL_LINES)` again (checks.rs:362) and drops line 1, the header. verify.rs:77 reads the header only from the first line. The bug exists today, but the plan relies on the claim, and its new tests call `detail_from_job_logs` directly, so they would not catch it. Fix: Either build the tail with `FAILED_TAIL_LINES - 1` when a header will be added, so header plus tail fits in 200 lines (one line, inside the same function), or correct the dependents entry to say the header survives only for logs under 200 lines. If you fix it, add an assertion to the routed test with a long log (for example the 60-test `shard_log`).",
+      "location": "Dependents: FAILING_UNITS_PREFIX header line (verify.rs ~63-82); checks.rs:359-364",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "This assertion cannot be written as stated. The plan's claim that the rejected broad-marker design would fail test (b) is also not backed by any concrete assertion.",
+      "evidence": "With the broad `test result` marker, the `panicked at` block still lies outside the end window, so a failure section is still built. The passing summary would only add one more block at the end, and the listed checks (last 600 chars contain `panicked at`, ` right:` is kept) could still pass. The phrase \"as its last line's only evidence\" does not translate into one assert. Fix: Replace it with an exact check, for example: the section after the separator line contains no `test result: ok` line, or the last line of output_tail is not `test result: ok. 250 passed; 0 failed`. Alternatively, drop the claim that the broad design would fail this test.",
+      "location": "Demonstrations, Criterion 3 (b): \"output_tail does not contain `test result: ok` as its last line's only evidence\"",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 480-byte window is a copy, made by hand, of a limit that belongs to a reader in another module (introspect `TAIL_CAP` = 600 chars). If that limit changes, nothing in the code links the two.",
+      "evidence": "introspect.rs:893 `pub const TAIL_CAP: usize = 600`. The plan picks 480 so the plain-tail case stays under the 600-character clip. Both constants are in athena-core. Fix: Derive the window from `crate::introspect::TAIL_CAP` (for example `TAIL_CAP * 4 / 5`), or at least add a doc comment and a unit test that asserts the window is below `TAIL_CAP`. Then changing the reader's cap cannot silently put the failure lines outside what introspection sees.",
+      "location": "Decision 3 / Step 1: FAILURE_END_WINDOW_BYTES = 480",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The section is capped at n/2 = 100 lines, far more than the 600 characters introspection keeps. When several tests fail, introspection sees only the last part of the section, so the plan's choice to keep the earliest failures first does not hold for that reader.",
+      "evidence": "`clip_tail` keeps the last 600 chars (introspect.rs:906). The section keeps blocks in log order, so with many failing tests the last 600 chars are the final `failures:` list and the `test result` line, not the first panic. Fix: Narrow the claim in the doc comment to \"the end of the section survives\". A small optional change: when the section is longer than the window, put the first panic block last.",
+      "location": "Approach: \"every end-keeping reader keeps it\"",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code at the places the plan cites. The plan fixes the fault where it starts. `detail_from_job_logs` (gh/client.rs:248) joins the plain job logs, then takes the last 200 lines of the whole text with `tail_lines` (lines 290-294). That text ends with the runner's post-job phase, and nothing selects failure lines. The new helpers sit beside `tail_lines` (checks.rs:193), and `CiSource::failure_detail` is the only non-test caller of `detail_from_job_logs`. The other things the plan names exist where it says: the `stamped` helper (gh/tests.rs:376), `shard_log`, the existing tests at :493, :536, :577 and :673, introspect's `clip_tail` with `TAIL_CAP` = 600 (introspect.rs:893, 906, 997), `clip_log_tail` (briefs.rs:1103), the 1024-byte tail in reading.rs:2045, the re-tail in `with_failure_detail` (checks.rs:347-366), and the loop in xtask/src/shard.rs:316-337 that keeps running units after one fails. The demonstrations call the real entry point with real log text and no doubles. Each new test fails on the base commit: criterion 2 on the cleanup assertions, and both criterion 3 tests because their failure lines fall outside the last 200 lines. The old `shard_log` tests have short logs, so their markers fall inside the 480-byte end window and their output keeps its shape. The 60-test log will be reordered, but that test checks only `failed_tests`. A second layer helps when the cut misses: if the runner's text differs from the expected markers, checkout's post-step block is longer than 480 bytes, so the failure section is still placed last. The marker list is limited to failure-only lines, which is a sound change from the reading's broader four strings. Nothing adds an athena.toml field, nothing calls an external service, and the work fits one producer run. Three minor problems remain: (1) the plan wrongly says the failing-units header always stays the first line; (2) one assertion in test 3b is too vague to write; (3) the 480-byte window copies a limit set in another module without linking to it. None of them leaves a criterion unshown, so the verdict is accept."
+}

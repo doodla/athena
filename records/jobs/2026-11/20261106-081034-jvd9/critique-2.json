@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-081034-jvd9",
+  "round": 2,
+  "at": "2026-11-06T12:38:33.302867063Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/ontology.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/ontology.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-context/src/briefs.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-context/src/briefs.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "xtask/shard-timings.txt is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, xtask/shard-timings.txt",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Rule (c) checks that the CI key covers BUILD_PATHS. That direction is already implied by policy.rs, so it can barely fail. It misses the real drift: BUILD_PATHS omits files the binary compiles in.",
+      "evidence": "BUILD_PATHS is [\"crates/\", \"xtask/\", \"Cargo.toml\", \"Cargo.lock\", \"setup.sh\"] (status.rs line 20). Its doc says a change to any path the binary is built from leaves the binary stale. The binary's real input list, BUILD_INPUT_GLOBS (xtask/src/main.rs lines 267-277), also has rust-toolchain.toml, athena.toml, defaults.toml and docs/system-facts.md. Two of these are compiled into non-test code: `pub const SYSTEM_FACTS = include_str!(\"../../../docs/system-facts.md\")` (athena-context briefs.rs line 1671) and `BUILTIN_CONFIG = include_str!(\"../../../athena.toml\")` (athena-gate lib.rs line 33). policy.rs already forces key == BUILD_INPUT_GLOBS, which is a superset of BUILD_PATHS. So 'key covers BUILD_PATHS' is true by construction, and the plan's 'expected to pass' follows from that. Meanwhile touches_build ignores an edit to docs/system-facts.md, which is exactly a hand-kept list contradicting its source. Fix: Reverse the rule: every glob in the athena-bin key, which policy.rs proves equals the true input set, must be covered by a BUILD_PATHS root, or be listed with a reason why it does not make the installed binary stale. Read touches_build and stale_build_line to decide which roots belong. Then change the BUILD_PATHS value in status.rs, which is already a deliverable, or record the excusals. Add touches_build and stale_build_line, and the drain.rs line 260 re-export, to the dependents with tests that cover the new roots.",
+      "location": "Decision 4 / rule (c) hash_glob_problems; crates/athena-core/src/status.rs line 20",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Rule (d) still keeps a second copy of the ontology logic. Only the line matchers move. The term walk and the schema parsing are re-implemented in mirrors.rs with toml_edit, next to ontology.rs's serde types.",
+      "evidence": "In ontology.rs, uncovered-line detection depends on names_of (line 259, which handles aliases), scanned_files (line 249: BRIEF.md plus file sources, skipping decision ids through is_decision_id at line 93), term_hits (line 266), and the serde types Term, Sense and Excuse (lines 41-75, parsed with the `toml` crate at line 109). The plan moves none of these. athena-core has toml_edit but not toml (Cargo.toml lines 10-26), and the workspace toml_edit dependency is plain \"0.23\" (Cargo.toml line 54), so mirrors.rs would hand-parse name, aliases, sources, senses (`in`, marker) and excused. Two parsers and two walks of one schema form a new hand-kept mirror: rename a field or change the scanned-file rule in one place and the other drifts. Fix: Move the walk as well, as functions over plain data. For example, `term_uncovered_lines(name, aliases, sources, senses, excuses, read_file)` would contain the scanned_files, names_of and term_hits logic. ontology.rs then calls it with its parsed Term fields, and rule (d) calls it with the fields read through toml_edit. Add a real-file test asserting that both parse paths give the same per-term names, sources, senses and excuses, so the remaining parser difference is checked.",
+      "location": "Decision 2 / Step 2 / rule (d) ontology_problems",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The before-handover step is a prose brief instruction that the producer can skip. Athena already has a send-back loop in code that runs before verification, where the registry could be invoked.",
+      "evidence": "run/producer.rs, after each producer turn and before verification, computes unmet_criteria, unchanged_planned_files, the out-of-scope paths, the decision gate (unreconciled_in_snapshot) and the replay. It sends the producer back unless all are clean (lines 313-320). The snapshot there is the one-commit git repository, so git_base works. run_pin_tests.rs line 1204 shows how such a check is tested. The plan's own risk says a producer can skip the instruction. The 'mechanism' default and criterion 5 ('invokes the registry before handover') ask for an invocation, not a sentence. The run_check hook was rightly dropped, but this seam was never considered. Fix: Add a mirror-drift problem to that loop: call mirrors::check_all on the snapshot root with git_base, skip entries whose mirror file is absent (so other repositories are unaffected), and send each Drift message back. Demonstrate it with a run_pin_tests-style test: a snapshot whose timings file lacks a test unit is sent back with the file named, and a clean one is not. The brief line can stay as a helpful note. Add producer.rs and run_pin_tests.rs to files and dependents.",
+      "location": "Decision 6 / Criterion 5 demonstration; crates/athena-core/src/run/producer.rs lines 285-320",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The fast rule checks only `--test` units, so a new crate whose `--lib` or `--bin` unit is missing from the timings is left to the slower ci_shards oracle.",
+      "evidence": "The plan says '`--lib`, `--doc` and `--bin` lines are never reported', and test_units derives only `--test` units. xtask/tests/ci_shards.rs builds its oracle from cargo metadata, which includes the lib and bin targets. Fix: Either derive the `--lib` and `--bin` units too (from src/lib.rs and src/main.rs or src/bin) and extend the cargo-metadata agreement test, or state the limit in D158.",
+      "location": "Decision 3 / rule (a) missing_timing_lines",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the plan against the snapshot. Most of what it names exists: the helpers in crates/athena-cli/tests/ontology.rs (lines 165-246, 362-368, 413-430), BOUNDARY_SCAN_INSTRUCTION (briefs.rs line 787), the gap between the banned-words section and the checks heading (briefs.rs lines 591-592), Git::show_file (athena-git lib.rs line 453), BUILD_PATHS (status.rs line 20), the shard-timings lines 30-31, the athena-core dependencies, and D157 as the last decision. The registry design is sound, and so are rules (a) and (b). Three soundness problems remain. First, rule (c) checks the direction that can hardly fail and misses the real drift: BUILD_PATHS leaves out files the binary compiles in. Second, rule (d) still re-implements the ontology term walk and the schema parsing next to ontology.rs, which is the kind of second copy this job is meant to stop. Third, the step that runs before handover is only prose, even though run/producer.rs already has a send-back loop that runs before verification where the registry could be called in code. Athena's three minor scope findings (ontology.rs, briefs.rs and shard-timings.txt are outside the listed deliverables) are justified in the plan and I do not repeat them."
+}

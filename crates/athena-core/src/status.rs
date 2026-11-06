@@ -17,7 +17,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// The paths the installed binary is built from: Athena's own code and the files that build and install it. A
 /// change to one of them after the build commit leaves the installed binary stale.
-pub const BUILD_PATHS: [&str; 5] = ["crates/", "xtask/", "Cargo.toml", "Cargo.lock", "setup.sh"];
+///
+/// The CI `athena-bin` cache key hashes the same files, so it mirrors this list by hand. The mirrors registry
+/// (`crate::mirrors`) compares the two both ways and names the side to fix, so edit them together.
+pub const BUILD_PATHS: [&str; 9] = [
+    "crates/",
+    "xtask/",
+    "rust-toolchain.toml",
+    "Cargo.toml",
+    "Cargo.lock",
+    "athena.toml",
+    "defaults.toml",
+    "setup.sh",
+    "docs/system-facts.md",
+];
 
 /// Whether any of `paths` is one the installed binary is built from.
 pub fn touches_build(paths: &[String]) -> bool {
@@ -51,8 +64,9 @@ pub fn stale_build_line(git: &Git, build_commit: &str, head: &str) -> Option<Str
     }
     let short = |c: &str| c[..c.len().min(12)].to_string();
     Some(format!(
-        "stale build: this athena was built from {}, and {changed} file(s) under crates/, xtask/, Cargo.toml, Cargo.lock or setup.sh changed by {}; run ./setup.sh",
+        "stale build: this athena was built from {}, and {changed} file(s) under {} changed by {}; run ./setup.sh",
         short(build_commit),
+        BUILD_PATHS.join(", "),
         short(head)
     ))
 }

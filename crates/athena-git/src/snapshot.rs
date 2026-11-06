@@ -510,12 +510,10 @@ mod tests {
         ]);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
+            crate::script_writer::write_executable(
                 dir.path().join("src/run.sh"),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .unwrap();
+                "#!/bin/sh\necho hi\n",
+            );
             std::os::unix::fs::symlink("main.rs", dir.path().join("src/link.rs")).unwrap();
         }
         let head = commit_all(&git, "exec bit and symlink");

@@ -258,7 +258,7 @@ batch goes on to the next item
   queue empty       nothing was left to work; this is not success
   job limit         --job-limit jobs were started
   stop requested    `athena drain-stop` was run; the job in progress was finished and no further job was started
-  rebuilt           a landing changed crates/, xtask/, Cargo.toml, Cargo.lock or setup.sh, so Athena was rebuilt \
+  rebuilt           a landing changed a path in BUILD_PATHS (athena-core status.rs), so Athena was rebuilt \
 and installed (the steps of ./setup.sh); the new binary carries on with the remaining --budget and --job-limit, \
 so a run is not seen to end here
   rebuild failed    that rebuild failed; the build output is shown and the rest stays queued

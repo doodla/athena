@@ -2444,6 +2444,215 @@ mod produce_and_verify_order_tests {
         );
     }
 
+    // -- hand-kept files that disagree with their source (`crate::mirrors`) -------------------------------------
+
+    const TIMINGS_A: &str = "demo --test a 1.00\n";
+    const TIMINGS_AB: &str = "demo --test a 1.00\ndemo --test b 1.00\n";
+    const BRIEF_TOOL: &str = "* Hermes: a tool\n";
+    const BRIEF_TOOL_AND_ROLE: &str = "* Hermes: a tool\n- Hermes: a named role\n";
+    const ONTOLOGY_TOOL: &str = "[[term]]\nname = \"Hermes\"\nsources = [\"BRIEF.md\"]\n\
+         senses = [{ in = \"BRIEF.md\", marker = \"a tool\", says = \"tool\" }]\n";
+    const ONTOLOGY_TOOL_AND_ROLE: &str = "[[term]]\nname = \"Hermes\"\nsources = [\"BRIEF.md\"]\n\
+         senses = [{ in = \"BRIEF.md\", marker = \"a tool\", says = \"tool\" }, \
+         { in = \"BRIEF.md\", marker = \"a named role\", says = \"role\" }]\n";
+
+    /// The test repository with the files that make it look like Athena's own source: a build script, the core
+    /// manifest, a timings file listing the one test file `crates/demo/tests/a.rs`, and a small ontology over
+    /// `BRIEF.md`.
+    fn athena_source_repo() -> tempfile::TempDir {
+        let repo = repo();
+        for (path, text) in [
+            ("setup.sh", "#!/bin/sh\n"),
+            ("crates/athena-core/Cargo.toml", "[package]\n"),
+            ("xtask/shard-timings.txt", TIMINGS_A),
+            ("crates/demo/tests/a.rs", "// a\n"),
+            ("BRIEF.md", BRIEF_TOOL),
+            ("docs/ontology.toml", ONTOLOGY_TOOL),
+        ] {
+            commit_file(&repo, path, text);
+        }
+        repo
+    }
+
+    /// The editing script, except that the producer also makes `fix` edits when its prompt carries a
+    /// send-back, as a producer that reads the drift would.
+    fn fixing_on_send_back(
+        counts: Arc<Counts>,
+        prompts: Arc<Mutex<Vec<String>>>,
+        extra: Vec<(String, Option<String>)>,
+        fix: Vec<(String, Option<String>)>,
+    ) -> athena_agent::fake::Script {
+        let inner = editing(counts, prompts, extra);
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            if spec.role == Role::Producer && spec.user_prompt.contains("## Sent back") {
+                turn.edits.extend(fix.clone());
+            }
+            turn
+        })
+    }
+
+    fn edit(path: &str, text: &str) -> (String, Option<String>) {
+        (path.to_string(), Some(text.to_string()))
+    }
+
+    /// Runs one job over `repo` and returns its closing, the producer and verifier runs, every producer prompt
+    /// and what the UI said.
+    fn mirror_job(
+        repo: &tempfile::TempDir,
+        extra: Vec<(String, Option<String>)>,
+        fix: Vec<(String, Option<String>)>,
+    ) -> (Finished, (usize, usize), Vec<String>, Vec<String>) {
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let script = fixing_on_send_back(counts.clone(), prompts.clone(), extra, fix);
+        let (done, said) = governed_job_with(repo, script);
+        let (_, producer, _, verifier) = counts.all();
+        let prompts = prompts.lock().unwrap().clone();
+        (done, (producer, verifier), prompts, said)
+    }
+
+    const MIRROR_SENTENCE: &str =
+        "Files that are kept by hand disagree with the source they summarize";
+
+    #[test]
+    fn mirrors_a_new_test_file_without_a_timings_line_is_sent_back_with_the_file_and_the_fix() {
+        let repo = athena_source_repo();
+        let (_, (producer, _), prompts, said) = mirror_job(
+            &repo,
+            vec![edit("crates/demo/tests/b.rs", "// b\n")],
+            Vec::new(),
+        );
+        assert_eq!(producer, 2, "{said:#?}");
+        assert!(!prompts[0].contains("## Sent back"), "{}", prompts[0]);
+        for text in [
+            "## Sent back",
+            MIRROR_SENTENCE,
+            "xtask/shard-timings.txt",
+            "add the line `demo --test b 5.00`",
+        ] {
+            assert!(prompts[1].contains(text), "omits {text}: {}", prompts[1]);
+        }
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("producer   sent back: files kept by hand disagree")),
+            "{said:#?}"
+        );
+        // Still there after the one send-back: the job goes on, and the repo test fails it at verification.
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("producer   hand-kept files still disagree")),
+            "{said:#?}"
+        );
+    }
+
+    #[test]
+    fn mirrors_a_producer_that_fixes_the_timings_on_the_send_back_reaches_the_verifier() {
+        let repo = athena_source_repo();
+        let (done, (producer, verifier), _, said) = mirror_job(
+            &repo,
+            vec![edit("crates/demo/tests/b.rs", "// b\n")],
+            vec![edit("xtask/shard-timings.txt", TIMINGS_AB)],
+        );
+        assert_eq!((producer, verifier), (2, 1), "{said:#?}");
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+    }
+
+    #[test]
+    fn mirrors_a_clean_producer_is_not_sent_back() {
+        let repo = athena_source_repo();
+        let (_, (producer, verifier), prompts, said) = mirror_job(
+            &repo,
+            vec![
+                edit("crates/demo/tests/b.rs", "// b\n"),
+                edit("xtask/shard-timings.txt", TIMINGS_AB),
+            ],
+            Vec::new(),
+        );
+        assert_eq!((producer, verifier), (1, 1), "{said:#?}");
+        assert!(prompts.iter().all(|p| !p.contains("## Sent back")));
+    }
+
+    #[test]
+    fn mirrors_drift_already_in_the_base_is_charged_to_a_producer_that_touches_a_watched_file() {
+        // `b.rs` is in the base with no timings line. The producer edits only `a.rs`, a file the timings entry
+        // watches, so it is charged with the whole entry (the filter is per entry, not per finding).
+        let with_drift = || {
+            let repo = athena_source_repo();
+            commit_file(&repo, "crates/demo/tests/b.rs", "// b\n");
+            repo
+        };
+        let (_, (producer, _), prompts, said) = mirror_job(
+            &with_drift(),
+            vec![edit("crates/demo/tests/a.rs", "// a2\n")],
+            Vec::new(),
+        );
+        assert_eq!(producer, 2, "{said:#?}");
+        assert!(
+            prompts[1].contains("add the line `demo --test b 5.00`"),
+            "{}",
+            prompts[1]
+        );
+
+        // A job lands its README edit in its repository, so the second job gets a fresh one.
+        let (done, (producer, verifier), _, said) = mirror_job(
+            &with_drift(),
+            vec![edit("crates/demo/tests/a.rs", "// a2\n")],
+            vec![edit("xtask/shard-timings.txt", TIMINGS_AB)],
+        );
+        assert_eq!((producer, verifier), (2, 1), "{said:#?}");
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+    }
+
+    #[test]
+    fn mirrors_a_producer_that_touches_none_of_the_entrys_files_is_not_charged_with_it() {
+        // The same drift in the base; the producer edits only the README, which no entry watches.
+        let repo = athena_source_repo();
+        commit_file(&repo, "crates/demo/tests/b.rs", "// b\n");
+        let (_, (producer, verifier), prompts, said) = mirror_job(&repo, Vec::new(), Vec::new());
+        assert_eq!((producer, verifier), (1, 1), "{said:#?}");
+        assert!(prompts.iter().all(|p| !p.contains("## Sent back")));
+    }
+
+    #[test]
+    fn mirrors_an_uncovered_ontology_line_in_the_brief_is_sent_back_and_a_covering_sense_fixes_it()
+    {
+        let role = vec![edit("BRIEF.md", BRIEF_TOOL_AND_ROLE)];
+        let (_, (producer, _), prompts, said) =
+            mirror_job(&athena_source_repo(), role.clone(), Vec::new());
+        assert_eq!(producer, 2, "{said:#?}");
+        for text in [
+            MIRROR_SENTENCE,
+            "docs/ontology.toml: Hermes: BRIEF.md:2 names the term as a definition or role",
+            "add a senses entry or an excuse for that term in docs/ontology.toml",
+        ] {
+            assert!(prompts[1].contains(text), "omits {text}: {}", prompts[1]);
+        }
+
+        let (done, (producer, verifier), _, said) = mirror_job(
+            &athena_source_repo(),
+            role,
+            vec![edit("docs/ontology.toml", ONTOLOGY_TOOL_AND_ROLE)],
+        );
+        assert_eq!((producer, verifier), (2, 1), "{said:#?}");
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+    }
+
+    #[test]
+    fn mirrors_a_repository_that_is_not_athenas_source_is_not_sent_back() {
+        // The timings file and a test file are there, but no build script: not Athena's source tree.
+        let repo = repo();
+        commit_file(&repo, "xtask/shard-timings.txt", TIMINGS_A);
+        commit_file(&repo, "crates/demo/tests/a.rs", "// a\n");
+        let (_, (producer, verifier), prompts, said) = mirror_job(
+            &repo,
+            vec![edit("crates/demo/tests/b.rs", "// b\n")],
+            Vec::new(),
+        );
+        assert_eq!((producer, verifier), (1, 1), "{said:#?}");
+        assert!(prompts.iter().all(|p| !p.contains("## Sent back")));
+    }
+
     #[test]
     fn the_producer_prompt_names_the_decisions_governing_the_planned_files() {
         use athena_context::briefs::GOVERNING_HEADING;

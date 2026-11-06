@@ -9,6 +9,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A registry of hand-kept mirrors, `athena_core::mirrors::REGISTRY`, that compares each mirror with its source
+  by content (D158). Root cause: a file kept by hand as a mirror of a governing source was tested for its
+  structure only, not its content against the source, so drift reached the final verdict in five jobs. Four
+  rules, each naming the file and the fix: every `--test` and `--lib` unit on disk has a line in
+  `xtask/shard-timings.txt` (and the reverse); `docs/decisions.md` starts with its base text; the CI `athena-bin`
+  `hashFiles` globs and `BUILD_PATHS` cover each other; every line of `BRIEF.md` or a term's source that names an
+  ontology term as a definition or role is covered by a sense or an excuse (the walk moved out of
+  `crates/athena-cli/tests/ontology.rs` into the module). The producer loop runs the entries a change touches
+  before verification and sends a drift back once; the new `athena-cli` test target `mirrors` runs every entry
+  over the real files and a drifted fixture for each, so a new entry is covered with no other edit. The producer
+  brief tells the producer to run it. `BUILD_PATHS` gains `rust-toolchain.toml`, `athena.toml`, `defaults.toml`
+  and `docs/system-facts.md` (nine roots, matching the CI key), so a landing that changes one now triggers the
+  drain's rebuild.
+- `athena_git::script_writer::write_executable(path, bytes)` writes a stand-in script from a short-lived `sh`
+  child (`cat` to a temporary file, `chmod 755`, `mv` into place) and waits for it, so a test process never holds
+  the script open for writing and cannot meet "Text file busy" when it runs the script. The tests that wrote a
+  file and then made it executable now use it: `checks.rs`
+  (`a_cargo_test_check_records_its_failing_tests_and_the_flag_it_ran_with`), `reading.rs` (the `stub_binary`
+  helper), `claude.rs` (the `stand_in` helper), `reconcile.rs` (the fake `gh`), `athena-git` `snapshot.rs`
+  (`user_repo`) and the `xtask` tests (`stand_in_claude` and
+  `a_cached_gitleaks_is_skipped_only_when_it_reports_the_pinned_version`). A stress test runs 400 write-then-exec
+  cycles on four threads while four other threads fork, and asserts every exec succeeds. `athena-agent` gains
+  `athena-git` as a dev-dependency.
 - A job whose accepted reading limits which files may change (a criterion such as "no file outside X changed",
   "only X may change", "test-only change" or "production unchanged") now stores that limit on its job record as
   `allowed_paths`, the reading's deliverable paths (an entry ending in `/` covers a directory tree, so a limiting

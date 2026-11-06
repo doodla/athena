@@ -615,7 +615,6 @@ mod stand_in_tests {
     use crate::Usage;
     use athena_data::records::Role;
     use std::collections::BTreeMap;
-    use std::os::unix::fs::PermissionsExt;
 
     const STAND_IN: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.299 (Claude Code)"; exit 0; fi
@@ -637,8 +636,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
 
     fn stand_in(dir: &Path) -> PathBuf {
         let path = dir.join("claude");
-        std::fs::write(&path, STAND_IN).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        athena_git::script_writer::write_executable(&path, STAND_IN);
         path
     }
 
