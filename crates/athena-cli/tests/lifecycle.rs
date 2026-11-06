@@ -2107,6 +2107,463 @@ fn a_governed_change_on_the_branch_makes_the_job_stale() {
     assert!(athena.check_history().unwrap().violations.is_empty());
 }
 
+/// A README with enough lines that an edit of the first line and an edit of the last line are far apart:
+/// git merges two such edits of one file without a conflict.
+const LONG_README: &str = "# Demo\n\nline one\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight\n";
+const PRODUCER_FIRST_LINE: &str = "# Demo, as the producer wrote it";
+const BRANCH_FIRST_LINE: &str = "# Demo, as the branch wrote it";
+const BRANCH_LAST_LINE: &str = "A line added on the branch.";
+
+fn long_readme_with_first_line(first: &str) -> String {
+    LONG_README.replacen("# Demo", first, 1)
+}
+
+fn long_readme_with_last_line(last: &str) -> String {
+    format!("{LONG_README}{last}\n")
+}
+
+/// Commits [`LONG_README`] as the repository's README.
+fn commit_long_readme(fx: &Fixture) {
+    write(fx.root(), &[("README.md", LONG_README)]);
+    fx.git.run(["add", "-A"]).unwrap();
+    fx.git
+        .run([
+            "commit",
+            "-q",
+            "-m",
+            "Write a longer README\n\nAthena-Job: bootstrap",
+        ])
+        .unwrap();
+}
+
+/// A hook for `Scenario::during_verification` that, once, commits `readme` as the README with an
+/// intervention record on the branch while the verifier works, so the job goes stale instead of landing.
+fn commit_readme_by_hand_once(root: &Path, readme: String) -> Arc<dyn Fn() + Send + Sync> {
+    let root = root.to_path_buf();
+    let once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    Arc::new(move || {
+        if once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let record = r#"{
+  "schema": "athena.intervention/1",
+  "id": "20261010-170000-abcd",
+  "at": "2026-10-10T17:00:00Z",
+  "what": "Edited the README by hand",
+  "why": "Faster than asking",
+  "class_of_work": "docs",
+  "category": "did-work-themselves",
+  "job": null,
+  "source": "user",
+  "with_staged_changes": true
+}
+"#;
+        write(
+            &root,
+            &[
+                ("README.md", &readme),
+                (
+                    "records/interventions/2026-10/20261010-170000-abcd.json",
+                    record,
+                ),
+            ],
+        );
+        let git = athena_git::Git::at(&root);
+        git.run(["add", "-A"]).unwrap();
+        git.run([
+            "commit",
+            "-q",
+            "-m",
+            "Edit by hand\n\nAthena-Intervention: 20261010-170000-abcd",
+        ])
+        .unwrap();
+    })
+}
+
+/// What a test needs of a job that went stale: the Athena that ran it, its id, and what the scripted
+/// agents were given.
+struct StaleRun {
+    athena: athena_core::Athena,
+    job: athena_data::JobId,
+    invocations: Arc<Mutex<Vec<Role>>>,
+    seen_by_verifier: Arc<Mutex<Vec<String>>>,
+    seen_by_producer: Arc<Mutex<Vec<String>>>,
+}
+
+/// Runs a job on [`LONG_README`] whose producer writes `producer_readme` and whose branch gains
+/// `branch_readme` while the verifier works: the job goes stale. The one check, `show`, prints the README,
+/// so a check run records the README it ran on.
+fn stale_job(fx: &Fixture, producer_readme: String, branch_readme: String) -> StaleRun {
+    commit_long_readme(fx);
+    let mut scenario = Scenario::default();
+    scenario.edits = vec![("README.md".into(), Some(producer_readme))];
+    scenario.during_verification = Some(commit_readme_by_hand_once(fx.root(), branch_readme));
+    let invocations = scenario.invocations.clone();
+    let seen_by_verifier = scenario.seen_by_verifier.clone();
+    let seen_by_producer = scenario.seen_by_producer.clone();
+    let athena = fx.athena(scenario.script());
+    let ui = Lines::default();
+    let proposal = athena.ask("add a greeting", &ui).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Stale, "{}", f.reason);
+    StaleRun {
+        athena,
+        job: proposal.job,
+        invocations,
+        seen_by_verifier,
+        seen_by_producer,
+    }
+}
+
+fn show_check_config() -> String {
+    config_with_change_checks(&[("show", &["sh", "-c", "cat README.md"])])
+}
+
+fn candidate_of(fx: &Fixture, job: &athena_data::JobId) -> athena_data::records::Candidate {
+    match record_at(fx, "HEAD", &format!("{}/candidate.json", job.dir())) {
+        Some(AnyRecord::Candidate2(c)) => *c,
+        other => panic!("expected a candidate record, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_stale_job_whose_candidate_merges_cleanly_lands_on_retry_with_no_producer_call() {
+    // The producer rewrites the first line of README.md; while the verifier works, the branch gains a line at
+    // the end of the same file. A copy of the candidate's file over the new base would drop the branch's
+    // line; only a three-way merge keeps both.
+    let fx = Fixture::with_config(&show_check_config());
+    let run = stale_job(
+        &fx,
+        long_readme_with_first_line(PRODUCER_FIRST_LINE),
+        long_readme_with_last_line(BRANCH_LAST_LINE),
+    );
+    let athena = &run.athena;
+    let stale = candidate_of(&fx, &run.job);
+    let stale_commit = stale.candidate_commit.clone().unwrap();
+    let roles_before = run.invocations.lock().unwrap().len();
+    let seen_before = run.seen_by_verifier.lock().unwrap().len();
+
+    let ui = Lines::default();
+    let (retry, _) = athena.retry(run.job.as_str(), &ui).unwrap();
+    assert_eq!(retry.reader_error, None);
+    let f = finished(
+        athena
+            .go(retry.job.as_str(), AcceptedBy::User, &ui)
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    let said = ui.0.lock().unwrap().clone();
+
+    // No planner and no producer ran for the retry; the verifier ran once, on the merged tree.
+    let roles: Vec<Role> = run.invocations.lock().unwrap()[roles_before..].to_vec();
+    assert!(roles.contains(&Role::Reader), "{roles:?}");
+    assert_eq!(
+        roles.iter().filter(|r| **r == Role::Verifier).count(),
+        1,
+        "{roles:?}"
+    );
+    assert!(
+        !roles
+            .iter()
+            .any(|r| matches!(r, Role::Planner | Role::Producer | Role::Critic)),
+        "{roles:?}"
+    );
+    let records = athena_core::store::Records::load(&fx.git, &fx.head()).unwrap();
+    let retried = &records.jobs[retry.job.as_str()];
+    assert!(
+        retried
+            .invocations
+            .iter()
+            .all(|i| matches!(i.role, Role::Reader | Role::Verifier)),
+        "{:?}",
+        retried
+            .invocations
+            .iter()
+            .map(|i| i.role)
+            .collect::<Vec<_>>()
+    );
+
+    // The verifier's snapshot holds both hunks of the one file.
+    let seen = run.seen_by_verifier.lock().unwrap()[seen_before..].to_vec();
+    assert_eq!(seen.len(), 3, "one verification: system, brief, snapshot");
+    assert!(seen[2].contains(PRODUCER_FIRST_LINE), "{}", seen[2]);
+    assert!(seen[2].contains(BRANCH_LAST_LINE), "{}", seen[2]);
+
+    // The retry's candidate is the merge of the kept candidate and the tip, made against the new base.
+    let candidate = candidate_of(&fx, &retry.job);
+    let merged = candidate.candidate_commit.clone().unwrap();
+    assert_ne!(merged, stale_commit);
+    let readme =
+        String::from_utf8(fx.git.show_file(&merged, "README.md").unwrap().unwrap()).unwrap();
+    assert!(readme.contains(PRODUCER_FIRST_LINE) && readme.contains(BRANCH_LAST_LINE));
+    assert_ne!(candidate.base_commit, stale.base_commit);
+    assert_eq!(
+        candidate
+            .changes
+            .iter()
+            .map(|c| c.path.as_str())
+            .collect::<Vec<_>>(),
+        ["README.md"]
+    );
+
+    // The checks ran on the merged tree (the recorded output is that README), not reused from anywhere;
+    // the replay and the verification name the same commit.
+    let verification = retried.verification.as_ref().expect("a new verification");
+    assert_eq!(verification.candidate_commit, merged);
+    assert!(!verification.checks.is_empty());
+    for check in &verification.checks {
+        assert!(check.passed && !check.reused, "{check:?}");
+    }
+    let show = verification
+        .checks
+        .iter()
+        .find(|c| c.name == "show")
+        .expect("the show check ran");
+    assert!(
+        show.output_tail.contains(PRODUCER_FIRST_LINE),
+        "{}",
+        show.output_tail
+    );
+    assert!(
+        show.output_tail.contains(BRANCH_LAST_LINE),
+        "{}",
+        show.output_tail
+    );
+    assert_eq!(
+        retried
+            .replay
+            .as_ref()
+            .expect("the replay stage ran")
+            .candidate_commit,
+        merged
+    );
+    assert!(
+        said.iter().any(|l| l.starts_with("merge      ")),
+        "{said:#?}"
+    );
+    assert!(
+        said.iter().any(|l| l.starts_with("replay     ")),
+        "{said:#?}"
+    );
+    assert!(
+        !said.iter().any(|l| l.contains("they do not run again")),
+        "{said:#?}"
+    );
+
+    // It landed with both hunks, and what landed is what was verified.
+    let landed = fx.file("README.md").unwrap();
+    assert!(landed.contains(PRODUCER_FIRST_LINE) && landed.contains(BRANCH_LAST_LINE));
+    assert_eq!(
+        athena_git::attrs::fingerprint(&fx.git, &fx.head(), &candidate.base_commit).unwrap(),
+        verification.verified_fingerprint
+    );
+    assert_eq!(
+        Some(&verification.verified_fingerprint),
+        candidate.fingerprint.as_ref()
+    );
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
+#[test]
+fn a_stale_job_whose_candidate_conflicts_with_the_tip_goes_to_a_producer_seeded_from_it() {
+    // Both the producer and the branch rewrite the first line of README.md, so the merge conflicts.
+    let fx = Fixture::with_config(&show_check_config());
+    let run = stale_job(
+        &fx,
+        long_readme_with_first_line(PRODUCER_FIRST_LINE),
+        long_readme_with_first_line(BRANCH_FIRST_LINE),
+    );
+    let athena = &run.athena;
+    let stale_commit = candidate_of(&fx, &run.job).candidate_commit.unwrap();
+    let producers_before = run.seen_by_producer.lock().unwrap().len();
+    let seen_before = run.seen_by_verifier.lock().unwrap().len();
+
+    let (retry, _) = athena.retry(run.job.as_str(), &Lines::default()).unwrap();
+    let ui = Lines::default();
+    let f = finished(
+        athena
+            .go(retry.job.as_str(), AcceptedBy::User, &ui)
+            .unwrap(),
+    );
+
+    // A producer ran, with a brief that says where its work starts from.
+    let briefs = run.seen_by_producer.lock().unwrap()[producers_before..].to_vec();
+    assert_eq!(briefs.len(), 1, "{briefs:#?}");
+    let brief = &briefs[0];
+    assert!(
+        brief.contains(&format!(
+            "job {} went stale and its candidate conflicts with the branch tip",
+            run.job
+        )),
+        "{brief}"
+    );
+    assert!(brief.contains("> README.md"), "{brief}");
+    assert!(brief.contains("Resolve every conflict"), "{brief}");
+    assert!(
+        brief.contains("holds no marker lines is a modify/delete, rename or binary conflict"),
+        "{brief}"
+    );
+    assert!(brief.contains("conflicted merge of job"), "{brief}");
+
+    // Nothing landed without a new verification: the verifier ran again, on a new candidate.
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert_eq!(
+        run.seen_by_verifier.lock().unwrap().len(),
+        seen_before + 3,
+        "the retry was verified"
+    );
+    let records = athena_core::store::Records::load(&fx.git, &fx.head()).unwrap();
+    let verification = records.jobs[retry.job.as_str()]
+        .verification
+        .as_ref()
+        .expect("a new verification");
+    assert_ne!(verification.candidate_commit, stale_commit);
+    assert_eq!(
+        verification.candidate_commit,
+        candidate_of(&fx, &retry.job).candidate_commit.unwrap()
+    );
+    assert_eq!(
+        athena_git::attrs::fingerprint(
+            &fx.git,
+            &fx.head(),
+            &candidate_of(&fx, &retry.job).base_commit
+        )
+        .unwrap(),
+        verification.verified_fingerprint
+    );
+}
+
+#[test]
+fn a_stale_candidate_that_still_holds_conflict_markers_is_closed_before_the_verifier() {
+    // The same conflict, retried by a second scripted Athena whose producer edits only src/lib.rs. It never
+    // writes README.md, so markers in the candidate's README.md can only come from the seed: the producer's
+    // working directory was the conflicted merge. The job closes before the checks and the verifier.
+    let fx = Fixture::with_config(&show_check_config());
+    let run = stale_job(
+        &fx,
+        long_readme_with_first_line(PRODUCER_FIRST_LINE),
+        long_readme_with_first_line(BRANCH_FIRST_LINE),
+    );
+    let tip_readme = fx.file("README.md").unwrap();
+    let mut second = Scenario::default();
+    second.reading = reading(
+        &[("README.md", "modify"), ("src/lib.rs", "modify")],
+        &[
+            ("content", "README.md ends with a greeting line"),
+            ("behavior", "the tests still pass"),
+        ],
+    );
+    second.edits = vec![(
+        "src/lib.rs".into(),
+        Some("pub fn one() -> u32 {\n    1 // retried\n}\n".into()),
+    )];
+    let invocations = second.invocations.clone();
+    let seen_by_verifier = second.seen_by_verifier.clone();
+    let seen_by_producer = second.seen_by_producer.clone();
+    let athena = fx.athena(second.script());
+
+    let (retry, _) = athena.retry(run.job.as_str(), &Lines::default()).unwrap();
+    assert_eq!(retry.reader_error, None);
+    let f = finished(
+        athena
+            .go(retry.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_ne!(f.state, OutcomeState::Landed, "{}", f.reason);
+    assert!(
+        f.reason.contains("conflict markers are left in README.md"),
+        "{}",
+        f.reason
+    );
+    assert_eq!(seen_by_producer.lock().unwrap().len(), 1);
+    let roles = invocations.lock().unwrap().clone();
+    assert!(roles.contains(&Role::Producer), "{roles:?}");
+    assert!(!roles.contains(&Role::Verifier), "{roles:?}");
+    assert!(seen_by_verifier.lock().unwrap().is_empty());
+    // Nothing landed: the branch holds exactly what the user committed.
+    assert_eq!(fx.file("README.md").unwrap(), tip_readme);
+    assert!(!fx.file("src/lib.rs").unwrap().contains("retried"));
+    let records = athena_core::store::Records::load(&fx.git, &fx.head()).unwrap();
+    let retried = &records.jobs[retry.job.as_str()];
+    assert!(retried.verification.is_none());
+    assert!(athena.check_history().unwrap().violations.is_empty());
+    // The kept candidate of the stale job is untouched, so it can be tried again.
+    assert_eq!(
+        records.jobs[run.job.as_str()].state(),
+        athena_core::store::JobState::Closed(OutcomeState::Stale)
+    );
+}
+
+#[test]
+fn a_stale_job_whose_changes_the_branch_already_holds_fails_instead_of_landing_nothing() {
+    // The branch gained exactly the README the producer wrote: the merge is clean and empty.
+    let fx = Fixture::with_config(&show_check_config());
+    let same = long_readme_with_first_line(PRODUCER_FIRST_LINE);
+    let run = stale_job(&fx, same.clone(), same);
+    let seen_before = run.seen_by_verifier.lock().unwrap().len();
+    let (retry, _) = run
+        .athena
+        .retry(run.job.as_str(), &Lines::default())
+        .unwrap();
+    let f = finished(
+        run.athena
+            .go(retry.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Failed, "{}", f.reason);
+    assert!(
+        f.reason.contains("already holds the candidate's changes"),
+        "{}",
+        f.reason
+    );
+    assert_eq!(run.seen_by_verifier.lock().unwrap().len(), seen_before);
+    assert_eq!(
+        run.seen_by_producer.lock().unwrap().len(),
+        1,
+        "only the first job ran a producer"
+    );
+}
+
+#[test]
+fn a_producer_that_deletes_a_conflicted_file_passes_the_marker_check() {
+    // A path the producer deleted reads as empty text, which holds no markers: the job goes on to the checks
+    // (which fail here, because the one check prints the README), not to a marker refusal.
+    let fx = Fixture::with_config(&show_check_config());
+    let run = stale_job(
+        &fx,
+        long_readme_with_first_line(PRODUCER_FIRST_LINE),
+        long_readme_with_first_line(BRANCH_FIRST_LINE),
+    );
+    let mut second = Scenario::default();
+    second.reading = reading(
+        &[("README.md", "delete")],
+        &[
+            ("content", "README.md is gone"),
+            ("behavior", "the tests still pass"),
+        ],
+    );
+    second.edits = vec![("README.md".into(), None)];
+    let athena = fx.athena(second.script());
+    let (retry, _) = athena.retry(run.job.as_str(), &Lines::default()).unwrap();
+    assert_eq!(retry.reader_error, None);
+    let ui = Lines::default();
+    let f = finished(
+        athena
+            .go(retry.job.as_str(), AcceptedBy::User, &ui)
+            .unwrap(),
+    );
+    assert!(!f.reason.contains("conflict markers"), "{}", f.reason);
+    let said = ui.0.lock().unwrap().clone();
+    assert!(
+        said.iter().any(|l| l.starts_with("checks     ")),
+        "the job reached the checks: {said:#?}"
+    );
+}
+
 fn intervene_on_latest(athena: &athena_core::Athena) -> athena_data::RecordId {
     athena
         .intervene(

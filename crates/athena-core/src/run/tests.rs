@@ -4265,6 +4265,191 @@ mod produce_and_verify_order_tests {
         assert_eq!(crate::disk::read_any_hold(&athena.state, &first), None);
     }
 
+    /// The base script with `give_up` on: the producer's `cargo` wrapper leaves the wait note it leaves when
+    /// no build slot came free, written with the production helper at the path the environment names.
+    fn giving_up_producer(
+        counts: Arc<Counts>,
+        give_up: Arc<std::sync::atomic::AtomicBool>,
+    ) -> athena_agent::fake::Script {
+        let inner = counting(counts, None);
+        Box::new(move |spec: &AgentInvocation| {
+            if spec.role == Role::Producer && give_up.load(std::sync::atomic::Ordering::SeqCst) {
+                let note = PathBuf::from(&spec.env[athena_agent::env::SHIM_NOTE_ENV]);
+                crate::slots::write_wait_note(
+                    &note,
+                    &crate::disk::SlotWait {
+                        waited_s: 300,
+                        limit_s: 300,
+                    },
+                )
+                .unwrap();
+            }
+            inner(spec)
+        })
+    }
+
+    #[test]
+    fn a_producer_whose_last_cargo_waited_out_the_slot_holds_the_job() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let give_up = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            giving_up_producer(counts.clone(), give_up.clone()),
+        );
+        let first = athena.ask("describe the demo", &Quiet).unwrap().job;
+        let ui = Lines::default();
+        let error = athena
+            .go(first.as_str(), AcceptedBy::User, &ui)
+            .expect_err("a producer that could not build is held");
+        let wait = error
+            .downcast_ref::<crate::disk::SlotWait>()
+            .copied()
+            .unwrap_or_else(|| panic!("not a slot wait hold: {error:#}"));
+        assert_eq!((wait.waited_s, wait.limit_s), (300, 300));
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("held       environment: build slot wait")),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+
+        // Held, not closed and not failed: no outcome, no score, no verification, no candidate.
+        let (planner, producer, read_before, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 0), "no verifier ran");
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let held = &records.jobs[first.as_str()];
+        assert_eq!(held.state(), JobState::Dispatched);
+        assert!(held.outcome.is_none() && held.latest_score().is_none());
+        assert!(held.verification.is_none() && held.candidate.is_none());
+        assert_eq!(
+            crate::disk::read_slot_hold(&athena.state, &first),
+            Some(wait)
+        );
+        assert_eq!(
+            crate::slots::read_wait_note(&crate::slots::wait_note_path(
+                &athena.state.job_dir(&first)
+            )),
+            None,
+            "the note is spent once it holds the job"
+        );
+        let status = athena.status().unwrap();
+        let line = status
+            .open
+            .iter()
+            .find(|l| l.id == first.as_str())
+            .expect("the held job is open work");
+        assert_eq!(line.hold.as_deref(), Some(wait.text().as_str()));
+
+        // A slot is free again: the retry runs the producer from the base. A note left by the held run, which
+        // nothing cleared, is cleared before the new producer starts, so it cannot hold the job again.
+        give_up.store(false, std::sync::atomic::Ordering::SeqCst);
+        let (retry, _) = athena.retry(first.as_str(), &Quiet).unwrap();
+        assert_eq!(retry.reader_error, None);
+        let stale = crate::slots::wait_note_path(&athena.state.job_dir(&retry.job));
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        crate::slots::write_wait_note(&stale, &wait).unwrap();
+        let (_, _, read_after, _) = counts.all();
+        assert!(read_after > read_before, "the reader ran again");
+        let done = finished(
+            athena
+                .go(retry.job.as_str(), AcceptedBy::User, &Quiet)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        assert_eq!(
+            counts.all(),
+            (0, 2, read_after, 1),
+            "the producer ran again"
+        );
+        assert_eq!(crate::slots::read_wait_note(&stale), None);
+    }
+
+    #[test]
+    fn only_the_producer_gets_the_cargo_shim_first_on_path() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        type Seen = Mutex<Vec<(Role, BTreeMap<String, String>)>>;
+        let seen: Arc<Seen> = Arc::default();
+        // Where the producer's `cargo` link pointed while the producer ran (the job's directory is cleaned
+        // when the job ends).
+        let link: Arc<Mutex<Option<PathBuf>>> = Arc::default();
+        let inner = base_script();
+        let log = seen.clone();
+        let link_seen = link.clone();
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            Box::new(move |spec: &AgentInvocation| {
+                log.lock().unwrap().push((spec.role, spec.env.clone()));
+                if spec.role == Role::Producer {
+                    let dir = PathBuf::from(&spec.env[athena_agent::env::SHIM_DIR_ENV]);
+                    *link_seen.lock().unwrap() = std::fs::read_link(dir.join("cargo")).ok();
+                }
+                inner(spec)
+            }),
+        );
+        let first = athena.ask("describe the demo", &Quiet).unwrap().job;
+        let done = finished(athena.go(first.as_str(), AcceptedBy::User, &Quiet).unwrap());
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+
+        let seen = seen.lock().unwrap();
+        let env_of = |role: Role| {
+            &seen
+                .iter()
+                .find(|(r, _)| *r == role)
+                .unwrap_or_else(|| panic!("no {role:?} invocation"))
+                .1
+        };
+        let shim_dir = athena.state.job_dir(&first).join("shim");
+        let producer = env_of(Role::Producer);
+        assert!(
+            producer["PATH"].starts_with(&format!("{}:", shim_dir.display())),
+            "{}",
+            producer["PATH"]
+        );
+        assert_eq!(
+            producer[athena_agent::env::SHIM_DIR_ENV],
+            shim_dir.display().to_string()
+        );
+        assert_eq!(producer[athena_agent::env::SHIM_SLOTS_ENV], "1");
+        assert_eq!(
+            producer[athena_agent::env::SHIM_SLOTS_DIR_ENV],
+            athena.state.slots_dir().display().to_string()
+        );
+        assert_eq!(
+            link.lock().unwrap().as_deref(),
+            Some(athena.athena_bin.as_path()),
+            "`cargo` in the shim directory is the athena binary"
+        );
+        // The verifier, and the reader, get the environment `build` makes: the parent's PATH, no shim.
+        let parent_path = std::env::var("PATH").unwrap();
+        for role in [Role::Verifier, Role::Reader] {
+            let env = env_of(role);
+            assert_eq!(env["PATH"], parent_path, "{role:?}");
+            for key in [
+                athena_agent::env::SHIM_DIR_ENV,
+                athena_agent::env::SHIM_SLOTS_DIR_ENV,
+                athena_agent::env::SHIM_SLOTS_ENV,
+                athena_agent::env::SHIM_WAIT_ENV,
+                athena_agent::env::SHIM_PROMOTE_ENV,
+                athena_agent::env::SHIM_NOTE_ENV,
+            ] {
+                assert!(!env.contains_key(key), "{role:?} has {key}");
+            }
+        }
+    }
+
     #[test]
     fn the_build_slot_is_free_after_a_panic_in_the_check_and_after_a_normal_run() {
         let repo = repo();
@@ -4559,6 +4744,161 @@ mod produce_and_verify_order_tests {
         );
         assert!(readme_at_head(&athena).contains("A demo."));
         assert_eq!(athena.state.read_resume(&first), None, "the mark is spent");
+    }
+
+    #[test]
+    fn has_conflict_markers_needs_an_opening_and_a_later_closing_line() {
+        let both = "intro\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\noutro\n";
+        assert!(has_conflict_markers(both));
+        // A Markdown underline is no marker, nor is text that only mentions the markers mid-line.
+        assert!(!has_conflict_markers("Title\n=======\nbody\n"));
+        assert!(!has_conflict_markers(
+            "use `<<<<<<< ` to open\nand `>>>>>>> ` to close\n"
+        ));
+        // An opening line alone, or a closing line before the opening one, is not a conflict.
+        assert!(!has_conflict_markers("<<<<<<< HEAD\nours\n"));
+        assert!(!has_conflict_markers(">>>>>>> branch\n<<<<<<< HEAD\n"));
+        // An absent or empty file reads as empty text.
+        assert!(!has_conflict_markers(""));
+    }
+
+    /// A landed job with its outcome turned into `stale`, as a stale job's records read, and the records.
+    /// Its candidate commit is the one the producer's edit made; its base is an ancestor of the head.
+    fn stale_records(athena: &Athena) -> (JobId, Records, String) {
+        let (first, done) = finished_job(athena);
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        let head = athena.head().unwrap();
+        let mut records = Records::load(&athena.git, &head).unwrap();
+        records
+            .jobs
+            .get_mut(first.as_str())
+            .unwrap()
+            .outcome
+            .as_mut()
+            .unwrap()
+            .state = OutcomeState::Stale;
+        (first, records, head)
+    }
+
+    fn test_redactor() -> Redactor {
+        Redactor::new(&athena_gate::builtin_config()).unwrap()
+    }
+
+    #[test]
+    fn stale_seed_merges_a_candidate_the_tip_does_not_conflict_with() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let (first, records, head) = stale_records(&athena);
+        let request = format!("try again on {first}");
+        // The tip holds the same README change the candidate made: the merge is clean.
+        let seed = athena
+            .stale_seed(&records, &request, &test_redactor(), &head)
+            .unwrap();
+        let Some(StaleSeed::Merge(seed)) = seed else {
+            panic!("expected a clean merge");
+        };
+        assert!(seed.merge);
+        assert_eq!(seed.job, first);
+        assert_eq!(seed.mark.stage, ResumeStage::Checks);
+        assert!(seed.mark.check_runs.is_empty());
+        let candidate = records.jobs[first.as_str()].candidate.as_ref().unwrap();
+        assert_eq!(seed.mark.base_commit, candidate.base_commit);
+        assert_eq!(seed.mark.candidate, *candidate);
+    }
+
+    #[test]
+    fn stale_seed_seeds_a_conflict_with_git_s_merge_and_the_conflicting_paths() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let (first, records, _) = stale_records(&athena);
+        // The branch then rewrites the README the candidate changed.
+        commit_file(&repo, "README.md", "# Demo\n\nSomething else.\n");
+        let head = athena.head().unwrap();
+        let request = format!("try again on {first}");
+        let seed = athena
+            .stale_seed(&records, &request, &test_redactor(), &head)
+            .unwrap();
+        let Some(StaleSeed::Conflict(conflict)) = seed else {
+            panic!("expected a conflict");
+        };
+        assert_eq!(conflict.job, first);
+        assert_eq!(conflict.paths, ["README.md"]);
+        // The seed commit sits on the tip and holds the conflicted file with its markers.
+        assert_eq!(
+            athena
+                .git
+                .rev_parse(&format!("{}^", conflict.seed_commit))
+                .unwrap(),
+            Some(head)
+        );
+        let text = String::from_utf8(
+            athena
+                .git
+                .show_file(&conflict.seed_commit, "README.md")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(has_conflict_markers(&text), "{text}");
+        assert!(text.contains("Something else.") && text.contains("A demo."));
+    }
+
+    #[test]
+    fn stale_seed_is_none_when_the_job_is_not_stale_or_its_candidate_cannot_be_merged() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let (first, mut records, head) = stale_records(&athena);
+        let request = format!("try again on {first}");
+        let has_seed = |records: &Records, request: &str| {
+            athena
+                .stale_seed(records, request, &test_redactor(), &head)
+                .unwrap()
+                .is_some()
+        };
+        assert!(has_seed(&records, &request));
+        // Not a retry request.
+        assert!(!has_seed(&records, "describe the demo"));
+        let id = first.as_str().to_string();
+        let job = |records: &mut Records| records.jobs.get_mut(&id).unwrap().clone();
+        let original = job(&mut records);
+        // Not a stale job.
+        records
+            .jobs
+            .get_mut(&id)
+            .unwrap()
+            .outcome
+            .as_mut()
+            .unwrap()
+            .state = OutcomeState::Rejected;
+        assert!(!has_seed(&records, &request));
+        // The candidate commit is gone (it never existed in this repository), or none is recorded.
+        for commit in [Some("0".repeat(39) + "1"), None] {
+            let mut changed = original.clone();
+            changed.candidate.as_mut().unwrap().candidate_commit = commit;
+            records.jobs.insert(id.clone(), changed);
+            assert!(!has_seed(&records, &request));
+        }
+        // A candidate with violations is not merged.
+        let mut changed = original.clone();
+        changed.candidate.as_mut().unwrap().violations = vec![PolicyViolation {
+            rule: "r".into(),
+            path: None,
+            detail: "d".into(),
+        }];
+        records.jobs.insert(id.clone(), changed);
+        assert!(!has_seed(&records, &request));
+        // The candidate's base is not an ancestor of the tip (here, the candidate commit itself).
+        let mut changed = original.clone();
+        let candidate = changed.candidate.as_mut().unwrap();
+        candidate.base_commit = candidate.candidate_commit.clone().unwrap();
+        records.jobs.insert(id.clone(), changed);
+        assert!(!has_seed(&records, &request));
+        // The unchanged records still give a seed.
+        records.jobs.insert(id, original);
+        assert!(has_seed(&records, &request));
     }
 
     /// One `go` run with the early seam holding a recording fake, so nothing reaches a network.

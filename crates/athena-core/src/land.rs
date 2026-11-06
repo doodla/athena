@@ -19,6 +19,13 @@
 //!
 //! The caller adds the closing records to the tree, gates the commit, and fast-forwards; a refused
 //! fast-forward makes the job `blocked`.
+//!
+//! A stale job is not lost. `athena retry <job>` merges the candidate the job kept onto the branch tip
+//! (`Athena::stale_seed` in `run`): a clean merge is checked and verified again as a new job, with no
+//! planner or producer run, and a conflict goes to a producer run seeded from the conflicted merge. The new
+//! job lands through this same rule, so the last line above still holds for it: its landed content must equal
+//! the content verified on the merged tree, and a landing whose fingerprint differs is refused. What makes a
+//! job stale is unchanged.
 
 use crate::gh::verification_id;
 use crate::verify::Verified;

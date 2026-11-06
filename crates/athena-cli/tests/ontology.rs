@@ -2,7 +2,11 @@
 //! the misread that caused it, sources that exist, and relations that point at defined terms.
 //!
 //! `claim_problems` is the content part: it compares every term with the sources that govern it, so a definition
-//! cannot drift from them unnoticed. It is generic over all terms. For each term it scans `BRIEF.md` and the
+//! cannot drift from them unnoticed. It is generic over all terms.
+//!
+//! Root cause this guards against: the checks verified the file's shape and the sources an author chose to list,
+//! not each term's content against every governing source, so a sense named in another document went unseen
+//! until the final verdict. For each term it therefore scans `BRIEF.md`, `README.md`, every `docs/*.md` and the
 //! term's own file sources (decision ids are not files and are not scanned) for lines that name the term or one
 //! of its optional `aliases`, as a whole word (a trailing `s` or `'s` is allowed). Matching is case-sensitive.
 //!
@@ -254,7 +258,7 @@ fn claim_problems(file: &File, root: &Path) -> Vec<String> {
             }
             let Some(file_hits) = hits.get(&sense.in_file) else {
                 found.push(format!(
-                    "{name}: sense file {:?} is not BRIEF.md or one of the term's file sources",
+                    "{name}: sense file {:?} is not BRIEF.md, README.md, docs/*.md or one of the term's file sources",
                     sense.in_file
                 ));
                 continue;
@@ -307,7 +311,7 @@ fn claim_problems(file: &File, root: &Path) -> Vec<String> {
             });
             if !hits.contains_key(&excuse.files[0]) {
                 found.push(format!(
-                    "{name}: excuse {marker:?} names {:?}, which is not BRIEF.md or one of the term's file sources",
+                    "{name}: excuse {marker:?} names {:?}, which is not BRIEF.md, README.md, docs/*.md or one of the term's file sources",
                     excuse.files[0]
                 ));
             } else if covered == 0 {
@@ -830,13 +834,47 @@ fn a_sense_in_a_file_the_term_does_not_scan_is_flagged() {
     let dir = scratch_root();
     let text = GOOD.replacen(
         "in = \"BRIEF.md\", marker = \"marked beta\"",
-        "in = \"docs/decisions.md\", marker = \"marked beta\"",
+        "in = \"notes.txt\", marker = \"marked beta\"",
         1,
     );
     let found = claims(&text, dir.path());
     assert!(
         found.iter().any(|p| p.starts_with("b: sense file")),
         "{found:?}"
+    );
+}
+
+#[test]
+fn a_sense_named_in_a_governing_doc_the_term_does_not_list_is_flagged() {
+    let dir = scratch_root();
+    std::fs::write(
+        dir.path().join("docs/guide.md"),
+        "* b: a second role, marked delta\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("README.md"), "| a | marked epsilon |\n").unwrap();
+    let found = claims(GOOD, dir.path());
+    assert!(
+        found
+            .iter()
+            .any(|p| p.starts_with("b: docs/guide.md:1") && p.contains("covers it")),
+        "a sense in an unlisted docs file is missed: {found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|p| p.starts_with("a: README.md:1") && p.contains("covers it")),
+        "a sense in README.md is missed: {found:?}"
+    );
+    let with_sense = GOOD.replacen(
+        "senses = [{ in = \"BRIEF.md\", marker = \"marked beta\", says = \"beta\" }]",
+        "senses = [{ in = \"BRIEF.md\", marker = \"marked beta\", says = \"beta\" }, { in = \"docs/guide.md\", marker = \"marked delta\", says = \"beta\" }]",
+        1,
+    );
+    let found = claims(&with_sense, dir.path());
+    assert!(
+        !found.iter().any(|p| p.starts_with("b: ")),
+        "listing the sense clears it: {found:?}"
     );
 }
 

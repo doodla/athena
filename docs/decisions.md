@@ -4384,3 +4384,74 @@ should replace those estimates with its figures.
   `xtask/tests/ci_shards.rs`, `xtask/tests/policy.rs`, `.github/workflows/ci.yml`, D140, D156. Measured:
   `cargo test -p athena-core mirrors`, `cargo test -p athena-cli --test mirrors`, `--test ontology` and
   `--test drain`. Not measured: how many future jobs add a hand-kept file without registering it.
+
+## D159 · A stale job is retried by merging its kept candidate onto the branch tip and verifying the merged tree
+
+- **Case:** D10 left out alternative (d), "Automatic re-verification on the new base", "until stale landings
+  recur", and made a stale job a job that must be asked again. Stale landings now recur with parallel jobs: two
+  jobs dispatched from one base both pass verification, and the one that lands second finds the branch moved. Asking
+  again throws away a candidate that was verified and costs a whole new planner, producer and verifier run for work
+  that may merge without a conflict.
+- **Decision:** This reverses alternative (d) of D10 in one respect and keeps the rest of D10. `athena retry <job>`
+  accepts a job closed `stale`. The staleness rule in `land::plan` is unchanged, and so is the rule that the landed
+  fingerprint must equal the verified one. The retry is a new job. It reads the candidate commit from the stale
+  job's `candidate` record and merges it onto the tip with a three-way `merge-tree` from the candidate's own base.
+  A clean merge goes to the resume path in a merge mode: the merged tree becomes the candidate on the new base,
+  admission, the checks, the replay and the verifier run on it, and no planner or producer runs. The landing is then
+  the ordinary one, so what lands is what was verified on the merged tree. A conflict starts an ordinary producer
+  run whose working directory is seeded with git's conflicted merge, and whose brief names the conflicted paths. A
+  candidate that still holds an opening and a closing conflict marker line in one of those paths closes the job
+  before the checks and the verifier. Git also lists conflicts that write no marker lines (modify/delete, rename,
+  binary), and the marker check cannot see them: the brief tells the producer to decide such a path explicitly and
+  report it, and the verifier judges the result. When the candidate or its base is gone, the base is no longer an
+  ancestor of the tip, or the request is pinned, the retry starts from the base, as a retry always did. A merge that
+  leaves the tree equal to the tip fails the job, because the branch already holds the candidate's changes. The
+  retry is explicit: no drain re-verifies a stale job by itself.
+- **Alternatives:**
+  - (a) Keep D10 as it was: a stale job is asked again. It repeats work that was verified, which parallel jobs make
+    routine.
+  - (b) Land the old candidate merged onto the tip without verifying again: the merged tree has another fingerprint
+    than the verified one, so `land::plan` refuses it, and landing unverified content is what D10 forbids.
+  - (c) Re-verify every stale job by itself in the drain: out of scope here, and it spends verifier cost on jobs
+    nobody asked to retry.
+  - (d) Copy the candidate's changed files over the new base, as the resume path does: it overwrites the tip's
+    hunks in a file both sides changed, so the verified tree would not hold the tip's work.
+- **Tradeoff:** A retry of a stale job costs a reader run and a verifier run, not a producer run, when the merge is
+  clean. The reading is made again, so the user sees and accepts it as for any retry. A merge can be clean in git's
+  terms and still wrong in meaning; the checks and the verifier run on the merged tree for that reason. The marker
+  check sees text markers only. A conflict that git keeps as one side, with no marker lines, relies on the
+  producer's explicit decision and on the verifier. The kept candidate is an unreferenced commit, so a `git gc` may
+  remove it, and the retry then starts from the base.
+- **Reversal cost:** Low. Remove the stale branch of `Athena::stale_seed`, the merge mode of `resume_candidate`, the
+  marker check in `check_and_verify` and `Git::merge_tree_report`, and refuse `stale` again in
+  `earlier_attempt_with`. Nothing recorded depends on them: a retry is an ordinary job.
+- **Provenance:** Stated: the request to retry job 20261106-161947-pdwd, and D10's own condition for alternative (d).
+  Read: D10, D08, `crates/athena-core/src/land.rs`, `crates/athena-core/src/run/mod.rs`,
+  `crates/athena-core/src/reading.rs`, `crates/athena-git/src/lib.rs`. Measured: the lifecycle tests for a clean
+  merge, a conflict, leftover markers, an empty merge and a deleted conflicted file, and the `land.rs` tests that
+  refuse content that differs from the verified content. Not measured: how often stale landings recur, how often a
+  stale candidate merges cleanly, or how often a conflict leaves no marker lines.
+
+## D160 · The ontology scan covers every governing document, not only the sources a term lists
+
+- **Case:** D152 made the ontology check scan `BRIEF.md` and each term's listed file sources. A governing document
+  that no term listed could use a term in a sense its definition lacked and pass; Hermes as a tool and as a named
+  role was found only at the final verdict of job 20261017-173508-0wtc. The root cause is that the checks verified
+  the file's shape and the sources an author chose to list, not each term's content against every governing source.
+- **Decision:** This supersedes the scan scope in part (1) of D152; the rest of D152 stands. For each term the
+  check scans `BRIEF.md`, `README.md`, every `docs/*.md` file and the term's file sources, whole word and
+  case-sensitive, as before. The walk lives in `athena_core::mirrors::scanned_files`, which the ontology test and
+  the hand-kept mirror registry share, and the registry's ontology entry now also runs when a change touches
+  `README.md` or a `docs/*.md` file. Decision ids are still not scanned. No decision keeps the narrower scope.
+  D152 stays unedited because the decision log is append-only; its scope text in part (1) is replaced by this entry.
+- **Alternatives:**
+  - (a) Keep the listed sources only and ask authors to list more: it relies on the choice that failed.
+  - (b) Scan `docs/` recursively: out of scope here, and it pulls in design and study files that use terms in
+    other senses.
+- **Tradeoff:** The `docs/` scan is not recursive: files in subfolders such as `docs/design/` are scanned only if a
+  term lists them as a source, so a governing document there can still drift unseen. More files are scanned, so a
+  term used in another sense in a docs file needs a sense or an excuse.
+- **Reversal cost:** Low. Restore the two-file start of `scanned_files` and the narrower watch in `Mirror::watches`.
+- **Provenance:** Stated: the request to widen the scan to all governing docs. Read: D152, `crates/athena-core/src/mirrors.rs`,
+  `crates/athena-cli/tests/ontology.rs`. Measured: the scratch-root test and the real-file test over
+  `docs/ontology.toml`. Not measured: how many future misreads sit in `docs/` subfolders.
