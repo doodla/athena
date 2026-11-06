@@ -1,0 +1,198 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261105-180330-tb41",
+  "n": 1,
+  "at": "2026-11-05T23:42:58.977366349Z",
+  "invocation_seq": 1,
+  "base_commit": "a27cac8f1ce3bf4a4297971f636c7244ed002168",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Take a build slot for each producer cargo command",
+  "summary": "Build step 4 of docs/design/agent-and-build-slots.md section 8. A wrapper directory first on the producer's PATH routes cargo build/test/clippy/check through a new `build-slot -- <cmd>` subcommand that waits in the step-3 queue (job 20261105-180325-s9pg), runs the command and frees the slot. After build_wait_s it exits 75 with the documented message. Audience: the maintainer and the verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All new code is Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Tests for the wrapper; cargo test and clippy must pass."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Criteria check slot hold, wait and timeout behavior directly."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the real subcommand with a real queue."
+    },
+    {
+      "id": "mechanism",
+      "how": "Policy allows only the wrapper form of cargo."
+    },
+    {
+      "id": "small",
+      "how": "Producer commands only; reruns and landing left out."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and changelog updated."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read docs/design/agent-and-build-slots.md sections 4 and 8; crates/athena-core/src/slots.rs (SlotQueue::new/from_config/acquire(class, stop)/Slot, Class), crates/athena-agent/src/policy.rs (check_cargo at ~616 decides which cargo forms are allowed; segments are checked per program), crates/athena-agent/src/env.rs (agent PATH and build dirs), crates/athena-cli/src/main.rs (clap Command enum at line 29). Order: policy check of the command line first, then wrapper on PATH runs `build-slot`, which acquires a slot (class 3, producer, ordered by priority tier), runs cargo, frees on exit or signal. No new record file under crates/ is added, so no check_record_file or AnyRecord change; queued_s is added to existing commands_run entries in the invocation record, which must still read old records (round-trip test). The property is measured directly: tests run the real build-slot subcommand against a real SlotQueue in a temp state dir with limit 1 and observe order and the exit code.",
+    "Job 20261105-180325-s9pg (step 3) is landed and kept as is: its 22 changed files are not reverted. Its findings are addressed: the 'fails without' reruns and baseline not taking a slot is a known gap for a later step and is out of scope here (this request is producer commands only); the slot-wait hold marker shape, the generic held-item wording and the extra files with queued_s: None literals need no action; the verifier's stale target dir was an environment issue.",
+    "Slot class is the producer class (3) already present in slots.rs; build_wait_s and build_age_promote_s already exist in PipelineConfig, so config.rs need not change. The wrapper's exit 75 message is 'no build slot free for 1800 s; try again' with the configured seconds, as the design says.",
+    "The producer's cargo build, test, clippy and check take a slot; cargo fmt --check and other subcommands pass through unwrapped. athena.toml, defaults.toml are not touched; the change reuses the existing config."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test that runs `build-slot -- <cmd>` (or the slot_exec function) for a producer cargo build/test/clippy/check command shows a slot file held for the command's duration and free after it, also when the command is killed by a signal. Run: cargo test -p athena-cli slot_exec.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test with max_check_slots = 1 and two producers running cargo: the second waits until the first ends, then runs, and its recorded queued_s is greater than zero. Run: cargo test -p athena-cli slot_exec.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test where no slot frees within build_wait_s (shrunk in the test): the command exits 75 with the message 'no build slot free for <N> s; try again', the producer's job is not failed, and the message is not a policy denial. Run: cargo test -p athena-cli slot_exec and cargo test -p athena-agent policy.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The agent's PATH has the wrapper directory first, and the policy allows cargo only in the wrapper form; a test shows a cargo command that bypasses the wrapper is denied, and `cargo fmt --check` still passes policy. Run: cargo test -p athena-agent.",
+      "kind": "behavior"
+    },
+    {
+      "text": "queued_s is recorded per producer command in the invocation record's commands_run (optional field; old records still read) and the 'build wait' line in crates/athena-core/src/status.rs includes it, plus the peak number of slots held, which never exceeds max_check_slots (checked by a test).",
+      "kind": "content"
+    },
+    {
+      "text": "docs/design/agent-and-build-slots.md step 4 gains a 'Built' note stating the choices made and what was not measured, and CHANGELOG.md has an entry.",
+      "kind": "content"
+    },
+    {
+      "text": "Outcome-check and tested defaults: cargo test --locked and cargo clippy --all-targets --locked -- -D warnings pass and cargo fmt --all --check is clean; the change is Rust only.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/slot_exec.rs",
+      "action": "create",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/lib.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-agent/src/env.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/slots.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-cli/Cargo.toml",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/tests/slot_exec.rs",
+      "action": "create",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-agent/src/lib.rs",
+      "action": "modify",
+      "p": 0.3
+    }
+  ],
+  "out_of_scope": [
+    "Wrapping the baseline run and 'fails without' reruns in a slot (finding of job 20261105-180325-s9pg; later step)",
+    "Landing rebuild slot use (step 7) and slot-owned warm target directories for producers (step 5)",
+    "Changes to athena.toml or defaults.toml",
+    "Reworking the step-3 files from job 20261105-180325-s9pg: crates/athena-cli/src/drain.rs, crates/athena-cli/tests/drain.rs, crates/athena-cli/tests/status_durations.rs, crates/athena-core/src/{checks.rs,disk.rs,introspect.rs,lib.rs,reading.rs,routing.rs,verify.rs,state.rs}, crates/athena-core/src/run/{checks.rs,close.rs,mod.rs,send_back.rs,tests.rs}, crates/athena-data/src/config.rs; kept as landed, not expected to change",
+    "Changing the sample metrics in records/"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.0,
+        "p90": 5.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6714628297362111,
+      "p_user_intervenes": 0.08380129589632829,
+      "cost_usd": {
+        "p10": 0.5591608,
+        "p50": 1.354814,
+        "p90": 4.0565341
+      },
+      "wall_time_s": {
+        "p10": 554.407803549423,
+        "p50": 1990.6219011185412,
+        "p90": 4209.656916398667
+      }
+    }
+  },
+  "departures": "Higher cost and time than reference: new subcommand, policy change and PATH wrapper across two crates, with signal-handling tests.",
+  "hard_reason": "Adds a gate that can block or refuse every producer cargo command (policy allows only the wrapper form of cargo, and the wait times out) and touches the run pipeline.",
+  "producer_effort": "high"
+}

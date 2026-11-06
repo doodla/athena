@@ -1,0 +1,226 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261105-170019-3v2x",
+  "round": 1,
+  "at": "2026-11-05T23:44:47.381199755Z",
+  "invocation_seq": 2,
+  "approach": "Add a `changed_paths: &'a [String]` field to `VerdictInputs`. In `judge` (verify.rs ~365-395), when every changed path is docs-only, also add a recorded check to `ran`. That means the same tree match, `passed`, no exit code, not reused, no `revert_for`, and a note that starts with the skip_when_only note prefix. A passing CI-reused record already counts, so that path is untouched. A code change, an empty path list, or any other skip reason leaves the rule as it is. Docs-only means every path matches `docs/` or `*.md`, using `crate::checks::path_matches` (the same patterns routing uses via the `skip_when_only` patterns, routing.rs test `prose()` and athena.toml). The note prefix is a private const in verify.rs; a test builds the record with the real `checks::skip_note` and `checks::skipped_run`, so drift from the producer of the note fails a test. Callers: verification.rs builds the paths from `closing.candidate.changes` exactly as run/mod.rs:1543 does for skipping; the send_back.rs test constructor gets `changed_paths: &[]`. The 8 verify.rs test constructors get the same empty field. Two new tests and a CHANGELOG entry.",
+  "decisions": [
+    {
+      "choice": "Gate on a new `changed_paths` input to `judge`, and also require the skip note prefix.",
+      "reason": "A skipped record alone must not count on a code change (criterion 2). Only the paths show that the change was docs-only at judgment time. The note prefix separates the docs-only skip from other skips ('not run: CI was not green', the nested-run placeholder), which must keep not counting (criterion 3).",
+      "rejected": [
+        {
+          "option": "Trust the note alone, with no path input.",
+          "why": "A stale or hand-made skipped record on a code change would count. The note says why the check was skipped, not what the candidate contains."
+        },
+        {
+          "option": "Count every skipped record (exit None, passed) on a docs-only change.",
+          "why": "It would also count a 'CI was not green' skip and the nested placeholder, widening what counts as seen."
+        }
+      ]
+    },
+    {
+      "choice": "Docs-only = every changed path matches `docs/` or `*.md` through `crate::checks::path_matches`; an empty list is not docs-only.",
+      "reason": "It is the same matcher and the same patterns the routing skip uses, so the verdict agrees with what Athena skipped. An empty list (a resumed or unknown change) is the safe side: nothing new counts.",
+      "rejected": [
+        {
+          "option": "Copy a matcher into verify.rs.",
+          "why": "It could drift from the routing rule."
+        },
+        {
+          "option": "Read the patterns from the config in `judge`.",
+          "why": "`judge` is pure and has no config. The note already proves the config's skip fired; the paths gate it a second time."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the note prefix as a private const in verify.rs and pin it with a test that builds the record with `skip_note` and `skipped_run`.",
+      "reason": "checks.rs is out of scope (the brief limits CI-reuse changes and does not list it as a deliverable). The test fails if the note wording changes without updating the const.",
+      "rejected": [
+        {
+          "option": "Export a const from checks.rs and use it in `skip_note`.",
+          "why": "It touches a file that is not a deliverable and sits beside the CI-reuse code the brief says to leave alone."
+        }
+      ]
+    },
+    {
+      "choice": "Source the paths in verification_stage from `closing.candidate.changes`, the same expression run/mod.rs:1543 uses for `changed_for_skip`.",
+      "reason": "It is the list the skip decision was made on, so the judgment and the skip see the same paths. No change to run/mod.rs or `Checked`.",
+      "rejected": [
+        {
+          "option": "Add the paths to the `Checked` struct from run/mod.rs.",
+          "why": "It touches more files than the deliverables list."
+        },
+        {
+          "option": "Run `git diff --name-only` in the verifier snapshot.",
+          "why": "It adds a git call and a failure mode where the data is already in memory."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/verify.rs",
+      "action": "modify",
+      "purpose": "Add `changed_paths` to `VerdictInputs`. Add the docs-only helper, the `SKIP_NOTE_PREFIX` const and the new counting branch in `judge`. Update the doc comments. Add `changed_paths: &[]` to the 8 test constructors. Add the helper and the new tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/verification.rs",
+      "action": "modify",
+      "purpose": "Build `changed_paths` from `closing.candidate.changes` and pass it in the `judge` call at line 389.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add `changed_paths: &[]` to the test's `VerdictInputs` literal at line 264.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an entry under [Unreleased]: a check skipped by the docs-only path rule counts as seen running on a docs-only change.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "verify.rs: add `pub changed_paths: &'a [String]` to `VerdictInputs`, with a doc comment. Update the `commands_run` doc comment and the `judge` comments to state the new rule and the docs-only definition: every changed path matches `docs/` or `*.md` via `crate::checks::path_matches`, and an empty list is not docs-only.",
+    "verify.rs: add a private const `SKIP_NOTE_PREFIX = \"not run: every changed path matches skip_when_only\"`, and a private fn `docs_only(paths: &[String]) -> bool`. In `judge`, inside the `candidate_tree == checks_tree` block, extend the filter so a record also counts when `docs_only` is true and the record has `passed`, no exit code, `!reused`, empty `revert_for`, and a note that starts with the prefix. Leave the existing branch and the revert-run handling as they are.",
+    "verify.rs tests: add `changed_paths: &[]` to every existing `VerdictInputs` literal. Add `judge_recorded_for(recorded, candidate_tree, checks_tree, cited, changed_paths)` and make `judge_recorded` delegate to it with `&[]`. Add a fixture that builds the skipped clippy record from a `CheckSpec` with `skip_when_only` of `docs/` and `*.md`, using `skip_note` and `skipped_run`.",
+    "verify.rs tests: add `a_docs_only_change_counts_a_docs_skipped_check_and_a_ci_reused_check_as_seen` (clippy skipped, test from `reused_from_ci(true)`, both cited, met true, `commands_verified` true, no D43 finding). Add `a_code_change_does_not_count_a_skipped_check_as_seen`: a `.rs` path, a mixed list, and an empty list each leave clippy unseen. In the same test or a sibling, check on a docs-only change that the 'CI was not green' skip and a failed check still do not count.",
+    "run/verification.rs: before the `judge` call, build `changed_paths: Vec<String>` from `closing.candidate.as_ref().map(|c| c.changes.iter().map(|e| e.path.clone()).collect()).unwrap_or_default()`, and pass `changed_paths: &changed_paths`. run/send_back.rs: add `changed_paths: &[]` to the test literal.",
+    "CHANGELOG.md: add one line under [Unreleased] that says what changed and the root cause. A docs-only change's skipped check had no exit code, so a 'still passes' criterion could never cite it.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`."
+  ],
+  "risks": [
+    {
+      "risk": "The skip note wording changes in checks.rs and the verdict silently stops counting skips.",
+      "mitigation": "The new test builds its skipped record with the real `skip_note` and `skipped_run`, so a wording change fails it."
+    },
+    {
+      "risk": "A mixed change (docs plus one code file) wrongly counts a skip.",
+      "mitigation": "Every path must match, and a test covers mixed paths and an empty list."
+    },
+    {
+      "risk": "The hard-coded `docs/` and `*.md` patterns drift from athena.toml's `skip_when_only`.",
+      "mitigation": "The doc comment names the pair. A drift only narrows what counts, because a skip by a broader pattern must also pass this gate."
+    },
+    {
+      "risk": "Adding a field breaks other struct literals in the workspace.",
+      "mitigation": "A search found `VerdictInputs {` only in verify.rs, verification.rs and send_back.rs; `cargo clippy --all-targets` compiles every one."
+    },
+    {
+      "risk": "Test fixture names clash with existing helpers.",
+      "mitigation": "`judge_recorded` stays and delegates to the new `judge_recorded_for`, so no existing call changes."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`VerdictInputs` gains `changed_paths`; `judge` seen-running rule (D43/D115)",
+      "dependent": "crates/athena-core/src/run/verification.rs:389 (`judge` call in `verification_stage`, reached for every job including resumed-from-checks jobs and nested runs)",
+      "kind": "code",
+      "test": null,
+      "reason": "It is the only production caller. It passes `closing.candidate.changes` paths, the list the skip decision used at run/mod.rs:1543, or an empty list when there is no candidate, which counts nothing new. A resumed job reuses recorded checks, and those still need the docs-only paths and the note, so nothing widens. Nested runs have `checks_tree` None, so the whole recorded-checks block is skipped. The run tests that reach this stage keep passing (`cargo test -p athena-core`)."
+    },
+    {
+      "name": "`VerdictInputs` struct literal",
+      "dependent": "crates/athena-core/src/run/send_back.rs:264 (test constructor of `VerdictInputs`)",
+      "kind": "code",
+      "test": "crates/athena-core/src/run/send_back.rs: the test containing `judgment.reasons.iter().any(|r| r == \"check test failed\")`",
+      "reason": "It is a test-only literal. It gains `changed_paths: &[]`. Its failed-check scenario is unchanged and `judgment.final_verdict` stays Fail."
+    },
+    {
+      "name": "`VerdictInputs` struct literals in tests",
+      "dependent": "crates/athena-core/src/verify.rs test constructors at ~1640, 1669, 1692, 1710, 1732, 2163, 2416, 2590",
+      "kind": "code",
+      "test": "cargo test -p athena-core verify (existing tests such as a_skipped_check_that_was_not_reused_does_not_count_as_run)",
+      "reason": "Each gains `changed_paths: &[]`, so every existing test keeps its old inputs and its old verdict."
+    },
+    {
+      "name": "The skip note wording the verdict now reads",
+      "dependent": "crates/athena-core/src/checks.rs `skip_note` (the note text 'not run: every changed path matches skip_when_only (...)') and `skipped_run`; routing.rs:93 which writes the skipped records",
+      "kind": "code",
+      "test": "verify::tests::a_docs_only_change_counts_a_docs_skipped_check_and_a_ci_reused_check_as_seen",
+      "reason": "Neither file changes. The new verify.rs test builds its record with `skip_note` and `skipped_run`, so a change to the wording fails that test and not silently the verdict."
+    },
+    {
+      "name": "D43/D115 seen-running rule",
+      "dependent": "docs/decisions.md D43 and D115 (the seen-running rule and its amendments)",
+      "kind": "rule",
+      "test": null,
+      "reason": "It is a documented rule that this change widens narrowly (docs-only changes, skipped by the path rule). The rule's code and finding text are otherwise unchanged. The decisions file is not among the deliverables, so recording the amendment is a question for the user."
+    },
+    {
+      "name": "Criteria that cite cargo fmt, clippy or test",
+      "dependent": "crates/athena-core/src/run/send_back.rs `is_athena_check_criterion`/`left_to_athena` (criteria left to Athena's recorded checks)",
+      "kind": "code",
+      "test": null,
+      "reason": "These functions decide which criteria go to the verifier; they do not read `judge`'s `ran`. They are unchanged."
+    },
+    {
+      "name": "The `skip_when_only` patterns and routing",
+      "dependent": "athena.toml and defaults.toml `skip_when_only` patterns, and .github/workflows",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Nothing changes there. The verdict defines docs-only with its own `docs/` and `*.md` patterns, which match routing's `prose()` patterns today. If a config's patterns were broader, the extra skips would still not count, because the paths must also match `docs/` or `*.md`."
+    },
+    {
+      "name": "Reading and refusal rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and the reading/plan refusal rules",
+      "kind": "rule",
+      "test": null,
+      "reason": "No parser, stem list, stop list or reading check is added or changed. `judge` is not part of the refusal corpus, so no corpus case maps and `cargo test -p athena-core --test refusal_corpus` is unaffected."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "New unit test. It builds clippy with the real `checks::skip_note` on a `CheckSpec` with `skip_when_only` of `docs/` and `*.md`, over changed paths `docs/design/many-agents.md` and `README.md`, then `checks::skipped_run`. It sets the command to `cargo clippy`. It builds test as `reused_from_ci(true)`. It judges them with a criterion citing both commands.",
+      "command": "cargo test -p athena-core verify::tests::a_docs_only_change_counts_a_docs_skipped_check_and_a_ci_reused_check_as_seen",
+      "observes": "`criteria[1].met` and `commands_verified` are true, and `d43_finding(&j)` is none.",
+      "fails_without": "Without the new counting path, clippy is not in `ran` (skipped records have no exit code and are not reused), so the criterion is unmet with 'cited but not seen running: `cargo clippy`'.",
+      "seam": "Production entry point `verify::judge`. Fixtures are the existing helpers `check`, `reused_from_ci`, `output`, `criteria` and `d43_finding`, plus a new helper `judge_recorded_for(recorded, candidate_tree, checks_tree, cited, changed_paths)`. The step that adds it also makes `judge_recorded` call it with `&[]`. The new `changed_paths` field is injected through `VerdictInputs`. The skipped record comes from the production `skip_note` and `skipped_run`, not a hand-written note. The `judge` seam exists today; the `changed_paths` field and the helper are added in plan steps 1 and 3."
+    },
+    {
+      "criterion": 2,
+      "method": "New unit test with the same skipped clippy record (note from `skip_note`) and the same trusted trees, judged with changed paths `crates/athena-core/src/verify.rs` and `docs/a.md`. A second case uses an empty path list.",
+      "command": "cargo test -p athena-core verify::tests::a_code_change_does_not_count_a_skipped_check_as_seen",
+      "observes": "`criteria[1].met` and `commands_verified` are false, and `d43_finding(&j)` is present with 'cited but not seen running' naming `cargo clippy`.",
+      "fails_without": "If the path gate were dropped (note alone), this test would turn the criterion met and fail. If the rule were absent, test 1 fails instead.",
+      "seam": "Same as criterion 1: `verify::judge` with `changed_paths` injected and the `judge_recorded_for` helper added in step 3. The note comes from the production `skip_note` and `skipped_run`."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the whole suite. It includes the existing `a_skipped_check_that_was_not_reused_does_not_count_as_run` (note 'not run: CI was not green', empty changed paths), `a_failed_check_reused_from_ci_does_not_count_as_run`, the other-tree tests, and the recorded-check tests. The new test also covers a docs-only change with a skip note from a non-docs reason and a failed check (steps 3 and 4).",
+      "command": "cargo test --locked && cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "All tests pass and clippy is clean. In the new negative cases on a docs-only change, a non-docs skip reason and a failed check leave the criterion unmet.",
+      "fails_without": "A rule that counted any skip, or that ignored `passed`, fails the 'CI was not green' case and the failed-check case.",
+      "seam": "`verify::judge` through the existing helpers. Each existing constructor gains `changed_paths: &[]` in step 3, which keeps their meaning."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the diff of the doc comments on `VerdictInputs::changed_paths` and `commands_run`, and on `judge`.",
+      "command": "git diff -- crates/athena-core/src/verify.rs",
+      "observes": "The comments state that a check skipped by the docs-only path rule counts as seen on a docs-only change, and name the definition: every changed path matches `docs/` or `*.md` via `checks::path_matches`, and an empty list is not docs-only.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run the crate's tests, then read the diff. The only change in `judge`'s `ran` building is one extra filter branch, guarded by `docs_only && note.starts_with(SKIP_NOTE_PREFIX)`. A docs-only test case varies the paths to code, an empty list and mixed paths, and a skipped record counts in none of them.",
+      "command": "cargo test -p athena-core && git diff",
+      "observes": "The tests pass and the diff has one new counting path gated on docs-only changed paths. `ran` is unchanged for every other input.",
+      "fails_without": "A guard that dropped the path check makes the code-change test in criterion 2 fail.",
+      "seam": "`verify::judge` with the `changed_paths` field set directly in the test."
+    }
+  ],
+  "open_questions": [
+    "User: Should the amendment to D43/D115 also be recorded as a new entry in docs/decisions.md? That file is not among the deliverables, so the plan leaves it out."
+  ],
+  "producer_section_sha256": "a06efea66b935c2c924b729809b8247eb064031163e01c472486969df3f1ab69"
+}

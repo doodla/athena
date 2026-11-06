@@ -157,8 +157,14 @@ pub struct VerdictInputs<'a> {
     pub output: Option<&'a VerdictOutput>,
     /// The commands the core saw the verifier run. A cited command is seen if it is here, or if Athena ran
     /// and recorded it in `checks` on the same candidate tree and it passed; failed or other-tree records
-    /// do not count (D43, D115).
+    /// do not count (D43, D115). On a docs-only change (see `changed_paths`) a check Athena skipped by the
+    /// docs-only path rule (note `not run: every changed path matches skip_when_only ...`) also counts as
+    /// seen, as does a check reused from a green CI run.
     pub commands_run: &'a [String],
+    /// The paths the candidate changes. The change is docs-only when the list is not empty and every path
+    /// matches `docs/` or `*.md` (by `checks::path_matches`, the matcher the skip rule uses); only then does
+    /// a check skipped by the docs-only path rule count as seen. An empty list is not docs-only.
+    pub changed_paths: &'a [String],
     /// The tree being judged. With `checks_tree`, decides whether `checks` count as seen commands.
     pub candidate_tree: Option<&'a str>,
     /// The tree Athena ran `checks` on, or `None` when it ran none. A recorded check counts as a seen
@@ -358,7 +364,47 @@ fn simple_commands(line: &str) -> Vec<String> {
     out
 }
 
+/// The start of the note Athena records when it skips a check because every changed path matches the check's
+/// `skip_when_only` patterns (`checks::skip_note`). A test builds the note with `skip_note`, so a change in
+/// its wording fails that test.
+const SKIP_NOTE_PREFIX: &str = "not run: every changed path matches skip_when_only";
+
+/// The patterns that make a change docs-only: everything under `docs/`, and any `*.md` file. They are the
+/// patterns routing's prose kinds skip fmt and clippy on.
+const DOCS_ONLY_PATTERNS: [&str; 2] = ["docs/", "*.md"];
+
+/// True when the change touches only docs: the list is not empty and every path matches `docs/` or `*.md`
+/// by `checks::path_matches`, the matcher the skip rule uses. An empty list (an unknown change) is not
+/// docs-only, so nothing extra counts as seen.
+fn docs_only(paths: &[String]) -> bool {
+    !paths.is_empty()
+        && paths.iter().all(|p| {
+            DOCS_ONLY_PATTERNS
+                .iter()
+                .any(|pat| crate::checks::path_matches(pat, p))
+        })
+}
+
+/// True for a record of a check Athena skipped by the docs-only path rule: it passed, carries no exit code,
+/// was not reused from CI, is not a revert run, and its note is the `skip_when_only` note. Any other skip
+/// (CI not green, a nested-run placeholder) is not.
+fn skipped_for_docs_only(check: &CheckRun) -> bool {
+    check.passed
+        && check.exit_code.is_none()
+        && !check.reused
+        && check.revert_for.is_empty()
+        && check
+            .note
+            .as_deref()
+            .is_some_and(|n| n.starts_with(SKIP_NOTE_PREFIX))
+}
+
 /// Computes the final verdict.
+///
+/// A cited command is seen running when the core saw the verifier run it, or Athena recorded it in `checks`
+/// on the judged tree and it passed with exit code 0 or was reused from a green CI run. On a docs-only
+/// change (every changed path matches `docs/` or `*.md`, see [`VerdictInputs::changed_paths`]) a check
+/// Athena skipped by the docs-only path rule also counts as seen: it had nothing to run on that change.
 pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
     let mut findings = Vec::new();
     let mut reasons = Vec::new();
@@ -370,17 +416,21 @@ pub fn judge(inputs: &VerdictInputs<'_>) -> Judgment {
     // Athena's own passing record for this very tree counts as a command run (D115). So does a passing
     // record reused from a green CI run for the candidate commit: it has no exit code but is marked
     // `reused`. Skipped checks and nested-run placeholders carry no exit code and are not reused, so they
-    // never count.
+    // do not count, with one exception: on a docs-only change (see `docs_only`) a check Athena skipped
+    // because of the docs-only path rule (`skip_when_only`) counts as seen. The paths are checked here as
+    // well as the note, so a skipped record on a change that touches code never counts.
     //
     // A recorded revert run (a planned "fails without the fix" demonstration) is not counted here: it ran on
     // a copy with the fix reverted, and it counts only for the criteria it demonstrates (see `revert_runs`).
     let mut revert_runs: Vec<&CheckRun> = Vec::new();
     if inputs.candidate_tree.is_some() && inputs.candidate_tree == inputs.checks_tree {
-        for check in inputs
-            .checks
-            .iter()
-            .filter(|c| c.passed && (c.exit_code == Some(0) || (c.reused && c.exit_code.is_none())))
-        {
+        let docs_change = docs_only(inputs.changed_paths);
+        for check in inputs.checks.iter().filter(|c| {
+            c.passed
+                && (c.exit_code == Some(0)
+                    || (c.reused && c.exit_code.is_none())
+                    || (docs_change && skipped_for_docs_only(c)))
+        }) {
             if !check.revert_for.is_empty() {
                 continue;
             }
@@ -1642,6 +1692,7 @@ mod tests {
             checks,
             output: Some(out),
             commands_run: ran,
+            changed_paths: &[],
             candidate_tree: None,
             checks_tree: None,
             system_fault: None,
@@ -1671,6 +1722,7 @@ mod tests {
             checks,
             output: Some(&output(vec!["cargo test"], vec![])),
             commands_run: &ran,
+            changed_paths: &[],
             candidate_tree: None,
             checks_tree: None,
             system_fault: None,
@@ -1689,11 +1741,23 @@ mod tests {
         checks_tree: Option<&str>,
         cited: Vec<&str>,
     ) -> Judgment {
+        judge_recorded_for(recorded, candidate_tree, checks_tree, cited, &[])
+    }
+
+    /// As `judge_recorded`, for a change that touches `changed_paths`.
+    fn judge_recorded_for(
+        recorded: &[CheckRun],
+        candidate_tree: Option<&str>,
+        checks_tree: Option<&str>,
+        cited: Vec<&str>,
+        changed_paths: &[String],
+    ) -> Judgment {
         judge(&VerdictInputs {
             criteria: &criteria(),
             checks: recorded,
             output: Some(&output(cited, vec![])),
             commands_run: &[],
+            changed_paths,
             candidate_tree,
             checks_tree,
             system_fault: None,
@@ -1712,6 +1776,7 @@ mod tests {
             checks: &[check(true)],
             output: Some(&output(vec!["cargo test"], vec![])),
             commands_run: &ran,
+            changed_paths: &[],
             candidate_tree: None,
             checks_tree: None,
             system_fault: None,
@@ -1734,6 +1799,7 @@ mod tests {
             checks,
             output: out,
             commands_run: &ran,
+            changed_paths: &[],
             candidate_tree: None,
             checks_tree: None,
             system_fault: None,
@@ -2001,6 +2067,92 @@ mod tests {
         assert!(d43_finding(&j).is_some());
     }
 
+    fn paths(list: &[&str]) -> Vec<String> {
+        list.iter().map(|p| p.to_string()).collect()
+    }
+
+    /// The record Athena writes for clippy on `changed`: built by the real `skip_note` and `skipped_run`
+    /// with the docs-only patterns, so a change in the note wording breaks the tests that use it.
+    fn clippy_skipped_for(changed: &[String]) -> CheckRun {
+        let spec = crate::capability::CheckSpec {
+            name: "clippy".into(),
+            run: ["cargo", "clippy", "--all-targets"]
+                .map(String::from)
+                .to_vec(),
+            kind: athena_data::config::CheckKind::Command,
+            skip_when_only: Some(vec!["docs/".into(), "*.md".into()]),
+        };
+        let note = crate::checks::skip_note(&spec, changed).expect("the change is docs-only");
+        crate::checks::skipped_run(&spec, note)
+    }
+
+    #[test]
+    fn a_docs_only_change_counts_a_docs_skipped_check_and_a_ci_reused_check_as_seen() {
+        let changed = paths(&["docs/design/many-agents.md", "README.md"]);
+        let recorded = [clippy_skipped_for(&changed), reused_from_ci(true)];
+        let cited = vec!["cargo clippy --all-targets", "cargo test"];
+        let j = judge_recorded_for(&recorded, Some("abc"), Some("abc"), cited, &changed);
+        assert!(j.criteria[1].met, "{:?}", j.findings);
+        assert!(j.criteria[1].commands_verified);
+        assert!(d43_finding(&j).is_none(), "{:?}", j.findings);
+        assert_eq!(j.final_verdict, Verdict::Pass, "{:?}", j.reasons);
+    }
+
+    #[test]
+    fn a_code_change_does_not_count_a_skipped_check_as_seen() {
+        let skipped = clippy_skipped_for(&paths(&["docs/a.md"]));
+        let cited = "cargo clippy --all-targets";
+        // A code path, a mixed list and an unknown (empty) list are none of them docs-only.
+        for changed in [
+            paths(&["crates/athena-core/src/verify.rs"]),
+            paths(&["crates/athena-core/src/verify.rs", "docs/a.md"]),
+            paths(&["docs/a.md", "Cargo.toml"]),
+            paths(&[]),
+        ] {
+            let j = judge_recorded_for(
+                std::slice::from_ref(&skipped),
+                Some("abc"),
+                Some("abc"),
+                vec![cited],
+                &changed,
+            );
+            assert_unseen(&j, cited);
+        }
+    }
+
+    #[test]
+    fn on_a_docs_only_change_only_a_docs_path_skip_that_passed_on_the_same_tree_counts() {
+        let changed = paths(&["docs/a.md"]);
+        let docs_skip = clippy_skipped_for(&changed);
+        let cited = "cargo clippy --all-targets";
+        let judged = |record: CheckRun, checks_tree: Option<&str>| {
+            judge_recorded_for(&[record], Some("abc"), checks_tree, vec![cited], &changed)
+        };
+        // The baseline: the docs-only skip counts.
+        assert!(judged(docs_skip.clone(), Some("abc")).criteria[1].commands_verified);
+        // Another skip reason (CI not green) does not.
+        let other_reason = CheckRun {
+            note: Some("not run: CI was not green for abc".into()),
+            ..docs_skip.clone()
+        };
+        assert_unseen(&judged(other_reason, Some("abc")), cited);
+        // A record with no note does not.
+        let no_note = CheckRun {
+            note: None,
+            ..docs_skip.clone()
+        };
+        assert_unseen(&judged(no_note, Some("abc")), cited);
+        // A failed record does not.
+        let failed = CheckRun {
+            passed: false,
+            ..docs_skip.clone()
+        };
+        assert_unseen(&judged(failed, Some("abc")), cited);
+        // A skip recorded on another tree does not.
+        assert_unseen(&judged(docs_skip.clone(), Some("def")), cited);
+        assert_unseen(&judged(docs_skip, None), cited);
+    }
+
     #[test]
     fn a_command_neither_run_nor_recorded_is_unseen_and_a_recorded_one_needs_the_same_text() {
         let j = judge_recorded(&[], Some("abc"), Some("abc"), vec!["cargo test"]);
@@ -2165,6 +2317,7 @@ mod tests {
             checks: &recorded,
             output: Some(&out),
             commands_run: &[],
+            changed_paths: &[],
             candidate_tree: Some("abc"),
             checks_tree: Some("abc"),
             system_fault: None,
@@ -2418,6 +2571,7 @@ mod tests {
             checks: &[check(true)],
             output: Some(&output(vec!["cargo test"], vec![])),
             commands_run: &ran,
+            changed_paths: &[],
             candidate_tree: None,
             checks_tree: None,
             system_fault: None,
@@ -2592,6 +2746,7 @@ mod tests {
             checks: &[check(true)],
             output: Some(&output(vec!["cargo test"], vec![])),
             commands_run: &ran,
+            changed_paths: &[],
             candidate_tree: None,
             checks_tree: None,
             system_fault: fault.map(String::from),
