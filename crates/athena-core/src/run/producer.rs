@@ -153,6 +153,12 @@ impl Athena {
     /// each parsed report is followed by [`Athena::loop_replay`], and a measured share over the limit joins the
     /// unmet criteria and unchanged files in the one send-back, with the list and the share in the brief. The
     /// hold at verification stays as the backstop.
+    ///
+    /// The decision gate ([`Athena::unreconciled_in_snapshot`]) runs on the same work tree after each report.
+    /// A change that touches code a decision governs without reconciling it earns the same one send-back,
+    /// with the gate's message in the brief; the send-back is shared with the unmet criteria, so a producer
+    /// already sent back for those gets none for the gate. A change still unreconciled at the limit leaves the
+    /// loop, and the gate at the candidate (`check_and_verify`) closes the job with the gate's message.
     pub(super) fn producer_loop(
         &self,
         ctx: &RunContext<'_>,
@@ -259,17 +265,21 @@ impl Athena {
             let unmet = unmet_criteria(&raw, accepted);
             // Planned files and expected deliverables the work tree does not change, with no reason in the
             // report. A run with no change at all fails below as an idle producer, so it is not listed here.
+            let changes = snapshot.change_list()?;
             let unchanged = {
-                let changed: Vec<String> = snapshot
-                    .change_list()?
-                    .into_iter()
-                    .map(|c| c.path)
-                    .collect();
+                let changed: Vec<String> = changes.iter().map(|c| c.path.clone()).collect();
                 if changed.is_empty() {
                     Vec::new()
                 } else {
                     unchanged_planned_files(&raw, &planned, &changed)
                 }
+            };
+            // The decision gate's finding on the work tree as it stands: the same message the gate at the
+            // candidate would close the job with. A nested run is judged by the outer job.
+            let gate = if self.nested.is_none() && !changes.is_empty() {
+                self.unreconciled_in_snapshot(&ctx.prediction, &snapshot, &changes)
+            } else {
+                None
             };
             left_criteria = left_to_athena(&raw, accepted);
             let report = self.redact_report(raw, ctx.redactor)?;
@@ -277,7 +287,7 @@ impl Athena {
             // over the limit is a problem like an unmet criterion; a replay that did not run is not.
             loop_replay = self.loop_replay(ctx, &snapshot)?;
             let held = loop_replay.as_ref().filter(|l| l.run.held);
-            if unmet.is_empty() && unchanged.is_empty() && held.is_none() {
+            if unmet.is_empty() && unchanged.is_empty() && held.is_none() && gate.is_none() {
                 break Some(report);
             }
             let mut problems = Vec::new();
@@ -300,6 +310,12 @@ impl Athena {
             if let Some(replay) = held {
                 problems.push(replay_problem(replay));
             }
+            // What the verifier is told the report still lacked at the limit; the gate's finding is not part
+            // of it, because the job ends at the gate and no verifier runs.
+            let report_problems = problems.clone();
+            if gate.is_some() {
+                problems.push("decisions not reconciled".to_string());
+            }
             // Keep the redacted report that failed the check: the attempt's invocation record carries it
             // in `detail`, so each attempt's report stays with the job's records.
             let kept = {
@@ -320,25 +336,32 @@ impl Athena {
             if send_backs >= PRODUCER_SEND_BACKS {
                 // The work may be finished even though the report is not: the verifier judges it. A run
                 // that changed nothing still fails, below, after the loop.
-                ctx.ui.line(&format!(
-                    "producer   report still incomplete after the send-back: {}; the verifier will judge it",
-                    problems.join("; ")
-                ));
-                report_gaps = problems;
-                report_kept_in = kept;
+                if !report_problems.is_empty() {
+                    ctx.ui.line(&format!(
+                        "producer   report still incomplete after the send-back: {}; the verifier will judge it",
+                        report_problems.join("; ")
+                    ));
+                    report_gaps = report_problems;
+                    report_kept_in = kept;
+                }
+                if gate.is_some() {
+                    // The gate at the candidate closes the job with the gate's message.
+                    ctx.ui.line(
+                        "producer   decisions still not reconciled after the send-back; the job ends at the decision gate",
+                    );
+                }
                 break Some(report);
             }
             send_backs += 1;
             ctx.ui
                 .line(&format!("producer   sent back: {}", problems.join("; ")));
-            attempt_brief = match held {
-                Some(replay) => send_back_text_with_replay(
-                    brief,
-                    &unmet,
-                    &unchanged,
-                    Some((&replay.view, replay.limit)),
-                ),
-                None => send_back_text(brief, &unmet, &unchanged),
+            let replay = held.map(|replay| (&replay.view, replay.limit));
+            attempt_brief = match (&gate, replay) {
+                (Some(message), replay) => {
+                    send_back_text_full(brief, &unmet, &unchanged, replay, Some(message))
+                }
+                (None, Some(_)) => send_back_text_with_replay(brief, &unmet, &unchanged, replay),
+                (None, None) => send_back_text(brief, &unmet, &unchanged),
             };
         };
         Ok(Flow::Go(Reported {

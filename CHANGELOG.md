@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The producer's prompt now has a `## Decisions that govern files you will change` section, added after the
+  plan, that lists each decision of `docs/decision-links.toml` governing a file the plan or the reading's
+  deliverables expect to change: the decision id, the governed paths and the rule for reconciling it (a log entry
+  in `docs/decisions.md` and a `[[link]]` whose `older` is the decision and whose `newer` is the entry). The
+  producer loop also runs the decision gate on the work tree after each report: a change that touches governed
+  code without reconciling it is sent back once, with the gate's message, sharing the one send-back that unmet
+  criteria use. A change still unreconciled afterwards leaves the loop and the gate at the candidate closes the
+  job with the same `decisions not reconciled:` message as before. A base list that cannot be read sends no one
+  back and prints no new line.
 - The drain report now records how many items each plan group held when the run started (`plan_group_sizes`)
   and how many queued items had no plan entry (`unplanned`, never counted as a group of one), for the
   one-at-a-time and the parallel path alike. `athena drain`'s summary prints them as a `group sizes` line.

@@ -1,0 +1,377 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261106-045349-f6x6",
+  "round": 1,
+  "at": "2026-11-06T07:02:19.635698829Z",
+  "invocation_seq": 2,
+  "approach": "Add an optional `mirrored_sources` section to the job plan. One entry has `content` (what the job writes), `source` (the governing source), `places` (every place in the source the content depends on) and `comparison` (the number of the criterion that compares the written content to those places). A new admission rule, `mirrored_sources_findings` in `plan_findings`, raises a major finding for an entry with a blank content or source, an empty or blank places list, or a comparison that is 0, out of range or has no demonstration. A major finding sends the plan back to the planner with no critic call, the same path as the `dependents` rule. The planner prompt requires the section and the critic prompt requires the critic to check it. The critic prompt also covers what a shape check cannot: a plan that writes mirrored content but gives `[]`, a places list that omits a place the critic's own search finds, and a comparing criterion that checks only structure. Those parts are prompt-only and marked so. The fixture is a plan whose entry names a source but lists no places. It is refused in the `plan_side` corpus, in unit tests in admission.rs, and end to end through the scripted planner in job_plan.rs. The same plan with the places listed is accepted. The section is stored on `JobPlan` with `serde(default)` and skipped when empty, so old records and plans with no mirrored content serialise as before. Prompt wording stays inside the budgets, and the `docs/system-facts.md` budget lines are updated to the computed values.",
+  "decisions": [
+    {
+      "choice": "Make the check a structured plan section with an admission shape rule, plus a critic prompt rule for what a shape check cannot see.",
+      "reason": "The critic is a model, so a rejection of a plan with no list is not deterministic. A tested admission finding is. The defaults say a rule that matters is enforced by mechanism or marked prose-only, and the existing `dependents` section is the model: admission checks shape, the critic checks completeness against its own search.",
+      "rejected": [
+        {
+          "option": "A critic-prompt rule only",
+          "why": "A fixture cannot make a model critic reject; the rejection could not be tested and the user asked for a rejected fixture."
+        },
+        {
+          "option": "Fold the list into `dependents` through a new DependentKind variant",
+          "why": "Smaller, but one entry per place cannot show a source with no places, and the entry has no field for the comparing criterion. The fixture would have nothing to reject."
+        },
+        {
+          "option": "Detect mirroring by keywords in the plan text or the reading's criteria (mirror, cache key, seed, definition)",
+          "why": "The keywords hit unrelated plans, including this one, and the refusal rate would rise on a guess. Whether a plan mirrors a source is the planner's declaration, backed by the critic."
+        }
+      ]
+    },
+    {
+      "choice": "The section is `Vec<PlanMirror>` with an empty list meaning the plan mirrors nothing; a missing key reads as empty.",
+      "reason": "A plan that mirrors nothing needs no entry. It also leaves the existing plan JSON fixtures (fake.rs:379, lifecycle.rs:2669, introspection.rs:737, run/tests.rs:794, job_plan.rs:431) valid with no edits. `JobPlan.mirrored_sources` is skipped when empty, so old records re-serialise byte for byte.",
+      "rejected": [
+        {
+          "option": "Make the section required and refuse an empty list like `dependents`",
+          "why": "Most plans mirror nothing and would be refused or padded. It would also force edits to six JSON fixtures in crates that are not deliverables."
+        },
+        {
+          "option": "Use `Option<Vec<_>>` so a missing key can be refused",
+          "why": "It separates 'forgot' from '[]' but then needs every JSON fixture to carry the key. The critic prompt covers 'forgot' instead."
+        }
+      ]
+    },
+    {
+      "choice": "The comparing criterion is checked only for shape: number in range, with one demonstration. Whether it compares content rather than structure stays with the critic.",
+      "reason": "A deterministic check of the demonstration text would be a keyword guess. Athena cannot read the repository, and the existing rules also leave semantic checks to the critic.",
+      "rejected": [
+        {
+          "option": "Require the demonstration's `observes` to contain every place string",
+          "why": "A place is often a long description, so the check would refuse good plans and pass a stuffed one."
+        }
+      ]
+    },
+    {
+      "choice": "Show the section in `plan_body` in briefs.rs, only when non-empty, so the critic, a revision brief and the producer section all see the list.",
+      "reason": "The critic cannot judge a list it is not shown, and the producer needs the places to write the content from. When it is empty the rendered bytes are unchanged, so existing producer-section hashes still match.",
+      "rejected": [
+        {
+          "option": "Leave it out of the briefs",
+          "why": "The critic would see only the approach text."
+        }
+      ]
+    },
+    {
+      "choice": "Do not touch crates/athena-core/src/plan.rs.",
+      "reason": "It holds the queue planner for `athena plan`, not the job plan; the grep for JobPlan, PlanOutput and job_plan shows no use there. The job-plan code is in admission.rs, run/planning.rs and records.rs. Add a note to the PR if the deliverable list is meant to stay.",
+      "rejected": [
+        {
+          "option": "Edit plan.rs to match the deliverables list",
+          "why": "Nothing in it reads or writes the job-plan section."
+        }
+      ]
+    },
+    {
+      "choice": "Add `crates/athena-data/src/records.rs`, `crates/athena-core/src/run/planning.rs`, `crates/athena-context/src/briefs.rs` and `docs/system-facts.md`, and fix `JobPlan` literals in four more test files.",
+      "reason": "A structured section needs the record type, the output-to-record conversion, the brief rendering and the budget lines the prompt edits change. These files are not in the brief's deliverable list, so the plan raises a minor scope finding for each.",
+      "rejected": [
+        {
+          "option": "Stay inside the listed deliverables",
+          "why": "A new section cannot be stored or shown to the critic without records.rs, planning.rs and briefs.rs."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/prompts/planner.md",
+      "action": "modify",
+      "purpose": "Add a `mirrored_sources` bullet of about 600 bytes or fewer. The planner prompt has roughly 1000 bytes of room.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/critic.md",
+      "action": "modify",
+      "purpose": "Add a bullet of about 450 bytes or fewer: Grep the governing source, and raise a major finding for an empty section, a missing source, an omitted place, or a comparison criterion that checks only structure. The critic prompt has roughly 1190 bytes of room.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "Add `mirrored_sources_findings`, called from `plan_findings`. Update the doc comment of `plan_findings`. Add unit tests: incomplete fixtures refused, complete fixture accepted.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `PlanMirror` and `JobPlan.mirrored_sources` (`serde(default, skip_serializing_if = \"Vec::is_empty\")`) plus a round-trip test. Fix the sample literal.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "purpose": "Add `PlanMirrorOutput` and `PlanOutput.mirrored_sources` with `serde(default)`. Update the schema tests (object count 6 to 7, sample plan, required-key test).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "Convert `PlanOutput.mirrored_sources` into the `JobPlan` in the function ending at line 581.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Render `Mirrored sources:` in `plan_body` only when non-empty. Add a test. Fix the `JobPlan` literal at line 3031.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add `mirrored-source-*` cases to the `plan_side` module and a `mirrored_sources` argument to `plan_for`. Add a test that the table holds both accepted and refused plans.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/job_plan.rs",
+      "action": "modify",
+      "purpose": "Add the end-to-end test with a scripted planner. A plan whose mirrored entry has no places goes back to the planner with no critic call, then the corrected plan lands.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased / Added entry citing failure class f62n and the four introspections, with the root cause.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/job-planning.md",
+      "action": "modify",
+      "purpose": "Describe the `mirrored_sources` section in the planner list, the new admission rule and the critic's part in section 3.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/system-facts.md",
+      "action": "modify",
+      "purpose": "Update the `budget planner` and `budget critic` lines to the computed values after the prompt edits.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Add `mirrored_sources: vec![]` to the test `JobPlan` literal at line 614.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add `mirrored_sources: vec![]` to the test `JobPlan` literal at line 2498.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add `mirrored_sources: vec![]` to the test `JobPlan` literal at line 1171.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `mirrored_sources: vec![]` to the test `JobPlan` literal at line 4524.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs: add `pub struct PlanMirror { content: String, source: String, places: Vec<String>, comparison: u32 }` with the same derives and `deny_unknown_fields` as `PlanDependent`. Add `JobPlan.mirrored_sources: Vec<PlanMirror>` with `#[serde(default, skip_serializing_if = \"Vec::is_empty\")]`. Add `mirrored_sources: vec![]` to `sample_plan` and add the round-trip test `plan_mirrored_sources_are_optional_in_old_records_and_round_trip_when_set`, modelled on records.rs:4471, including `check_record_file`.",
+    "Fix the other `JobPlan` literals with `mirrored_sources: vec![]`: store.rs:614, status.rs:2498, run_pin_tests.rs:1171, reading.rs:4524, briefs.rs:3031, admission.rs:682 and 805, and the corpus `plan_for` (refusal_corpus.rs:998). Search with Grep for `dependents: vec![` to catch any other.",
+    "admission.rs: add `fn mirrored_sources_findings(mirrors: &[PlanMirror], criteria: usize, demonstrations: &[Demonstration]) -> Vec<Finding>` and call it in `plan_findings` after `dependents_findings` (line 310). For each entry N, raise a Major Athena finding at `mirrored sources, entry N` for: a blank `content` or `source`; no non-blank place (summary `Mirrored source entry N (<source>) lists no places`); `comparison` of 0 or above `criteria`; or no demonstration for the `comparison` criterion. An empty list gives no finding. Update the `plan_findings` doc comment.",
+    "outputs.rs: add `PlanMirrorOutput` (derives as `PlanDependentOutput`, field docs carrying the rule) and `PlanOutput.mirrored_sources` with `#[serde(default)]`. Add the key to `sample_plan`, change the nested-object count at line 724 from 6 to 7, add `mirrored_sources` to the extra-property test list, and add `the_plan_schema_requires_mirrored_sources_and_a_plan_without_the_key_reads_as_empty`.",
+    "planning.rs: map `out.mirrored_sources` into `JobPlan.mirrored_sources` in the function ending at line 581.",
+    "briefs.rs `plan_body`: after the Dependents block, print `\\nMirrored sources:` and one line per entry (content, source, the places joined, and `Compared by criterion N`), only when non-empty. Add a test next to briefs.rs:3230 that the section shows only when present and that a plan without it renders byte for byte as before.",
+    "admission.rs tests: add `a_mirrored_source_with_no_places_is_a_major_finding_naming_the_missing_list`, covering blank source, blank-only places, comparison 0, comparison out of range and a comparison with no demonstration. Add `a_complete_mirrored_source_adds_no_finding` and `a_plan_with_no_mirrored_sources_adds_no_finding`. The fixture is the existing `plan_findings_for` helper with a `mirrored_sources` argument.",
+    "refusal_corpus.rs `plan_side`: extend `plan_for` and `findings` with a `mirrored_sources` argument. Add a `MirrorCase` table with ids `mirrored-source-no-places`, `mirrored-source-blank-place`, `mirrored-source-blank-source`, `mirrored-source-comparison-zero`, `mirrored-source-comparison-out-of-range` (Refuse, text `lists no places` or `comparison`), `mirrored-source-complete-term-mentions` and `mirrored-source-complete-cache-key-files` (Accept), and `mirrored-source-none-declared` (empty list, Accept). Give each a source from the four introspections or failure class f62n. Add a table-level test that it holds both outcomes.",
+    "job_plan.rs: add `athena_sends_a_plan_that_mirrors_a_source_without_places_back_to_the_planner`, using `good_plan()` with a `mirrored_sources` entry that has `places: []`, then the same entry with places. Script `scenario.plans = [incomplete, complete]` as at line 856. Assert 2 planner calls, 1 critic call, `OutcomeState::Landed`, and that the brief of round 2 contains `lists no places`. Include 3 criteria forms by index: the entry's `comparison` points at criterion 1 of the default reading.",
+    "Prompts: edit planner.md and critic.md as sized in the files list. Run `cargo test --locked budget`; copy the computed planner and critic sizes into the two `budget` lines of docs/system-facts.md.",
+    "docs/design/job-planning.md: add the `mirrored_sources` bullet to the planner list (line ~59-75), the admission rule to the paragraph at line 77-89 and the critic's check at line 109-113. Mark the completeness and structure-only checks as prompt-only.",
+    "CHANGELOG.md: add an Unreleased / Added entry with the plan section, the admission rule, the critic and planner prompt rules, and the root cause (content written from a partial view of its governing source was caught only at the final verdict). Cite failure class f62n and jobs 20261017-182254-my85, 20261025-230247-cm9r, 20261102-102715-564y and 20261106-030930-hb84. Keep `Root cause:` style as the neighbouring entries.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, then `cargo test --locked`, and fix what they report. Run `cargo test -p athena-core --test refusal_corpus` as the corpus demonstration."
+  ],
+  "risks": [
+    {
+      "risk": "A planner that does not realise it mirrors a source gives `[]`, and no mechanical check can tell. That is the silent-omission case of f62n.",
+      "mitigation": "State in the planner and critic prompts, the design doc and the CHANGELOG that admission checks only shape, and that the critic's own search covers completeness and structure-only criteria. Open question 2 records the gap."
+    },
+    {
+      "risk": "The prompt edits push the planner or critic set over 1300 tokens or desynchronise docs/system-facts.md.",
+      "mitigation": "Write the planner bullet at 600 bytes or fewer and the critic bullet at 450 bytes or fewer, then run `cargo test --locked budget`. Fix the two system-facts lines from the computed values the failing test prints; never change the budget."
+    },
+    {
+      "risk": "A new `JobPlan` field breaks old records, the producer-section hash or a struct literal elsewhere.",
+      "mitigation": "The field has `serde(default, skip_serializing_if)` and `plan_body` prints the section only when it is non-empty. Test with the byte-for-byte round trip and the briefs test. Fix every literal listed in the files section."
+    },
+    {
+      "risk": "The new rule refuses good plans.",
+      "mitigation": "Every sample shape check is covered by a named corpus case and a unit test. Existing accept cases must stay finding-free."
+    },
+    {
+      "risk": "The plan edits files outside the listed deliverables, so admission raises a minor scope finding.",
+      "mitigation": "The plan lists each extra file with a purpose. The edits to those files are literal fields and wiring only, and tests run under `cargo test --locked`."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "JobPlan record shape",
+      "dependent": "crates/athena-data/src/records.rs JobPlan (new field `mirrored_sources`, `deny_unknown_fields`, `validate()` at 2563, `check_record_file`)",
+      "kind": "code",
+      "test": "New records.rs test `plan_mirrored_sources_are_optional_in_old_records_and_round_trip_when_set`, modelled on `plan_dependents_are_optional_in_old_records_and_round_trip_when_set` (records.rs:4471).",
+      "reason": null
+    },
+    {
+      "name": "JobPlan record shape",
+      "dependent": "JobPlan struct literals in crates/athena-core/src/store.rs:614, status.rs:2498, run_pin_tests.rs:1171, reading.rs:4524, briefs.rs:3031, admission.rs:682 and 805, refusal_corpus.rs plan_for, and records.rs:4455",
+      "kind": "code",
+      "test": "Each literal gains `mirrored_sources: vec![]`; the crates compile and their existing tests in those files pass under `cargo test --locked`.",
+      "reason": null
+    },
+    {
+      "name": "JobPlan record shape",
+      "dependent": "crates/athena-core/src/store.rs:186, run/mod.rs:126 and run/close.rs:609 (collect, hold and clone `JobPlan` into the records) and status.rs:1633",
+      "kind": "code",
+      "test": null,
+      "reason": "They move or clone whole `JobPlan` values and read no individual plan section, so the added field passes through unchanged."
+    },
+    {
+      "name": "plan_findings behavior (new `mirrored sources` findings)",
+      "dependent": "crates/athena-core/src/run/planning.rs:216 (the only production caller of `plan_findings`) and the conversion at planning.rs:518-580",
+      "kind": "code",
+      "test": "job_plan.rs end-to-end test `athena_sends_a_plan_that_mirrors_a_source_without_places_back_to_the_planner`, plus the existing `athena_sends_a_plan_without_dependents_back_to_the_planner_with_no_critic_call` showing the shared revision path is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "plan_findings behavior (new `mirrored sources` findings)",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `plan_side` accept cases (lines 971-993) and the open-question cases (line ~1198), which expect `got.is_empty()` or exactly one finding",
+      "kind": "rule",
+      "test": "`plan_cases_get_the_expected_outcome` and the open-question table test in the same file still pass because an empty `mirrored_sources` adds no finding. New corpus cases map each input form below.",
+      "reason": null
+    },
+    {
+      "name": "PlanOutput schema (new key `mirrored_sources`)",
+      "dependent": "crates/athena-context/src/outputs.rs `PlanOutput` and `plan_schema` (tests at lines 721, 740 and 775 count objects, forbid extra properties and require every key)",
+      "kind": "code",
+      "test": "The test at outputs.rs:721 is updated from 6 nested objects to 7. New test `the_plan_schema_requires_mirrored_sources_and_a_plan_without_the_key_reads_as_empty`.",
+      "reason": null
+    },
+    {
+      "name": "PlanOutput schema (new key `mirrored_sources`)",
+      "dependent": "Plan JSON fixtures that lack the key: crates/athena-agent/src/fake.rs:379, crates/athena-cli/tests/lifecycle.rs:2669, introspection.rs:737, crates/athena-core/src/run/tests.rs:794, job_plan.rs:431",
+      "kind": "code",
+      "test": null,
+      "reason": "The field has `#[serde(default)]`, so a plan without the key reads as an empty list and gets no finding; these fixtures need no edit."
+    },
+    {
+      "name": "Rendering of the plan in briefs",
+      "dependent": "crates/athena-context/src/briefs.rs `plan_body` (line 1384): revision brief, critic brief and producer section",
+      "kind": "code",
+      "test": "New briefs.rs test next to `the_critic_brief_and_producer_section_show_dependents_only_when_the_plan_has_them` (briefs.rs:3230). It checks the section appears only when non-empty and that a plan without it renders as before, so `producer_section_sha256` is unchanged for such plans.",
+      "reason": null
+    },
+    {
+      "name": "Prompt budgets of planner and critic",
+      "dependent": "docs/system-facts.md budget lines for planner and critic, read by `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs:125) and carried whole into the planner and critic briefs through `SYSTEM_FACTS` (briefs.rs:1508)",
+      "kind": "host_setting",
+      "test": "`system_facts_budgets_match_computed`, `every_role_set_is_within_its_budget` and `planner_and_critic_frames_are_short_and_fit_the_budgets` (athena-context lib.rs:394, which requires each frame under 700 tokens).",
+      "reason": null
+    },
+    {
+      "name": "Plan checks",
+      "dependent": "athena.toml `[job_plan]` and defaults.toml",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No config key is added or read. The rule runs inside `plan_findings` whenever planning runs, so neither file changes."
+    },
+    {
+      "name": "CHANGELOG.md entry",
+      "dependent": "CHANGELOG-reading tests (reading.rs:6666, 8099, 8416; refusal_corpus.rs:859; main.rs:1966) that look for fixed needles in the changelog",
+      "kind": "code",
+      "test": null,
+      "reason": "The entry is added to Unreleased only and removes no text, so the needles they search for are still present."
+    },
+    {
+      "name": "Plan record and stage description",
+      "dependent": "docs/records.md line 46 and docs/design/job-planning.md section 3",
+      "kind": "rule",
+      "test": null,
+      "reason": "records.md lists only the file name and schema id, not the plan's sections, so it needs no edit. job-planning.md is updated in step 9 to describe the section and the new rule."
+    },
+    {
+      "name": "planner.md and critic.md wording",
+      "dependent": "Critic and planner prompt consumers: `PLANNER_FRAME` and `CRITIC_FRAME` (athena-context lib.rs:59 and 65, `include_str!`)",
+      "kind": "code",
+      "test": null,
+      "reason": "They embed the files as plain text, so only the budgets matter; those are covered by the budget entry above."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff of the planner prompt.",
+      "command": "git diff -- crates/athena-context/prompts/planner.md",
+      "observes": "A bullet states that a job writing content that summarises or mirrors a governing source must name the source, list every place in it the content depends on (each term mention, each compiled-in file for a cache key), and have one criterion that compares the written content to that list, not only its structure.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read the diff of the critic prompt.",
+      "command": "git diff -- crates/athena-context/prompts/critic.md",
+      "observes": "A bullet tells the critic to raise a major finding when such a plan has an empty `mirrored_sources`, a missing source, a places list that omits a place the critic finds by its own search, or a comparison criterion that checks only structure.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Run the tests whose names contain `mirrored_source`: admission unit tests, `plan_side` corpus cases and an end-to-end scripted-planner test. Each pairs a plan that names a source but lists no places (also blank source, blank place, comparison 0, comparison out of range) with the same plan with places listed.",
+      "command": "cargo test --locked mirrored_source",
+      "observes": "Each incomplete plan produces exactly one major Athena finding at location `mirrored sources, entry N` whose summary says the places list is missing. The scripted job sends the plan back to the planner with no critic call, then accepts the plan with the list. The complete fixture produces no finding.",
+      "fails_without": "Without `mirrored_sources_findings` the incomplete fixture yields no finding. The unit test in admission.rs, the `mirrored-source-no-places` corpus case and the job_plan.rs test (which expects the planner brief of round 2 to contain the finding text and zero critic calls) all fail. The complete-fixture cases pass either way, so they show the rule does not refuse good plans.",
+      "seam": "Entry points: `admission::plan_findings` (admission.rs:172) for the unit and corpus tests, and `Athena::go` with `Scenario.plans` for the end to end test. Fixtures: the corpus `plan_for` (refusal_corpus.rs:998) and admission.rs `plan_findings_for`, both passing a `JobPlan` as an argument, and the scripted fake planner in job_plan.rs (`scenario.plans`, line 856). All three exist today. Step 1 adds the `mirrored_sources` field and step 3 the rule they drive. The tests are added in steps 6 to 8."
+    },
+    {
+      "criterion": 4,
+      "method": "Read the CHANGELOG diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "An entry under Unreleased / Added that describes the `mirrored_sources` plan section and the critic rule, states the root cause, and cites failure class f62n and the four introspections.",
+      "fails_without": null
+    },
+    {
+      "criterion": 5,
+      "method": "Run the budget tests. They are `every_role_set_is_within_its_budget` and `system_facts_budgets_match_computed` in crates/athena-cli/tests/budgets.rs, and `planner_and_critic_frames_are_short_and_fit_the_budgets` in athena-context.",
+      "command": "cargo test --locked budget",
+      "observes": "The planner and critic sets stay within 1300 tokens, and the `budget planner` and `budget critic` lines in docs/system-facts.md equal the computed values.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the full test suite, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`. The records.rs round-trip test is new, written in step 1.",
+      "command": "cargo test --locked",
+      "observes": "All existing and new tests pass; clippy and fmt are clean. A plan with no mirrored content gets no new finding and an old record re-serialises byte for byte.",
+      "fails_without": "If the new field changed how old plans serialise, the records.rs round-trip test for an empty `mirrored_sources` (byte for byte) and the existing job_plan.rs and corpus `plan_side` cases would fail. If the rule refused complete or unrelated plans, the unchanged accept cases would fail.",
+      "seam": "Entry points: `AnyRecord::parse` and `to_json` in records.rs, which already have the old-record round-trip tests such as `plan_dependents_are_optional_in_old_records_and_round_trip_when_set`, and `plan_findings` through the existing accept cases of the corpus. Both exist. Step 1 adds the new round-trip test."
+    }
+  ],
+  "open_questions": [
+    "User: Is `crates/athena-core/src/plan.rs` meant to change? The plan leaves it alone because it holds the queue planner for `athena plan`, not the job plan, and the other files the new section needs are not on the deliverable list either.",
+    "User: Should a plan that mirrors a source but gives `[]` be caught by a mechanism later, for example a keyword trigger on the reading's criteria? This plan leaves that case to the critic prompt, which is prose-only, because a keyword trigger would also refuse unrelated plans."
+  ],
+  "producer_section_sha256": "81c2d54ceaa3873d5a873a66c7c7060732fcd7e2b7023738c02ca09cf293d702"
+}

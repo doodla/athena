@@ -2253,14 +2253,24 @@ mod produce_and_verify_order_tests {
         repo: &tempfile::TempDir,
         extra: Vec<(String, Option<String>)>,
     ) -> (Finished, Arc<Counts>, Vec<String>) {
-        let state = tempfile::tempdir().unwrap();
         let counts = Arc::new(Counts::default());
+        let script = editing(counts.clone(), Arc::default(), extra);
+        let (done, said) = governed_job_with(repo, script);
+        (done, counts, said)
+    }
+
+    /// [`governed_job`] with the fake agents' `script` given whole.
+    fn governed_job_with(
+        repo: &tempfile::TempDir,
+        script: athena_agent::fake::Script,
+    ) -> (Finished, Vec<String>) {
+        let state = tempfile::tempdir().unwrap();
         let athena = athena_with(
             repo,
             &state,
             PASSES,
             crate::test_support::plenty_of_space,
-            editing(counts.clone(), Arc::default(), extra),
+            script,
         );
         let proposal = athena.ask("describe the demo", &Quiet).unwrap();
         let ui = Lines::default();
@@ -2270,7 +2280,23 @@ mod produce_and_verify_order_tests {
                 .unwrap(),
         );
         let said = ui.0.lock().unwrap().clone();
-        (done, counts, said)
+        (done, said)
+    }
+
+    /// The editing script, except that the producer adds [`reconciling_edits`] only when its prompt carries a
+    /// send-back, as a producer that reads the gate's message would.
+    fn reconciling_on_send_back(
+        counts: Arc<Counts>,
+        prompts: Arc<Mutex<Vec<String>>>,
+    ) -> athena_agent::fake::Script {
+        let inner = editing(counts, prompts, Vec::new());
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            if spec.role == Role::Producer && spec.user_prompt.contains("## Sent back") {
+                turn.edits.extend(reconciling_edits());
+            }
+            turn
+        })
     }
 
     #[test]
@@ -2290,9 +2316,10 @@ mod produce_and_verify_order_tests {
         assert!(done.reason.contains("[[link]]"), "{}", done.reason);
         // It is a failure of the work, which a retry starts again, not an environment stop.
         assert!(!crate::disk::is_environment_reason(&done.reason));
-        // Nothing after the check ran: no verifier, no checks line.
+        // Nothing after the check ran: no verifier, no checks line. The producer ran twice: once, and once
+        // after the send-back that the unreconciled change earned.
         let (_, producer, _, verifier) = counts.all();
-        assert_eq!((producer, verifier), (1, 0), "{said:#?}");
+        assert_eq!((producer, verifier), (2, 0), "{said:#?}");
         assert!(
             said.iter()
                 .any(|l| l.starts_with("failed     decisions not reconciled:")),
@@ -2317,7 +2344,131 @@ mod produce_and_verify_order_tests {
         assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
         assert!(done.reason.contains("D02 (README.md)"), "{}", done.reason);
         assert!(done.reason.contains("D12 (src/lib.rs)"), "{}", done.reason);
-        assert_eq!(counts.all().3, 0);
+        assert_eq!((counts.all().1, counts.all().3), (2, 0));
+    }
+
+    #[test]
+    fn governed_edit_is_sent_back_once_and_the_second_candidate_reaches_the_verifier() {
+        use athena_data::decision_links::GATE_REASON_PREFIX;
+        let repo = governed_repo(GOVERNING);
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (done, said) = governed_job_with(
+            &repo,
+            reconciling_on_send_back(counts.clone(), prompts.clone()),
+        );
+        assert!(
+            !done.reason.starts_with(GATE_REASON_PREFIX),
+            "{}",
+            done.reason
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (2, 1), "{said:#?}");
+        let prompts = prompts.lock().unwrap().clone();
+        assert!(!prompts[0].contains("## Sent back"), "{}", prompts[0]);
+        // The send-back carries the gate's message: its prefix, the decision and path, and the fix.
+        for text in [
+            "## Sent back",
+            GATE_REASON_PREFIX,
+            "D02 (README.md)",
+            "[[link]]",
+        ] {
+            assert!(prompts[1].contains(text), "omits {text}: {}", prompts[1]);
+        }
+        assert!(!prompts[1].contains("D12 ("), "{}", prompts[1]);
+        assert_eq!(
+            said.iter()
+                .filter(|l| l.as_str() == "producer   sent back: decisions not reconciled")
+                .count(),
+            1,
+            "{said:#?}"
+        );
+        assert!(
+            said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+    }
+
+    #[test]
+    fn governed_edit_still_unreconciled_after_the_send_back_ends_with_the_gate_message() {
+        use athena_data::decision_links::GATE_REASON_PREFIX;
+        let repo = governed_repo(GOVERNING);
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (done, said) =
+            governed_job_with(&repo, editing(counts.clone(), prompts.clone(), Vec::new()));
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            done.reason.starts_with(GATE_REASON_PREFIX),
+            "{}",
+            done.reason
+        );
+        assert!(!done.reason.contains("D12"), "{}", done.reason);
+        // Today's message, word for word.
+        assert_eq!(
+            done.reason,
+            format!(
+                "{GATE_REASON_PREFIX} the change touches code that docs/decisions.md records decisions for: \
+                 D02 (README.md). Add an entry to docs/decisions.md that amends or supersedes each decision \
+                 (or says it was checked and stands), and a matching [[link]] in docs/decision-links.toml \
+                 whose older is the decision and whose newer is the new entry."
+            )
+        );
+        // One send-back and no third producer run; no verifier.
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (2, 0), "{said:#?}");
+        let prompts = prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[1].contains("## Sent back"), "{}", prompts[1]);
+        assert!(prompts[1].contains(GATE_REASON_PREFIX), "{}", prompts[1]);
+        assert!(
+            said.iter().any(|l| l
+                == "producer   decisions still not reconciled after the send-back; the job ends at the decision gate"),
+            "{said:#?}"
+        );
+        assert!(
+            !said
+                .iter()
+                .any(|l| l.contains("the verifier will judge it")),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("failed     decisions not reconciled:")),
+            "{said:#?}"
+        );
+    }
+
+    #[test]
+    fn the_producer_prompt_names_the_decisions_governing_the_planned_files() {
+        use athena_context::briefs::GOVERNING_HEADING;
+        // The README is a planned file here and D02 governs it.
+        let repo = governed_repo(GOVERNING);
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let counts = Arc::new(Counts::default());
+        let _ = governed_job_with(&repo, editing(counts, prompts.clone(), Vec::new()));
+        let first = prompts.lock().unwrap()[0].clone();
+        let at = first
+            .find(GOVERNING_HEADING)
+            .unwrap_or_else(|| panic!("no governing section in the producer prompt:\n{first}"));
+        let section = &first[at..];
+        assert!(section.contains("D02 governs README.md"), "{section}");
+        assert!(section.contains("[[link]]"), "{section}");
+        assert!(section.contains("docs/decisions.md"), "{section}");
+        // D12 governs `src/`, which no planned file is in.
+        assert!(!section.contains("D12"), "{section}");
+
+        // A repository with no list gets today's prompt, with no such section.
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let counts = Arc::new(Counts::default());
+        let _ = governed_job_with(&self::repo(), editing(counts, prompts.clone(), Vec::new()));
+        let first = prompts.lock().unwrap()[0].clone();
+        assert!(!first.contains(GOVERNING_HEADING), "{first}");
     }
 
     #[test]
@@ -2380,6 +2531,8 @@ mod produce_and_verify_order_tests {
             "{said:#?}"
         );
         assert_eq!(counts.all().3, 0);
+        // An unreadable list sends no one back: the producer ran once.
+        assert_eq!(counts.all().1, 1);
 
         std::fs::write(root.join("freed"), b"").unwrap();
         let (retry, _) = athena.retry(first.as_str(), &Quiet).unwrap();
@@ -2429,16 +2582,20 @@ mod produce_and_verify_order_tests {
         // The retry starts a fresh producer from the base; this one fails the same check again.
         assert_eq!(second.state, OutcomeState::Failed, "{}", second.reason);
         let prompts = prompts.lock().unwrap().clone();
-        assert_eq!(prompts.len(), 2, "one producer per job");
+        // Each job runs its producer and sends it back once: the retry's first brief is the third prompt.
+        assert_eq!(prompts.len(), 4, "two producers per job");
         assert!(
             !prompts[0].contains("## Findings you must address"),
             "the first brief has no earlier findings"
         );
-        let brief = &prompts[1];
+        let brief = &prompts[2];
         let start = brief
             .find("## Findings you must address")
             .unwrap_or_else(|| panic!("no findings block in the retry brief:\n{brief}"));
+        // The findings block ends at the next section; the governing-decisions section after it names the
+        // same decision and path, so it is left out.
         let block = &brief[start..];
+        let block = &block[..block[1..].find("\n\n## ").map_or(block.len(), |n| n + 1)];
         assert!(block.contains("D02"), "{block}");
         assert!(block.contains("README.md"), "{block}");
         assert!(block.contains("decisions not reconciled:"), "{block}");

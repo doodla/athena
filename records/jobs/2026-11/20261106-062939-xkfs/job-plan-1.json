@@ -1,0 +1,324 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261106-062939-xkfs",
+  "round": 1,
+  "at": "2026-11-06T08:15:59.439669217Z",
+  "invocation_seq": 2,
+  "approach": "Run the decision gate inside the producer loop (producer.rs, stage S3), where the one send-back for unmet criteria already lives. After each parsed report, evaluate the gate against the work tree's change list. To do that, split `unreconciled_decisions` (checks.rs) into one shared message builder that takes a \"read the candidate's file\" closure. The existing commit-based entry point and the new work-tree entry point both call it, so the message text and `GATE_REASON_PREFIX` stay byte-identical. A gate finding becomes one more problem in the same send-back, sharing the `PRODUCER_SEND_BACKS = 1` budget. The send-back text gains an optional gate section carrying the gate's message. If the finding survives the send-back, the loop exits as it does for an unmet criterion, and the unchanged gate in `check_and_verify` (mod.rs:1553) ends the job with today's message. That call site stays as the backstop: a resumed job, the nested-run skip and any path that bypasses the loop all keep today's behavior. For the brief, add a pure helper in athena-data (`governing`: base list text plus planned paths gives decisions with their governed planned paths) and a renderer in athena-context (`governing_decisions_section`, `producer_prompt_with_governing`). `dispatch` (mod.rs ~1091) appends the section to the producer prompt after the optional plan section, built from the prediction commit's `docs/decision-links.toml` and `planned_paths(plan, accepted)`. The stored `brief-producer.md` and its `brief_sha256` do not change. With no list or no governed planned file, the prompt is byte-identical to today's.",
+  "decisions": [
+    {
+      "choice": "Evaluate the gate in `producer_loop` on the work tree's change list, not by resuming the producer after `candidate_stage`.",
+      "reason": "The producer's work directory and snapshot exist only inside `produce_and_verify`: the loop returns the snapshot, then `candidate_stage` commits, then the work tree is removed (mod.rs:1511). A send-back after the candidate commit would need a second producer run, a fresh snapshot and a re-admission path. In the loop, the send-back, the work directory, the invocation record and the shared one-send-back counter already exist. The candidate commit is the base tree plus the change list (candidate.rs:60-108), so the file text read from the snapshot blobs equals the committed text and the loop's verdict equals the later gate's.",
+      "rejected": [
+        {
+          "option": "Send back from `check_and_verify` after the candidate commit",
+          "why": "The work tree is gone and the candidate is already recorded and admitted, so it would rebuild a snapshot, re-run admission and re-enter the loop: far more than the smallest design."
+        },
+        {
+          "option": "Move the gate out of `check_and_verify` into the loop only",
+          "why": "Resumed jobs (`recorded_checks`), the nested-run skip and any path that reaches `check_and_verify` without the loop would lose the check. Keeping it is a backstop, and it is what produces 'today's message' when the second try still fails."
+        }
+      ]
+    },
+    {
+      "choice": "Refactor `unreconciled_decisions` in checks.rs into a shared builder, `decision_gate(ctx, base, changed, read_candidate)`, plus two thin callers. The commit caller is the existing signature; the snapshot caller is new. The message `format!` stays in one place.",
+      "reason": "AC4 requires the message and `GATE_REASON_PREFIX` unchanged and the retry reader (reading.rs:1799) to keep recognising it. One builder makes a drift between the send-back text and the closing reason impossible.",
+      "rejected": [
+        {
+          "option": "Duplicate the message in the loop",
+          "why": "Two copies can drift, and the retry reader and the send-back would then disagree."
+        },
+        {
+          "option": "Have the loop build a throwaway commit to call the existing function",
+          "why": "The candidate builder writes objects into the user's repository; building a commit per attempt for a text read is heavy and leaves unreferenced objects."
+        }
+      ]
+    },
+    {
+      "choice": "The gate problem uses the same send-back budget as unmet criteria (`PRODUCER_SEND_BACKS`, one). It is added to the `problems` list only for the invocation `detail` and the UI line. It is not added to `report_gaps`, and the gate's message is passed to `send_back_text_full` as its own argument.",
+      "reason": "The request says 'as for unmet acceptance criteria'. The reading assumes the send-back is shared. `report_gaps` feeds the idle-producer failure message and the verifier's flagged gaps; a gate line there would change text other tests pin, and the job fails at the gate anyway.",
+      "rejected": [
+        {
+          "option": "A separate second budget for the gate",
+          "why": "Out of scope: 'Adding a second send-back'."
+        }
+      ]
+    },
+    {
+      "choice": "Keep `send_back_text` and `send_back_text_with_replay` with their signatures and exact output. Add `send_back_text_full(brief, unmet, unchanged, replay, gate: Option<&str>)`. The old functions delegate with `gate = None`. With a gate message the intro gains one leading sentence, as the replay does, and the message follows the lists.",
+      "reason": "Existing callers and byte-exact tests (send_back.rs:333-342; run_pin_tests.rs:1134, 1282) stay valid. The gate-only send-back reads correctly: the standard intro talks only about criteria.",
+      "rejected": [
+        {
+          "option": "Add a parameter to `send_back_text_with_replay`",
+          "why": "Breaks four callers and the exact-text tests for no gain."
+        }
+      ]
+    },
+    {
+      "choice": "Append the governing-decisions section in `dispatch` to the producer prompt, unstored, like the plan section. Do not put it in the stored brief or its `brief_sha256`.",
+      "reason": "The producer works from the prompt; the send-back is built from the prompt too (producer_loop's `brief` argument), so the producer sees the rule again on the send-back. The stored brief and the landing gate's hash check on `brief-producer.md` (athena-gate/src/jobs.rs:489-505) are untouched. The plan is known only after `plan_round`, so the section must be built after it to see the plan's files.",
+      "rejected": [
+        {
+          "option": "Put the section in `producer_brief_with_evidence` via `ProducerInputs`",
+          "why": "The brief is built and committed before planning, so it could list only the reading's deliverables and not the plan's files. It would also change `brief_sha256` for every governed job."
+        }
+      ]
+    },
+    {
+      "choice": "The section lists, for each decision whose `[[governs]]` paths cover a planned path, the decision id, the covered planned paths and the rule: append a `## D<n>` log entry to docs/decisions.md and add a `[[link]]` to docs/decision-links.toml whose `older` is the decision and `newer` the new entry. Planned paths come from `planned_paths(closing.plans.last(), &accepted)`; the list is read from the prediction commit (the gate's own base).",
+      "reason": "AC3. It reuses `Governs::covers` through one helper, so the brief and the gate agree on what counts as governed. The prediction commit is the `base` the gate uses (mod.rs:1513, 1544).",
+      "rejected": [
+        {
+          "option": "List every governs entry",
+          "why": "Noise for the producer; only decisions on files it will change matter."
+        }
+      ]
+    },
+    {
+      "choice": "No new refusal and no change to a matching rule; the refusal corpus is not part of the demonstrations.",
+      "reason": "`unreconciled` (decision_links.rs:124) and its message are untouched. The change only makes the existing refusal retryable once. `governing` is a read-only lookup over `Governs::covers`, not a parser or a refusal.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/decision_links.rs",
+      "action": "modify",
+      "purpose": "Add `Governing { decision, paths }` and `pub fn governing(base_links: &str, planned: &[String]) -> Result<Vec<Governing>, String>`. It parses with `parse_governs`, keeps the entries whose `covers` matches a planned path, and records the covered paths in order. An empty text gives an empty list, as in `unreconciled`. Unit tests are added in this file's test module. The gate rule `unreconciled` and `GATE_REASON_PREFIX` are untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `governing_decisions_section(&[(String, Vec<String>)]) -> String` (decision id, governed planned paths and the reconcile rule, in the style of the replay send-back section) and `producer_prompt_with_governing(prompt, entries)`, which returns the prompt unchanged when `entries` is empty. Add unit tests next to the existing producer-brief tests (named `governing_decisions_*`).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "Split `unreconciled_decisions` into a private builder, `decision_gate(ctx, base, changed, read_candidate)`, that holds the `format!` unchanged, and two callers. `unreconciled_decisions` keeps its commit-based signature. New `unreconciled_in_snapshot(ctx, base, snapshot, changes)` reads candidate text from the snapshot: deleted gives empty, changed gives `snapshot.blob(new_oid)`, unchanged gives the base text. Expose `DECISION_LINKS` and `DECISION_LOG` to the new code as needed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "In `producer_loop`, compute the change list once. When `self.nested` is none, call `unreconciled_in_snapshot` on each parsed report. Add the finding to the loop-continue condition and to `problems` (for the UI line and the invocation detail), but not to `report_gaps`. Build the send-back with `send_back_text_full(..., gate)`. At the budget limit with only a gate finding, print a gate-specific line (the job ends at the gate) instead of 'the verifier will judge it'.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add `send_back_text_full(brief, unmet, unchanged, replay, gate: Option<&str>)`. `send_back_text_with_replay` delegates with `None`, so its output is byte-identical. With a gate message: a leading sentence (a recorded decision governs code you changed and the change does not reconcile it; add the entry and link in your working directory; this is the only send-back, and if it is still unreconciled the job ends) and the message after the lists. Add a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "In `dispatch`, after the `if planned { ... }` block (~line 1097) and before `produce_and_verify`, read `docs/decision-links.toml` from `ctx.prediction`, call `athena_data::decision_links::governing` with `planned_paths(closing.plans.last(), &accepted)`, and append the section via `producer_prompt_with_governing`. A read or parse error leaves the prompt unchanged, with at most a warning line. Update the import list at line 31. The `check_and_verify` gate (1553-1565) is left unchanged as the backstop.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the criterion-1 test (script `reconciling_on_send_back`), the criterion-2 test and the prompt test (criterion 3b). Update `governed_edit_closes_before_the_verifier_starts` (producer count 2) and `governed_edit_closes_..._names_every_one`. Update `a_retry_of_a_gated_job_briefs_the_producer_with_the_decision_ids` for two prompts per job (4 prompts, with the retry's first brief at index 2). Message and prefix assertions are untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under '## [Unreleased]' stating only what the diff does: the producer prompt lists the decisions governing the planned files with the reconcile rule, and a candidate that leaves governed code unreconciled is sent back once with the gate's message before the job ends.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "decision_links.rs: add `Governing` and `governing(base_links, planned)`, using `parse_governs` and `Governs::covers`. An empty text gives `Ok(vec![])`; a parse error gives `Err`. Add unit tests: one governed planned file, a directory-prefix match, no match, an empty list, a bad list, and several planned paths per decision listed once and in order.",
+    "briefs.rs: add `governing_decisions_section` and `producer_prompt_with_governing`. The section is headed '## Decisions that govern files you will change'. For each decision it gives the id, the planned paths it governs and the rule (add a `## D<n> · ...` entry to docs/decisions.md that amends or supersedes the decision, or says it was checked and stands; add a `[[link]]` to docs/decision-links.toml whose `older` is the decision and whose `newer` is the new entry). It says one send-back is allowed. Add the `governing_decisions_*` unit tests: names id, path and rule; an ungoverned path is absent; empty entries leave the prompt equal to the input.",
+    "checks.rs: extract `decision_gate` with the one unchanged `format!` and the existing 'warning: ... could not be read' behavior. Re-express `unreconciled_decisions` over it with the committed-text reader, and add `unreconciled_in_snapshot` with the snapshot reader. Do not edit the message text.",
+    "send_back.rs: add `send_back_text_full` and delegate `send_back_text_with_replay` to it with `None`. Add a unit test that the gate section appears only when given, and that the `None` path equals the old output.",
+    "producer.rs: compute `changes = snapshot.change_list()?` once per pass. Derive `changed` from it for `unchanged_planned_files`. Call `unreconciled_in_snapshot` when `self.nested.is_none()` and `changes` is non-empty. Include the finding in the break condition, the `problems`/detail/UI text and the send-back call; keep it out of `report_gaps`. Handle the limit-reached gate-only case with its own line. Update the stage doc comment.",
+    "mod.rs `dispatch`: after the plan block, load `docs/decision-links.toml` from `ctx.prediction` (via `self.git.show_file`), call `governing` with `planned_paths(closing.plans.last(), &accepted)`, and wrap `producer_prompt` with `producer_prompt_with_governing`. Add the imports. Leave the gate at 1553-1565 as the backstop and refresh its comment to say the loop gives the send-back first.",
+    "tests.rs: add `reconciling_on_send_back`, then the criterion-1 test, the criterion-2 test and the prompt test. Edit the producer-count assertions in the two `governed_edit_closes_*` tests and the prompt count and indexes in the retry test. Keep every message assertion.",
+    "CHANGELOG.md: add the one Unreleased entry, stating only what the diff does.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Confirm with `git diff --stat` that no governed file (snapshot.rs, candidate.rs), config file, prompt file, workflow, record or docs/decision* file is touched."
+  ],
+  "risks": [
+    {
+      "risk": "Existing gate tests assert one producer run (tests.rs:2295, 2320). The new send-back makes it two, so the literal reading of AC4, 'existing gate tests still pass', needs those two counts updated. The retry test's prompt count and indexes change as well.",
+      "mitigation": "The plan names these edits explicitly. They follow from AC2 (the same scenario now gets one send-back). All message, prefix and decision-id assertions stay as they are, and a diff review can confirm only counts and indexes changed."
+    },
+    {
+      "risk": "The loop's verdict differs from the later gate's (for example a docs file deleted, a mode 160000 blob, or a rename), which would send back a candidate that then passes, or miss one the gate then fails.",
+      "mitigation": "A miss only falls through to the unchanged gate at check_and_verify, which fails the job exactly as today. The edge cases touch only the two docs paths; `blob` errors map to empty text, the same as `text()` does for a missing file. The criterion-1 test checks the loop and the committed candidate agree."
+    },
+    {
+      "risk": "Cost: the send-back adds a producer invocation for gated jobs that previously failed after one run. Budget preflight may not have reserved it.",
+      "mitigation": "The unmet-criteria send-back already takes the same path and `ReserveStage` already covers one send-back; `agent_spec` enforces the per-invocation producer_usd cap. The shared budget keeps it to one."
+    },
+    {
+      "risk": "A job is both sent back for criteria and unreconciled: the gate earns no second send-back, which matches the reading but may surprise.",
+      "mitigation": "The gate message is in the single send-back whenever it is found on the first report, so both are fixed together. If it appears only after the send-back, the gate ends the job with today's message. The doc comment on `producer_loop` says so."
+    },
+    {
+      "risk": "The fake producer applies edits to the same work directory on the second call, so the scripted 'second candidate' must not rely on a fresh snapshot.",
+      "mitigation": "Existing replay send-back tests already rely on the same work directory persisting (tests.rs ~1872). The new script adds edits only when the prompt contains '## Sent back'."
+    },
+    {
+      "risk": "Appending the section changes the prompt of every governed job, and if it were stored it would break `brief_sha256`.",
+      "mitigation": "It is appended after the stored brief, in memory only. The existing tests at tests.rs:489 and 690 pin the stored brief's hash."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "decision gate placement and closing behavior",
+      "dependent": "crates/athena-core/src/run/mod.rs:1553-1565 (`check_and_verify` gate call site, runs for first runs, skipped for `recorded_checks` and nested runs)",
+      "kind": "code",
+      "test": "governed_edit_still_unreconciled_after_the_send_back_ends_with_the_gate_message; governed_check_is_skipped_for_a_resume_at_the_verifier",
+      "reason": "Left unchanged as the backstop. It still ends the job with the same `self.failure(ctx, &reason)` when the loop's send-back did not fix the finding. Its inputs are unchanged: the committed candidate texts equal the work-tree texts the loop read."
+    },
+    {
+      "name": "GATE_REASON_PREFIX and the closing reason text",
+      "dependent": "crates/athena-core/src/reading.rs:1782-1800 (`retry_findings`, which recognises a gated job by `GATE_REASON_PREFIX`) and its tests at reading.rs:5989-6033",
+      "kind": "code",
+      "test": "a_retry_of_a_gated_job_briefs_the_producer_with_the_decision_ids (prompt indexes and count updated for two producer runs per job); the reading.rs gate tests",
+      "reason": "Constant and message text are not edited; the shared builder keeps the one `format!`. A job that ends still unreconciled carries the same reason into the retry brief."
+    },
+    {
+      "name": "one shared send-back budget",
+      "dependent": "crates/athena-core/src/run/producer.rs `producer_loop`: PRODUCER_SEND_BACKS (mod.rs:1308) and the `send_backs` counter",
+      "kind": "code",
+      "test": "Existing replay send-back tests (tests.rs ~1872-1953) pass unchanged; the criterion-2 test covers the budget being spent. A one-line criteria-then-gate case is added only if the producer finds it cheap (shared-budget assertion: three producer runs never happen).",
+      "reason": "The gate problem joins the same `problems`/`send_backs` path. A producer already sent back for criteria gets no second send-back for the gate, and the gate at `check_and_verify` then ends the job. The replay and unmet-criteria send-backs are unchanged when the gate finds nothing."
+    },
+    {
+      "name": "send-back brief text",
+      "dependent": "crates/athena-core/src/run/send_back.rs `send_back_text` and `send_back_text_with_replay` and their callers/tests (send_back.rs:333-342, run_pin_tests.rs:1134, 1282)",
+      "kind": "code",
+      "test": "Existing send_back.rs tests and run_pin_tests.rs send-back tests; a new send_back.rs unit test asserts the gate section appears only when a gate message is given and that the `None` output equals `send_back_text_with_replay`'s",
+      "reason": "The two functions keep their signatures and exact output (they delegate with `gate = None`). Only the new `send_back_text_full` adds the gate sentence and section."
+    },
+    {
+      "name": "invocation record detail written at a send-back",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs:1559 (asserts the invocation detail contains 'self-check failed') and `closing.new_invocations` detail written at producer.rs:310",
+      "kind": "code",
+      "test": "run_pin_tests.rs:1559 test, unchanged",
+      "reason": "The detail format `self-check failed: <problems>; redacted report: ...` is unchanged; a gate-only send-back adds the gate text to the problems joined into it."
+    },
+    {
+      "name": "`report_gaps` contents",
+      "dependent": "crates/athena-core/src/run/candidate.rs (`candidate_stage` uses `report_gaps` for the idle-producer message) and `Built.report_gaps`/the verifier brief",
+      "kind": "code",
+      "test": "Existing run tests; the idle-producer tests pass unchanged",
+      "reason": "The gate text is kept out of `report_gaps`, so those messages and the verifier's flagged gaps are byte-identical to today's."
+    },
+    {
+      "name": "the producer prompt",
+      "dependent": "crates/athena-core/src/run/mod.rs `dispatch` (~1086-1098), `producer_prompt_with_plan`, and `plan_round` (planning.rs:205, which renders the plan section and records its hash)",
+      "kind": "code",
+      "test": "the_producer_prompt_names_the_decisions_governing_the_planned_files (positive and no-list cases); the dispatch brief tests at tests.rs:489-690, which check `brief_sha256` against the stored brief, unchanged",
+      "reason": "The governing section is appended after the plan section and is not part of the stored brief or the plan record's hash. A job with no list, or with no governed planned file, gets the same prompt as today."
+    },
+    {
+      "name": "stored producer brief and brief_sha256",
+      "dependent": "crates/athena-gate/src/jobs.rs:489-505 (landing gate: `brief-producer.md` hash must equal `brief_sha256`)",
+      "kind": "rule",
+      "test": "tests.rs:690 asserts `brief_sha256` equals the hash of the stored brief; athena-gate landing_tests for the brief hash",
+      "reason": "The stored brief and its hash are untouched; the section is added to the prompt only."
+    },
+    {
+      "name": "D08 reconcile requirement on this change",
+      "dependent": "docs/decision-links.toml D08 `[[governs]]` (crates/athena-git/src/snapshot.rs, crates/athena-core/src/run/candidate.rs) and docs/decisions.md",
+      "kind": "rule",
+      "test": "git diff --stat shows no governed path",
+      "reason": "The plan edits neither governed file (it only calls `Snapshot::change_list` and `Snapshot::blob`), so this job's own gate does not fire and no log entry or link is added. The docs/ files are not edited."
+    },
+    {
+      "name": "flows that reach `check_and_verify` or `producer_loop`",
+      "dependent": "resume paths: `resume_candidate` (mod.rs:1073-1076) and `athena retry` (`retry_seed`/`resume`)",
+      "kind": "code",
+      "test": "governed_check_is_skipped_for_a_resume_at_the_verifier; a_retry_of_a_gated_job_briefs_the_producer_with_the_decision_ids",
+      "reason": "A resume from a kept candidate skips `producer_loop` and keeps today's gate (skipped at the verifier stage). A tree-seeded retry's producer runs the loop; its change list is still against the base (producer.rs:107-125), so the gate there reads the right texts. Nested runs skip the loop gate exactly as they skip the gate at mod.rs:1553."
+    },
+    {
+      "name": "prompt-set token budgets",
+      "dependent": "docs/system-facts.md budget lines and athena-cli/tests/budgets.rs (`system_facts_budgets_match_computed`)",
+      "kind": "host_setting",
+      "test": "cargo test --locked (budgets.rs unchanged)",
+      "reason": "No prompt file or brief constant read by a budget set changes. The new text is in a Rust function appended at run time, outside the always-loaded sets."
+    },
+    {
+      "name": "reading refusal rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and the replay in `loop_replay`",
+      "kind": "rule",
+      "test": null,
+      "reason": "No reading rule, parser or stem list changes, so no corpus case applies and the replay is unaffected. The gate's rule `unreconciled` is not edited."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A run test over a repository whose base has docs/decision-links.toml governing README.md (D02) and docs/decisions.md. The fake producer's first turn edits only README.md. When its prompt contains '## Sent back', it also makes `reconciling_edits()` (a new D13 entry plus a [[link]] D02 to D13). The test asserts: 2 producer invocations; the second prompt contains '## Sent back', GATE_REASON_PREFIX, 'D02 (README.md)' and '[[link]]'; the first prompt has no '## Sent back'; the job is not failed with the gate prefix; 1 verifier invocation; a 'checks     ' UI line; and a 'producer   sent back: decisions not reconciled' UI line.",
+      "command": "cargo test -p athena-core governed_edit_is_sent_back_once_and_the_second_candidate_reaches_the_verifier",
+      "observes": "The producer count is 2, the send-back prompt carries the gate message, and the job reaches checks and the verifier (state Landed, as in `governed_edit_with_an_amending_entry_and_link_reaches_the_verifier`).",
+      "fails_without": "Without the loop-level gate, the first candidate ends the job at check_and_verify: producer count 1, verifier 0, state Failed with the gate prefix, so every assertion above fails.",
+      "seam": "Entry point `Athena::go` (via the `governed_job` pattern, tests.rs:2252) driving `producer_loop` then `check_and_verify`. Fixtures: `governed_repo(GOVERNING)`, `athena_with(...)` and `counting`/`editing` (tests.rs:187, 2152, 2234) exist today. The step adds a sibling script, `reconciling_on_send_back(counts, prompts)`, that wraps `counting` and adds `reconciling_edits()` only when the producer prompt contains '## Sent back'. It injects through the `FakeAgentDriver` script parameter of `athena_with`. The gate, send-back and loop logic are production code, not in the double; the double only decides which file edits the fake producer makes."
+    },
+    {
+      "criterion": 2,
+      "method": "The same repository and driver, but the fake producer never reconciles (the existing `editing(counts, prompts, Vec::new())`). Assert 2 producer invocations (not 3) and 0 verifiers. Assert the state is Failed and the reason starts with GATE_REASON_PREFIX, contains 'D02 (README.md)', does not contain 'D12', contains the fix text ('Add an entry to docs/decisions.md ... whose newer is the new entry.'), and equals the literal message built from the constants. If `with_reason` alters the text, compare as `governed_edit_closes_before_the_verifier_starts` does. Also assert the second prompt contains '## Sent back', and that the UI has the line 'producer   report still incomplete after the send-back' or the gate-specific line, then 'failed     decisions not reconciled:'.",
+      "command": "cargo test -p athena-core governed_edit_still_unreconciled_after_the_send_back_ends_with_the_gate_message",
+      "observes": "Exactly 2 producer runs, no verifier, no 'checks     ' line, and the closing reason is today's gate message.",
+      "fails_without": "With no send-back, the producer count is 1. With an unbounded or second send-back, it is 3 or more. With a changed message, the equality and prefix assertions fail.",
+      "seam": "`Athena::go` with the existing `governed_job`, `editing` and `Counts` (tests.rs:2234-2274), which exist today. The only edit to the existing tests: the `(producer, verifier)` assertions at tests.rs:2295 and 2320 change from one producer run to two, since the same scenario now gets its one send-back. Nothing is injected beyond the fake script."
+    },
+    {
+      "criterion": 3,
+      "method": "Two tests. (a) In athena-context, a unit test on `producer_prompt_with_governing(prompt, governs, planned)` (and `governing_decisions_section`), given a `[[governs]]` list where D08 covers 'crates/athena-git/src/snapshot.rs' and a planned list containing that path and an ungoverned one. The result contains 'D08', the governed path, 'docs/decisions.md', 'docs/decision-links.toml', '[[link]]', 'older' and 'newer', and not the ungoverned path. With planned paths that no decision governs, or an empty list, the result equals the input prompt exactly. (b) In athena-core, extend the governed run test to assert that the first producer prompt, with the plan's or the reading's deliverable README.md governed by D02, contains the section naming 'D02' and 'README.md'. A second job over a repository with no list has a prompt with no such section.",
+      "command": "cargo test -p athena-context governing_decisions && cargo test -p athena-core the_producer_prompt_names_the_decisions_governing_the_planned_files",
+      "observes": "The prompt names the decision id, the governed path and the reconcile rule; the prompt is unchanged when nothing planned is governed.",
+      "fails_without": "Without the section, the prompt has no 'D02' (the fake producer's first prompt, read from the `prompts` mutex) and the unit test's contains assertions fail.",
+      "seam": "Production functions `athena_data::decision_links::governing`, `athena_context::briefs::producer_prompt_with_governing` and `dispatch`'s call to them, added by plan steps 1, 2 and 5. Test (a) is a pure function with a literal list string. Test (b) reuses `governed_repo`, `editing` and its `prompts` capture, which exist today (tests.rs:2234). No logic sits in the double."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the existing gate and retry-reader tests, unchanged in their message assertions: the run tests (`governed_*`, `ungoverned_edit_reaches_the_verifier`, `governed_check_is_skipped_for_a_resume_at_the_verifier`, `a_retry_of_a_gated_job_briefs_the_producer_with_the_decision_ids`), the retry-reader tests in reading.rs (~5989-6033) and the athena-data rule tests. A new equality assertion in the criterion-2 test pins the message text. `git diff` confirms no hunk touches the `format!` in `decision_gate` or `GATE_REASON_PREFIX`.",
+      "command": "cargo test -p athena-core governed && cargo test -p athena-core retry_findings && cargo test -p athena-data decision_links",
+      "observes": "All pass. The gated job's reason still starts with `GATE_REASON_PREFIX` and names the decision, its touched path and the fix. The retry brief still carries the findings block. The only existing-test edits are the producer-count assertions and the prompt indexes in the retry test, which now sees two producer runs per job (4 prompts, with the retry's first brief at index 2).",
+      "fails_without": "A changed prefix or message would fail the starts_with/contains assertions in the governed_* tests and the retry-finding test in reading.rs.",
+      "seam": "Existing tests; `Athena::go` and `retry_findings` are the production entry points. No new seam."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the CHANGELOG.md diff: one entry under '## [Unreleased]' / '### Added' (or 'Changed') that states only what the diff does: the producer prompt lists, for each planned file a decision governs, the decision id, the path and the rule for reconciling it; a candidate that touches governed code without a log entry and link is sent back once with the gate's message before the job ends as failed. No forecast, no claim about outcomes.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The diff adds only that entry, and its wording matches the code (one send-back, shared with the unmet-criteria send-back).",
+      "fails_without": "No entry, or an entry that claims more than the diff (for example a second send-back or a change to the gate's rule)."
+    },
+    {
+      "criterion": 6,
+      "method": "Run Athena's three recorded checks on the candidate.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0; the new tests are included in the test run.",
+      "fails_without": "A formatting slip, a clippy warning (an unused helper or a needless clone) or a failing test fails the corresponding check.",
+      "seam": "Cargo itself; nothing injected."
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the changed paths against the allowed list.",
+      "command": "git status && git diff --stat",
+      "observes": "The only modified files are those in the plan's file list (run/*.rs, briefs.rs, decision_links.rs, tests, CHANGELOG.md). athena.toml, defaults.toml, workflows, prompt files and records/ are absent, and so are docs/decisions.md, docs/decision-links.toml, athena-git/src/snapshot.rs and run/candidate.rs. So D08, the only `[[governs]]` entry, covers neither the files touched nor any added by the change (docs/decision-links.toml lines 183-188), and the gate does not fire on this change itself.",
+      "fails_without": "A touched governed file or config would appear in the stat and, for D08, would make this job's own gate fire."
+    }
+  ],
+  "open_questions": [
+    "User: The brief lists run_pin_tests.rs as a deliverable to modify, but no existing test there depends on the gate and `send_back_text`/`send_back_text_with_replay` keep their output. The plan leaves it untouched unless a pin test breaks. Is that acceptable?"
+  ],
+  "producer_section_sha256": "4205ec09762875067efb90af8a28e0b68d59e145a0591416141c6eb4287c5958"
+}

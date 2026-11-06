@@ -1,0 +1,186 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-062939-xkfs",
+  "n": 1,
+  "at": "2026-11-06T08:12:10.695521362Z",
+  "invocation_seq": 1,
+  "base_commit": "a2a3f540f27b58191cddead924b68bc64da11ef6",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Send unreconciled decisions back to the producer once before failing",
+  "summary": "When the decision gate (unreconciled_decisions) finds unreconciled decisions, the producer gets one send-back carrying the gate's message, as for unmet criteria, and the job fails with today's message only if it is still unreconciled. The producer brief also lists the decisions governing the files the plan expects to change, with the reconcile rule, so the producer can add the entry the first time. Audience: Athena operators whose jobs now die on a one-entry fix.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust code and tests."
+    },
+    {
+      "id": "tested",
+      "how": "Three new tests plus cargo test and clippy clean as criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the send-back and the job's end by running tests, not that wiring exists."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is that a one-entry reconcile no longer fails the job, shown by the second-candidate test."
+    },
+    {
+      "id": "small",
+      "how": "One focused change limited to the call site, the brief, tests and CHANGELOG."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "mechanism",
+      "how": "The send-back is enforced in the run loop and covered by tests."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and CHANGELOG written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: crates/athena-core/src/run/mod.rs (check_and_verify calls self.unreconciled_decisions after producer_loop and candidate_stage and ends the job via self.failure; dispatch builds producer_brief_with_evidence, then producer_prompt_with_plan appends the plan section), crates/athena-core/src/run/checks.rs (unreconciled_decisions builds the GATE_REASON_PREFIX message), crates/athena-core/src/run/producer.rs (producer_loop with PRODUCER_SEND_BACKS and send_back_text), crates/athena-core/src/run/send_back.rs (send_back_text_with_replay), crates/athena-data/src/decision_links.rs (parse_governs, Governs::covers, unreconciled), crates/athena-context/src/briefs.rs (ProducerInputs, producer_brief_with_evidence, producer_prompt_with_plan).",
+    "The gate runs on a committed candidate in check_and_verify, after the producer loop. The producer is sent back with the same one-send-back budget as unmet criteria. The producer loop can run the gate on the work tree's change list, or the send-back can be added at the call site; the producer chooses the smallest route that keeps the gate's text and the retry reader's GATE_REASON_PREFIX unchanged.",
+    "The one send-back is shared with the unmet-criteria send-back: if the producer was already sent back for criteria, a still-unreconciled result does not earn a second send-back, and the job ends with today's message.",
+    "The governing-decisions section is built from the base's docs/decision-links.toml [[governs]] list (Governs::covers) over planned_paths(plan, accepted), appended to the producer prompt after the plan section; with no list or no governed planned file, the brief is unchanged.",
+    "No record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are not involved. Property is measured directly by fake-agent run tests in crates/athena-core/src/run/tests.rs and a brief test next to the existing producer-brief tests.",
+    "This change adds no new refusal; it makes an existing refusal less final, so no expected N% replay figure applies and the replay is unaffected.",
+    "docs/decisions.md and docs/decision-links.toml are not edited: D08 and other governed paths in the touched source files may need their own reconciling entry if the change touches governed files, which the producer handles under the gate's own rule."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A run test (cargo test -p athena-core) where the producer's first candidate touches a path governed by a decision in the base docs/decision-links.toml and adds no log entry or link shows the producer invoked a second time with a send-back brief that contains the gate's message (GATE_REASON_PREFIX and the decision id); the second candidate adds the entry and [[link]] and the job proceeds to checks and the verifier.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A run test (cargo test -p athena-core) where the producer's second candidate is still unreconciled ends the job as failed with exactly today's gate message (starting with GATE_REASON_PREFIX, naming each decision and touched path and the fix), after exactly one send-back and no third producer run.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A brief test (cargo test -p athena-context or -p athena-core) shows the producer prompt for a plan that expects a governed file to change names the governing decision id, the governed path, and the rule (log entry plus matching [[link]] whose older is the decision and newer the new entry); a plan with no governed file adds no such section.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The unreconciled_decisions message text and athena_data::decision_links::GATE_REASON_PREFIX are unchanged, so the retry reader (reading::retry_findings) still recognises a gated job; the existing gate tests in crates/athena-core/src/run/tests.rs still pass.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry that says only what the diff does: the producer brief lists governing decisions for planned files, and an unreconciled candidate is sent back once with the gate's message before the job ends.",
+      "kind": "content"
+    },
+    {
+      "text": "cargo test, cargo clippy and cargo fmt --check pass on the candidate (Athena's recorded checks).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Changes stay within the gate's call site in the run loop, the producer brief, tests and CHANGELOG.md; no change to athena.toml, defaults.toml, workflows, prompt files or records/.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-data/src/decision_links.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    }
+  ],
+  "out_of_scope": [
+    "Reconciling D08 or any decision for crates/athena-git/src/snapshot.rs; that test-only change is not part of this job.",
+    "Changing which paths a decision governs, or editing docs/decisions.md or docs/decision-links.toml.",
+    "Changing the gate's rule in athena_data::decision_links::unreconciled or the gate's message text.",
+    "Adding a second send-back, or changing the send-back for unmet criteria or the replay.",
+    "Prompt files, athena.toml, defaults.toml and workflows."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.9,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2200.0,
+        "p90": 4800.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6666666666666666,
+      "p_user_intervenes": 0.0815126050420168,
+      "cost_usd": {
+        "p10": 0.559933412652465,
+        "p50": 1.3563835854363693,
+        "p90": 4.275388880754505
+      },
+      "wall_time_s": {
+        "p10": 564.2344018515643,
+        "p50": 2032.7086206039992,
+        "p90": 4218.9872660035035
+      }
+    }
+  },
+  "departures": "Higher cost and lower pass chance than reference: the change touches the producer loop, the gate's call site and the brief, and the gate sits after candidate commit, so moving it into the loop needs care and several tests.",
+  "urgent_reason": "It cuts failed jobs and redo-work retries that end on a one-line log entry the producer could add in a minute.",
+  "hard_reason": "It changes the decision gate's behavior (refuse-and-end becomes send-back-then-refuse) and the run pipeline's producer loop and brief, where a mistake could let unreconciled changes through.",
+  "producer_effort": "high"
+}

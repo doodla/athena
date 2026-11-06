@@ -1502,6 +1502,48 @@ pub fn producer_prompt_with_plan(brief: &str, section: &str) -> String {
     format!("{brief}\n\n{section}")
 }
 
+/// The heading of the producer prompt's section on governing decisions.
+pub const GOVERNING_HEADING: &str = "## Decisions that govern files you will change";
+
+/// The producer prompt's section on the decisions that govern files the plan expects to change: for each
+/// decision its id, the planned paths it governs, and the rule for reconciling it. The rule is the one the
+/// decision gate applies before the verifier starts; the section says that one send-back is allowed.
+/// Empty `governing` gives an empty section.
+pub fn governing_decisions_section(governing: &[athena_data::decision_links::Governing]) -> String {
+    if governing.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "{GOVERNING_HEADING}\n\nA decision in `docs/decisions.md` governs each path listed below. A change \
+         that touches one of them fails before the verifier starts unless the same change reconciles the \
+         decision: add an entry (`## D<n> · title`) to `docs/decisions.md` that amends or supersedes the \
+         decision, or says it was checked and stands, and add a `[[link]]` to `docs/decision-links.toml` \
+         whose `older` is the decision's id and whose `newer` is the new entry's id. Do this in the same \
+         change, the first time. A change that still leaves one unreconciled is sent back once with the \
+         gate's message, and then fails.\n\n"
+    );
+    for g in governing {
+        out.push_str(&format!(
+            "- {} governs {}\n",
+            g.decision,
+            g.paths.join(", ")
+        ));
+    }
+    out
+}
+
+/// The producer's prompt with the governing-decisions section after it. With no governing decisions the
+/// prompt is returned exactly as given.
+pub fn producer_prompt_with_governing(
+    prompt: &str,
+    governing: &[athena_data::decision_links::Governing],
+) -> String {
+    if governing.is_empty() {
+        return prompt.to_string();
+    }
+    format!("{prompt}\n\n{}", governing_decisions_section(governing))
+}
+
 /// Facts about how Athena runs that the code cannot reveal, each with its source (`docs/system-facts.md`).
 /// Embedded so the binary needs no `docs/` at run time; a test in `crates/athena-cli/tests/budgets.rs` checks
 /// the budget lines in it against the computed ones.
@@ -3422,6 +3464,41 @@ mod tests {
             assert!(first.contains(text), "the plan section omits {text}");
         }
         assert_ne!(first, render_plan_section(&plan(3)));
+    }
+
+    #[test]
+    fn governing_decisions_name_the_id_the_path_and_the_reconcile_rule() {
+        use athena_data::decision_links::Governing;
+        let governing = [Governing {
+            decision: "D08".into(),
+            paths: vec!["crates/athena-git/src/snapshot.rs".into()],
+        }];
+        let section = governing_decisions_section(&governing);
+        assert!(section.starts_with(GOVERNING_HEADING), "{section}");
+        for text in [
+            "D08",
+            "crates/athena-git/src/snapshot.rs",
+            "docs/decisions.md",
+            "docs/decision-links.toml",
+            "[[link]]",
+            "`older` is the decision's id",
+            "`newer` is the new entry's id",
+            "sent back once",
+        ] {
+            assert!(
+                section.contains(text),
+                "the section omits {text}: {section}"
+            );
+        }
+        assert!(!section.contains("crates/athena-core"));
+        let prompt = producer_prompt_with_governing("PROMPT", &governing);
+        assert_eq!(prompt, format!("PROMPT\n\n{section}"));
+    }
+
+    #[test]
+    fn governing_decisions_add_nothing_when_no_planned_file_is_governed() {
+        assert_eq!(governing_decisions_section(&[]), "");
+        assert_eq!(producer_prompt_with_governing("PROMPT", &[]), "PROMPT");
     }
 
     #[test]
