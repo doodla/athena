@@ -1,0 +1,196 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-041052-wzy7",
+  "n": 1,
+  "at": "2026-11-06T04:54:55.520556745Z",
+  "invocation_seq": 1,
+  "base_commit": "ca68e716d3c7c89c685e5e38eac1f1c51bc47457",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Let athena retry re-verify a stale job's kept candidate on the new tip",
+  "summary": "Make `athena retry` accept a stale job. It merges the kept candidate onto the current branch tip. A clean merge re-runs checks, replay and verification on the merged tree and lands it with the new fingerprint, with no producer call. A conflict starts a producer retry seeded from the kept candidate. Audience: users running parallel jobs, and the verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "tested",
+      "how": "New tests for clean-merge landing and conflict retry; cargo test and clippy pass."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo test as the way to exercise it."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check the producer call count, the landing and the fingerprint, not wiring."
+    },
+    {
+      "id": "root-cause",
+      "how": "The stale retry path is changed in the retry and landing code, not by a workaround."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and changelog written for an outside reader."
+    },
+    {
+      "id": "small",
+      "how": "One focused change limited to the listed files."
+    },
+    {
+      "id": "rust",
+      "how": "All code is Rust."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that a stale job lands re-verified without a producer run."
+    },
+    {
+      "id": "mechanism",
+      "how": "The fingerprint-match landing rule stays enforced by code and is tested."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/reading.rs (Athena::retry at ~1103 calls ask with 'try again on <id>'; qualifies_for_tree_retry and tree_retry_seed at ~1645-1758 only accept Rejected jobs, so a Stale job is not seeded; resumable_job/retries_by_job treat Stale as an unrun state), crates/athena-core/src/land.rs (plan() returns Plan::Stale/Tree/OtherBranch; landing requires P ancestor of H, same classification, and Verified fingerprint match), and crates/athena-core/src/run/close.rs (Stale outcome written at ~289-312; retry_landing at ~451 re-runs plan on a blocked job and bails on Stale). Behavior is measured by existing run tests (crates/athena-core/src/run/tests.rs) and CLI tests (crates/athena-cli/tests/lifecycle.rs, drain.rs) using a fake producer whose calls are counted.",
+    "Existing code: the records for a stale job already hold its candidate commit and base; the new path reuses plan(), Verified::from_record, fingerprint, the tree-retry seeding in reading.rs and the checks/replay/verifier stages in crates/athena-core/src/run/. The merge uses the git layer's merge-tree in crates/athena-git; no new crate is added (buy-first).",
+    "Where ask refuses non-retryable states, the Stale state is added to the accepted ones. The merge-clean/conflict decision is made once on the current tip, before any producer call; the merged tree gets a fresh candidate and a fresh verification record, and the fingerprint is recomputed, so the landing check still compares verified to landed content.",
+    "No new record type or schema change is expected; existing candidate, verification and outcome records are reused (so the records allow-list and AnyRecord need no change). If one is needed, add it to AnyRecord with a round-trip test.",
+    "This adds no refusal rule; it removes one (stale retry no longer errors). No replay refusal-rate criterion applies.",
+    "Governance files (athena.toml, defaults.toml, workflows) are not changed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test`: a test shows `athena retry` on a stale job returns a proposal instead of an error (the stale-state refusal in ask/retry is gone).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test where the kept candidate merges cleanly onto a moved branch tip shows checks, replay and verification run on the merged tree, the job lands, and the producer call count recorded for the retry is zero.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test where the candidate conflicts with the moved branch shows the retry goes to a producer retry seeded from the kept candidate (one producer call recorded, nothing lands without a new verification).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test shows the landed content's fingerprint equals the fingerprint verified on the merged tree (not the original candidate's), and a landing whose verified fingerprint differs from the landed content is still refused.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test` and `cargo clippy --all-targets` and `cargo fmt --check`: all pass, including existing land.rs tests for Plan::Stale.",
+      "kind": "behavior"
+    },
+    {
+      "text": "docs/decisions.md records a new decision (or a revision) stating that it reverses the left-out alternative (d) 'Automatic re-verification on the new base' of the landing decision (the one at ~line 292), with the reason that stale landings now recur with parallel jobs, and the original line 297 is annotated as reversed.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing only what the diff does: athena retry accepts a stale job, merges its candidate onto the tip, re-verifies and lands on a clean merge without a producer run, and runs the producer from the candidate on conflict.",
+      "kind": "content"
+    },
+    {
+      "text": "Only the retry command, the stale landing path, tests, docs/decisions.md and CHANGELOG.md change; no secrets or personal data are committed.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    }
+  ],
+  "out_of_scope": [
+    "Automatic (drain-triggered) re-verification of stale jobs without an explicit athena retry",
+    "Changing the staleness rules in land.rs plan() (what makes a job stale)",
+    "Retrying other non-retryable states (landed, dropped, abandoned)",
+    "Prompt files and governance configuration"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.12,
+      "cost_usd": {
+        "p10": 1.0,
+        "p50": 2.6,
+        "p90": 6.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2800.0,
+        "p90": 6500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6690140845070423,
+      "p_user_intervenes": 0.08202959830866807,
+      "cost_usd": {
+        "p10": 0.5592216999999999,
+        "p50": 1.3551466,
+        "p90": 4.1947559000000005
+      },
+      "wall_time_s": {
+        "p10": 563.7204452185691,
+        "p50": 1998.9721884033272,
+        "p90": 4199.998630167197
+      }
+    }
+  },
+  "departures": "Hard job touching the retry and landing pipeline with new merge logic and multi-path tests, so cost and time exceed the reference.",
+  "hard_reason": "Changes the landing path for stale jobs and the retry pipeline (how a retried job is produced, verified and landed), including the verified-fingerprint landing rule.",
+  "producer_effort": "high"
+}

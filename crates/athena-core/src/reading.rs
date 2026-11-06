@@ -1093,9 +1093,11 @@ impl Athena {
         })
     }
 
-    /// `athena retry <job>`: reads a retry of a rejected, failed or interrupted job (dispatched with no
-    /// process working on it, for example after a restart, or held for low disk space), seeded from that job's
-    /// introspection record when it has one. The request recorded is "try again on <job id>", so a later
+    /// `athena retry <job>`: reads a retry of a rejected, failed, timed out, stale or interrupted job
+    /// (dispatched with no process working on it, for example after a restart, or held for low disk space),
+    /// seeded from that job's introspection record when it has one. A stale job is accepted too: `go` then
+    /// merges its kept candidate onto the tip (see `Athena::stale_retry`). The request recorded is "try again
+    /// on <job id>", so a later
     /// retry of this job finds the original; nothing is run. The flag says whether the introspection
     /// record seeded the reading (false: the plain "try again on" behavior). An interrupted job that already
     /// has a retry standing for it (see [`retries_by_job`]) is refused, naming that retry; a retry closed
@@ -1363,12 +1365,15 @@ pub fn earlier_attempt_with(
         && !matches!(
             state,
             JobState::Closed(
-                OutcomeState::Rejected | OutcomeState::Failed | OutcomeState::TimedOut
+                OutcomeState::Rejected
+                    | OutcomeState::Failed
+                    | OutcomeState::TimedOut
+                    | OutcomeState::Stale
             )
         )
     {
         bail!(
-            "job {id} is {}; only a rejected or failed job can be tried again (so can a timed out one), or one that was interrupted",
+            "job {id} is {}; only a rejected or failed job can be tried again (so can a timed out or stale one), or one that was interrupted",
             state.name()
         );
     }
@@ -1755,6 +1760,31 @@ pub fn tree_retry_seed(
         findings,
         must_address,
     }))
+}
+
+/// The kept candidate of a stale job, for a request of the form "try again on <job>": the stale job and its
+/// candidate. `Some` only when the job closed stale, its candidate has a commit and no admission violations,
+/// and its verification passed. A stale job passed checks, replay and verification and then could not land
+/// (the branch moved), so its candidate is worth merging onto the new tip. `None` for any other request or
+/// job. The caller still checks that the commits exist and which branch is checked out.
+pub fn stale_candidate(
+    records: &Records,
+    request: &str,
+) -> Option<(JobId, athena_data::records::Candidate)> {
+    let id = retried_job(records, request)?;
+    let job = records.jobs.get(id.as_str())?;
+    if job.state() != JobState::Closed(OutcomeState::Stale) {
+        return None;
+    }
+    let candidate = job.candidate.as_ref()?;
+    let verification = job.verification.as_ref()?;
+    if candidate.candidate_commit.is_none()
+        || !candidate.violations.is_empty()
+        || verification.final_verdict != athena_data::records::Verdict::Pass
+    {
+        return None;
+    }
+    Some((id, candidate.clone()))
 }
 
 /// One finding as a retry brief shows it: severity, location, summary and evidence.
@@ -4652,11 +4682,7 @@ mod tests {
     #[test]
     fn only_rejected_or_failed_jobs_can_be_tried_again() {
         let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
-        for state in [
-            OutcomeState::Landed,
-            OutcomeState::Stale,
-            OutcomeState::Abandoned,
-        ] {
+        for state in [OutcomeState::Landed, OutcomeState::Abandoned] {
             let mut job = job_with_checks(vec![]);
             job.outcome = Some(outcome(&job, state, "done"));
             let id = job.id().as_str().to_string();
@@ -4678,6 +4704,123 @@ mod tests {
         .to_string();
         assert!(error.contains("queued"), "{error}");
         assert!(error.contains("only a rejected or failed job"), "{error}");
+    }
+
+    /// A job that passed verification and then closed stale, with a kept candidate.
+    fn stale_job() -> JobRecords {
+        let mut job = job_with_checks(vec![check("test", true, "ok")]);
+        job.verification.as_mut().unwrap().final_verdict = athena_data::records::Verdict::Pass;
+        job.candidate = Some(athena_data::records::Candidate {
+            job: job.id().clone(),
+            base_commit: "a".repeat(40),
+            base_fingerprint: None,
+            previous_job: None,
+            candidate_commit: Some("b".repeat(40)),
+            candidate_tree: Some("c".repeat(40)),
+            changes: vec![],
+            fingerprint: Some("f".repeat(64)),
+            violations: vec![],
+            producer_report: None,
+        });
+        job.outcome = Some(outcome(
+            &job,
+            OutcomeState::Stale,
+            "governed content changed on the branch",
+        ));
+        job
+    }
+
+    #[test]
+    fn a_stale_job_can_be_tried_again() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let job = stale_job();
+        let id = job.id().as_str().to_string();
+        let attempt = earlier_attempt(&records_with(job), &format!("try again on {id}"), &redactor)
+            .expect("a stale job is no longer refused")
+            .expect("it is a retry request");
+        assert_eq!(attempt.job, id);
+        assert_eq!(attempt.end_state, "stale");
+        assert_eq!(attempt.request, "add a greeting");
+    }
+
+    #[test]
+    fn a_stale_retry_carries_the_stale_end_state_to_the_reader() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let mut job = stale_job();
+        job.readings = vec![final_reading(&job)];
+        let forecast = job.readings[0].forecasts.reader.clone();
+        let id = job.id().as_str().to_string();
+        let attempt = earlier_attempt(&records_with(job), &format!("try again on {id}"), &redactor)
+            .unwrap()
+            .unwrap();
+        assert!(!attempt.failed);
+        assert_eq!(attempt.end_state, "stale");
+        assert_eq!(
+            attempt.reading_summary.as_deref(),
+            Some("Print a greeting.")
+        );
+        let brief = reader_brief(&ReaderInputs {
+            request: format!("try again on {id}"),
+            earlier_attempt: Some(attempt),
+            referenced_jobs: vec![],
+            history: vec![],
+            reference: forecast,
+            reference_basis: "test".into(),
+            classes: vec!["feature".into()],
+            producer_models: vec!["producer".into()],
+            producer_default: "producer".into(),
+            listing: vec![],
+            verifier_can_run: vec![],
+            headroom: vec![],
+            refusal: None,
+        });
+        assert!(brief.contains(&format!("try again on job {id}")), "{brief}");
+        assert!(brief.contains("add a greeting"), "{brief}");
+        assert!(brief.contains("end state stale"), "{brief}");
+        // Known wording, recorded in decision D157: the earlier-attempt section is written for a rejected
+        // job, so it calls a stale job rejected and says a retry starts from the base. For a stale job both
+        // are wrong (it passed verification and its candidate is merged onto the tip). The reader brief is
+        // prompt text and is left as it is; this assertion pins what the reader is told today.
+        assert!(brief.contains("which was rejected"), "{brief}");
+    }
+
+    #[test]
+    fn stale_candidate_is_the_kept_candidate_of_a_verified_stale_job_only() {
+        let job = stale_job();
+        let id = job.id().as_str().to_string();
+        let request = format!("try again on {id}");
+        let (found, candidate) = stale_candidate(&records_with(job.clone()), &request).unwrap();
+        assert_eq!(found.as_str(), id);
+        assert_eq!(
+            candidate.candidate_commit.as_deref(),
+            Some("b".repeat(40).as_str())
+        );
+        assert_eq!(candidate.base_commit, "a".repeat(40));
+
+        // Not a retry request.
+        assert!(stale_candidate(&records_with(job.clone()), "add a greeting").is_none());
+        // A rejected job is the tree-retry path, not this one.
+        let mut rejected = job.clone();
+        rejected.outcome = Some(outcome(&rejected, OutcomeState::Rejected, "rejected"));
+        assert!(stale_candidate(&records_with(rejected), &request).is_none());
+        // No commit to merge.
+        let mut no_commit = job.clone();
+        no_commit.candidate.as_mut().unwrap().candidate_commit = None;
+        assert!(stale_candidate(&records_with(no_commit), &request).is_none());
+        // Admission violations keep the candidate out.
+        let mut violating = job.clone();
+        violating.candidate.as_mut().unwrap().violations.push(
+            athena_data::records::PolicyViolation {
+                rule: "x".into(),
+                path: None,
+                detail: "d".into(),
+            },
+        );
+        assert!(stale_candidate(&records_with(violating), &request).is_none());
+        // A verification that did not pass.
+        let mut failed = job;
+        failed.verification.as_mut().unwrap().final_verdict = athena_data::records::Verdict::Fail;
+        assert!(stale_candidate(&records_with(failed), &request).is_none());
     }
 
     fn final_reading(job: &JobRecords) -> Reading {

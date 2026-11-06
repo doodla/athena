@@ -2107,6 +2107,418 @@ fn a_governed_change_on_the_branch_makes_the_job_stale() {
     assert!(athena.check_history().unwrap().violations.is_empty());
 }
 
+// ---- Trying a stale job again: its kept candidate is merged onto the moved tip ----
+
+const HAND_INTERVENTION: &str = r#"{
+  "schema": "athena.intervention/1",
+  "id": "20261010-170000-abcd",
+  "at": "2026-10-10T17:00:00Z",
+  "what": "Edited the library by hand",
+  "why": "Faster than asking",
+  "class_of_work": "code",
+  "category": "did-work-themselves",
+  "job": null,
+  "source": "user",
+  "with_staged_changes": true
+}
+"#;
+
+const LIB_BY_HAND: &str = "pub fn one() -> u32 {\n    1 // by hand\n}\n";
+const LIB_BY_JOB_A: &str = "pub fn one() -> u32 {\n    2 // job A\n}\n";
+const LIB_RESOLVED: &str = "pub fn one() -> u32 {\n    2 // job A and by hand\n}\n";
+const README_BY_JOB_A: &str = "# Demo\n\nHello, reader.\n";
+
+/// Makes the first verification commit `files` and an intervention record to the branch, as a hand edit
+/// would: governed content on the branch moves, so the job being verified goes stale.
+fn hand_edit_during_verification(scenario: &mut Scenario, root: &Path, files: &[(&str, &str)]) {
+    let root = root.to_path_buf();
+    let files: Vec<(String, String)> = files
+        .iter()
+        .map(|(p, c)| (p.to_string(), c.to_string()))
+        .collect();
+    let once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    scenario.during_verification = Some(Arc::new(move || {
+        if once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let mut all: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        all.push((
+            "records/interventions/2026-10/20261010-170000-abcd.json",
+            HAND_INTERVENTION,
+        ));
+        write(&root, &all);
+        let git = athena_git::Git::at(&root);
+        git.run(["add", "-A"]).unwrap();
+        git.run([
+            "commit",
+            "-q",
+            "-m",
+            "Edit by hand\n\nAthena-Intervention: 20261010-170000-abcd",
+        ])
+        .unwrap();
+    }));
+}
+
+/// Asks, runs the job and checks that it closed stale.
+fn go_stale(athena: &athena_core::Athena) -> athena_data::JobId {
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Stale, "{}", f.reason);
+    proposal.job
+}
+
+/// `athena retry` on `job`, then `go` on the job it proposes.
+fn retry_and_go(
+    athena: &athena_core::Athena,
+    job: &athena_data::JobId,
+) -> (athena_data::JobId, athena_core::run::Finished) {
+    let (proposal, _) = athena.retry(job.as_str(), &Lines::default()).unwrap();
+    assert_ne!(&proposal.job, job);
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    (proposal.job, f)
+}
+
+fn roles_since(calls: &Arc<Mutex<Vec<Role>>>, mark: usize) -> Vec<Role> {
+    calls.lock().unwrap()[mark..].to_vec()
+}
+
+#[test]
+fn retry_accepts_a_stale_job() {
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    hand_edit_during_verification(&mut scenario, fx.root(), &[("src/lib.rs", LIB_BY_HAND)]);
+    let athena = fx.athena(scenario.script());
+    let stale = go_stale(&athena);
+
+    let (proposal, from_introspection) = athena
+        .retry(stale.as_str(), &Lines::default())
+        .expect("a stale job is no longer refused");
+    assert!(!from_introspection);
+    assert_ne!(proposal.job, stale);
+    assert!(proposal.reading.is_some(), "{:?}", proposal.reader_error);
+    let records = athena_core::store::Records::load(&fx.git, &fx.head()).unwrap();
+    let request = records.jobs[proposal.job.as_str()]
+        .request
+        .as_ref()
+        .unwrap();
+    assert_eq!(request.text, format!("try again on {stale}"));
+
+    // A landed job is still refused.
+    let again = athena
+        .ask("add a second greeting", &Lines::default())
+        .unwrap();
+    let landed = finished(
+        athena
+            .go(again.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(landed.state, OutcomeState::Landed, "{}", landed.reason);
+    let error = athena
+        .retry(again.job.as_str(), &Lines::default())
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("only a rejected or failed job"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn a_stale_job_whose_candidate_merges_cleanly_lands_on_retry_with_no_producer_run() {
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    let calls = scenario.invocations.clone();
+    let seen_by_verifier = scenario.seen_by_verifier.clone();
+    hand_edit_during_verification(&mut scenario, fx.root(), &[("src/lib.rs", LIB_BY_HAND)]);
+    let athena = fx.athena(scenario.script());
+    let stale = go_stale(&athena);
+    assert!(!fx.file("README.md").unwrap().contains("Hello, reader."));
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| **r == Role::Producer)
+            .count(),
+        1,
+        "the stale job ran the producer once"
+    );
+    let calls_mark = calls.lock().unwrap().len();
+    let verifier_mark = seen_by_verifier.lock().unwrap().len();
+
+    let (retry, f) = retry_and_go(&athena, &stale);
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+
+    // No producer ran for the retry; the merged tree was verified.
+    let roles = roles_since(&calls, calls_mark);
+    assert!(!roles.contains(&Role::Producer), "{roles:?}");
+    assert!(!roles.contains(&Role::Planner), "{roles:?}");
+    assert!(roles.contains(&Role::Verifier), "{roles:?}");
+
+    // The landed tree holds the candidate's change and the other change.
+    assert!(fx.file("README.md").unwrap().contains("Hello, reader."));
+    assert_eq!(fx.file("src/lib.rs").as_deref(), Some(LIB_BY_HAND));
+
+    // The verifier saw the merged tree: both changes.
+    let verifier_input = seen_by_verifier.lock().unwrap()[verifier_mark..].join("\n");
+    assert!(
+        verifier_input.contains("Hello, reader."),
+        "{verifier_input}"
+    );
+    assert!(verifier_input.contains("// by hand"), "{verifier_input}");
+
+    let records = athena_core::store::Records::load(&fx.git, &fx.head()).unwrap();
+    let old = &records.jobs[stale.as_str()];
+    let new = &records.jobs[retry.as_str()];
+    assert!(
+        new.invocations.iter().all(|i| i.role != Role::Producer),
+        "the retry records no producer invocation"
+    );
+    // Checks and replay ran on the merged candidate.
+    let candidate = new.candidate.as_ref().expect("a candidate record");
+    let verification = new.verification.as_ref().expect("a verification record");
+    assert!(!verification.checks.is_empty());
+    assert!(verification.checks.iter().all(|c| c.passed));
+    let replay = new.replay.as_ref().expect("a replay record");
+    assert_eq!(
+        Some(replay.candidate_commit.as_str()),
+        candidate.candidate_commit.as_deref()
+    );
+    assert_eq!(replay.base_commit, candidate.base_commit);
+    // The change list is against the retry's own base.
+    let changed: Vec<&str> = candidate.changes.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(changed, ["README.md"], "{changed:?}");
+
+    // The landing compares the fingerprint verified on the merged tree with the landed content.
+    let landed = f.landed_commit.clone().expect("a landed commit");
+    assert_eq!(
+        verification.verified_fingerprint,
+        athena_git::attrs::fingerprint(&fx.git, &landed, &candidate.base_commit).unwrap()
+    );
+    assert_ne!(
+        verification.verified_fingerprint,
+        old.verification.as_ref().unwrap().verified_fingerprint,
+        "the merged tree is not the content the stale job verified"
+    );
+    assert_ne!(
+        candidate.base_commit,
+        old.candidate.as_ref().unwrap().base_commit
+    );
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
+#[test]
+fn a_stale_job_whose_candidate_is_already_on_the_tip_fails_without_a_producer_run() {
+    // The other change already holds the candidate's content, so merging adds nothing to land.
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    let calls = scenario.invocations.clone();
+    hand_edit_during_verification(
+        &mut scenario,
+        fx.root(),
+        &[("src/lib.rs", LIB_BY_HAND), ("README.md", README_BY_JOB_A)],
+    );
+    let athena = fx.athena(scenario.script());
+    let stale = go_stale(&athena);
+    let calls_mark = calls.lock().unwrap().len();
+
+    let (_, f) = retry_and_go(&athena, &stale);
+    assert_eq!(f.state, OutcomeState::Failed, "{}", f.reason);
+    assert!(
+        f.reason.contains("already on the branch tip"),
+        "{}",
+        f.reason
+    );
+    let roles = roles_since(&calls, calls_mark);
+    assert!(!roles.contains(&Role::Producer), "{roles:?}");
+    assert!(!roles.contains(&Role::Verifier), "{roles:?}");
+    assert_eq!(fx.file("README.md").as_deref(), Some(README_BY_JOB_A));
+    assert_eq!(fx.file("src/lib.rs").as_deref(), Some(LIB_BY_HAND));
+}
+
+/// The text of two files in the producer's working directory when a producer call starts.
+type SeenInWorkdir = Arc<Mutex<Vec<(String, String)>>>;
+
+/// Wraps `scenario`'s script so that the first producer call edits README.md and src/lib.rs (job A's
+/// change), and the second, the retry's, edits src/lib.rs to `second` (or nothing) after recording what
+/// src/lib.rs and README.md held in its working directory.
+fn conflicting_script(
+    scenario: Scenario,
+    second: Option<&'static str>,
+) -> (athena_agent::fake::Script, SeenInWorkdir) {
+    let seen: SeenInWorkdir = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let producer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let script = scenario.script();
+    let wrapped: athena_agent::fake::Script = Box::new(move |spec| {
+        let mut turn = script(spec);
+        if spec.role == Role::Producer {
+            let n = producer_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                turn.edits = vec![
+                    ("README.md".into(), Some(README_BY_JOB_A.into())),
+                    ("src/lib.rs".into(), Some(LIB_BY_JOB_A.into())),
+                ];
+            } else {
+                let read =
+                    |p: &str| std::fs::read_to_string(spec.workdir.join(p)).unwrap_or_default();
+                record
+                    .lock()
+                    .unwrap()
+                    .push((read("src/lib.rs"), read("README.md")));
+                turn.edits = second
+                    .map(|text| vec![("src/lib.rs".to_string(), Some(text.to_string()))])
+                    .unwrap_or_default();
+            }
+        }
+        turn
+    });
+    (wrapped, seen)
+}
+
+/// A scenario whose reading lists both files that job A changes.
+fn two_file_scenario() -> Scenario {
+    let mut scenario = Scenario::default();
+    scenario.reading = reading(
+        &[("README.md", "modify"), ("src/lib.rs", "modify")],
+        &[
+            ("content", "README.md ends with a greeting line"),
+            ("behavior", "the tests still pass"),
+        ],
+    );
+    scenario
+}
+
+#[test]
+fn a_stale_job_whose_candidate_conflicts_goes_to_a_producer_retry_seeded_from_it() {
+    let fx = Fixture::new();
+    let mut scenario = two_file_scenario();
+    let calls = scenario.invocations.clone();
+    let seen_by_producer = scenario.seen_by_producer.clone();
+    hand_edit_during_verification(&mut scenario, fx.root(), &[("src/lib.rs", LIB_BY_HAND)]);
+    let (script, seen_in_workdir) = conflicting_script(scenario, Some(LIB_RESOLVED));
+    let athena = fx.athena(script);
+    let stale = go_stale(&athena);
+    let calls_mark = calls.lock().unwrap().len();
+    let briefs_mark = seen_by_producer.lock().unwrap().len();
+
+    let (retry, f) = retry_and_go(&athena, &stale);
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+
+    // One producer call for the retry, and a verification after it.
+    let roles = roles_since(&calls, calls_mark);
+    let producers: Vec<usize> = (0..roles.len())
+        .filter(|i| roles[*i] == Role::Producer)
+        .collect();
+    assert_eq!(producers.len(), 1, "{roles:?}");
+    assert!(
+        roles
+            .iter()
+            .skip(producers[0])
+            .any(|r| *r == Role::Verifier),
+        "{roles:?}"
+    );
+
+    // The producer started from the conflicted merge, not from the base: the candidate's README.md change
+    // was already there and src/lib.rs held conflict markers.
+    let seen = seen_in_workdir.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let (lib, readme) = &seen[0];
+    assert!(lib.contains("<<<<<<<") && lib.contains(">>>>>>>"), "{lib}");
+    assert!(
+        lib.contains("// job A") && lib.contains("// by hand"),
+        "{lib}"
+    );
+    assert_eq!(readme, README_BY_JOB_A);
+    // It was told which job went stale and which file to resolve.
+    let briefs = seen_by_producer.lock().unwrap();
+    let brief = &briefs[briefs_mark];
+    assert!(brief.contains(stale.as_str()), "{brief}");
+    assert!(brief.contains("src/lib.rs"), "{brief}");
+    assert!(brief.contains("went stale"), "{brief}");
+
+    // Landed: the candidate's change and the resolution, with no marker left.
+    assert_eq!(fx.file("README.md").as_deref(), Some(README_BY_JOB_A));
+    assert_eq!(fx.file("src/lib.rs").as_deref(), Some(LIB_RESOLVED));
+    let records = athena_core::store::Records::load(&fx.git, &fx.head()).unwrap();
+    let new = &records.jobs[retry.as_str()];
+    let candidate = new.candidate.as_ref().unwrap();
+    let verification = new.verification.as_ref().unwrap();
+    let landed = f.landed_commit.clone().unwrap();
+    assert_eq!(
+        verification.verified_fingerprint,
+        athena_git::attrs::fingerprint(&fx.git, &landed, &candidate.base_commit).unwrap()
+    );
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
+#[test]
+fn a_conflict_retry_whose_producer_leaves_the_conflict_unresolved_fails_before_the_checks() {
+    let fx = Fixture::new();
+    let mut scenario = two_file_scenario();
+    let calls = scenario.invocations.clone();
+    hand_edit_during_verification(&mut scenario, fx.root(), &[("src/lib.rs", LIB_BY_HAND)]);
+    let (script, _) = conflicting_script(scenario, None);
+    let athena = fx.athena(script);
+    let stale = go_stale(&athena);
+    let calls_mark = calls.lock().unwrap().len();
+    let tip_before = fx.file("src/lib.rs");
+
+    let (retry, f) = retry_and_go(&athena, &stale);
+    assert_eq!(f.state, OutcomeState::Failed, "{}", f.reason);
+    assert!(f.reason.contains("src/lib.rs"), "{}", f.reason);
+    assert!(f.reason.contains("unresolved"), "{}", f.reason);
+    let roles = roles_since(&calls, calls_mark);
+    assert_eq!(
+        roles.iter().filter(|r| **r == Role::Producer).count(),
+        1,
+        "{roles:?}"
+    );
+    assert!(
+        !roles.contains(&Role::Verifier),
+        "nothing was verified: {roles:?}"
+    );
+    let records = athena_core::store::Records::load(&fx.git, &fx.head()).unwrap();
+    let new = &records.jobs[retry.as_str()];
+    assert!(new.verification.is_none());
+    assert_eq!(fx.file("src/lib.rs"), tip_before, "nothing landed");
+    assert!(!fx.file("README.md").unwrap().contains("Hello, reader."));
+}
+
+#[test]
+fn a_stale_job_from_another_branch_is_retried_from_scratch() {
+    // The job went stale because `other` was checked out. Its candidate is not carried onto a branch it was
+    // not dispatched on: the retry on `other` is the ordinary producer retry.
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    let calls = scenario.invocations.clone();
+    switch_to_new_branch_during_verification(&fx, &mut scenario, true);
+    let athena = fx.athena(scenario.script());
+    let stale = go_stale(&athena);
+    assert_eq!(fx.git.current_branch().unwrap().as_deref(), Some("other"));
+    let calls_mark = calls.lock().unwrap().len();
+
+    let (_, f) = retry_and_go(&athena, &stale);
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    let roles = roles_since(&calls, calls_mark);
+    assert_eq!(
+        roles.iter().filter(|r| **r == Role::Producer).count(),
+        1,
+        "the producer ran: {roles:?}"
+    );
+    assert!(fx.file("README.md").unwrap().contains("Hello, reader."));
+}
+
 fn intervene_on_latest(athena: &athena_core::Athena) -> athena_data::RecordId {
     athena
         .intervene(
