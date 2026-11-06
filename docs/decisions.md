@@ -4309,3 +4309,17 @@ should replace those estimates with its figures.
   `crates/athena-core/src/reading.rs`, `crates/athena-core/src/disk.rs`, D08. Measured: the tests named above.
   Not measured: how many future changes will touch the two D08 paths, and whether authors will add the link or
   work around it.
+
+## D157 · The test that builds the snapshot fixture writes its script through a shared helper; D08 stands
+
+- **Case:** Tests that write a stand-in script and run it can fail with "Text file busy" when another test thread
+  forks while the writing test still holds the script open. The change adds `athena_git::script_writer` and
+  converts the test fixture `user_repo` in `crates/athena-git/src/snapshot.rs` to it, which touches a path D08
+  governs.
+- **Decision:** Amends D08 in prose only: D08 was checked for the `crates/athena-git/src/snapshot.rs` change and
+  stands. Only test code in that file changed; the snapshots, their throwaway repositories and the candidate
+  build are untouched.
+- **Alternatives:** None considered; the change is a test fixture edit.
+- **Tradeoff:** None for D08.
+- **Reversal cost:** Low; revert the fixture edit.
+- **Provenance:** Read: D08, D156, `crates/athena-git/src/snapshot.rs`.

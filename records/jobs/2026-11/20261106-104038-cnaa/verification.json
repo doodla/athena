@@ -1,0 +1,208 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261106-104038-cnaa",
+  "candidate_commit": "ead6ae070c806842093d3d742819620e89aa80fd",
+  "verified_fingerprint": "sha256:358e8cdbd9151c4f077cd3f8406ac11c9cf281a61f61a7660801d946719330fe",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42213223731 for ead6ae070c806842093d3d742819620e89aa80fd",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42213223731 for ead6ae070c806842093d3d742819620e89aa80fd",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42213223731 for ead6ae070c806842093d3d742819620e89aa80fd",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 4,
+  "criteria": [
+    {
+      "criterion": "A single shared helper exists that writes script bytes by spawning a child process (sh with bytes on stdin: cat to a tmp file, chmod 755, mv into place) and waits for it; the test process never opens the script for writing. Confirm by reading it.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read crates/athena-git/src/script_writer.rs. `write_executable(path, bytes)` spawns `sh -c 'cat > \"$1.writing\" && chmod 755 \"$1.writing\" && mv \"$1.writing\" \"$1\"'` with stdin piped, writes the bytes to the pipe, drops it, then calls `child.wait()` and asserts success. The calling process never opens the script path. The module doc explains ETXTBSY and why a child does the writing. It is exported as `pub mod script_writer` in athena-git/src/lib.rs.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Every test in the workspace that writes a file and then makes it executable (set_permissions, from_mode, set_mode, xtask set_executable, or an external chmod) calls the helper. This covers at least reading.rs, checks.rs, claude.rs, reconcile.rs, athena-git snapshot.rs and the xtask tests. Grep of test code finds no remaining write-then-chmod pairs. Production set_executable uses are untouched.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Grep of all *.rs files for set_permissions|from_mode|set_mode|set_executable|chmod, and for 0o7xx|.mode(|+x|PermissionsExt|#!/bin/sh. The only remaining hits are production code (toolconfig.rs, pin.rs, core snapshot.rs, athena-git snapshot.rs set_mode/restore, xtask set_executable at lines 415/490/550/807), chmod used as a policy string (policy.rs, cap-change lib.rs), and read-only mode assertions (pin.rs:650, athena-git snapshot.rs:537). The diff converts reading.rs stub_binary, checks.rs a_cargo_test_check_records_its_failing_tests_and_the_flag_it_ran_with, claude.rs stand_in, reconcile.rs world() (the fake gh), athena-git snapshot.rs user_repo, and xtask stand_in_claude and a_cached_gitleaks_is_skipped_only_when_it_reports_the_pinned_version. The diff does not touch production set_executable.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "A stress test runs many write-then-exec cycles through the helper while other threads fork, and asserts every exec succeeds.",
+      "kind": "content",
+      "met": true,
+      "evidence": "`many_write_then_exec_cycles_succeed_while_other_threads_fork` in script_writer.rs: 4 forker threads loop `Command::new(\"true\")` while 4 writer threads each do 100 cycles of write_executable then exec. Each exec is checked: it must spawn (panic otherwise), exit successfully, and print the expected stdout.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test` for the workspace. All tests pass, including the stress test and every converted test. Run `cargo clippy` (clean) and `cargo fmt --check`.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded fmt, clippy and test runs passed (CI run 42213223731 for ead6ae0). I ran these targeted tests myself and all passed: script_writer (2 tests, including the stress test), athena-git snapshot (14), athena-agent stand_in_tests (10), the checks.rs test (1), reading tests (130, including replay_binary_checker_runs_a_build_from_its_path_alone_and_parses_its_line, which uses stub_binary), xtask bin tests (69, including the repin tests and the gitleaks test), and reconcile (2).",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked",
+        "cargo test -p athena-git --lib script_writer",
+        "cargo test -p athena-git --lib snapshot",
+        "cargo test -p athena-agent --lib stand_in_tests",
+        "cargo test -p athena-core --lib a_cargo_test_check_records_its_failing_tests_and_the_flag_it_ran_with",
+        "cargo test -p athena-core --lib reading::tests::",
+        "cargo test -p xtask --bin xtask",
+        "cargo test -p athena-cli --test reconcile"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "No new test scans source text for patterns. The change adds no source-scanning test.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read the diff. The only new tests are the two in script_writer.rs. Both exercise the filesystem and exec; neither reads source files.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "docs/decisions.md has an appended entry saying D08 was checked for the crates/athena-git/src/snapshot.rs conversion and stands. docs/decision-links.toml has a matching `amended` [[link]] with older D08 and the new entry as newer. Its `line` matches the entry's phrase line in docs/decisions.md. Any other governed converted file is handled the same way.",
+      "kind": "content",
+      "met": true,
+      "evidence": "D157 is appended at line 4313. Line 4319 reads \"Amends D08 in prose only: D08 was checked for the `crates/athena-git/src/snapshot.rs` change and stands.\" decision-links.toml adds a [[link]] with line = 4319, older D08, newer D157, status amended. Both test runs pass, including the_decision_log_is_well_formed_and_only_appended_to and the_real_log_has_no_condition_a_finding_against_the_confirmed_list. No other converted file is under a [[governs]] entry: the only governs entry is D08 (snapshot.rs and candidate.rs).",
+      "commands": [
+        "cargo test -p athena-cli --lib decisions",
+        "cargo test -p athena-cli --test backtest"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Any new test file is listed in xtask/shard-timings.txt; otherwise that file is unchanged.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The stress test is in a module inside athena-git's existing lib target, so no new test file was added. xtask/shard-timings.txt is not in the diff.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "CHANGELOG.md has an entry that states only what the diff does: the helper, the converted tests and the stress test.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The CHANGELOG entry describes write_executable and how it works, lists the converted sites, describes the stress test (400 cycles on four threads with four forking threads, which matches 4×100 in the code), and notes the new athena-git dev-dependency of athena-agent. Every claim matches the diff.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The job report lists each converted call site by file and test name. Because the reader checks only the diff, the verifier compares that list with a Grep of the diff.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The job report is not in my snapshot. The CHANGELOG list names checks.rs (the test name), reading.rs (stub_binary), claude.rs (stand_in), reconcile.rs (the fake gh), snapshot.rs (user_repo) and xtask (stand_in_claude and the gitleaks test). That is 7 sites, and it matches the 7 write_executable call sites the diff adds outside script_writer.rs.",
+      "commands": [],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The test-only helper ships as a public module of the production athena-git library, with no feature gate.",
+      "evidence": "`pub mod script_writer;` has no cfg or feature gate, so every production build of athena-git exports a panicking test utility. The reading suggested a `test-support` feature, which would keep it out of the production API. It works as is.",
+      "location": "crates/athena-git/src/lib.rs:20",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stress test has no control run showing that a direct write followed by chmod fails under the same forking load.",
+      "evidence": "The test shows the helper survives 400 cycles under concurrent forks. It never shows the old pattern failing, so it cannot tell a fixed race apart from a race that did not happen in this run. The race is probabilistic, so a control would be flaky; this is acceptable but worth noting.",
+      "location": "crates/athena-git/src/script_writer.rs:71",
+      "source": "verifier"
+    },
+    {
+      "severity": "nit",
+      "summary": "The test-only retry in reading.rs check_stub is now redundant, and its doc comment describes a busy stub that can no longer occur.",
+      "evidence": "The comment says \"trying again while the freshly written stub is busy (a parallel test's fork can hold it)\". stub_binary now writes through the helper. The brief allowed removing test-only retry code made redundant, but did not require it.",
+      "location": "crates/athena-core/src/reading.rs:8187",
+      "source": "verifier"
+    },
+    {
+      "severity": "nit",
+      "summary": "user_repo now writes src/run.sh twice.",
+      "evidence": "The fixture list writes \"#!/bin/sh\\necho hi\\n\", then write_executable rewrites the same bytes. The behavior is correct; the content is just duplicated.",
+      "location": "crates/athena-git/src/snapshot.rs:509-516",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "pass",
+  "final_verdict": "pass",
+  "reasons": [],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "The change does what was asked. It adds `athena_git::script_writer::write_executable`, which writes a script through a short-lived `sh` child (cat to a temp file, chmod 755, mv into place) and waits for it, so the test process never holds the script open for writing. All 7 test sites that wrote a file and then made it executable now use it. I grepped every .rs file and found no remaining write-then-chmod pair in test code; the only other hits are production code (left alone) or policy strings. The stress test runs 400 write-then-exec cycles while four threads fork. It passed when I ran it, as did every converted test. The new D157 entry and its `amended` link (line 4319) satisfy D156, and the decision-log tests (the decisions lib tests and the backtest file) pass. No new test file was added, so shard-timings.txt is unchanged. The CHANGELOG lists each converted site and matches the diff. The job report itself is not in my snapshot. Every changed file is on the deliverables list. For the whole workspace I cited Athena's recorded fmt, clippy and test passes. The four findings are all minor or nits: the helper is a public, ungated module of the production athena-git crate; the stress test has no control run of the old pattern; a test-only retry in reading.rs is now redundant; and one fixture writes run.sh twice. Verdict: pass."
+}
