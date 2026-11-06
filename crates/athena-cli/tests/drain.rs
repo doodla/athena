@@ -7362,6 +7362,66 @@ mod parallel {
         jobs
     }
 
+    /// Six items in three waves: a, b, c are free; d needs a; e and f need d. Group sizes 3, 1, 2.
+    fn sized_three_one_two() -> Shared {
+        let mut plan = independent(&["a", "b", "c"]);
+        plan.push(planned("d", Ladder::Implementation, &["src/d.rs"], &["a"]));
+        plan.push(planned("e", Ladder::Implementation, &["src/e.rs"], &["d"]));
+        plan.push(planned("f", Ladder::Implementation, &["src/f.rs"], &["d"]));
+        Shared {
+            items: vec!["a", "b", "c", "d", "e", "f"],
+            plan,
+            ..Shared::default()
+        }
+    }
+
+    #[test]
+    fn group_sizes_are_recorded_with_a_bound_of_one() {
+        let report = run_with(&sized_three_one_two(), 1, 20.0);
+        assert_eq!(
+            report.plan_group_sizes,
+            [3, 1, 2],
+            "{:?}",
+            report.plan_groups
+        );
+        assert_eq!(report.unplanned, 0);
+    }
+
+    #[test]
+    fn group_sizes_are_recorded_with_a_bound_of_two() {
+        let shared = sized_three_one_two();
+        let report = run_with(&shared, 2, 20.0);
+        assert_eq!(
+            report.plan_group_sizes,
+            [3, 1, 2],
+            "{:?}",
+            report.plan_groups
+        );
+        assert_eq!(report.unplanned, 0);
+        assert_eq!(landed_jobs(&report).len(), 6);
+    }
+
+    #[test]
+    fn an_item_without_a_plan_entry_is_unplanned_and_not_a_group_of_one() {
+        let shared = Shared {
+            items: vec!["a", "b", "x"],
+            plan: independent(&["a", "b"]),
+            ..Shared::default()
+        };
+        let report = run_with(&shared, 1, 20.0);
+        assert_eq!(report.unplanned, 1);
+        assert_eq!(report.plan_group_sizes, [2], "{:?}", report.plan_groups);
+    }
+
+    #[test]
+    fn the_summary_prints_the_group_sizes_and_the_unplanned_count() {
+        let mut shared = sized_three_one_two();
+        shared.items.push("x");
+        let report = run_with(&shared, 2, 20.0);
+        let text = display::drain(&report);
+        assert!(text.contains("group sizes 3, 1, 2; unplanned 1"), "{text}");
+    }
+
     #[test]
     fn with_a_bound_of_one_items_run_strictly_in_plan_order_and_alone() {
         // c serves the higher rung, so the plan order is c, a, b; a and c share a group.

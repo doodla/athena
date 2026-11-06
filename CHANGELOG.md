@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The drain report now records how many items each plan group held when the run started (`plan_group_sizes`)
+  and how many queued items had no plan entry (`unplanned`, never counted as a group of one), for the
+  one-at-a-time and the parallel path alike. `athena drain`'s summary prints them as a `group sizes` line.
 - A change to code that a decision of `docs/decisions.md` governs now fails before the verifier starts unless the
   change reconciles the decision, and the `athena drain --help` ceiling is read from the constant that enforces
   it. Root cause: The decision log is prose with no link from a decision to the code or limit it governs, so

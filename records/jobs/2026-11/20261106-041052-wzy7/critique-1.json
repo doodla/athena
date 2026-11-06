@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-041052-wzy7",
+  "round": 1,
+  "at": "2026-11-06T05:04:32.62035525Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/display.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/display.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "In the conflict path, an unresolved merge is caught only by the checks, which miss many conflict types.",
+      "evidence": "candidate.rs 134-137: when a seeded retry's producer adds nothing, the seeded candidate goes on to admission, checks and the verifier. The plan's seed is the conflicted tree from `merge-tree --write-tree`. Its fix is that 'the checks (fmt, clippy, tests) run on the seeded, marker-filled tree and reject it.' That holds only for files the checks compile or test. Markers in Markdown, TOML text or other data files pass them. A modify/delete or rename conflict leaves no markers at all: merge-tree writes one side's version into the tree. So an unresolved merge can reach the verifier, and land if the verifier misses it. Fix: Treat a conflict seed as unresolved until the producer has changed every conflicted path. If the work tree still matches the seed (`Snapshot::unchanged_since_seed`), or any path in `StaleMerge::Conflict.paths` is unchanged from the seed or still holds marker lines, close the job failed before the checks run. Put this check in run/producer.rs or run/mod.rs where `seed_commit` is known. candidate.rs is governed by D08, so changing it would need a D156 reconciliation. Add a lifecycle test where the second producer call changes nothing. It should assert that the job closes failed, that no Verifier call is recorded and that the branch tip is unchanged.",
+      "location": "Risks, 4th bullet (conflict markers left in the seed); Steps 5-6 (Conflict seed); run/candidate.rs 134-150",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The conflict test does not show that the producer started from the kept candidate.",
+      "evidence": "The test checks three things: exactly one Producer call, that the brief names the conflicted path, and that the job lands with the resolved text. Producer call 2 writes the resolved text no matter what its work tree held. A plain retry from the new base, with a must-address line added to its brief, would pass all three assertions. The test also has no change outside the conflict, so 'seeded from the kept candidate' (criterion 3, and the request's 'runs the producer from the kept candidate') is never observed. Fix: Give the original candidate two changes: one that conflicts (src/lib.rs) and one that does not (for example README.md). Producer call 2 rewrites only src/lib.rs. Assert that the landed tree also has the README.md change, which is only possible if the work tree was seeded from the merge. Also have the scripted producer assert that src/lib.rs in its working directory holds the conflict markers when call 2 starts.",
+      "location": "Demonstrations, Criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 'nothing lands without a new verification' check is empty: `retry` never lands anything, with or without this change.",
+      "evidence": "`Athena::retry` only reads; it starts no run (reading.rs 1096-1102). An unchanged tip right after `retry` is therefore true on the base code too. Fix: Show instead that the retry job's Verifier call comes after its Producer call. Also show that the retry job's Verification `verified_fingerprint` equals the fingerprint of the landed commit against the retry job's base.",
+      "location": "Demonstrations, Criterion 3 ('Right after retry (before go) the branch tip is unchanged')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A job can also be stale because the user checked out another branch, and the plan's analysis does not cover that case.",
+      "evidence": "close.rs 273-289 records Plan::OtherBranch as a Stale outcome when the checked-out branch holds the job's records. The reason reads 'the job was dispatched on branch `X`, but branch `Y` is checked out' (land.rs 85-88). With this plan, `athena retry` would merge that candidate onto Y's tip and land it there with no producer run. That is a different situation from 'the other job landed first'. Fix: Choose one behaviour and test it. Either take the clean-merge path only when the stale job's `dispatch_branch` equals the current branch, and fall back to a plain retry otherwise. Or state that the retry lands on the current branch, and add that to D157 and the CHANGELOG.",
+      "location": "Dependents, 'Parallel jobs that can make a verified job stale'; close.rs 273-289",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "When the merge gives the tip's own tree, the plan falls back to a full producer retry of work that has already landed.",
+      "evidence": "In that case `stale_retry` returns None, so the job takes the ordinary path and the producer runs from the base. That repeats the whole producer run, which is the cost the request wants to avoid, for a change that is already on the tip. Fix: Close the retry job without a producer run, with a reason saying its candidate's content is already on the tip. Or refuse it at dispatch with that message. Test the case.",
+      "location": "Risks, 2nd bullet (merged tree equals the tip)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The name of the boundary-scan test is a guess, though the code says where it lives.",
+      "evidence": "The plan runs `cargo test -p athena-cli --test boundary (if present under that name)`. The system facts place the boundary scan in `boundary_words()` in xtask/tests/policy.rs. Fix: Run the xtask policy tests, for example `cargo test -p xtask --test policy`, or rely on `cargo test --workspace --locked` and say that it includes them.",
+      "location": "Demonstrations, Criterion 8",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The dependents list leaves out crates/athena-cli/tests/retry.rs, which checks the refusal message.",
+      "evidence": "retry.rs 383-396 (`a_job_that_is_not_rejected_or_failed_is_refused`) asserts that the error contains 'only a rejected or failed job can be tried again'. The plan keeps that prefix, so the test still passes, but the list does not name it. Fix: Add retry.rs to the dependents entry. Consider putting `retry_accepts_a_stale_job` in tests/retry.rs, next to the other retry acceptance tests.",
+      "location": "Dependents, refusal of a stale job",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code by reading it; I ran nothing. Its main claims hold. `Athena::retry`, `earlier_attempt_with` (reading.rs 1362-1374), `tree_seed` and `resume_seed`, `resume_candidate` (run/mod.rs 522-650), the seed wiring in `dispatch` (909-1076), `BaseThenTree` (producer.rs 116-125), `plan()` and its fingerprint check (land.rs 70, 139), `Git::merge_tree` (lib.rs 663) and the lifecycle fixtures (`during_verification`, `invocations`, `seen_by_producer`) all exist and behave as the plan says. The drain retries only Rejected, Failed and TimedOut jobs (drain.rs 1654-1658), so accepting Stale in `earlier_attempt_with` does not make the drain re-verify stale jobs on its own. The fingerprint rule stays enforced in code. No `[[governs]]` path is touched: only D08 has one, on snapshot.rs and candidate.rs. Two problems need a revision. (1) In the conflict path, an unresolved merge is caught only by the checks. A producer that changes nothing keeps the seeded tree, so a conflict in a non-code file, or a modify/delete conflict with no markers, passes the checks and reaches the verifier unresolved. (2) The criterion-3 test does not show that the producer started from the kept candidate. The assertions it names would also pass for a plain retry whose brief carries a must-address line. Smaller points: the stale job could be one whose branch was switched, the 'tip is unchanged after retry' check proves nothing, the boundary-scan test name is guessed, and the empty-merge fallback runs a full producer retry. Athena's display.rs scope finding still stands."
+}

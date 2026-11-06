@@ -711,6 +711,20 @@ pub fn drain(report: &crate::drain::Report) -> String {
             }
         );
     }
+    if !report.plan_group_sizes.is_empty() || report.unplanned > 0 {
+        let sizes = report
+            .plan_group_sizes
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "plan        group sizes {}; unplanned {}",
+            if sizes.is_empty() { "none" } else { &sizes },
+            report.unplanned
+        );
+    }
     for r in &report.refused {
         let _ = writeln!(out, "refused     {} · {}: {}", r.id, r.title, r.reason);
     }

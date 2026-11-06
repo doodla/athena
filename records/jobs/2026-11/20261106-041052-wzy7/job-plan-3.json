@@ -1,0 +1,522 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261106-041052-wzy7",
+  "round": 3,
+  "at": "2026-11-06T05:15:22.922047121Z",
+  "invocation_seq": 6,
+  "approach": "Make `Athena::retry` accept a Closed(Stale) job. In `dispatch` (run/mod.rs) a new `stale_retry` step runs when no other seed applies. It reads the stale job's kept candidate and base from its records and merges the candidate onto the current tip once, before any producer call, with `land::merge_kept_candidate`. That function is backed by a new `Git::merge_tree_report` (`merge-tree --write-tree --name-only -z`), which keeps a conflicted tree and its unquoted paths. The step applies only when the stale job's `dispatch_branch` equals the checked-out branch and both commits still exist; the ancestry condition of the last plan is dropped (finding 6). Otherwise the retry is the ordinary producer retry from the base. Clean merge: reuse `resume_candidate` with no planner and no producer. It re-merges against the prediction commit, builds the candidate from the merged tree, recomputes the change list and fingerprint, then runs admission, `check_and_verify` (checks, replay, verifier) and the unchanged `plan()` landing. A merge that adds nothing to the tip closes the job failed with a reason and no producer run. Conflict: the conflicted tree is committed as a seed and a producer retry starts from it through the existing `TreeRetrySeed` / `BaseThenTree` path. A gate between `producer_loop` and `candidate_stage` closes the job failed, before any check or verifier, if any conflicted path is unchanged from the seed or still holds marker lines. `plan()` and its fingerprint-equality bail are untouched. Also in this revision: README.md line 76 is updated; drain.rs:1654 stays unchanged and gets a test; the clean-merge test now observes the Replay record and what the verifier saw. D157 reverses alternative (d) of D10 and records what a clean-merge verifier does not get and what a failed conflict retry costs.",
+  "decisions": [
+    {
+      "choice": "Decide clean-vs-conflict at dispatch time on `head`, before the dispatch commit, in `land::merge_kept_candidate(git, old_base, tip, old_candidate)`. `resume_candidate` redoes the merge against the prediction commit P to build the tree.",
+      "reason": "The seed choice (resume vs seeded producer) fixes the brief that goes into the prediction commit, so it must come first. P differs from `head` only under records/, and an admitted candidate changes nothing there, so the second merge cannot newly conflict; if it does, the job closes failed with a reason and nothing lands unverified.",
+      "rejected": [
+        {
+          "option": "Decide inside `Athena::retry` at reading time",
+          "why": "The tip can move between `retry` and `go`; `go` must decide on the tip it dispatches on. `retry` only needs to accept the job."
+        },
+        {
+          "option": "Re-apply the old candidate's diff onto the new base, as `resume_candidate` does today",
+          "why": "That overwrites the other job's changes to the same files. Only a three-way merge keeps both."
+        }
+      ]
+    },
+    {
+      "choice": "Add `Git::merge_tree_report(base, ours, theirs) -> MergeReport { tree, conflicts }` using `git merge-tree --write-tree --name-only -z --merge-base=<base>`. Parse by splitting stdout on NUL: first field is the tree (trim any newline), the following non-empty fields are conflicted paths, the first empty field ends them. Exit 1 still returns the tree and paths; any other exit is an error. Leave `merge_tree` (athena-git lib.rs:663) unchanged.",
+      "reason": "Answers finding 3: without `-z` git C-quotes paths with spaces, quotes or non-ASCII characters, so the gate's `snapshot.dir().join(path)` and `show_file(seed, path)` would look up a different path and wrongly count a missing file as unchanged. `merge_tree` returns None on a conflict and drops the tree; the producer seed needs the tree and paths. The flags need git 2.38 or later; D19 pins 2.40 and the unit test uses the exact flags.",
+      "rejected": [
+        {
+          "option": "Parse newline output of `--name-only` without `-z`",
+          "why": "Quoted paths for unusual file names break the gate (finding 3)."
+        },
+        {
+          "option": "Seed from the old candidate commit as `tree_seed` does for a rejected job",
+          "why": "`BaseThenTree` would restore that commit's whole tree and undo the other job's landing; `tree_seed` refuses exactly that case (mod.rs 477-480)."
+        },
+        {
+          "option": "On a conflict, plain retry from the new base with no seed",
+          "why": "The request says to run the producer from the kept candidate; dropping it repeats the whole producer run."
+        }
+      ]
+    },
+    {
+      "choice": "Build the clean path's `ResumeMark` from the stale job's committed Candidate and Verification records (stage Checks, empty check_runs). `report_gaps` and `left_criteria` stay empty, and D157 says so with the reason below.",
+      "reason": "Answers finding 4. `report_gaps` and `left_criteria` exist only in `ResumeMark` (state.rs:491-493) and `Built` (producer.rs:31-35), which feed verification.rs:100-123 as notes to the verifier. I found no committed record that holds them, so they cannot be rebuilt from records. They describe the original producer report, which the verifier already judged when the stale job passed verification; the merged candidate is checked and verified afresh against its criteria. `settle_resume_marks` removes a job's mark when it closes with any outcome but an environment failure, so a stale job has none and the committed records are the only durable source.",
+      "rejected": [
+        {
+          "option": "Keep the resume mark when a job goes stale, so the gaps survive",
+          "why": "It changes close-time bookkeeping for every job, and the mark would describe the old tree."
+        },
+        {
+          "option": "Add a new record to carry the gaps",
+          "why": "A schema change for a note the verifier already weighed; outside the listed files."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the conflict gate between `producer_loop` and `candidate_stage` (run/mod.rs ~1497) instead of folding unresolved paths into the producer's send-back. `RunContext` gains `seeded_conflicts: Vec<String>` (empty for every other job). `unresolved_conflicts(ctx, &snapshot)` flags a path whose bytes in `snapshot.dir()` equal `git.show_file(seed_commit, path)` (missing on both sides counts as unchanged) or that `land::has_conflict_markers` flags (a line starting `<<<<<<< ` or `>>>>>>> `). A flagged path calls `self.failure(ctx, reason)` naming the paths, with no checks and no verifier. D157 and the risks state that a failed conflict retry loses the kept candidate on a later `athena retry`, because the failed job matches neither `qualifies_for_tree_retry` (Rejected only) nor `resumable_job`.",
+      "reason": "Answers finding 5. Folding the paths into the existing send-back (producer.rs:262-341) is the better design, but producer.rs is outside the listed files; it is raised as an open question. The gate fits where the seed commit and snapshot are both known, and candidate.rs (governed by D08) stays untouched. Markers in non-compiled files pass the checks, and modify/delete or rename conflicts leave no markers, so a per-path 'the producer touched this and removed the markers' rule is the sound one. `Snapshot::unchanged_since_seed` covers the whole tree and core never calls it.",
+      "rejected": [
+        {
+          "option": "Fold the unresolved paths into the producer's one send-back (producer.rs)",
+          "why": "Better for the user but widens the change to an unlisted file; left as a user question."
+        },
+        {
+          "option": "Rely on the checks to reject marker-filled trees",
+          "why": "They miss Markdown, TOML and data files, and modify/delete conflicts that leave no markers."
+        },
+        {
+          "option": "Edit candidate.rs 134-150",
+          "why": "Governed by D08; would need a D156 reconciliation."
+        },
+        {
+          "option": "Let a producer keep a seeded version of a conflicted path unchanged",
+          "why": "The rule cannot tell that from an unresolved conflict, so such a retry fails with a reason naming the path. The cost is a failed retry, not a wrong landing."
+        }
+      ]
+    },
+    {
+      "choice": "`stale_retry` applies only when the stale job's `dispatch_branch` (records.rs:633; recorded at mod.rs:1031) is non-empty and equals `self.git.current_branch()`, and `rev_parse` finds both the candidate and base commits. The ancestry condition `is_ancestor(old_base, head)` is dropped. Otherwise it returns None and the retry is the ordinary producer retry from the base.",
+      "reason": "Answers finding 6. `merge-tree --merge-base=<old_base>` applies the candidate's change from old_base onto any head, so ancestry is not needed for the merge to be correct; the later `plan()` still requires the new base to be an ancestor of the landing head, and the new job's base is the tip. Dropping it means a job made stale by a non-ancestor base (land.rs:97-100) also benefits. The branch condition stays: a job can be stale because another branch was checked out (close.rs 273-289, Plan::OtherBranch), and landing its candidate onto that branch with no producer run is a different act. A missing commit cannot be merged. D157 and the CHANGELOG name these two fallback cases (other branch checked out; kept candidate or base commit gone) instead of 'any other stale job'.",
+      "rejected": [
+        {
+          "option": "Keep the ancestry gate",
+          "why": "No concrete reason: the merge is correct without it, and it sends one of the two stale causes back to a full producer run."
+        },
+        {
+          "option": "Merge onto whatever branch is checked out and document it",
+          "why": "It lands a candidate on a branch it was never dispatched on, unverified in that context."
+        }
+      ]
+    },
+    {
+      "choice": "When the merge of the kept candidate onto P gives P's own tree, `resume_candidate` closes the retry job failed, with no producer run, with the reason 'the kept candidate's content is already on the branch tip (job <stale>)'.",
+      "reason": "A plain retry would repeat the whole producer run for work that already landed, the cost this change exists to avoid.",
+      "rejected": [
+        {
+          "option": "Return None from `stale_retry` and run a producer retry from the base",
+          "why": "It repeats the producer run for work already on the tip."
+        }
+      ]
+    },
+    {
+      "choice": "Reuse `TreeRetrySeed` and the producer brief's existing fields for the conflict retry: `unmet` and `findings` empty, one redacted `must_address` line naming the stale job and the conflicted paths. briefs.rs is not touched.",
+      "reason": "Keeps the change inside the listed files; the must-address line states the real situation.",
+      "rejected": [
+        {
+          "option": "Add a stale-specific section to `retry_section` in athena-context",
+          "why": "A prompt-text change outside the listed files; left as a user question."
+        }
+      ]
+    },
+    {
+      "choice": "Leave `plan()` in land.rs and the Plan::Stale arms in close.rs unchanged. The retry is a new job with a fresh `Verified` (new base, candidate, fingerprint), so the existing equality bail (land.rs 136-142) enforces 'verified content equals landed content'.",
+      "reason": "What makes a job stale is out of scope.",
+      "rejected": [
+        {
+          "option": "Re-land the old stale job in place from `retry_landing`",
+          "why": "Its Verified fingerprint is for the old tree; landing the merged tree under it is exactly what the fingerprint rule refuses."
+        }
+      ]
+    },
+    {
+      "choice": "Update README.md line 76 (the `athena retry` row) to say a stale job can also be tried again, in one sentence, and add README.md to the files. Do not edit display.rs; its stale `next` hint ('ask again') stays true and lifecycle.rs:2090 asserts it.",
+      "reason": "Answers finding 2. README.md:76 documents the retry command as 'Try a rejected or failed job again'; leaving it would make the documentation wrong. It is documentation of the retry command, so it belongs to the change. It is raised as a user question because the brief's list omits it.",
+      "rejected": [
+        {
+          "option": "Leave README.md stale",
+          "why": "The documented behaviour of the command would be incomplete."
+        },
+        {
+          "option": "Edit the display.rs hint to name `athena retry`",
+          "why": "Widens scope beyond the listed files; the hint is still accurate."
+        }
+      ]
+    },
+    {
+      "choice": "Leave the drain's own copy of the rule at drain.rs:1654-1657 (`retry: matches!(other, Some(Rejected | Failed | TimedOut))`) unchanged, and add a drain test that a stale job is not retried by the drain.",
+      "reason": "Answers finding 2. That guard is what keeps a stale job from being retried automatically, which is out of scope. A stale outcome falls into the `other` arm with `retry: false`.",
+      "rejected": [
+        {
+          "option": "Add Stale to the drain's retry set",
+          "why": "Automatic re-verification is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Put the end-to-end tests in tests/lifecycle.rs, and the drain no-retry test in tests/drain.rs. The conflict tests conflict on src/lib.rs line 1, the governed file the stale fixture already edits.",
+      "reason": "The stale fixture style (hook commits during verification) lives at lifecycle.rs:2027 and the same `during_verification` hook is used in drain.rs:4876. The realistic conflict in this repository is two jobs each adding a bullet at the top of CHANGELOG.md or docs/decisions.md (plan.rs:461 names them as shared append-only files); that is stated in the risks and D157. Making the fixture conflict on a CHANGELOG would need a new fixture file for no extra logic coverage.",
+      "rejected": [
+        {
+          "option": "New tests in retry.rs",
+          "why": "Not a listed deliverable; the stale fixture is in lifecycle.rs. retry.rs `a_job_that_is_not_rejected_or_failed_is_refused` (383-396) uses a proposed job with no outcome and stays valid."
+        }
+      ]
+    },
+    {
+      "choice": "docs/decisions.md: append D157 at the end in the D156 layout, and append ' Reversed by D157: stale landings now recur with parallel jobs.' to the same line 297. Avoid the phrases 'superseded by', 'supersedes' and 'amends' followed by a D-number.",
+      "reason": "`athena backtest` condition (a) matches those phrases and compares hits with docs/decision-links.toml line numbers. Appending at the end and keeping line 297 one line shifts no `line =` entry.",
+      "rejected": [
+        {
+          "option": "Add a [[link]] D10 to D157 in docs/decision-links.toml",
+          "why": "A governance-adjacent file, not a listed deliverable, and not needed when no phrase is parsed."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `MergeReport { tree, conflicts }` and `Git::merge_tree_report` (`merge-tree --write-tree --name-only -z`, NUL-split parse; exit 1 returns the conflicted tree and paths). `merge_tree` untouched. Unit tests: clean, conflict, and a conflicted path containing a space and a non-ASCII character returned unquoted.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "purpose": "Add `StaleMerge { Clean(tree) | Conflict { tree, paths } }`, `merge_kept_candidate` and `has_conflict_markers` with unit tests (clean, conflict, merged-tip fingerprint, markers). Extend the module header comment. `plan()` unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "`earlier_attempt_with` accepts Closed(Stale) and its error text lists it, keeping the 'only a rejected or failed job' prefix. Add `stale_candidate(records, request)`. Update the `retry` doc comment and unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "`ResumeSeed.merged`; `stale_retry` (dispatch-branch and commit-exists gates; Clean or Conflict); `RunContext.seeded_conflicts`; the conflict gate between `producer_loop` and `candidate_stage`; the merged branch and already-on-tip rule in `resume_candidate`; wiring in `dispatch`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "purpose": "No logic change planned: Plan::Stale/OtherBranch arms and `retry_landing` stay as they are. Listed in the brief; touched only if a doc comment on the stale outcome needs to name the retry. If nothing needs saying it is left unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Core-level test that a conflict-seeded retry's `RunContext` and gate behave as the lifecycle tests expect, only if a lifecycle assertion cannot reach it; otherwise unchanged.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Update the `Retry` command's doc comment (help text): a stale job can be retried; what happens on a clean merge, on a conflict, and on a different checked-out branch.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "purpose": "End-to-end tests: `retry_accepts_a_stale_job`, the clean-merge landing (zero Producer entries, Replay record, verifier input), the already-on-tip failure, the seeded conflict retry, the unresolved-conflict failure, and the other-branch plain retry.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "One test: `a_stale_job_is_not_retried_by_the_drain`, so drain.rs:1654 stays unchanged and covered.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "Line 76: the `athena retry` row says a stale job can be tried again too (one sentence). Not in the brief's list; see the open question.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D157, which reverses alternative (d) of D10, and add a same-line 'Reversed by D157' note at line 297, adding no lines.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet under `[Unreleased]` / `### Added` describing exactly what the diff does.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read crates/athena-git/src/lib.rs `merge_tree` (~663) and its exit helper. Add `MergeReport { tree: String, conflicts: Vec<String> }` and `Git::merge_tree_report(base, ours, theirs)`, which runs `merge-tree --write-tree --name-only -z --merge-base=<base> <ours> <theirs>`. Split stdout on NUL: the first field (trim a trailing newline) is the tree; following non-empty fields up to the first empty field are conflicted paths (none on exit 0). Exit 0 and 1 both return a report; any other exit is an error. Tests beside `merge_tree_detects_conflicts` (~1440): clean; conflict (tree readable with `show_file`, holds markers, path listed); a conflict on `a file é.txt` returns that exact unquoted path.",
+    "In land.rs add `pub enum StaleMerge { Clean(String), Conflict { tree: String, paths: Vec<String> } }`, `pub fn merge_kept_candidate(git, old_base, tip, old_candidate) -> Result<StaleMerge>` over `merge_tree_report`, and `pub fn has_conflict_markers(bytes: &[u8]) -> bool` (a line starting `<<<<<<< ` or `>>>>>>> `). Update the module header comment: `athena retry` can merge a stale job's kept candidate onto the tip; `plan()` is unchanged.",
+    "Add land.rs tests with the existing `base_and_candidate()` / `commit()` / `pass()` helpers: (a) `a_kept_candidate_merged_onto_a_moved_tip`: the base moves on another file; `merge_kept_candidate` returns Clean; a commit on the new tip with that tree and a `Verified` built from `fingerprint(git, tree, new_base)` gives `Plan::Tree`; the same with the original candidate's fingerprint returns Err. (b) The base moves on the same lines: Conflict, with the path. (c) `has_conflict_markers`: a marker line, markdown `=====` underlines and prose that merely mentions the marker text.",
+    "In reading.rs add `OutcomeState::Stale` to the `matches!` in `earlier_attempt_with` (~1362-1368). Change the message to 'only a rejected or failed job can be tried again (so can a timed out or stale one), or one that was interrupted', keeping the existing prefix. Add `pub fn stale_candidate(records, request) -> Option<(JobId, Candidate)>` beside `tree_retry_seed` (~1707); it returns Some only for a Closed(Stale) job whose Candidate has a commit and no violations and whose Verification passed. Update the `Athena::retry` doc comment (~1096). In the tests, drop `Stale` from the refusal loop (~4655) and add `a_stale_job_can_be_tried_again` and `stale_candidate` unit tests (accepts Stale; refuses Rejected, a missing commit, violations).",
+    "In run/mod.rs add `merged: bool` to `ResumeSeed` (false in `resume_seed`, ~514) and `seeded_conflicts: Vec<String>` to `RunContext` (~1120, empty by default). Check every existing construction of both.",
+    "Add `enum StaleRetry { Clean(ResumeSeed), Conflict { seed: TreeRetrySeed, paths: Vec<String> } }` and `fn stale_retry(&self, records, request, redactor, head) -> Result<Option<StaleRetry>>`. It calls `stale_candidate` and returns None unless the stale job's `dispatch_branch` is non-empty and equals `self.git.current_branch()?` and `rev_parse` finds both the candidate and base commits (no ancestry test). It runs `merge_kept_candidate(old_base, head, old_commit)`. Clean builds a `ResumeMark` from the records (stage Checks; empty `check_runs`, `report_gaps`, `left_criteria`; `base_commit` = candidate.base_commit) and returns `ResumeSeed { merged: true, .. }`. Conflict commits the conflicted tree with `commit_tree(tree, [head], ...)` and builds a `TreeRetrySeed` (`candidate_commit` = that commit, empty `unmet` and `findings`, one redacted `must_address` line naming the stale job and the conflicted paths and telling the producer to resolve every marker).",
+    "Wire it into `dispatch` (~909-921): `retry_seed = tree_seed(..)?`, else the Conflict seed when `pinned.is_none()`; `resume_from = resume_seed(..)?`, else the Clean seed when `pinned.is_none()`. Pass the conflicted paths into `RunContext.seeded_conflicts`. The existing `seed_commit`, `retry_from` and `resume_from` code (~963, 1064, 1073) carries the rest.",
+    "In `resume_candidate` (~522), when `seed.merged`: compute `tree = git.merge_tree(&mark.base_commit, &p, &old_commit)?`. On None, set `closing.happened = self.failure(ctx, \"the kept candidate no longer merges onto the dispatch commit\")` and return `Ok(closing)`. If `tree == git.tree_of(&p)?`, fail with 'the kept candidate's content is already on the branch tip (job <stale>)' and return. Otherwise take the `Changed` list and `candidate.changes` from `diff_tree(&p, &tree)` (same `ChangeEntry` shape as candidate.rs 84-89), commit the tree on `p`, recompute the fingerprint, and print a line saying the candidate merged cleanly onto the tip with no planner or producer run. The non-merged branch stays exactly as it is. Replay still runs inside `check_and_verify` (`replay_stage`, ~1774) with `loop_replay: None` (~646); step 15 asserts the Replay record.",
+    "Add the conflict gate in the stage chain at ~1497, after `producer_loop` returns `Reported` and before `candidate_stage`. When `ctx.seeded_conflicts` is non-empty, call a new `unresolved_conflicts(ctx, &snapshot)`: for each path compare `std::fs::read(snapshot.dir().join(path)).ok()` with `self.git.show_file(seed_commit, path)?` and run `has_conflict_markers` on the file. If any path is flagged, set `closing.happened = self.failure(ctx, ...)` naming the paths and return `Ok(closing)`. Only the seeded-conflict job takes this branch.",
+    "In main.rs update the `Retry` doc comment (~44): a stale job can be retried; clean merge lands re-verified with no producer run; a merge adding nothing fails the retry; a conflict starts a producer retry from the conflicted tree; a job whose dispatch branch is not checked out, or whose kept commits are gone, is retried from the base.",
+    "In tests/lifecycle.rs add six tests on the stale fixture style (hook commit during verification, `Scenario.invocations`, `seen_by_producer`, `seen_by_verifier`) and, for the conflict tests, a wrapper `Script` around `Scenario::script()` that reads `spec.workdir` and overrides `FakeTurn.edits` for the second Producer call only: `retry_accepts_a_stale_job`; `a_stale_job_whose_candidate_merges_cleanly_lands_on_retry_with_no_producer_run`; `a_stale_job_whose_candidate_is_already_on_the_tip_fails_without_a_producer_run`; `a_stale_job_whose_candidate_conflicts_goes_to_a_producer_retry_seeded_from_it`; `a_conflict_retry_whose_producer_leaves_the_conflict_unresolved_fails_before_the_checks`; `a_stale_job_from_another_branch_is_retried_from_scratch`.",
+    "In the clean-merge test also load `Records::load(&fx.git, &fx.head())` and assert: a Replay record exists for the retry job; its `candidate_commit` equals the retry job's Candidate `candidate_commit` (the merged commit) and its `base_commit` equals that Candidate's `base_commit` (the prediction commit); and `seen_by_verifier` contains both A's README.md greeting and the hand edit to src/lib.rs.",
+    "In tests/drain.rs add `a_stale_job_is_not_retried_by_the_drain`: use the `during_verification` hook (drain.rs:4876 shows its use) to commit a governed change and an intervention record so the drained job closes stale, run the drain as the neighbouring tests at drain.rs:1562 and 1580 do, and assert the job's outcome is stale and no job whose request starts 'try again on' exists afterwards. drain.rs:1654-1657 is not edited.",
+    "Edit README.md line 76: append to the `athena retry` row that a stale job can also be tried again: its candidate is merged onto the tip and re-verified there when it merges cleanly.",
+    "Append D157 to docs/decisions.md in the D156 layout (Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance). State that it reverses alternative (d) 'Automatic re-verification on the new base' of D10 because stale landings now recur with parallel jobs. Record: the dispatch-branch condition and the commit-exists condition (no ancestry condition, and why); the already-on-tip failure; the conflict gate and that a failed conflict retry loses the kept candidate on a later retry; that the clean-merge verifier does not get the original `report_gaps` and `left_criteria` (held only in the resume mark, which a closed job no longer has) and why that is acceptable; that two jobs adding a bullet at the same place in CHANGELOG.md or docs/decisions.md will usually take the conflict path and a union merge for append-only files is a separate request. Say what stays: the fingerprint rule and no automatic re-verification. Append ' Reversed by D157: stale landings now recur with parallel jobs.' to line 297 without adding a line; avoid 'superseded by', 'supersedes' and 'amends' followed by a D-number.",
+    "Add the CHANGELOG bullet under `[Unreleased]` / `### Added` in the style of its neighbours: `athena retry` accepts a stale job; when its dispatch branch is checked out and the kept commits exist it merges the candidate onto the tip; a clean merge re-runs checks, replay and verification and lands with a new fingerprint without a producer run; a merge that adds nothing fails the retry; a conflict starts a producer retry from the conflicted tree and fails before the checks if a conflicted path is unchanged or holds markers; a stale job from another checked-out branch, or one whose kept commits are gone, is retried from the base; `Git::merge_tree_report`; root cause; D157; README row.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`, then `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-cli --test backtest`, `cargo test -p athena-cli --test drain a_stale_job_is_not_retried_by_the_drain` and `cargo test -p xtask --test policy`, and fix what they show."
+  ],
+  "risks": [
+    {
+      "risk": "The merge at `head` is clean but the merge against the prediction commit P (head plus dispatch records) conflicts.",
+      "mitigation": "`resume_candidate` redoes the three-way merge against P. On a conflict it calls `self.failure(ctx, ...)` and returns, so the job closes failed and nothing lands. An admitted candidate changes nothing under records/, so P's records-only difference cannot conflict."
+    },
+    {
+      "risk": "A clean merge whose result equals the tip (the other job landed the same change) gives an empty candidate.",
+      "mitigation": "`resume_candidate` compares the merged tree with `tree_of(P)` and closes the job failed with 'the kept candidate's content is already on the branch tip (job X)', with no producer run. The `..._already_on_the_tip_...` lifecycle test covers it."
+    },
+    {
+      "risk": "The kept candidate or base commit was garbage collected, or the stale job's dispatch branch is not the checked-out branch.",
+      "mitigation": "`stale_retry` returns None when `rev_parse` cannot find either commit or the branch differs; the job then runs an ordinary retry from the base, which is no worse than today. The other-branch lifecycle test covers the branch case. There is no ancestry gate: the three-way merge uses the recorded base explicitly, and `plan()` still requires the new base to be an ancestor at landing."
+    },
+    {
+      "risk": "A producer leaves a conflict unresolved: markers in a non-compiled file, or a modify/delete or rename conflict with no markers.",
+      "mitigation": "The gate before `candidate_stage` closes the job failed, naming the paths, if any conflicted path is unchanged from the seed or still holds marker lines. No check or verifier runs on it. The unresolved-conflict lifecycle test covers it."
+    },
+    {
+      "risk": "The gate fails a retry where the producer correctly keeps a conflicted path as seeded (for example keeps the modified side of a modify/delete conflict).",
+      "mitigation": "A deliberate cost, not a wrong landing; the reason names the path and D157 records the rule."
+    },
+    {
+      "risk": "A failed conflict retry loses both the kept candidate and the producer's work: the failed job has no Candidate record and a later `athena retry` on it starts from the base (it matches neither `qualifies_for_tree_retry` nor `resumable_job`).",
+      "mitigation": "Stated in D157. The better design, folding the paths into the producer's single send-back, needs producer.rs and is raised as an open question. The user can still run `athena retry` on the original stale job again, which merges the candidate afresh."
+    },
+    {
+      "risk": "Parallel jobs in this repository usually both add a bullet at the top of CHANGELOG.md or docs/decisions.md (plan.rs:461 lists them as shared append-only files), so the usual stale retry will take the conflict path and a producer run, not the clean no-producer path.",
+      "mitigation": "Stated in D157 and this plan so users are not surprised. The conflict path still seeds the producer from the conflicted tree. A union merge for append-only files is a separate request."
+    },
+    {
+      "risk": "The clean-merge verifier does not receive the original producer's `report_gaps` and `left_criteria`.",
+      "mitigation": "They are held only in the resume mark, which a closed job no longer has; the stale job's verification already passed with them, and the merged tree is checked and verified afresh. D157 states this."
+    },
+    {
+      "risk": "Someone later adds Stale to the drain's retry set and the drain retries stale jobs automatically.",
+      "mitigation": "drain.rs:1654 stays unchanged and `a_stale_job_is_not_retried_by_the_drain` fails if a retry job appears."
+    },
+    {
+      "risk": "The brief's heading misdescribes the conflict retry's starting point (the producer brief's retry section heads a seeded retry as a rejected candidate).",
+      "mitigation": "The must-address line states the real situation and the lifecycle test asserts it reaches the brief. Raised as an open question."
+    },
+    {
+      "risk": "Editing docs/decisions.md breaks the backtest's line-number links or the ontology test.",
+      "mitigation": "Keep line 297 on one line, append D157 only at the end, avoid the three parsed phrases. The backtest test is in the verification run; reword a term if the ontology test objects."
+    },
+    {
+      "risk": "The git flags are unsupported on an older git.",
+      "mitigation": "`merge-tree --write-tree --name-only -z` needs git 2.38 or later and D19 pins 2.40. The athena-git unit test exercises the exact flags, so an older git fails the test."
+    },
+    {
+      "risk": "A user reads 'no producer run' as 'no model cost'.",
+      "mitigation": "`retry` goes through `ask`, so the reader still runs once; the CHANGELOG and tests say 'no producer run'."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusal of a Stale job in `earlier_attempt_with`",
+      "dependent": "crates/athena-core/src/reading.rs `earlier_attempt_with` and its callers: `Athena::retry` (~1103), `ask` via `first_reading`, crates/athena-cli/src/drain.rs `ReadOf::Retry` (~4216), crates/athena-cli/src/main.rs (~987)",
+      "kind": "code",
+      "test": "reading.rs unit tests (Stale removed from the refusal loop; Landed and Abandoned stay refused; new `a_stale_job_can_be_tried_again`); lifecycle `retry_accepts_a_stale_job`; `cargo test -p athena-cli --test drain`",
+      "reason": null
+    },
+    {
+      "name": "error text 'only a rejected or failed job can be tried again'",
+      "dependent": "crates/athena-cli/tests/retry.rs `a_job_that_is_not_rejected_or_failed_is_refused` (383-396), reading.rs tests at 4668 and 4680, a comment at crates/athena-cli/tests/drain.rs:1581",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test retry",
+      "reason": null
+    },
+    {
+      "name": "the rule 'which states `athena retry` accepts' as documented",
+      "dependent": "README.md:76 (`athena retry <job> [--yes]` row: 'Try a rejected or failed job again'); README.md:60 and 215 describe retry generally and stay true",
+      "kind": "rule",
+      "test": null,
+      "reason": "Line 76 is updated in step 14 to add the stale case. Lines 60 and 215 describe the command's introspection use and the environment-failure retry and are not narrowed by this change."
+    },
+    {
+      "name": "the drain's own retry set (the rule that a stale job is not retried automatically)",
+      "dependent": "crates/athena-cli/src/drain.rs:1654-1657 (`retry: matches!(other, Some(Rejected | Failed | TimedOut))`)",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/drain.rs `a_stale_job_is_not_retried_by_the_drain` (new, step 13) runs a stale job through the drain and asserts no 'try again on' job exists; it stays unchanged so the drain never retries a stale job, which is out of scope",
+      "reason": null
+    },
+    {
+      "name": "Stale as a closed-without-landing state in dependency and retry bookkeeping",
+      "dependent": "reading.rs `job_history`, `retries_by_job`, `retry_follow_up`; crates/athena-core/src/plan.rs (~348, 555, 949)",
+      "kind": "code",
+      "test": null,
+      "reason": "They read the outcome state only. A stale job's retry is a request job with `try again on <id>`. If it lands, `job_history` shows a landed retry, the intended result. If it closes stale or failed, `retries_by_job` still treats it as not standing (reading.rs 1568-1577)."
+    },
+    {
+      "name": "seed selection for a retry (`retry_seed`, `resume`, `resume_from`)",
+      "dependent": "crates/athena-core/src/run/mod.rs `dispatch`: `tree_seed`, `timeout_seed`, `resume_seed`, `retry_findings`",
+      "kind": "code",
+      "test": "cargo test -p athena-core --lib (existing run::tests resume and retry tests at ~1343, 2385, 2794, 2989, 3511, 3598, 3791)",
+      "reason": "Each is gated on a different state: Rejected (`qualifies_for_tree_retry`), TimedOut (`timeout_seed`), environment failure or Dispatched (`resumable_job`). `stale_retry` is gated on Closed(Stale) and runs only when the others return None, so one source applies to a given job."
+    },
+    {
+      "name": "the resume path reused for the clean merge",
+      "dependent": "run/mod.rs `resume_candidate`, `ResumeSeed`, `write_resume_mark`, `settle_resume_marks`; state.rs 309-319, 491-493 (`ResumeMark`)",
+      "kind": "code",
+      "test": "New lifecycle clean-merge and already-on-tip tests; existing resume tests in run/tests.rs and tests/drain.rs",
+      "reason": "`ResumeSeed` gains `merged: bool`, false in `resume_seed`. `resume_candidate` branches on it only for the tree, the change list and the already-on-tip rule. The fingerprint, candidate record, admission, the new job's own resume mark and `check_and_verify` run as before. `settle_resume_marks` on the stale job removes a mark that does not exist, a no-op."
+    },
+    {
+      "name": "`report_gaps` / `left_criteria` fed to verification",
+      "dependent": "crates/athena-core/src/run/verification.rs:38-39, 100-123; run/candidate.rs:122-145; run/mod.rs:642-643",
+      "kind": "code",
+      "test": "Existing run/tests.rs resume and verification tests",
+      "reason": "Unchanged for every existing path. For a clean-merge retry both are empty (they are held only in the resume mark, which a closed job lacks); D157 states it."
+    },
+    {
+      "name": "new `seeded_conflicts` field and the gate before `candidate_stage`",
+      "dependent": "run/mod.rs `RunContext` and the stage chain at ~1482-1510 (`producer_snapshot`, `producer_loop`, `candidate_stage`); producer.rs send-back (262-341)",
+      "kind": "code",
+      "test": "Lifecycle seeded-conflict and unresolved-conflict tests; existing run/tests.rs retry tests",
+      "reason": "The field is empty for every job except a conflict-seeded stale retry, and the gate returns immediately when it is empty, so tree-seeded (rejected), timeout-resumed and plain jobs behave as before. `producer_loop` and `candidate_stage` / candidate.rs (governed by D08) are not edited."
+    },
+    {
+      "name": "landing requires the verified fingerprint to equal the landed content",
+      "dependent": "crates/athena-core/src/land.rs `plan()` and the equality bail (136-142); callers `land_or_block` and `retry_landing` in run/close.rs and the pull-request landing path",
+      "kind": "rule",
+      "test": "land.rs `landing_refuses_content_that_differs_from_the_verified_content`, `a_base_that_is_no_longer_an_ancestor_makes_the_job_stale`, `a_changed_exclusion_rule_makes_the_job_stale`, and new `a_kept_candidate_merged_onto_a_moved_tip`",
+      "reason": null
+    },
+    {
+      "name": "a job being stale because another branch is checked out",
+      "dependent": "run/close.rs 273-289 (Plan::OtherBranch recorded as a Stale outcome); land.rs `Dispatched::from_record` (58)",
+      "kind": "code",
+      "test": "lifecycle `a_stale_job_from_another_branch_is_retried_from_scratch`",
+      "reason": "The new step runs only when `dispatch_branch` equals the checked-out branch; otherwise the retry is the ordinary producer retry. close.rs and `plan()` are unchanged."
+    },
+    {
+      "name": "parallel jobs that can make a verified job stale (`[parallel] max_concurrency`)",
+      "dependent": "docs/decisions.md D145, D155; crates/athena-cli/src/drain.rs ordered landing queue",
+      "kind": "host_setting",
+      "test": "tests/drain.rs `a_stale_job_is_not_retried_by_the_drain`",
+      "reason": "This adds only an explicit user action on a stale job. No drain code changes and nothing re-verifies automatically. The retry job records its own `dispatch_branch`, so the branch rule in `plan()` applies to it."
+    },
+    {
+      "name": "stale outcome hint text",
+      "dependent": "crates/athena-cli/src/display.rs ~840 and lifecycle.rs:2090 (`shown.contains(\"ask again\")`)",
+      "kind": "code",
+      "test": "lifecycle `a_governed_change_on_the_branch_makes_the_job_stale`",
+      "reason": "Not edited. The hint is still accurate."
+    },
+    {
+      "name": "docs/decisions.md line numbers and supersession phrases",
+      "dependent": "docs/decision-links.toml `[[link]]` line numbers; crates/athena-cli/tests/backtest.rs; crates/athena-cli/src/backtest.rs PHRASES",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test backtest",
+      "reason": "The edit to line 297 adds no line, D157 is appended at the end, and the text avoids the parsed phrases followed by a D-number."
+    },
+    {
+      "name": "governed-path reconciliation check",
+      "dependent": "docs/decision-links.toml `[[governs]]` (D08 -> snapshot.rs, run/candidate.rs); the decision check in `check_and_verify` (D156)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --lib governed",
+      "reason": "The plan edits neither governed path; snapshot.rs and candidate.rs are called, not edited."
+    },
+    {
+      "name": "`Git::merge_tree`",
+      "dependent": "crates/athena-git/src/lib.rs `merge_tree` (663) and its callers (land.rs `plan()`, `resume_candidate`, tests)",
+      "kind": "code",
+      "test": "athena-git `merge_tree_detects_conflicts` plus new `merge_tree_report_returns_the_conflicted_tree_and_paths`",
+      "reason": "Unchanged; `merge_tree_report` is a new, separate method."
+    },
+    {
+      "name": "producer brief for a seeded retry",
+      "dependent": "crates/athena-context/src/briefs.rs `retry_section`",
+      "kind": "code",
+      "test": "Lifecycle conflict test asserts the must-address text and conflicted path reach the producer brief",
+      "reason": "Not edited. It is fed empty `unmet` and `findings` and one `must_address` line, which it already renders. The heading wording is slightly off (see risk)."
+    },
+    {
+      "name": "refusal corpus cases",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `retry-complaint-reading-names-the-job` (:351) and `retry-complaint-reading-omits-the-job` (:369)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "These test request text, not job state, and no corpus case carries job state. This change removes a job-state refusal and adds no request-text form, so no case is added."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "End-to-end test against the real `Athena::retry`. A job really goes stale (the `a_governed_change_on_the_branch_makes_the_job_stale` hook style, lifecycle.rs:2027-2069), then `retry` on it. Plus reading.rs unit tests for `earlier_attempt_with`. A second test, `a_stale_job_from_another_branch_is_retried_from_scratch`, has the hook check out a branch `other` that holds the records (the OtherBranch route, close.rs 273-289; lifecycle.rs:1995 shows the checkout); `retry` and `go` run there.",
+      "command": "cargo test -p athena-cli --test lifecycle retry_accepts_a_stale_job && cargo test -p athena-core --lib reading::tests::a_stale_job_can_be_tried_again && cargo test -p athena-cli --test lifecycle a_stale_job_from_another_branch_is_retried_from_scratch",
+      "observes": "`athena.retry(stale_job, &Lines::default())` returns Ok with a Proposal whose request is `try again on <stale job>`; the old error for Stale is gone. In reading.rs `earlier_attempt` on a Stale job returns Some and still refuses Landed and Abandoned with the 'only a rejected or failed job' prefix. In the other-branch test exactly one Producer entry is recorded, the Reader/Producer/Verifier order is that of an ordinary retry, and the merged candidate is not landed.",
+      "fails_without": "`earlier_attempt_with` (reading.rs:1362-1374) bails 'job .. is stale; only a rejected or failed job can be tried again', so `retry` returns Err and the unwrap fails. Without the branch gate, the other-branch test sees zero Producer entries.",
+      "seam": "Production entry point `Athena::retry` (reading.rs ~1103) and `earlier_attempt_with`. Fixture `Fixture::new()`, `Scenario::default().script()` and the `during_verification` hook exist (tests/common/mod.rs:428, lifecycle.rs:2027). The reading.rs helpers `records_with` / `job_with_checks` exist (~4636). New tests are added in steps 4 and 11; git is real and nothing under test is mocked."
+    },
+    {
+      "criterion": 2,
+      "method": "End-to-end test. Job A (default scenario: its candidate changes README.md) goes stale because the hook commits a governed change to src/lib.rs plus an intervention record during A's verification. Then `retry`, then `go` on the retry job. Count the roles the fake driver was invoked as between the end of A and the end of the retry. Then load the retry job's records and the verifier input. A second test, `..._already_on_the_tip_...`, makes the hook also write A's exact README.md text so the merge is empty.",
+      "command": "cargo test -p athena-cli --test lifecycle a_stale_job_whose_candidate_merges_cleanly_lands_on_retry_with_no_producer_run && cargo test -p athena-cli --test lifecycle a_stale_job_whose_candidate_is_already_on_the_tip_fails_without_a_producer_run",
+      "observes": "Clean test: the retry job finishes Landed. `Scenario.invocations` gains no `Role::Producer` entry after the stale job's close and gains a `Role::Verifier` entry. The retry job's Verification record has non-empty `checks`. A Replay record exists for the retry job; its `candidate_commit` equals the retry Candidate's `candidate_commit` (the merged commit) and its `base_commit` equals that Candidate's `base_commit` (the prediction commit). `seen_by_verifier` contains both A's README.md greeting and the hand edit to src/lib.rs. The landed tree holds both changes and the tip is the landing commit. Already-on-tip test: the retry job ends Failed with a reason containing 'already on the branch tip', no Producer or Verifier entry follows, and the tip's non-records tree is unchanged.",
+      "fails_without": "Without the clean-merge path the retry is an ordinary producer retry, a Producer entry is recorded and the zero-producer assertion fails; there is also no Replay record on a merged candidate and the verifier never sees both edits. Without the three-way merge the hand change is overwritten or the job does not land. Without the equal-tree rule the merge gives an empty candidate or a producer retry runs.",
+      "seam": "Entry points `Athena::retry` then `Athena::go` (`dispatch`, mod.rs:823, then `resume_candidate`, mod.rs:522; replay in `check_and_verify`/`replay_stage`, ~1774). The fake driver `Scenario::script()` with the `invocations: Arc<Mutex<Vec<Role>>>` log and `seen_by_verifier` exist (common/mod.rs:430-433, push at 570). The `during_verification` hook exists (common/mod.rs:428, 637). Records are read with `Records::load` (lifecycle.rs:3607). The `stale_retry` step and the merged branch of `resume_candidate` are added in steps 6-8; the double implements no merge."
+    },
+    {
+      "criterion": 3,
+      "method": "End-to-end tests with a wrapper `Script` around `Scenario::script()` that, for the second Producer invocation only, reads `spec.workdir` and overrides `FakeTurn.edits`; the reads are collected in an `Arc<Mutex<..>>` and asserted after `go` returns. The original candidate edits README.md and src/lib.rs line 1; the hook lands a different edit of src/lib.rs line 1 (plus the intervention record), so the merge conflicts on src/lib.rs only.",
+      "command": "cargo test -p athena-cli --test lifecycle a_stale_job_whose_candidate_conflicts_goes_to_a_producer_retry_seeded_from_it && cargo test -p athena-cli --test lifecycle a_conflict_retry_whose_producer_leaves_the_conflict_unresolved_fails_before_the_checks",
+      "observes": "Seeded test: exactly one Producer entry for the retry job. At the start of that call src/lib.rs in the producer's `workdir` held `<<<<<<<` markers and README.md already held A's greeting. The producer's brief names src/lib.rs and the stale job. The wrapper's edit rewrites only src/lib.rs. A Verifier entry has a higher index than that Producer entry, and the job lands with the README.md change and the resolved src/lib.rs. Unresolved test: the second producer call makes no edit (and a variant leaves the markers in place); the job ends Failed with a reason naming src/lib.rs, no Verifier entry follows the Producer entry, no checks are recorded, and the tip's non-records tree is unchanged.",
+      "fails_without": "A plain retry from the new base lacks the markers and the README.md change in the producer's work tree, so the work-tree assertions and the landed-README assertion fail. A clean-only implementation never reaches a producer. Without the gate, the unresolved seed goes to admission, the checks and the verifier (candidate.rs 134-150), a Verifier entry is recorded and the job is not failed.",
+      "seam": "Entry points `Athena::retry` and `Athena::go`. `merge_kept_candidate` returns Conflict, so `dispatch` sets `retry_seed`, `ctx.seed_commit` and `ctx.seeded_conflicts`, and `producer_snapshot` (producer.rs:116-125) takes the existing `SnapshotRepo::BaseThenTree` route. The gate is added in step 9. `Script` is the boxed closure over `&AgentInvocation` that `Scenario::script()` returns; `seen_by_producer` and `invocations` exist (common/mod.rs:431-433). The wrapper varies only producer inputs and edits; the merge, seed and gate live in production code. Unit tests in land.rs (`merge_kept_candidate`, `has_conflict_markers`) and athena-git (`merge_tree_report`, including a path with a space and a non-ASCII character) cover the pieces."
+    },
+    {
+      "criterion": 4,
+      "method": "(a) Read the retry job's Verification and Candidate records after the landing in the clean test and the seeded-conflict test. (b) A land.rs unit test on the real `plan()` with a real git repository. (c) The existing refusal test.",
+      "command": "cargo test -p athena-cli --test lifecycle a_stale_job_whose_candidate_merges_cleanly_lands_on_retry_with_no_producer_run && cargo test -p athena-core --lib land::tests::a_kept_candidate_merged_onto_a_moved_tip && cargo test -p athena-core --lib land::tests::landing_refuses_content_that_differs_from_the_verified_content",
+      "observes": "(a) The retry job's `verified_fingerprint` equals `athena_git::attrs::fingerprint(git, landed_commit, retry_candidate.base_commit)` and differs from the stale job's. (b) After the base moves, `merge_kept_candidate` gives a clean tree; a commit on the new tip with that tree and a `Verified` built from the merged tree's fingerprint gives `Plan::Tree`; a `Verified` carrying the original candidate's fingerprint makes `plan()` return Err ('differs from the verified content'). (c) The existing differing-content refusal still passes.",
+      "fails_without": "If the retry reused the original fingerprint, the equality bail at land.rs 136-142 refuses the landing and (b)'s second assertion shows the Err. If the landing skipped the check, that Err assertion fails.",
+      "seam": "Production `plan()` (land.rs:70) is called directly with a real `Verified` from the existing `pass()` helper and the `base_and_candidate()` / `commit()` fixtures in land.rs tests, all existing. `merge_kept_candidate` is added in step 2."
+    },
+    {
+      "criterion": 5,
+      "method": "Whole-workspace checks including the existing land.rs Plan::Stale tests, the refusal corpus, the backtest and the drain test. No double is involved.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked && cargo test -p athena-core --test refusal_corpus && cargo test -p athena-cli --test backtest",
+      "observes": "All pass. Existing land.rs tests `a_base_that_is_no_longer_an_ancestor_makes_the_job_stale` and `a_changed_exclusion_rule_makes_the_job_stale` still see Plan::Stale. `refusal_corpus` is unchanged: the retry-related ids I read (`retry-complaint-reading-names-the-job`, `retry-complaint-reading-omits-the-job`) test request text, no case carries job state, and this change adds no request-text form. The drain test `a_stale_job_is_not_retried_by_the_drain` passes.",
+      "fails_without": "Not a behavior of its own: a formatting, lint or regression failure in any touched file fails this.",
+      "seam": "Whole-workspace commands; nothing is mocked."
+    },
+    {
+      "criterion": 6,
+      "method": "Content check of the diff.",
+      "command": "git diff -- docs/decisions.md",
+      "observes": "A new D157 after D156 states that it reverses alternative (d) 'Automatic re-verification on the new base' of D10, with the reason that stale landings now recur with parallel jobs. It has Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance. It records the dispatch-branch and commit-exists conditions (no ancestry condition), the already-on-tip failure, the conflict gate and its cost, the report-gaps note for the clean-merge verifier, the shared-append-only-file conflict expectation, and that the fingerprint rule and the exclusion of automatic re-verification stay. Line 297 is still one line and ends with the 'Reversed by D157' note. No added line contains 'superseded by', 'supersedes' or 'amends' followed by a D-number. `cargo test -p athena-cli --test backtest` passes.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Content check of the diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One bullet at the top of `[Unreleased]` / `### Added` says only what the diff does: `athena retry` accepts a stale job; with the dispatch branch checked out and the kept commits present it merges the candidate onto the tip; a clean merge re-runs checks, replay and verification and lands with a new fingerprint and no producer run; a merge that adds nothing fails the retry; a conflict starts a producer retry from the conflicted tree and fails before the checks if a conflicted path is unchanged or holds markers; a stale job from another checked-out branch, or with its kept commits gone, is retried from the base. It lists `Git::merge_tree_report`, names the root cause and cites D157.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Scope check of the final diff and the repository's policy scans.",
+      "command": "git status && cargo test -p xtask --test policy",
+      "observes": "Only these paths changed: crates/athena-git/src/lib.rs, crates/athena-core/src/land.rs, reading.rs, run/mod.rs (and run/close.rs, run/tests.rs only if needed), crates/athena-cli/src/main.rs, crates/athena-cli/tests/lifecycle.rs, crates/athena-cli/tests/drain.rs, README.md (one line), docs/decisions.md and CHANGELOG.md. athena.toml, defaults.toml, workflows, prompt files, docs/decision-links.toml, crates/athena-context and display.rs are untouched. The xtask policy test (banned words, personal-data allow-list) passes.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: README.md and tests/drain.rs are not in the brief's deliverable list. The plan edits one README.md line (76, the `athena retry` row) because it would otherwise say only rejected or failed jobs can be retried, and adds one drain test so drain.rs:1654 stays unchanged. Confirm both are in scope.",
+    "User: should the unresolved-conflict check be folded into the producer's one send-back in producer.rs, so the producer gets a chance to fix it instead of the job failing and losing the kept candidate on a later retry? The plan keeps the gate in run/mod.rs because producer.rs is outside the listed files.",
+    "User: the producer brief's retry section (`crates/athena-context/src/briefs.rs`, `retry_section`) heads a seeded retry as a rejected candidate. Should a stale-specific heading be added in a follow-up? The plan carries the real situation in the must-address line."
+  ],
+  "producer_section_sha256": "1ac5731fbfee6167a4eaa4339d9deb903d35425faa2588592a888520a5215d3b"
+}
