@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The `[parallel]` `max_concurrency` ceiling for `athena drain` rises from 8 to 16: 1 to 16 loads and 17 is refused
+  with the message "must be from 1 to 16". `MAX_CONCURRENCY_CEILING` in `athena-data` is the one constant, so the
+  error and the `athena drain --help` text both say 16, and the pipeline `max_in_flight` limit, which uses the same
+  constant, is 1 to 16 too. A test covers 16 loading and 17 refused. `docs/design/async-drain.md`,
+  `docs/design/parallel-jobs.md`, `docs/design/agent-and-build-slots.md` and the comment in `athena.toml` state
+  16; the `max_concurrency = 2` value is unchanged.
 - A change to code that a decision of `docs/decisions.md` governs now fails before the verifier starts unless the
   change reconciles the decision, and the `athena drain --help` ceiling is read from the constant that enforces
   it. Root cause: The decision log is prose with no link from a decision to the code or limit it governs, so
