@@ -245,6 +245,10 @@ fn failing_units(log: &str) -> Vec<String> {
 /// than [`MAX_RECORDED_TESTS`] is cut with [`LIST_CUT`]. Those entries never match a base's names, so a
 /// partly read set of shards can never look like a complete list. With no names the list stays empty and the
 /// tail alone is kept; with no log read, or no job, the result is `None`.
+///
+/// Root cause of a stored tail that could not diagnose a failure: it was taken of the whole CI log, which
+/// ends with the runner's post-job cleanup, and no failure line was selected. Each log is cut before its
+/// cleanup and the tail keeps the failure lines (`checks::failure_tail`).
 pub fn detail_from_job_logs(
     jobs: &[(String, String, Option<String>)],
 ) -> Option<crate::ci_result::FailureDetail> {
@@ -287,10 +291,12 @@ pub fn detail_from_job_logs(
         if readable.len() > 1 {
             text.push_str(&format!("== {name}\n"));
         }
-        text.push_str(log.as_deref().unwrap_or_default());
+        text.push_str(crate::checks::without_post_job_cleanup(
+            log.as_deref().unwrap_or_default(),
+        ));
         text.push('\n');
     }
-    let tail = crate::checks::tail_lines(&text, crate::checks::FAILED_TAIL_LINES);
+    let tail = crate::checks::failure_tail(&text, crate::checks::FAILED_TAIL_LINES);
     let tail = crate::checks::tail(&tail, crate::checks::FAILED_TAIL_BYTES);
     let mut failed_tests: Vec<String> = Vec::new();
     let mut output_tail = tail;

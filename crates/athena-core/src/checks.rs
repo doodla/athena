@@ -202,6 +202,111 @@ pub fn tail_lines(text: &str, n: usize) -> String {
     kept
 }
 
+/// The size of the log's end, in bytes, that end-keeping readers are sure to see.
+const FAILURE_END_WINDOW_BYTES: usize = 480;
+
+/// How many lines after a failure marker line belong to its block (an `assert_eq` panic has three).
+const FAILURE_BLOCK_AFTER: usize = 4;
+
+/// The line that opens the separator between the log's end and the failure section.
+const FAILURE_SECTION_SEPARATOR: &str = "--- failure lines from earlier in the log ---";
+
+/// Whether `line` is failure evidence from the Rust test harness. Passing summaries (`test result: ok`)
+/// are deliberately not markers.
+fn is_failure_marker(line: &str) -> bool {
+    let line = line.trim();
+    line.contains("panicked at")
+        || line.ends_with(" ... FAILED")
+        || line.starts_with("test result: FAILED")
+        || line == "failures:"
+        || (line.starts_with("---- ") && line.ends_with(" stdout ----"))
+}
+
+/// `log` cut at its first post-job marker line (`Post job cleanup.`, `Cleaning up orphan processes`, a
+/// `##[group]Post ` step). Root cause of the noisy stored tail: a CI job log ends with the runner's
+/// post-job phase, so tailing the whole log kept only cleanup text. A log that would be left empty by the
+/// cut is returned whole.
+pub fn without_post_job_cleanup(log: &str) -> &str {
+    let mut offset = 0;
+    for line in log.split_inclusive('\n') {
+        let t = line.trim();
+        if t == "Post job cleanup."
+            || t == "Cleaning up orphan processes"
+            || t.starts_with("##[group]Post ")
+        {
+            let kept = &log[..offset];
+            return if kept.trim().is_empty() { log } else { kept };
+        }
+        offset += line.len();
+    }
+    log
+}
+
+/// The last `n` lines of `text`, with the failure lines kept.
+///
+/// Root cause fixed here: the stored tail of a CI log was the plain last lines, and no line was chosen for
+/// being a failure, so later passing units or progress lines pushed the failing test out. With no failure
+/// marker, or with every marker already in the log's end window, this is [`tail_lines`]. Otherwise it
+/// returns the log's end, a separator, then the failure blocks as the LAST lines, because every reader of
+/// the stored tail (introspection, the verifier brief, a carried reading) keeps the end.
+pub fn failure_tail(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let markers: Vec<usize> = (0..lines.len())
+        .filter(|&i| is_failure_marker(lines[i]))
+        .collect();
+    if markers.is_empty() {
+        return tail_lines(text, n);
+    }
+    let mut start = lines.len() - 1;
+    let mut size = lines[start].len() + 1;
+    while start > 0 && size + lines[start - 1].len() < FAILURE_END_WINDOW_BYTES {
+        start -= 1;
+        size += lines[start].len() + 1;
+    }
+    if markers.iter().all(|&i| i >= start) {
+        return tail_lines(text, n);
+    }
+    // Blocks: marker line plus following lines up to a blank line, merged.
+    let mut in_block = vec![false; lines.len()];
+    let mut blocks: Vec<(usize, usize)> = Vec::new();
+    for &m in &markers {
+        let mut end = m + 1;
+        while end < lines.len() && end <= m + FAILURE_BLOCK_AFTER && !lines[end].trim().is_empty() {
+            end += 1;
+        }
+        match blocks.last_mut() {
+            Some(last) if m <= last.1 => last.1 = last.1.max(end),
+            _ => blocks.push((m, end)),
+        }
+    }
+    let cap = n / 2;
+    let mut section: Vec<&str> = Vec::new();
+    for (a, b) in blocks {
+        // A block that does not fit whole is cut at the cap, earliest lines first.
+        let b = b.min(a + (cap - section.len()));
+        section.extend(&lines[a..b]);
+        in_block[a..b].iter_mut().for_each(|x| *x = true);
+        if section.len() >= cap {
+            break;
+        }
+    }
+    if section.is_empty() {
+        return tail_lines(text, n);
+    }
+    let rest: Vec<&str> = (0..lines.len())
+        .filter(|&i| !in_block[i])
+        .map(|i| lines[i])
+        .collect();
+    let room = n.saturating_sub(section.len() + 1);
+    let from = rest.len().saturating_sub(room);
+    let mut out: Vec<&str> = rest[from..].to_vec();
+    out.push(FAILURE_SECTION_SEPARATOR);
+    out.extend(section);
+    let mut kept = out.join("\n");
+    kept.push('\n');
+    kept
+}
+
 /// The most failing names one log entry lists before it counts the rest.
 const LOGGED_NAMES: usize = 5;
 
@@ -583,6 +688,57 @@ pub fn baseline_runs(specs: &[CheckSpec], ctx: &CheckContext<'_>) -> Vec<CheckRu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn post_job_cleanup_is_cut_at_the_first_marker_line() {
+        for marker in [
+            "Post job cleanup.",
+            "Cleaning up orphan processes",
+            "##[group]Post Run actions/checkout@v4",
+        ] {
+            let log = format!("a\nb\n{marker}\nnoise\n");
+            assert_eq!(without_post_job_cleanup(&log), "a\nb\n", "{marker}");
+        }
+        assert_eq!(without_post_job_cleanup("a\nb\n"), "a\nb\n");
+        // A marker on the first line would leave nothing, so the log stays whole.
+        let first = "Post job cleanup.\nx\n";
+        assert_eq!(without_post_job_cleanup(first), first);
+        // Marker text inside a line is test output, not a cut.
+        let mid = "test says Post job cleanup. ok\nb\n";
+        assert_eq!(without_post_job_cleanup(mid), mid);
+    }
+
+    #[test]
+    fn failure_tail_is_the_plain_tail_without_failure_outside_the_end() {
+        let plain: String = (0..300).map(|i| format!("line {i}\n")).collect();
+        assert_eq!(failure_tail(&plain, 200), tail_lines(&plain, 200));
+        let passing = format!("test result: ok. 1 passed\n{plain}");
+        assert_eq!(failure_tail(&passing, 200), tail_lines(&passing, 200));
+        let at_end = format!("{plain}thread 't' panicked at x:1:1:\nboom\n");
+        assert_eq!(failure_tail(&at_end, 200), tail_lines(&at_end, 200));
+    }
+
+    #[test]
+    fn failure_tail_puts_an_early_failure_block_last_and_keeps_the_caps() {
+        let mut text =
+            String::from("thread 't' panicked at x:1:1:\nboom\n  left: 1\n right: 2\n\n");
+        for i in 0..300 {
+            text.push_str(&format!("progress {i}\n"));
+        }
+        let kept = failure_tail(&text, 200);
+        assert!(kept.ends_with("thread 't' panicked at x:1:1:\nboom\n  left: 1\n right: 2\n"));
+        assert!(kept.contains(FAILURE_SECTION_SEPARATOR));
+        assert!(kept.contains("progress 299"));
+        assert!(kept.lines().count() <= 200);
+        // The section never takes more than half the lines.
+        let many: String = (0..300)
+            .map(|i| format!("test t{i} ... FAILED\n"))
+            .chain((0..300).map(|i| format!("progress {i}\n")))
+            .collect();
+        let kept = failure_tail(&many, 40);
+        assert!(kept.lines().count() <= 40);
+        assert!(kept.ends_with("test t19 ... FAILED\n"));
+    }
 
     fn sh_spec(name: &str, script: &str) -> CheckSpec {
         CheckSpec {

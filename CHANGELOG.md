@@ -298,6 +298,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A failed CI check's stored output now keeps the failing section of the log. The root cause was that
+  `detail_from_job_logs` took the tail of the whole CI job log, which ends with the runner's post-job cleanup
+  (`Post job cleanup.`, `git config --unset-all`, `Cleaning up orphan processes`), and never selected the
+  failure lines, so a shard that did not finish or a failing unit followed by passing units left only cleanup
+  text. Each log is now cut before its post-job block, and when a failure line (`panicked at`, `... FAILED`,
+  `test result: FAILED`, `failures:`, `---- name stdout ----`) lies outside the log's end, those lines are
+  kept as the last lines of the stored tail.
 - `athena retry` no longer starts the same work twice for an interrupted job. An interrupted job (dispatched,
   no live process) stays dispatched after it is retried, so `athena status` kept telling the user to run
   `athena retry <id>` and a second retry made a second "try again on <id>" job. The check is in `Athena::retry`
