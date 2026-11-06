@@ -831,10 +831,8 @@ mod tests {
     use super::*;
 
     fn stand_in_claude(dir: &Path, output: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join("claude");
-        std::fs::write(&path, format!("#!/bin/sh\necho '{output}'\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        athena_testkit::write_executable(&path, format!("#!/bin/sh\necho '{output}'\n")).unwrap();
         path
     }
 
@@ -1019,8 +1017,7 @@ mod tests {
         let fake = dir.path().join("gitleaks");
         // Missing: install.
         assert!(!gitleaks_present(&fake, "8.1.0"));
-        std::fs::write(&fake, "#!/bin/sh\necho 8.1.0\n").unwrap();
-        set_executable(&fake).unwrap();
+        athena_testkit::write_executable(&fake, "#!/bin/sh\necho 8.1.0\n").unwrap();
         // Present and the pinned version: skip.
         assert!(gitleaks_present(&fake, "8.1.0"));
         // Present but another version: install.
