@@ -995,18 +995,15 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored
 
     #[test]
     fn a_cargo_test_check_records_its_failing_tests_and_the_flag_it_ran_with() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let bin = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         // A script named `cargo` that echoes its arguments, prints canned failing output and exits 101.
         let script = bin.path().join("cargo");
-        std::fs::write(
+        athena_testutil::write_executable(
             &script,
-            format!("#!/bin/sh\necho \"args: $*\"\ncat <<'EOF'\n{TWO_BINARIES}EOF\nexit 101\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\necho \"args: $*\"\ncat <<'EOF'\n{TWO_BINARIES}EOF\nexit 101\n"),
+        );
         let registry = Registry::new(state.path());
         let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
         let env = BTreeMap::from([("PATH".to_string(), std::env::var("PATH").unwrap())]);

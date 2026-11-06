@@ -1,0 +1,30 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261106-062957-q52f",
+  "at": "2026-11-06T06:29:57.173481152Z",
+  "trigger": "intervention",
+  "job": null,
+  "intervention": "20261106-062951-0s33",
+  "class_of_work": "config",
+  "category": "mistake",
+  "what_happened": "The person running Athena already had a two-job batch running. They started a third job, the stale-job retry, next to it. Before starting it they checked free disk once and saw 26 GB. Each producer build takes 10 to 12 GB, so free disk fell to about 8 GB, below the 10 GB the batch needs. The replay check was skipped because of the low disk. No job is recorded as failed. The batch lost its replay check and ran short of disk.",
+  "failure_class": "20261026-140304-afw9",
+  "new_class": false,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "Athena does not tie parallel job starts to disk. It never compares free disk with the combined build size of the jobs already running plus the one being added. It does not show that each producer build holds 10 to 12 GB until producer builds use slots. A person starting a job by hand has only a point-in-time free-disk reading and has to estimate the rest. The low-disk guard acts only after disk has fallen, by skipping checks. It does not stop the extra start.",
+  "prevention_kind": "code-check",
+  "prevention": "Add a start-time disk reservation check for every way a job can start: drain, retry, and hand-started runs. Athena would add up the expected build size (measured, about 12 GB) for each running producer plus the new one. It would refuse or hold the start, with a message giving the numbers, when free disk minus that total falls below the 10 GB floor. Athena would show the reserved and free figures in its status output, so nobody has to estimate them.",
+  "proposed_request": "Add a disk reservation check that runs before any job starts, whether by drain, retry or hand command. Outcome: Athena never starts a job when free disk, minus the expected build size of every running producer and of the job being started, would fall below the configured free-disk floor (10 GB now). The expected build size is measured from recent producer builds, with a configured default of 12 GB. If the check fails, the start is held, not failed, with a message naming the free disk, the reserved disk and the floor. The job starts later when space is free. `athena status` shows free, reserved and floor figures. Acceptance: (1) a test with two running producers and 26 GB free shows a third start is held; (2) a test with enough room shows the start proceeds; (3) a held start is not recorded as a failure and does not count toward scope-guard spend; (4) the check works for the default serial path (max_concurrency = 1) and for parallel runs.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.0971401,
+    "input_tokens": 2,
+    "output_tokens": 966
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}

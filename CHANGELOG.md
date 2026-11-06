@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A shared test-support crate, `athena-testutil`, writes executable stand-in scripts through a temporary name
+  (write, close, `chmod`, rename) and runs them again while the kernel reports `ETXTBSY` ("Text file busy"),
+  which a forked child of another test thread can cause. The stand-in tests of `xtask`, `athena-cli`
+  (`reconcile.rs`), `athena-agent` (`claude.rs`), `athena-core` (`checks.rs`, `reading.rs`) and `athena-git`
+  (`snapshot.rs`) use it. A stress test in the crate writes and runs 400 scripts while other threads fork. A new
+  `docs/decisions.md` entry (D157) records that D08 was checked and stands, with a matching `[[link]]` in
+  `docs/decision-links.toml`; only the test module of `snapshot.rs` changed.
 - A change to code that a decision of `docs/decisions.md` governs now fails before the verifier starts unless the
   change reconciles the decision, and the `athena drain --help` ceiling is read from the constant that enforces
   it. Root cause: The decision log is prose with no link from a decision to the code or limit it governs, so
