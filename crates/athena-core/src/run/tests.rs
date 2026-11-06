@@ -4561,6 +4561,161 @@ mod produce_and_verify_order_tests {
         assert_eq!(athena.state.read_resume(&first), None, "the mark is spent");
     }
 
+    #[test]
+    fn has_conflict_markers_needs_an_opening_and_a_later_closing_line() {
+        let both = "intro\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\noutro\n";
+        assert!(has_conflict_markers(both));
+        // A Markdown underline is no marker, nor is text that only mentions the markers mid-line.
+        assert!(!has_conflict_markers("Title\n=======\nbody\n"));
+        assert!(!has_conflict_markers(
+            "use `<<<<<<< ` to open\nand `>>>>>>> ` to close\n"
+        ));
+        // An opening line alone, or a closing line before the opening one, is not a conflict.
+        assert!(!has_conflict_markers("<<<<<<< HEAD\nours\n"));
+        assert!(!has_conflict_markers(">>>>>>> branch\n<<<<<<< HEAD\n"));
+        // An absent or empty file reads as empty text.
+        assert!(!has_conflict_markers(""));
+    }
+
+    /// A landed job with its outcome turned into `stale`, as a stale job's records read, and the records.
+    /// Its candidate commit is the one the producer's edit made; its base is an ancestor of the head.
+    fn stale_records(athena: &Athena) -> (JobId, Records, String) {
+        let (first, done) = finished_job(athena);
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+        let head = athena.head().unwrap();
+        let mut records = Records::load(&athena.git, &head).unwrap();
+        records
+            .jobs
+            .get_mut(first.as_str())
+            .unwrap()
+            .outcome
+            .as_mut()
+            .unwrap()
+            .state = OutcomeState::Stale;
+        (first, records, head)
+    }
+
+    fn test_redactor() -> Redactor {
+        Redactor::new(&athena_gate::builtin_config()).unwrap()
+    }
+
+    #[test]
+    fn stale_seed_merges_a_candidate_the_tip_does_not_conflict_with() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let (first, records, head) = stale_records(&athena);
+        let request = format!("try again on {first}");
+        // The tip holds the same README change the candidate made: the merge is clean.
+        let seed = athena
+            .stale_seed(&records, &request, &test_redactor(), &head)
+            .unwrap();
+        let Some(StaleSeed::Merge(seed)) = seed else {
+            panic!("expected a clean merge");
+        };
+        assert!(seed.merge);
+        assert_eq!(seed.job, first);
+        assert_eq!(seed.mark.stage, ResumeStage::Checks);
+        assert!(seed.mark.check_runs.is_empty());
+        let candidate = records.jobs[first.as_str()].candidate.as_ref().unwrap();
+        assert_eq!(seed.mark.base_commit, candidate.base_commit);
+        assert_eq!(seed.mark.candidate, *candidate);
+    }
+
+    #[test]
+    fn stale_seed_seeds_a_conflict_with_git_s_merge_and_the_conflicting_paths() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let (first, records, _) = stale_records(&athena);
+        // The branch then rewrites the README the candidate changed.
+        commit_file(&repo, "README.md", "# Demo\n\nSomething else.\n");
+        let head = athena.head().unwrap();
+        let request = format!("try again on {first}");
+        let seed = athena
+            .stale_seed(&records, &request, &test_redactor(), &head)
+            .unwrap();
+        let Some(StaleSeed::Conflict(conflict)) = seed else {
+            panic!("expected a conflict");
+        };
+        assert_eq!(conflict.job, first);
+        assert_eq!(conflict.paths, ["README.md"]);
+        // The seed commit sits on the tip and holds the conflicted file with its markers.
+        assert_eq!(
+            athena
+                .git
+                .rev_parse(&format!("{}^", conflict.seed_commit))
+                .unwrap(),
+            Some(head)
+        );
+        let text = String::from_utf8(
+            athena
+                .git
+                .show_file(&conflict.seed_commit, "README.md")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(has_conflict_markers(&text), "{text}");
+        assert!(text.contains("Something else.") && text.contains("A demo."));
+    }
+
+    #[test]
+    fn stale_seed_is_none_when_the_job_is_not_stale_or_its_candidate_cannot_be_merged() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena(&repo, &state);
+        let (first, mut records, head) = stale_records(&athena);
+        let request = format!("try again on {first}");
+        let has_seed = |records: &Records, request: &str| {
+            athena
+                .stale_seed(records, request, &test_redactor(), &head)
+                .unwrap()
+                .is_some()
+        };
+        assert!(has_seed(&records, &request));
+        // Not a retry request.
+        assert!(!has_seed(&records, "describe the demo"));
+        let id = first.as_str().to_string();
+        let job = |records: &mut Records| records.jobs.get_mut(&id).unwrap().clone();
+        let original = job(&mut records);
+        // Not a stale job.
+        records
+            .jobs
+            .get_mut(&id)
+            .unwrap()
+            .outcome
+            .as_mut()
+            .unwrap()
+            .state = OutcomeState::Rejected;
+        assert!(!has_seed(&records, &request));
+        // The candidate commit is gone (it never existed in this repository), or none is recorded.
+        for commit in [Some("0".repeat(39) + "1"), None] {
+            let mut changed = original.clone();
+            changed.candidate.as_mut().unwrap().candidate_commit = commit;
+            records.jobs.insert(id.clone(), changed);
+            assert!(!has_seed(&records, &request));
+        }
+        // A candidate with violations is not merged.
+        let mut changed = original.clone();
+        changed.candidate.as_mut().unwrap().violations = vec![PolicyViolation {
+            rule: "r".into(),
+            path: None,
+            detail: "d".into(),
+        }];
+        records.jobs.insert(id.clone(), changed);
+        assert!(!has_seed(&records, &request));
+        // The candidate's base is not an ancestor of the tip (here, the candidate commit itself).
+        let mut changed = original.clone();
+        let candidate = changed.candidate.as_mut().unwrap();
+        candidate.base_commit = candidate.candidate_commit.clone().unwrap();
+        records.jobs.insert(id.clone(), changed);
+        assert!(!has_seed(&records, &request));
+        // The unchanged records still give a seed.
+        records.jobs.insert(id, original);
+        assert!(has_seed(&records, &request));
+    }
+
     /// One `go` run with the early seam holding a recording fake, so nothing reaches a network.
     struct CiRun {
         git: Git,

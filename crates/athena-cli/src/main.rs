@@ -41,8 +41,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Try a rejected or failed job again, starting from its introspection record (the proposed next
-    /// request, the cause and the prevention) and shown as `ask` shows a reading; Enter runs it.
+    /// Try a rejected, failed, timed out, stale or interrupted job again, starting from its introspection
+    /// record (the proposed next request, the cause and the prevention) and shown as `ask` shows a reading;
+    /// Enter runs it. A stale job keeps its verified candidate: the retry merges it onto the branch tip. A
+    /// clean merge is checked and verified again with no planner or producer run; a conflict starts a producer
+    /// from the conflicted merge. The retry starts from the base when the candidate cannot be merged (it is
+    /// gone, or the branch no longer holds its base).
     Retry {
         job: String,
         /// Run without waiting at the prompt (the reading is printed, but its acceptance stays unresolved).
@@ -1837,6 +1841,28 @@ mod tests {
             .render_help()
             .to_string();
         assert!(sub.contains("worktrees"), "{sub}");
+    }
+
+    #[test]
+    fn retry_help_names_stale_jobs_the_merge_and_the_base_fallback() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("retry")
+            .expect("a retry subcommand")
+            .render_long_help()
+            .to_string();
+        // Wrapping in the rendered help must not matter.
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        for needle in [
+            "stale",
+            "merges it onto the branch tip",
+            "checked and verified again with no planner or producer run",
+            "a conflict starts a producer from the conflicted merge",
+            "The retry starts from the base when the candidate cannot be merged",
+        ] {
+            assert!(help.contains(needle), "{needle:?} missing from:\n{help}");
+        }
+        assert!(!help.contains("a rejected or failed job again"), "{help}");
     }
 
     /// The long help of `athena drain` as a person reads it.

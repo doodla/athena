@@ -1093,8 +1093,11 @@ impl Athena {
         })
     }
 
-    /// `athena retry <job>`: reads a retry of a rejected, failed or interrupted job (dispatched with no
-    /// process working on it, for example after a restart, or held for low disk space), seeded from that job's
+    /// `athena retry <job>`: reads a retry of a rejected, failed, timed out, stale or interrupted job
+    /// (dispatched with no process working on it, for example after a restart, or held for low disk space).
+    /// A stale job keeps its candidate: `go` merges it onto the branch tip and re-verifies it, or starts a
+    /// producer run seeded from the conflicted merge, or starts from the base when it cannot be merged. The
+    /// reading is seeded from that job's
     /// introspection record when it has one. The request recorded is "try again on <job id>", so a later
     /// retry of this job finds the original; nothing is run. The flag says whether the introspection
     /// record seeded the reading (false: the plain "try again on" behavior). An interrupted job that already
@@ -1132,7 +1135,7 @@ impl Athena {
         // retry that cannot be afforded prints no resume note; `ask` makes it again before the reader runs.
         let jc = JobConfig::at(&self.git, &head)?;
         self.preflight(&jc, 0.0, ReserveStage::Admission)?;
-        // `ask` refuses a job that is not rejected, failed or interrupted before any model is called.
+        // `ask` refuses a job that is not rejected, failed, timed out, stale or interrupted before any model is called.
         // A job that stopped for the environment, or was interrupted, after its candidate was built resumes
         // from that candidate: `go` runs no planner or producer. The reader still runs below.
         let request = format!("{RETRY_PREFIX}{id}");
@@ -1329,8 +1332,8 @@ pub(crate) fn total_cost(invocations: &[Invocation]) -> f64 {
 const RETRY_PREFIX: &str = "try again on ";
 
 /// Detects "try again on <job>" at the start of `request` and builds the earlier attempt from the
-/// rejected or failed job's request, final verification and (for a failed or unverified job) outcome
-/// reason. Returns `None` when the request is not that form.
+/// rejected, failed, timed out or stale job's request, final verification and (for a failed, stale or
+/// unverified job) outcome reason. Returns `None` when the request is not that form.
 /// The carried text goes through `redactor`.
 pub fn earlier_attempt(
     records: &Records,
@@ -1363,12 +1366,15 @@ pub fn earlier_attempt_with(
         && !matches!(
             state,
             JobState::Closed(
-                OutcomeState::Rejected | OutcomeState::Failed | OutcomeState::TimedOut
+                OutcomeState::Rejected
+                    | OutcomeState::Failed
+                    | OutcomeState::TimedOut
+                    | OutcomeState::Stale
             )
         )
     {
         bail!(
-            "job {id} is {}; only a rejected or failed job can be tried again (so can a timed out one), or one that was interrupted",
+            "job {id} is {}; only a rejected or failed job can be tried again (so can a timed out or stale one), or one that was interrupted",
             state.name()
         );
     }
@@ -2081,8 +2087,14 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
         .outcome
         .as_ref()
         .is_some_and(|o| matches!(o.state, OutcomeState::Failed | OutcomeState::TimedOut));
+    // A stale job was verified and then could not land, so its reason (what moved on the branch) is
+    // carried too.
+    let stale = job
+        .outcome
+        .as_ref()
+        .is_some_and(|o| o.state == OutcomeState::Stale);
     if let Some(outcome) = &job.outcome
-        && (failed || job.verification.is_none())
+        && (failed || stale || job.verification.is_none())
         && !outcome.reason.trim().is_empty()
     {
         texts.push(format!("outcome: {}", outcome.reason));
@@ -4660,11 +4672,7 @@ mod tests {
     #[test]
     fn only_rejected_or_failed_jobs_can_be_tried_again() {
         let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
-        for state in [
-            OutcomeState::Landed,
-            OutcomeState::Stale,
-            OutcomeState::Abandoned,
-        ] {
+        for state in [OutcomeState::Landed, OutcomeState::Abandoned] {
             let mut job = job_with_checks(vec![]);
             job.outcome = Some(outcome(&job, state, "done"));
             let id = job.id().as_str().to_string();
@@ -4686,6 +4694,31 @@ mod tests {
         .to_string();
         assert!(error.contains("queued"), "{error}");
         assert!(error.contains("only a rejected or failed job"), "{error}");
+    }
+
+    #[test]
+    fn a_stale_job_is_accepted_and_its_reason_is_carried() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let mut job = job_with_checks(vec![]);
+        job.outcome = Some(outcome(
+            &job,
+            OutcomeState::Stale,
+            "the branch moved: a governed file changed",
+        ));
+        let id = job.id().as_str().to_string();
+        let attempt = earlier_attempt(&records_with(job), &format!("try again on {id}"), &redactor)
+            .unwrap()
+            .expect("a stale job can be tried again");
+        assert_eq!(attempt.end_state, "stale");
+        assert!(!attempt.failed);
+        assert!(
+            attempt
+                .findings
+                .iter()
+                .any(|f| f == "outcome: the branch moved: a governed file changed"),
+            "{:?}",
+            attempt.findings
+        );
     }
 
     fn final_reading(job: &JobRecords) -> Reading {
@@ -5952,6 +5985,7 @@ mod tests {
                     must_address: seed.must_address.clone(),
                     progress_note: None,
                     candidate: None,
+                    conflicts: Vec::new(),
                 });
             } else {
                 inputs.retry_findings = Some(RetryFindings {

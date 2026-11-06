@@ -45,7 +45,7 @@ Enter, or athena go <job>
   landing                              → the change plus every record, one commit, fast-forwarded
 ```
 
-To retry a rejected or failed job, ask `athena ask "try again on <job>"` (the full id or a unique suffix; the form is
+To retry a rejected, failed or stale job, ask `athena ask "try again on <job>"` (the full id or a unique suffix; the form is
 matched case-insensitively at the start of the request). The reader then sees that job's request and its final
 verification's findings, redacted, in an "Earlier attempt" section. That section also shows the job's final
 reading (summary, acceptance criteria, deliverables) and the corrections and answers the user gave, and it says the
@@ -54,8 +54,13 @@ attempt was rejected with every check passed and only content criteria unmet: th
 candidate (the base's files with the attempt's changes applied) and is sent the verifier's findings. The new candidate
 is always checked and verified in full and compared with the base, and a producer that changes nothing fails as an
 empty candidate. If other work has landed since, the retry starts from the base. A failed job (for example one refused at
-admission, which has no verification) also has its recorded reason carried there. Jobs that are landed, stale,
-in flight, or unknown are refused.
+admission, which has no verification) also has its recorded reason carried there. A stale job was verified but
+could not land because the branch moved on; it keeps its candidate, and its recorded reason is carried to the reader.
+The retry merges that candidate onto the branch tip. A clean merge is checked and verified again on the merged tree,
+with no new planner or producer run, and lands like any job. A conflict starts a producer run whose working directory
+is git's conflicted merge, and a candidate that still holds conflict markers in a conflicted file is closed before the
+checks and the verifier. The retry starts from the base when the candidate cannot be merged: it is gone, the branch no
+longer holds its base, or the request is pinned. Jobs that are landed, in flight, or unknown are refused.
 
 `athena retry <job>` is the short form: it does the same, and when the job has an introspection record it also shows
 the reader that record's cause, prevention and proposed next request, and the earlier cases of the same class with
@@ -73,7 +78,7 @@ itself erred.
 | Command | What it does |
 |---|---|
 | `athena ask "<request>" [--yes \| --later]` | Read a request; on a terminal, Enter runs it, a typed line corrects it, `q` leaves it proposed. `--later` only queues the request, with no model call |
-| `athena retry <job> [--yes]` | Try a rejected or failed job again from its introspection record (proposed next request, cause, prevention, earlier cases of the same class); shown as `ask` shows a reading. Without an introspection record it is `athena ask "try again on <job>"` |
+| `athena retry <job> [--yes]` | Try a rejected, failed, timed out, stale or interrupted job again from its introspection record (proposed next request, cause, prevention, earlier cases of the same class); shown as `ask` shows a reading. Without an introspection record it is `athena ask "try again on <job>"`. A stale job's kept candidate is merged onto the branch tip and verified again; the retry starts from the base when it cannot be merged |
 | `athena propose` | Write a pending defaults proposal for each failure class whose introspections span at least 3 distinct jobs. Proposals are records; `athena status` lists the open ones with their sources, and `defaults.toml` is never edited by Athena |
 | `athena score-jev [--cut <time>] [--derive] [--json]` | Score Jev's recorded shadow answers against introspections that have a class label (`athena.class-label/1` records, from a person or derived from evidence): Brier skill over two references, sample size, interval or "no bound computed", and the promotion verdict for the items it can compute. It reports how many labels came from evidence, per kind. With too few labeled cases it says so and gives no verdict. Read-only unless `--derive` is given, which first appends evidence-derived labels (see D137) |
 | `athena review <introspection-id> (--right \| --class <class-id> \| --new-class <name> --description "...") [--note "..."] [--json]` | Show an introspection (what happened, class, cause, prevention, Jev's shadow answer) and record your verdict on its class in the same step, as an `athena.class-label/1` record: the recorded class is right, the right class is another registry class, or a new class (added as a proposed `athena.failure-class/1` record in the same commit). The note is one line. The introspection is never edited; reviewing again adds a newer label that replaces the earlier one. An unknown id or class writes nothing. `athena status` shows how many introspections are still unreviewed and its `next` lines point here |
