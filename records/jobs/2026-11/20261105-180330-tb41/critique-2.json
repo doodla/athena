@@ -1,0 +1,118 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-180330-tb41",
+  "round": 2,
+  "at": "2026-11-06T00:00:14.030743445Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/invocation.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/invocation.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/admission.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/admission.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/planning.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/planning.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/tests/refusal_corpus.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/tests/refusal_corpus.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/live.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/live.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/pr_check.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/pr_check.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/reconcile.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/reconcile.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/landing_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/landing_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The new tests inherit the producer's slot variables, so they fail inside every later producer's wrapped `cargo test`",
+      "evidence": "Decision 2 puts ATHENA_BUILD_SLOT_HELD=1 in the environment of every wrapped command. env.rs also sets ATHENA_BUILD_SLOT, ATHENA_BUILD_SLOT_LOG and the wrapper-first PATH for Side::Produce. Once this lands, a producer working on Athena runs `cargo test` through the wrapper. The slot_exec tests then spawn `athena build-slot` and the `cargo` symlink with the marker inherited. `run` checks the marker first and runs the command with no slot, so: test (a)'s try_acquire returns Some while the command runs, criterion 2's B never waits, and criterion 3 never times out. A child given no ATHENA_BUILD_SLOT_LOG of its own appends to the producer's real log, which then lands in that producer's build_slots. Unit tests of `real_cargo` that read the process PATH find the wrapper first. Inside a test binary, current_exe is the test harness, not athena, so 'skip the athena binary' does not skip the wrapper. The repository already has this pattern: crates/athena-cli/tests/common/mod.rs:289-291 runs `.env_remove(\"ATHENA_NESTED\")` because tests run inside agents. The plan names no such step. The checks pass (they run with Side::Verify and no wrapper), so CI passes while producers keep failing. Fix: In every Command the slot_exec tests spawn, call env_remove for ATHENA_BUILD_SLOT_HELD, ATHENA_BUILD_SLOT and ATHENA_BUILD_SLOT_LOG, then set the ones the test needs, and always pass PATH explicitly. Give `real_cargo` a PATH and a self-path argument so its unit tests never read the process environment. Add one test that runs with the marker set in the parent and shows it is removed (or say in the plan why the tests are immune). State this in step 10.",
+      "location": "Demonstrations, criteria 1-3 and 5(4); Files: crates/athena-cli/tests/slot_exec.rs; Step 3 unit tests for real_cargo",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "build_wait_s (1800 s) is longer than the Bash tool's limit on any producer command, so the documented timeout never reaches the producer",
+      "evidence": "config.rs:166 defaults build_wait_s to 1800. athena.toml:64-65 sets bash_default_timeout_ms = 600000 and bash_max_timeout_ms = 1200000. env.rs:81-88 passes both to the agent. The design's own table (agent-and-build-slots.md:127) bounds a producer command by these Bash timeouts. A wrapper that waits 1800 s is killed by the Bash tool at 600 s, or 1200 s at most. The producer then sees a tool timeout with no 'no build slot free ... try again' text, and nothing recorded. If the host kills only the shell and not the wrapper, the wrapper can keep waiting, later win a slot and run cargo with no one reading the output. That outcome depends on host behavior the plan does not measure. Criterion 3 passes only because its test shrinks wait_s to 1 s. Meanwhile the shipped configuration cannot produce the behavior the acceptance asks for. Fix: When writing the producer's build-slot.json, cap wait_s below the Bash timeout, e.g. min(build_wait_s, bash_default_timeout_ms/1000 minus a margin). Print the capped value in the message. Add a test that the written settings respect the cap. Alternatively, raise it as a User open question and keep the 1800 s wait only with an explicit decision. Either way, state it in the Built note.",
+      "location": "Decision 4 / Step 8 (settings wait_s from jc.config.pipeline()), Criterion 3, Risks",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Nothing checks after the run that producer cargo commands actually went through the wrapper",
+      "evidence": "The hook checks its own PATH, which env.rs builds with the wrapper first. The producer cannot change PATH (NAME=value is denied at policy.rs:546-553, and export and env are not on the producer list at athena.toml:74). So the hook rule only catches a host-level PATH change that the hook process can also see. The case the plan leaves unmeasured is the Bash tool's shell putting another cargo first. If that happens, every producer build runs with no slot and no test or record shows it. The wrapper's log already gives the ground truth: each slotted command adds one line. Fix: In invoke_and_record, compare the number of slotted cargo commands in commands_run (using cargo_subcommand/takes_build_slot) with the number of build_slots lines. Report a mismatch as a warning line, or in a record field, and add a test with the fake driver. A bypass then shows up in the first real run instead of staying an open question.",
+      "location": "Decision 6 / Risks (host PATH) / Open question Host",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'The producer's job is not failed' is supported by argument, not shown, and the request's 'held' is quietly narrowed",
+      "evidence": "The request bullet says 'the job is held, not failed'. Design §4 (agent-and-build-slots.md:164-165) says the producer decides after exit 75. The demonstration asserts only that the message lacks 'Athena policy' and that the wrapper has no job state. No check observes a job outcome. The plan's own reasoning is sound: no code path turns a command's exit code into job state. Fix: Raise the gap between the request and design §4 as a User open question. Also put it in the Built note and the CHANGELOG entry ('a producer command that times out holds nothing; the producer decides'), so the user can see 'held' was not built for producer commands.",
+      "location": "Decision 9 / Criterion 3 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The documentation of the invocation record will not mention the new build_slots field",
+      "evidence": "docs/records.md:93 documents the invocation fields, commands_run and policy_denials included. No test enforces it (grep finds no reader of records.md in tests), so nothing fails. But by the 'strangers' default, a reader of the record format would not learn about build_slots, which is only described in a design note. Fix: Add one sentence to docs/records.md and list it as a file outside the deliverables with its reason, or ask the user in an open question.",
+      "location": "Decision 10 (docs/records.md dropped)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Asserting the recorded peak equals the measured overlap can be flaky",
+      "evidence": "held() is counted by try-locking slot files just after a win. The overlap counter changes outside the lock: a holder may decrement before it drops its lock, and one counter's brief try-lock can make another counter see a free slot as held. Either way the two numbers can differ by one with no bug. Fix: Force the overlap with a barrier, as the integration test's start markers do. Assert overlap ≤ limit, held ≤ limit, and max held ≥ the forced overlap, rather than exact equality in the threaded unit test.",
+      "location": "Criterion 5 demonstration (3) and (4): 'the largest Slot::held() equals the measured overlap'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Round 2 fixes most of round 1. The child stays in the agent's process group, the nested-cargo marker is tested with one slot, the policy now checks which `cargo` wins on PATH, and the peak test has an unwrapped control. I checked the named code in the snapshot (by reading it, not running it): slots.rs (try_acquire, acquire, waiting, Class::Producer = 2), policy.rs (check_segment denies NAME=value at 546-553, check_cargo at 616), env.rs `build`, procs.rs kill_group/group_alive, main.rs argv[0] dispatch at 545-553, and agent_spec in reading.rs. All exist as described. The Policy and Invocation literal lists match a grep of the crates. Step 3 takes the check slot per check (run/checks.rs:58), so a send-back producer never waits on its own job's slot. Two problems remain. (1) The new slot_exec tests will run inside future producers' wrapped `cargo test`, which sets ATHENA_BUILD_SLOT_HELD. The spawned wrappers inherit it and skip the queue, so the hold, wait and timeout tests fail for every later producer working on Athena. They would also append lines to that producer's real log. (2) The settings file passes build_wait_s (1800 s) to the wrapper, but the Bash tool ends a producer command at 600 s by default and 1200 s at most (athena.toml:64-65). With the shipped config, the documented exit-75 message can never reach the producer. Smaller points: the Bash tool's PATH is never checked against what the wrapper actually logged; criterion 3's 'not failed' rests on argument; docs/records.md is not updated; and asserting that the peak equals the measured overlap may be flaky."
+}

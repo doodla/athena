@@ -1123,6 +1123,9 @@ pub struct Report {
     /// touch disjoint paths; they run side by side up to `[parallel] max_concurrency`, group after group in
     /// this order (one job at a time when the bound is 1).
     pub plan_groups: Vec<Vec<String>>,
+    /// The item count of each plan group as the loop took it up to work, in the order worked. A group the run
+    /// never reached is not listed. Kept for this run only, to show what a higher `max_concurrency` could use.
+    pub group_sizes: Vec<usize>,
     /// Items refused for design or code because their plan lacks a goal, a ladder rung or acceptance.
     pub refused: Vec<Refusal>,
     /// Anything that went wrong beside the stop reason, such as a rating that could not be taken.
@@ -2941,6 +2944,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     let first_plan = plan.clone();
     let mut plan = plan;
     let mut wave: Vec<String> = Vec::new();
+    let mut group_sizes: Vec<usize> = Vec::new();
     loop {
         {
             let mut st = d.st();
@@ -2956,6 +2960,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
             break;
         }
         let mut now = batches.remove(0);
+        let group_size = now.len();
         if one_at_a_time {
             // One item runs. The rest of its group is not dispatched now (a later wave takes it); it is
             // passed on as `later` so the read-ahead can read it while the one item runs.
@@ -2967,6 +2972,11 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         wave = now.iter().map(|i| i.job.clone()).collect();
         d.st().tried.extend(wave.iter().cloned());
         run(d, vec![now], batches);
+        // A group counts as worked only when one of its items got a line: a stop (the job limit, say) can
+        // come before the first item of the group starts.
+        if d.st().jobs.iter().any(|j| wave.contains(&j.item)) {
+            group_sizes.push(group_size);
+        }
         if d.stopped() {
             break;
         }
@@ -3058,6 +3068,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
             .collect(),
         waiting: view.waiting,
         plan_groups: plan.groups,
+        group_sizes,
         refused: plan
             .refused
             .into_iter()

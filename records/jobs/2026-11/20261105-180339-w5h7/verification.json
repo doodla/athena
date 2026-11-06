@@ -1,0 +1,191 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261105-180339-w5h7",
+  "candidate_commit": "a0192713183fcd2923ca1f09b8dc032ca07eaa1c",
+  "verified_fingerprint": "sha256:6f0963e9ff38b3959708d7d7fc1c310e17ae9fa0170035f7647618567e82efdd",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42142292758 for a0192713183fcd2923ca1f09b8dc032ca07eaa1c",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42142292758 for a0192713183fcd2923ca1f09b8dc032ca07eaa1c",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42142292758 for a0192713183fcd2923ca1f09b8dc032ca07eaa1c",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 3,
+  "criteria": [
+    {
+      "criterion": "crates/athena-data/src/config.rs declares MAX_CONCURRENCY_CEILING as 16, and its doc comments and the athena.toml comment ('the schema allows 1 to 8') say 1 to 16.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read in the diff: config.rs:270 is `pub const MAX_CONCURRENCY_CEILING: u32 = 16;`. The doc comments at config.rs:110, 113 and 276 say 'from 1 to [`MAX_CONCURRENCY_CEILING`]', so they now mean 16. The error at :589 derives from the constant. The athena.toml comment now says 'the schema allows 1 to 16'. The criterion is met as worded. The CLI help text in main.rs still says 8 (see findings).",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "athena.toml [parallel] max_concurrency is 12 (the design's section 7.2 starting value), with its comment updated; athena.toml is listed as a deliverable for this reason.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read in the diff: athena.toml sets `max_concurrency = 12`. Its comment cites the design's starting value and the rollback to 2. Design section 7.2 (line 331) says '12 agent slots to start, 16 after build job 1 has measured agent memory', which matches.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test -p athena-data`: tests show max_concurrency = 16 and max_in_flight = 16 validate, and 17 (ceiling + 1) is refused with the 'from 1 to 16' error.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "`config::tests::the_ceiling_is_sixteen_and_the_shipped_start_is_twelve ... ok`. The test parses max_concurrency 16 and max_in_flight 16 and both are accepted. It shows max_concurrency 17 is refused with an error containing 'from 1 to 16', and max_in_flight 17 is refused with an error naming max_in_flight. That error is ConfigError::DrainPipeline and does not say 'from 1 to 16'. The criterion names that phrase only for the refusal of 17, and the max_concurrency path covers it. The full athena-data suite passed in the recorded `cargo test --locked`.",
+      "commands": [
+        "cargo test -p athena-data the_ceiling_is_sixteen"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test -p athena-cli --test drain`: a test drains a plan with groups of different sizes (e.g. two items disjoint in one group, one item alone in another) and asserts the Report's new group-size record lists the size of each group the batch worked, in order, and that groups not reached are not recorded.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "13 passed, including three new tests. `the_report_records_the_size_of_each_group_the_batch_worked_in_order` asserts group_sizes == [2, 1]. `a_group_the_batch_did_not_reach_is_not_recorded` gets Stop::BudgetSpent, plan_groups.len() == 2 and group_sizes == [2]. `one_job_at_a_time_records_groups_of_one` asserts [1, 1, 1]. Without the change, the group_sizes field does not exist, so these tests do not compile.",
+      "commands": [
+        "cargo test -p athena-cli --test drain rebase_recheck::"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test -p athena-cli` display tests: the end-of-run lines print the group sizes and their mean (an exact expected string asserted), and print nothing misleading when no group was worked.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Two tests passed. `group_sizes_are_listed_in_order_with_their_mean` asserts the exact strings 'group sizes 2, 1 (mean 1.5, 2 groups worked)\\n' and 'group sizes 3 (mean 3.0, 1 group worked)\\n'. `no_group_worked_prints_no_group_sizes_line` asserts None. The tests call the helper `group_sizes_line`. I confirmed by reading that display::drain pushes that line (display.rs ~734), but no test exercises display::drain itself (minor finding).",
+      "commands": [
+        "cargo test -p athena-cli --lib group_sizes"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "docs/design/agent-and-build-slots.md step 6 gets a short Built note stating the ceiling, the starting value 12, what is recorded, and what was not measured (peak in-flight and the low-disk count are read after real drains); CHANGELOG.md has an entry.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read in the diff: the Built note under step 6 states the ceiling of 16, the starting value of 12, what Report::group_sizes records and how it is counted, and the rollback. A '**Not measured:**' paragraph names peak in-flight jobs and the low-disk outcome count. It also explains why plan.rs is unchanged. CHANGELOG.md has a matching entry under Added.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test` from the repository root: all pass with no new warnings.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded checks for a0192713183f (CI run 42142292758): fmt passed, clippy passed with -D warnings, and the test suite passed.",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The `athena drain` help text still says the ceiling is 8. main.rs is on the deliverables list and was not changed.",
+      "evidence": "main.rs:274-275 reads 'drain runs up to `[parallel] max_concurrency` of them at once (athena.toml; default 1, which is one job at a time; at most 8)'. This change raised MAX_CONCURRENCY_CEILING to 16 and set athena.toml to 12. The CLI help now states a limit that is false and below the shipped value, so the maintainer reading `athena drain --help` is misled about what the change allows. The reading listed crates/athena-cli/src/main.rs (modify) as an expected deliverable, but `git diff HEAD~1 --stat` shows it untouched. Fix: change 'at most 8' to 'at most 16'.",
+      "location": "crates/athena-cli/src/main.rs:275",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two design docs still describe the built drain as allowing 1 to 8.",
+      "evidence": "parallel-jobs.md says 'the schema allows 1 to 8, `MAX_CONCURRENCY_CEILING` in `crates/athena-data/src/config.rs`' in its 'First slice built' summary. async-drain.md's current-state table says '1 to 8'. Neither file is on the deliverables list, so this is a follow-up, not a scope violation.",
+      "location": "docs/design/parallel-jobs.md:10; docs/design/async-drain.md:20,24,264",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "No test exercises display::drain printing the group-sizes line. Only the helper is tested.",
+      "evidence": "The display tests call `group_sizes_line` directly. A regression that removed the `if let Some(line) = group_sizes_line(&report.group_sizes)` call in `drain()` would still pass every test.",
+      "location": "crates/athena-cli/src/display.rs:734",
+      "source": "verifier"
+    },
+    {
+      "severity": "nit",
+      "summary": "The Built note implies max_in_flight 17 is also refused with 'from 1 to 16'. Only max_concurrency is.",
+      "evidence": "The note reads '(it bounds `[parallel] max_concurrency` and `[drain.pipeline] max_in_flight`; 17 is refused with \"from 1 to 16\")'. max_in_flight returns ConfigError::DrainPipeline(\"max_in_flight\") (config.rs:747), whose message does not say 'from 1 to 16'. Line 474 is also much longer than the doc's wrap width.",
+      "location": "docs/design/agent-and-build-slots.md:469-470",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "1 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "I judged the change against the request, design section 8 step 6 and section 7.2, and all 7 acceptance criteria. Every criterion is met, but the verdict is fail because one major finding remains: the `athena drain` help text in crates/athena-cli/src/main.rs:275 still says the limit is 'at most 8'. main.rs is on the deliverables list and was left unchanged, so after this change the help text gives a false, lower limit than the shipped value; the fix is changing that one word to 16. What the change does: it raises MAX_CONCURRENCY_CEILING to 16, sets athena.toml max_concurrency to 12 (the starting value in section 7.2), and adds Report::group_sizes. That field counts the items that began in each group a drain run worked, in order, and the end-of-run output prints them with their mean. The size is counted from items that actually started (the `begun` set), which is a sound measure when more than one job runs at a time; when the bound is 1, groups show as size 1, which the Built note documents. I ran the new tests myself: the ceiling test in athena-data, 13 drain integration tests including the three new group-size tests, and the two display tests. All passed. For fmt, clippy and the full test suite I relied on Athena's recorded CI results, which all passed. Smaller findings: two design docs still say 1 to 8; no test checks the full drain output for the group-sizes line, only the helper that builds it; and the Built note suggests max_in_flight 17 gets the 'from 1 to 16' error, which only max_concurrency does."
+}

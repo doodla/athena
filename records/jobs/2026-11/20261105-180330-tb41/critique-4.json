@@ -1,0 +1,97 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-180330-tb41",
+  "round": 4,
+  "at": "2026-11-06T00:14:43.756143183Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/invocation.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/invocation.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/pr_check.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/pr_check.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/reconcile.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/reconcile.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/landing_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/landing_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/records.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/records.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Slotted commands that time out (or end before running cargo) leave no log line. The build-wait line therefore leaves out the worst waits, and the unslotted note falsely reports a bypass on every exit 75.",
+      "evidence": "The plan's run writes the JSON line only after a slot is won. The criterion 3 test asserts the timed-out wrapper's log has no line. slotted_seen counts every `cargo test` in commands_run, and status prints the unslotted note when slotted_seen exceeds the logged lines. So each exit 75 shows up as an 'unslotted' cargo command, which is exactly the signal the plan relies on to detect the Bash-tool PATH bypass (Risks 1, Host question). The design (agent-and-build-slots.md:410-411) measures the effect by producer queued_s, and timeouts are the longest waits. Leaving them out biases the line low, and criterion 5 says queued_s is recorded per producer command. Fix: Write one log line for every slotted command the wrapper handles, with an outcome field: ran, timed_out (queued_s = time waited), or no_settings. Add the field to CommandSlot. Count timed-out commands in the build-wait line, for example 'N timed out', and compare slotted_seen against all logged lines, so the note only means 'never reached the wrapper'. Change the criterion 3 test to assert a timed_out line with queued_s >= wait_s, and add a status test where one timeout gives no unslotted note.",
+      "location": "Decision 10 / Demonstration criterion 3 ('B's log has no line') / Risks ('timed-out waits are not in the record') / status.rs unslotted note",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan says denied commands appear in commands_run, so the unslotted note overcounts. The code says denied commands are left out.",
+      "evidence": "crates/athena-agent/src/lib.rs:109-110: `/// Bash commands that ran (denied ones excluded), unredacted. pub commands_run: Vec<String>`. invocation.rs:152-159 builds the record's commands_run from this list. Fix: Check this against claude.rs/stream.rs. Then drop the 'denied commands count' wording from the note, the Risks and the Built note, so the docs do not state a false limitation.",
+      "location": "Risks ('denied commands appear in commands_run') / Decision 10 rejected alternative",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Splitting command strings by hand is a crude heuristic when the same crate already has the shell tokenizer the policy uses.",
+      "evidence": "policy.rs:495-512 check_bash tokenizes with `tokenize` and splits on Token::Separator. A string split miscounts quoted text such as `git log --grep 'cargo build; x'`, and the records hold redacted strings. Fix: Build slotted_cargo_commands on policy::tokenize (make it pub(crate) and keep the function in the athena-agent crate), counting segments whose first word is `cargo` and whose subcommand takes_build_slot. Keep the unit tests.",
+      "location": "Decision 10 / Step 2: slotted_cargo_commands splits on &&, ||, ;, |, newline",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan documents that producers can starve and asks for a governance change. It does not consider letting age carry across retries, which would keep the design's anti-starvation rule without touching athena.toml.",
+      "evidence": "slots.rs:245-251 encodes queued_at in the ticket name, and is_head (298-308) ages by now − queued_at. With wait 540 s < promote 600 s, a producer ticket never ages (decision 5). The design says class 3 'cannot starve behind a steady stream of class 2' (agent-and-build-slots.md:155-156). Fix: Either add an enqueue variant that takes the time of the job's first unanswered ask (kept in a per-job file next to the log and cleared on a win), so a retry inherits its age, or state in the Built note why this was rejected. Keep the User question in either case.",
+      "location": "Decision 5 (cap versus ageing)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Any process that inherits the producer's PATH but gets its environment rebuilt from the allow-list hits the wrapper with neither ATHENA_BUILD_SLOT_HELD nor settings, so its cargo fails with exit 1.",
+      "evidence": "checks.rs:447-450 runs check commands with env_clear().envs(ctx.env), and env::build (env.rs:65-112) passes PATH (athena.toml:52 env_pass = [\"HOME\", \"PATH\"]) but not ATHENA_BUILD_SLOT_HELD. A nested athena check inside a producer's `cargo test` would see the wrapper first on PATH. The hook already guarantees that a producer has the variable (decision 7), so failing closed in the wrapper adds no protection for producers. Fix: When ATHENA_BUILD_SLOT is absent, pass through to the real cargo and log nothing; the hook remains the fail-closed point for producers. Alternatively, keep exit 1, name this case in the Built note and test it.",
+      "location": "Decision 2 / Step 3 ('missing settings for a slotted subcommand exit 1 (fail closed)')",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The cap protects only the default Bash timeout. A producer that passes a shorter Bash `timeout`, or that gets a slot near the cap and then runs for more than 60 s, is killed by the Bash tool and never sees the documented message.",
+      "evidence": "The Bash timeout covers both the slot wait and the command's run. env.rs:81-88 passes only the default and the maximum. Fix: Add one sentence to the Built note covering both cases.",
+      "location": "Decision 4 (wait cap = bash_default_timeout_ms/1000 − 60)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code by reading it. Most of what it names exists as described: the argv[0] dispatch at main.rs:546-553; check_segment and check_cargo, including the NAME=value denial at policy.rs:546-553; is_head and enqueue in slots.rs (Class::Producer = 2, and a retry gets a fresh queued_at); env::build; agent_spec at reading.rs:338-405; and the six Invocation literals at the lines given. run/producer.rs:166 is the only caller that passes Side::Produce, and every other env::build caller passes Verify or Read. procs.rs provides kill_group and group_alive. The plan's Policy and Invocation readers match what I found, and the demonstrations mostly run the real binary against a real queue, with controls. One design flaw is left. The wrapper writes nothing when a wait times out, or when it ends before running cargo. So the \"build wait\" line leaves out the longest producer waits, and the unslotted-bypass note fires falsely on every timeout. That note is the plan's only way to catch the Bash-tool PATH risk. The remaining findings are minor: a false claim about denied commands, a hand-written command splitter where a tokenizer already exists, a way to keep ageing that the plan did not consider, and the wrapper exiting 1 when settings are missing in non-producer contexts. Athena's six scope findings are already answered by decision 14, and I do not repeat them. Verdict: revise."
+}

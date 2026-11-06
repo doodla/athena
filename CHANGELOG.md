@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The drain's agent ceiling is now 16: `[parallel] max_concurrency` and `[drain.pipeline] max_in_flight` accept 1
+  to 16 (the ceiling was 8), and 17 is refused. `athena.toml` sets `max_concurrency` to 12. The drain report also
+  records the item count of each plan group it worked, in order, and the end-of-run output prints a `groups` line
+  with the sizes and their mean; groups the run did not reach are not listed. Kept in memory for the run. Peak
+  in-flight jobs and the "low disk" count are not measured by this change.
 - On a docs-only change (every changed path is under `docs/` or ends in `.md`), the verdict now counts a check
   Athena skipped by the docs-only path rule (`skip_when_only`) as seen running, as it already did a check
   reused from a green GitHub run, so a criterion such as "cargo test and cargo clippy still pass" can cite it.
@@ -162,6 +167,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- `athena drain --help` no longer hard-codes the concurrency ceiling in its text ("at most 8"). Root cause: the
+  help was a literal string, separate from `MAX_CONCURRENCY_CEILING`, so raising the constant left the help
+  stating a false limit. The help now carries a placeholder that is filled from the constant when the command
+  is built, and a test checks the rendered help against the constant.
 - `athena retry` no longer starts the same work twice for an interrupted job. An interrupted job (dispatched,
   no live process) stays dispatched after it is retried, so `athena status` kept telling the user to run
   `athena retry <id>` and a second retry made a second "try again on <id>" job. The check is in `Athena::retry`

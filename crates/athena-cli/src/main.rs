@@ -272,7 +272,7 @@ items in plan order (a dependent after what it needs, then priority urgent, high
 then higher rung, then age as the tiebreak; no priority means normal), not oldest \
 first, and the report shows the plan's groups: items in one group have no dependency and touch disjoint paths, \
 so they can run in parallel: drain runs up to `[parallel] max_concurrency` of them at once (athena.toml; \
-default 1, which is one job at a time; at most 8). Landing and rating stay one at a time, and a group starts \
+default 1, which is one job at a time; at most {MAX_CONCURRENCY}). Landing and rating stay one at a time, and a group starts \
 only when the group before it is done. Nothing is defaulted into a plan: acceptance \
 comes only from explicit bullets in the request or a reading's criteria, and the rung from the proposal that made \
 the job or from evidence in the request. The planning pass is deterministic code, not a model call. An unread \
@@ -542,6 +542,22 @@ impl Ui for Terminal {
     }
 }
 
+/// The command tree, with the drain help's `{MAX_CONCURRENCY}` placeholder filled from the config ceiling so
+/// the help cannot disagree with what the config accepts.
+fn cli_command() -> clap::Command {
+    Cli::command().mut_subcommand("drain", |drain| {
+        let text = drain
+            .get_after_help()
+            .map(|t| t.to_string())
+            .unwrap_or_default()
+            .replace(
+                "{MAX_CONCURRENCY}",
+                &athena_data::config::MAX_CONCURRENCY_CEILING.to_string(),
+            );
+        drain.after_help(text)
+    })
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let name = args
@@ -553,7 +569,7 @@ fn main() -> ExitCode {
     }
     let version: &'static str =
         Box::leak(wiring::version_string(&wiring::build_info()).into_boxed_str());
-    let matches = Cli::command().version(version).get_matches();
+    let matches = cli_command().version(version).get_matches();
     let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(error) => error.exit(),
@@ -1843,6 +1859,18 @@ mod tests {
             "{restart}"
         );
         assert!(help_of("drain").contains("drain-status"));
+        // The drain help states the ceiling from the config constant, never a hard-coded number.
+        let ceiling = athena_data::config::MAX_CONCURRENCY_CEILING;
+        let drain_help = cli_command()
+            .find_subcommand_mut("drain")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(
+            drain_help.contains(&format!("at most {ceiling})")),
+            "{drain_help}"
+        );
+        assert!(!drain_help.contains("{MAX_CONCURRENCY}"), "{drain_help}");
         // The flags parse, and a timeout without a wait is refused.
         assert!(matches!(
             Cli::try_parse_from(["athena", "drain-stop", "--wait", "--timeout", "30"])
