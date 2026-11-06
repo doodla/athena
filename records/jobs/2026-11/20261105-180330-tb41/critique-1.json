@@ -1,0 +1,132 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-180330-tb41",
+  "round": 1,
+  "at": "2026-11-05T23:51:59.31428932Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/invocation.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/invocation.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/admission.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/admission.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/planning.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/planning.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/tests/refusal_corpus.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/tests/refusal_corpus.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/live.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/live.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/pr_check.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/pr_check.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/reconcile.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/reconcile.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/landing_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/landing_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/records.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/records.md",
+      "source": "athena"
+    },
+    {
+      "severity": "blocker",
+      "summary": "A cargo started inside a slotted cargo goes back through the wrapper and waits for a second slot, so with the default single slot the producer's `cargo test` of this repository hangs for build_wait_s and then fails.",
+      "evidence": "The wrapper directory stays first on PATH for everything the wrapped command starts. This repository's own tests start `cargo` by name: crates/athena-core/src/slots.rs:824 (`Command::new(\"cargo\").args([\"build\", \"--offline\"])` in a test), crates/athena-core/src/run/tests.rs:2659, crates/athena-core/src/disk.rs:824 and xtask/tests/ci_shards.rs:121. Inside the producer's `cargo test`, which already holds a slot, a nested `cargo build` resolves to the wrapper and asks for a Producer slot. The default max_check_slots is 1 (crates/athena-data/src/config.rs:165), so it waits 1800 s, exits 75, and the test fails. With more slots, one command takes two slots and two producers can deadlock each other. The plan's only recursion guard is that real_cargo skips the athena binary, which does not cover this case. Fix: Make the wrapper re-entrant. It sets a marker in the child's environment (for example ATHENA_BUILD_SLOT_HELD=<slot index>), and a wrapper that sees the marker execs the real cargo without asking for a slot. Another option is to remove the wrapper directory from the child's PATH. Add a slot_exec test with slots=1: the wrapped command itself runs `cargo build` by name through the wrapper and finishes well before wait_s. That test fails without the guard.",
+      "location": "Approach / Decision 1 and step 2 (wrapper dir first on PATH for Side::Produce); slot_exec::cargo_wrapper",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The peak count cannot exceed max_check_slots by construction, so the 'never exceeds' test passes whether or not the queue works. The count is also sampled only when a producer wins a slot.",
+      "evidence": "The plan counts `held` by try-locking each of the `slots` files `slot-0.lock`..`slot-{N-1}.lock` (slots.rs:220-237). A count over N files is at most N even if the queue let more commands run at once, so 'max held <= 2 with limit 2' cannot fail. The design asks for the peak that 'the queue records' (agent-and-build-slots.md:411). The plan samples only at producer acquisitions and leaves out checks (Class::Check in run/checks.rs). The probe also briefly locks free slot files, which can make a concurrent try_acquire or head request miss (the plan's own risk). Fix: Measure concurrency apart from the lock files. In the test, each command appends start and end marks to a shared file, and the test computes the most commands that overlapped, then checks it is at most the limit and equals the recorded peak. Run it on a path where a broken queue (for example, one that skips the lock) would let it exceed the limit. Better still, have the queue keep the peak itself: a counter file in the slots directory, updated under a lock on every win for any class. Then checks count too and there is no try-lock probe of free slots. If the producer-only sample is kept, label it as a lower bound in the status line as well as in the Built note.",
+      "location": "Decision 7, step 1 (Slot::held), criterion 5 demonstration group (3)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "`procs::isolate` moves cargo out of the agent's process group, so the group kills used by `athena stop` and the deadline no longer reach rustc, build scripts or test binaries.",
+      "evidence": "procs.rs:88-92: isolate calls `process_group(0)` and sets PDEATHSIG to SIGTERM. Today a producer's cargo and all its descendants are in the agent's group, and kill_group (procs.rs:100) ends them all. With the plan, a group kill reaches only the wrapper. Cargo then gets SIGTERM, but its children are in cargo's new group and are not signalled, so they keep running with no slot held, which is the gap the plan notes for grandchildren. The plan creates this regression; it was not there before. Fix: Spawn the child in the agent's group (a plain Command::spawn without a new process group). Group kills from `athena stop` and the timeouts then reach the whole build tree, and the slot lock still dies with the wrapper. If a parent-death signal is still wanted, expose `sys::set_parent_death_signal` through a small pub helper in procs.rs and add procs.rs to the files list. Adjust demonstration 1(d) so it checks the whole tree, for example by killing the agent-like group, not only the direct child.",
+      "location": "Decision 4, step 3 (spawn with procs::isolate)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Criterion 4's bypass tests already pass on today's policy, and the one new rule only checks that a file named `cargo` exists, not that `cargo` resolves to the wrapper.",
+      "evidence": "policy.rs already denies `/usr/bin/cargo` and `./cargo` (line 554, 'run programs by name'), `+nightly` (line 637) and `--target-dir` (line 659), and policy.rs:1046-1047 tests the last two. So 'a cargo command that bypasses the wrapper is denied' would pass without this change. The only new denial is 'wrapper directory has no cargo file', which detects a missing install, not a bypass. The plan's own top risk, a host PATH that resolves another cargo first, is left with no check. Fix: Make the hook check what `cargo` actually resolves to. The hook process gets the agent's environment, so it can search its own PATH for `cargo` and deny slotted subcommands unless the first hit is `<build_wrapper>/cargo`. Test it as a protection: the same command is allowed with the wrapper first on PATH and denied with another cargo ahead of it. Present the existing denials as controls, not as evidence of the new behavior.",
+      "location": "Decision 5, criterion 4 demonstration item (4)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 3's 'the producer's job is not failed' is argued in prose, not shown by a test.",
+      "evidence": "The demonstration says 'no code path changes job state, so the job is not failed'. No assertion is run on a job record. Design section 4 (line 164-165) says the producer decides after exit 75, and the request says 'the job is held, not failed'. Fix: Either add a run-level test in which a fake producer's command gets exit 75 and the job does not close as failed (and does not use an attempt), or say plainly in the criterion and the Built note that for producer commands the design gives the decision to the producer, so no hold marker is written.",
+      "location": "Criterion 3 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Putting `cargo run` (and `cargo test`) in a slot holds it for the whole run of the program, not only the compile.",
+      "evidence": "Design section 4 asks for every cargo command 'that compiles'. A wrapped `cargo run -- <long task>` holds a build slot while the program runs, which blocks checks for as long as the Bash timeout allows (up to 1,200,000 ms in athena.toml:65). Fix: State this in the Built note as a known cost, or for `run` hold the slot only for `cargo build` of the same arguments and then exec the binary unslotted.",
+      "location": "Decision 3",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Athena's out-of-deliverable findings are mechanical literal edits plus two needed wiring files.",
+      "evidence": "I grepped the Policy literals (admission.rs 688/818/903, run/planning.rs:219, refusal_corpus.rs 1030/1191, live.rs:170) and the Invocation literals (pr_check.rs:269, reconcile.rs:245, landing_tests.rs:125); the plan's list matches what the code has. reading.rs and invocation.rs are where the policy and the record are built. Fix: No change needed beyond naming in the Built note why these files changed.",
+      "location": "Files list",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the design (sections 4 and 8), slots.rs, policy.rs, env.rs, procs.rs, reading.rs, invocation.rs and the config defaults. The plan's names are real, its lists of struct literals match the code, and it follows the files the design names. It still has one blocker: the wrapper stays first on PATH for everything cargo starts, and this repository's tests run `cargo build` and `cargo metadata` by name (slots.rs:824, run/tests.rs:2659, disk.rs:824, ci_shards.rs:121). With the default max_check_slots = 1, the producer's own `cargo test` would wait 1800 s for a second slot and then fail. There are three major soundness problems. First, the peak is counted over N lock files, so the 'never exceeds the limit' test cannot fail, and it covers producer acquisitions only. Second, `procs::isolate` moves the build out of the agent's process group, so `athena stop` and the timeouts no longer reach rustc or test binaries. Third, the criterion 4 bypass tests are denials the policy already makes, and the new rule only checks that a wrapper file exists, not that `cargo` resolves to it. To fix: make the wrapper re-entrant, measure or record the peak apart from the lock files, keep the child in the agent's group, and have the hook check the resolved `cargo` on PATH."
+}
