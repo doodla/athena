@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::capability::ToolGrant;
+use athena_agent::env::CargoShim;
 use athena_context::Composed;
 use std::collections::BTreeMap;
 
@@ -209,6 +210,20 @@ impl Athena {
             if let Some(effort) = &ctx.reading.producer_effort {
                 spec.effort = effort.clone();
             }
+            // The producer's `cargo build`, `test`, `clippy` and `check` take a build slot: a `cargo` wrapper
+            // first on its PATH. Only this spec gets it, so the verifier and the checks run as before. A note
+            // left by an earlier invocation is cleared, so only the wrapper of this one can hold the job.
+            let job_dir = self.state.job_dir(&id);
+            crate::slots::clear_wait_note(&crate::slots::wait_note_path(&job_dir));
+            let shim = CargoShim::new(
+                &job_dir,
+                self.state.slots_dir(),
+                &jc.config.pipeline(),
+                &jc.config.agents,
+            );
+            shim.install(&self.athena_bin)
+                .map_err(|e| anyhow::anyhow!("installing the producer's cargo wrapper: {e}"))?;
+            shim.apply(&mut spec.env);
             seq += 1;
             let facts = InvocationFacts {
                 job: &id,
@@ -244,6 +259,14 @@ impl Athena {
                     &crate::disk::producer_stop_reason(&record.detail.clone().unwrap_or_default()),
                 );
                 return Ok(Flow::Stop);
+            }
+            // The producer ended while its last cargo command had waited out the build slot: its work could not
+            // be built, so the job is held (the way a wait at the checks holds it), not judged on unbuilt work.
+            // A producer that tried again and got a slot cleared the note, so it is not held.
+            let note = crate::slots::wait_note_path(&job_dir);
+            if let Some(wait) = crate::slots::read_wait_note(&note) {
+                crate::slots::clear_wait_note(&note);
+                return Err(wait.into());
             }
             let raw = match output
                 .structured

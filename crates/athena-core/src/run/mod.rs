@@ -1489,9 +1489,18 @@ impl Athena {
             seq,
             snapshot,
             work,
-        } = match self.producer_loop(ctx, brief, accepted, &mut closing, seq, prepared)? {
-            Flow::Go(reported) => reported,
-            Flow::Stop => return Ok(closing),
+        } = match self.producer_loop(ctx, brief, accepted, &mut closing, seq, prepared) {
+            Ok(Flow::Go(reported)) => reported,
+            Ok(Flow::Stop) => return Ok(closing),
+            // The producer's last cargo command waited out the build slot: the job is held, with no
+            // candidate and no attempt used, and a later drain runs it again from the base.
+            Err(e) => {
+                if let Some(wait) = e.downcast_ref::<crate::disk::SlotWait>() {
+                    let wait = *wait;
+                    return Err(self.hold_for_slot_wait(ctx, closing, wait));
+                }
+                return Err(e);
+            }
         };
 
         let Admitted {
