@@ -3,6 +3,7 @@
 //!
 //! This module is compiled for this crate's own tests and for any crate that turns on the `test-support`
 //! feature of `athena-core` (the shipped binary does not). Nothing here is used in production.
+//! A test that needs an executable stand-in script writes it with `athena_testkit::write_executable`.
 //!
 //! # The shape of the history
 //!

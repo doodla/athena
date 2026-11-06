@@ -184,6 +184,128 @@ impl Drop for BuildLink {
     }
 }
 
+/// The environment variable that names the producer's `cargo` shim directory. The wrapper reads it to find
+/// itself on `PATH` and to run the real `cargo` without it.
+pub const SHIM_DIR_ENV: &str = "ATHENA_CARGO_SHIM_DIR";
+/// The directory of the build-slot lock files and queue.
+pub const SHIM_SLOTS_DIR_ENV: &str = "ATHENA_SLOTS_DIR";
+/// How many build slots there are.
+pub const SHIM_SLOTS_ENV: &str = "ATHENA_SLOTS";
+/// The longest the wrapper waits for a slot, in seconds.
+pub const SHIM_WAIT_ENV: &str = "ATHENA_SLOT_WAIT_S";
+/// The ageing interval of the slot queue, in seconds.
+pub const SHIM_PROMOTE_ENV: &str = "ATHENA_SLOT_PROMOTE_S";
+/// The file the wrapper writes when it gave up waiting for a slot.
+pub const SHIM_NOTE_ENV: &str = "ATHENA_SLOT_WAIT_NOTE";
+/// The wait note's file name inside the job's directory.
+pub const WAIT_NOTE_FILE: &str = "slot-wait.json";
+/// The shim directory's name inside the job's directory.
+pub const SHIM_DIR_NAME: &str = "shim";
+
+/// The `cargo` wrapper the producer's `PATH` starts with, so that its `cargo build`, `test`, `clippy` and
+/// `check` take a build slot (`docs/design/agent-and-build-slots.md` section 6, step 4).
+///
+/// The wrapper is the `athena` binary linked as `cargo` in [`CargoShim::dir`]. Only the producer's environment
+/// gets it ([`CargoShim::apply`]); [`build`] does not, so the verifier's and the checks' environments are
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CargoShim {
+    /// The directory holding the `cargo` link, inside the job's directory.
+    pub dir: PathBuf,
+    /// The build-slot directory.
+    pub slots_dir: PathBuf,
+    /// The number of build slots.
+    pub slots: usize,
+    /// The longest the wrapper waits for a slot, in seconds.
+    pub wait_s: u64,
+    /// The ageing interval of the queue, in seconds.
+    pub promote_s: u64,
+    /// Where the wrapper records that it gave up waiting.
+    pub note: PathBuf,
+}
+
+impl CargoShim {
+    /// The shim of the job whose directory is `job_dir`.
+    ///
+    /// The wait is `build_wait_s`, capped at half the agent's default Bash timeout (at least 1 s). The
+    /// wrapper runs inside one Bash call, which the agent's tool ends at that timeout; a wrapper that waited
+    /// the full `build_wait_s` (1800 s by default) would be killed first and never say why. Half leaves the
+    /// rest of the call for the build itself.
+    pub fn new(
+        job_dir: &Path,
+        slots_dir: PathBuf,
+        pipeline: &athena_data::config::PipelineConfig,
+        agents: &Agents,
+    ) -> CargoShim {
+        let cap = (agents.bash_default_timeout_ms / 2000).max(1);
+        CargoShim {
+            dir: job_dir.join(SHIM_DIR_NAME),
+            slots_dir,
+            slots: pipeline.max_check_slots.max(1) as usize,
+            wait_s: pipeline.build_wait_s.min(cap),
+            promote_s: pipeline.build_age_promote_s,
+            note: job_dir.join(WAIT_NOTE_FILE),
+        }
+    }
+
+    /// Reads the shim from the wrapper's own environment. The error names what is missing or malformed.
+    pub fn from_env(lookup: &dyn Fn(&str) -> Option<String>) -> Result<CargoShim, String> {
+        let get = |key: &str| lookup(key).ok_or_else(|| format!("{key} is not set"));
+        let number = |key: &str| -> Result<u64, String> {
+            get(key)?
+                .parse::<u64>()
+                .map_err(|e| format!("{key} is not a number: {e}"))
+        };
+        Ok(CargoShim {
+            dir: PathBuf::from(get(SHIM_DIR_ENV)?),
+            slots_dir: PathBuf::from(get(SHIM_SLOTS_DIR_ENV)?),
+            slots: usize::try_from(number(SHIM_SLOTS_ENV)?)
+                .map_err(|e| format!("{SHIM_SLOTS_ENV}: {e}"))?,
+            wait_s: number(SHIM_WAIT_ENV)?,
+            promote_s: number(SHIM_PROMOTE_ENV)?,
+            note: PathBuf::from(get(SHIM_NOTE_ENV)?),
+        })
+    }
+
+    /// Puts the shim directory first on `PATH` and sets the variables the wrapper reads.
+    pub fn apply(&self, env: &mut BTreeMap<String, String>) {
+        let path = match env.get("PATH").filter(|p| !p.is_empty()) {
+            Some(old) => format!("{}:{old}", self.dir.display()),
+            None => self.dir.display().to_string(),
+        };
+        env.insert("PATH".into(), path);
+        env.insert(SHIM_DIR_ENV.into(), self.dir.display().to_string());
+        env.insert(
+            SHIM_SLOTS_DIR_ENV.into(),
+            self.slots_dir.display().to_string(),
+        );
+        env.insert(SHIM_SLOTS_ENV.into(), self.slots.to_string());
+        env.insert(SHIM_WAIT_ENV.into(), self.wait_s.to_string());
+        env.insert(SHIM_PROMOTE_ENV.into(), self.promote_s.to_string());
+        env.insert(SHIM_NOTE_ENV.into(), self.note.display().to_string());
+    }
+
+    /// Makes `<dir>/cargo` a link to `athena_bin`, replacing whatever was there. The link is all there is to
+    /// the shim; `athena_bin` need not run now.
+    pub fn install(&self, athena_bin: &Path) -> Result<(), String> {
+        let link = self.dir.join("cargo");
+        let fail = |what: &str, e: std::io::Error| format!("{what} {}: {e}", link.display());
+        std::fs::create_dir_all(&self.dir).map_err(|e| fail("creating the directory of", e))?;
+        if std::fs::symlink_metadata(&link).is_ok() {
+            std::fs::remove_file(&link).map_err(|e| fail("removing", e))?;
+        }
+        std::os::unix::fs::symlink(athena_bin, &link).map_err(|e| fail("linking", e))
+    }
+
+    /// `path` (a `PATH` value) without the shim directory, for the real `cargo` the wrapper runs.
+    pub fn without_shim(&self, path: &str) -> String {
+        path.split(':')
+            .filter(|dir| Path::new(dir) != self.dir)
+            .collect::<Vec<_>>()
+            .join(":")
+    }
+}
+
 /// Resolves `.` and `..` lexically.
 pub fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
@@ -408,6 +530,127 @@ mod tests {
         let error = BuildLink::create(&job_dir, &outside, &slot).unwrap_err();
         assert!(error.contains("not inside this job's directory"), "{error}");
         assert!(std::fs::symlink_metadata(&outside).is_err());
+    }
+
+    fn shim_for(pipeline: &athena_data::config::PipelineConfig) -> CargoShim {
+        CargoShim::new(
+            Path::new("/state/jobs/j"),
+            PathBuf::from("/state/slots"),
+            pipeline,
+            &agents(),
+        )
+    }
+
+    #[test]
+    fn the_shim_directory_goes_first_on_the_path_and_the_variables_round_trip() {
+        let shim = shim_for(&athena_data::config::PipelineConfig::default());
+        let mut env = BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        shim.apply(&mut env);
+        assert_eq!(env["PATH"], "/state/jobs/j/shim:/usr/bin:/bin");
+        assert_eq!(env[SHIM_DIR_ENV], "/state/jobs/j/shim");
+        let read = CargoShim::from_env(&|key| env.get(key).cloned()).unwrap();
+        assert_eq!(read, shim);
+        // With no PATH at all the directory is the whole PATH.
+        let mut bare = BTreeMap::new();
+        shim.apply(&mut bare);
+        assert_eq!(bare["PATH"], "/state/jobs/j/shim");
+        // A missing variable is named.
+        let error = CargoShim::from_env(&|_| None).unwrap_err();
+        assert!(error.contains(SHIM_DIR_ENV), "{error}");
+    }
+
+    #[test]
+    fn the_real_cargo_is_looked_up_on_the_path_without_the_shim_directory() {
+        let shim = shim_for(&athena_data::config::PipelineConfig::default());
+        assert_eq!(
+            shim.without_shim("/state/jobs/j/shim:/usr/bin:/bin"),
+            "/usr/bin:/bin"
+        );
+        assert_eq!(shim.without_shim("/usr/bin:/state/jobs/j/shim"), "/usr/bin");
+        assert_eq!(shim.without_shim("/usr/bin"), "/usr/bin");
+        // A longer path that only starts with the directory stays.
+        assert_eq!(
+            shim.without_shim("/state/jobs/j/shim2:/usr/bin"),
+            "/state/jobs/j/shim2:/usr/bin"
+        );
+    }
+
+    #[test]
+    fn the_shims_wait_is_below_the_bash_timeout_of_the_shipped_config() {
+        // The wrapper runs inside one Bash call. Its wait must end, with its message and note, before the
+        // tool ends the call, or the producer never learns why its command stopped.
+        let config = Config::parse(include_str!("../../../athena.toml")).unwrap();
+        let shim = CargoShim::new(
+            Path::new("/state/jobs/j"),
+            PathBuf::from("/state/slots"),
+            &config.pipeline(),
+            &config.agents,
+        );
+        assert!(
+            config.pipeline().build_wait_s > 600,
+            "the checks wait longer"
+        );
+        assert!(shim.wait_s < config.agents.bash_default_timeout_ms / 1000);
+        assert_eq!(shim.wait_s, config.agents.bash_default_timeout_ms / 2000);
+        assert_eq!(shim.wait_s, 300);
+        // A short configured wait is kept as it is.
+        let short = athena_data::config::PipelineConfig {
+            build_wait_s: 1,
+            ..Default::default()
+        };
+        assert_eq!(shim_for(&short).wait_s, 1);
+    }
+
+    #[test]
+    fn installing_the_shim_links_cargo_to_the_binary_and_replaces_an_old_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let shim = CargoShim::new(
+            &temp.path().join("jobs/j"),
+            temp.path().join("slots"),
+            &athena_data::config::PipelineConfig::default(),
+            &agents(),
+        );
+        shim.install(Path::new("/opt/athena")).unwrap();
+        let link = shim.dir.join("cargo");
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("/opt/athena"));
+        shim.install(Path::new("/opt/athena-new")).unwrap();
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("/opt/athena-new")
+        );
+    }
+
+    #[test]
+    fn build_adds_no_shim_variables() {
+        // The verifier's and the checks' environments come from `build` alone: no shim directory, no slot
+        // variables, and the parent's PATH as it is.
+        let agents = agents();
+        let capability_env = BTreeMap::new();
+        for side in [Side::Read, Side::Produce, Side::Verify] {
+            let env = build(
+                &EnvSpec {
+                    agents: &agents,
+                    job: "j",
+                    job_dir: Path::new("/state/jobs/j"),
+                    snapshot: Path::new("/state/jobs/j/work"),
+                    side,
+                    capability_env: &capability_env,
+                },
+                parent_env,
+            )
+            .unwrap();
+            assert_eq!(env["PATH"], "/usr/bin");
+            for key in [
+                SHIM_DIR_ENV,
+                SHIM_SLOTS_DIR_ENV,
+                SHIM_SLOTS_ENV,
+                SHIM_WAIT_ENV,
+                SHIM_PROMOTE_ENV,
+                SHIM_NOTE_ENV,
+            ] {
+                assert!(!env.contains_key(key), "{side:?} has {key}");
+            }
+        }
     }
 
     #[test]

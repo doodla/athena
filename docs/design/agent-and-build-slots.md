@@ -411,6 +411,38 @@ Each change is one focused job with its own tests, lands on its own, and reads i
    `commands_run`, read by the "build wait" line; and the peak number of slots held at once, which the queue records and the same line prints (it must never
    exceed `max_check_slots`).
    Depends on: 3.
+   **Built** (the producer's `cargo build`, `test`, `clippy` and `check`; `athena.toml` not touched). What was chosen
+   where the note left room:
+   - The wrapper is the `athena` binary linked as `cargo` in `<job_dir>/shim`, first on the producer's `PATH`, and
+     `main` dispatches on `argv[0]` as it does for the git hooks. It is not a `build-slot -- <cmd>` subcommand: the
+     producer keeps typing plain `cargo ...`, which the tool policy already checks by name, so the policy needs no
+     second parser of the inner command and its allowed commands do not change. Only the producer's environment
+     gets the directory (`CargoShim::apply`, called in `producer_loop`); `env::build`, the verifier and the checks
+     are unchanged.
+   - The wrapper finds the subcommand after the global options with the policy's own list and walk
+     (`policy::CARGO_GLOBAL_FLAGS`, `policy::cargo_lead`, `policy::cargo_subcommand`), so `cargo -q build` and
+     `cargo --locked test` take a slot and the two cannot drift. `build`, `test`, `clippy` and `check` take a
+     `Class::Producer` slot; `fmt`, `metadata`, `tree`, `doc`, `run` and any form it does not recognise run the real
+     `cargo` at once with no slot.
+   - The real `cargo` runs as a child with the shim directory removed from its `PATH`, and the slot is held until it
+     exits. It is not `exec`ed: the lock is held by the wrapper process and the workspace denies `unsafe`; and a
+     `cargo` that the real one starts must be the real one, or it would wait for the slot its parent holds. If the
+     wrapper is killed with `SIGKILL`, the lock is freed while its child may still run for a short while; the Bash
+     timeout and the kill switch end the child's process group.
+   - **The wrapper's wait is shorter than section 4's `build_wait_s`.** Section 4 gives 1800 s, which still governs
+     the checks. The wrapper runs inside one Bash call, which the agent's tool ends at `bash_default_timeout_ms`
+     (600000 ms in `athena.toml`), so a wrapper that waited 1800 s would be killed first and never print its message.
+     The wrapper waits `min(build_wait_s, max(1, bash_default_timeout_ms / 2000))`, 300 s for the shipped settings:
+     long enough to queue, and half the call is left for the build. A build that needs more than the rest can run
+     with a longer explicit Bash timeout, up to `bash_max_timeout_ms`.
+   - A wait past the limit prints "no build slot free for 300 s; try again", writes `<job_dir>/slot-wait.json` and
+     exits 75 (`EX_TEMPFAIL`) without starting `cargo`. `producer_loop` clears the note before each producer
+     invocation and the wrapper clears it whenever it later gets a slot; if the note is still there when the
+     producer ends, the job is held as `environment: build slot wait` (`hold_for_slot_wait`), not failed and not
+     judged on unbuilt work. There is no candidate and no resume mark, so a later drain retries the job from the
+     base and the producer's spend is paid again.
+   - Not done yet: `queued_s` per producer command in the invocation record, and the peak number of slots held at
+     once (build job 4's second measure).
 5. **Slot-owned warm target directories and smaller outputs.**
    Touches: `crates/athena-core/src/state.rs` (slot directories under the state directory, outliving a job),
    `crates/athena-agent/src/env.rs` (the per-command symlink under `{job_dir}/target/<side>`),

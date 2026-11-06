@@ -17,7 +17,6 @@
 pub mod attrs;
 pub mod index;
 pub mod records_branch;
-pub mod script_writer;
 pub mod snapshot;
 
 use std::collections::BTreeMap;
@@ -135,6 +134,16 @@ pub struct DiffEntry {
     /// `A`, `M`, `D`, or `T`.
     pub status: char,
     pub path: String,
+}
+
+/// The result of [`Git::merge_tree_report`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeReport {
+    /// The merge is clean; this is the merged tree.
+    Clean(String),
+    /// The merge conflicts. `tree` is the tree git wrote (conflict markers in the files it could not merge)
+    /// and `paths` the conflicted paths, each once.
+    Conflicted { tree: String, paths: Vec<String> },
 }
 
 impl Git {
@@ -679,6 +688,51 @@ impl Git {
                 .next()
                 .map(str::to_string)),
             Some(1) => Ok(None),
+            _ => Err(GitError::Failed {
+                command: "merge-tree".into(),
+                status: exit.code,
+                stderr: exit.stderr,
+            }),
+        }
+    }
+
+    /// Like [`Git::merge_tree`], but a conflict keeps the tree git wrote and names the conflicted paths.
+    /// The tree of a conflict holds conflict markers in the text files git could not merge; a path that is
+    /// modified on one side and deleted on the other, a rename conflict or a binary file is listed too, but
+    /// its blob holds no marker lines (git keeps one side). Paths are exact (read from `-z` output), listed
+    /// once each, in the order git reports them.
+    pub fn merge_tree_report(&self, base: &str, ours: &str, theirs: &str) -> Result<MergeReport> {
+        let exit = self.exit(
+            [
+                "merge-tree",
+                "--write-tree",
+                "-z",
+                "--name-only",
+                "--no-messages",
+                &format!("--merge-base={base}"),
+                ours,
+                theirs,
+            ],
+            None,
+            &[],
+        )?;
+        let mut fields = exit.stdout.split(|b| *b == 0);
+        let tree = fields
+            .next()
+            .map(|t| String::from_utf8_lossy(t).trim().to_string())
+            .filter(|t| !t.is_empty());
+        match (exit.code, tree) {
+            (Some(0), Some(tree)) => Ok(MergeReport::Clean(tree)),
+            (Some(1), Some(tree)) => {
+                let mut paths: Vec<String> = Vec::new();
+                for field in fields.take_while(|f| !f.is_empty()) {
+                    let path = String::from_utf8_lossy(field).into_owned();
+                    if !paths.contains(&path) {
+                        paths.push(path);
+                    }
+                }
+                Ok(MergeReport::Conflicted { tree, paths })
+            }
             _ => Err(GitError::Failed {
                 command: "merge-tree".into(),
                 status: exit.code,
@@ -1447,6 +1501,111 @@ mod tests {
         write_files(dir.path(), &[("a.txt", "theirs\n")]);
         let theirs = commit_all(&git, "theirs");
         assert_eq!(git.merge_tree(&base, &ours, &theirs).unwrap(), None);
+    }
+
+    /// Three commits for a merge report: the base, `ours` (on main) and `theirs` (on a side branch).
+    fn merge_fixture(
+        base_files: &[(&str, &str)],
+        ours_files: &[(&str, &str)],
+        theirs_files: &[(&str, &str)],
+    ) -> (tempfile::TempDir, Git, [String; 3]) {
+        let (dir, git) = repo_with(base_files);
+        let base = git.head().unwrap().unwrap();
+        write_files(dir.path(), ours_files);
+        let ours = commit_all(&git, "ours");
+        git.run(["checkout", "-q", "-b", "other", &base]).unwrap();
+        write_files(dir.path(), theirs_files);
+        let theirs = commit_all(&git, "theirs");
+        (dir, git, [base, ours, theirs])
+    }
+
+    #[test]
+    fn merge_tree_report_of_a_clean_merge_is_the_merged_tree() {
+        let base_text = "one\n2\n3\n4\n5\n6\n7\n8\n9\nten\n";
+        let (_dir, git, [base, ours, theirs]) = merge_fixture(
+            &[("a.txt", base_text)],
+            &[("a.txt", "ONE\n2\n3\n4\n5\n6\n7\n8\n9\nten\n")],
+            &[("a.txt", "one\n2\n3\n4\n5\n6\n7\n8\n9\nTEN\n")],
+        );
+        let report = git.merge_tree_report(&base, &ours, &theirs).unwrap();
+        let MergeReport::Clean(tree) = report else {
+            panic!("expected a clean merge, got {report:?}");
+        };
+        assert_eq!(
+            git.merge_tree(&base, &ours, &theirs).unwrap().as_deref(),
+            Some(tree.as_str())
+        );
+        let blob = git.show_file(&tree, "a.txt").unwrap().unwrap();
+        assert_eq!(
+            String::from_utf8(blob).unwrap(),
+            "ONE\n2\n3\n4\n5\n6\n7\n8\n9\nTEN\n"
+        );
+    }
+
+    #[test]
+    fn merge_tree_report_of_a_conflict_keeps_the_tree_and_lists_the_path_once() {
+        let (_dir, git, [base, ours, theirs]) = merge_fixture(
+            &[("a.txt", "base\n"), ("b.txt", "same\n")],
+            &[("a.txt", "ours\n")],
+            &[("a.txt", "theirs\n")],
+        );
+        let report = git.merge_tree_report(&base, &ours, &theirs).unwrap();
+        let MergeReport::Conflicted { tree, paths } = report else {
+            panic!("expected a conflict, got {report:?}");
+        };
+        assert_eq!(paths, ["a.txt"]);
+        let blob = String::from_utf8(git.show_file(&tree, "a.txt").unwrap().unwrap()).unwrap();
+        assert!(blob.contains("<<<<<<<") && blob.contains("=======") && blob.contains(">>>>>>>"));
+        assert!(blob.contains("ours") && blob.contains("theirs"));
+        // The plain merge still reports a conflict as None.
+        assert_eq!(git.merge_tree(&base, &ours, &theirs).unwrap(), None);
+    }
+
+    #[test]
+    fn merge_tree_report_reads_a_path_with_a_space_exactly() {
+        let (_dir, git, [base, ours, theirs]) = merge_fixture(
+            &[("docs/a b.md", "base\n"), ("c.txt", "c\n")],
+            &[("docs/a b.md", "ours\n"), ("c.txt", "ours\n")],
+            &[("docs/a b.md", "theirs\n"), ("c.txt", "theirs\n")],
+        );
+        let MergeReport::Conflicted { paths, .. } =
+            git.merge_tree_report(&base, &ours, &theirs).unwrap()
+        else {
+            panic!("expected a conflict");
+        };
+        assert_eq!(paths, ["c.txt", "docs/a b.md"]);
+    }
+
+    #[test]
+    fn merge_tree_report_lists_a_modify_delete_conflict_without_marker_lines() {
+        let (dir, git) = repo_with(&[("a.txt", "base\n"), ("keep.txt", "k\n")]);
+        let base = git.head().unwrap().unwrap();
+        write_files(dir.path(), &[("a.txt", "ours\n")]);
+        let ours = commit_all(&git, "ours");
+        git.run(["checkout", "-q", "-b", "other", &base]).unwrap();
+        std::fs::remove_file(dir.path().join("a.txt")).unwrap();
+        let theirs = commit_all(&git, "theirs deletes a.txt");
+        let MergeReport::Conflicted { tree, paths } =
+            git.merge_tree_report(&base, &ours, &theirs).unwrap()
+        else {
+            panic!("expected a conflict");
+        };
+        assert_eq!(paths, ["a.txt"]);
+        // Git keeps one side: the path is listed but its blob holds no marker lines, which is why a check
+        // for marker lines cannot see this kind of conflict.
+        let blob = String::from_utf8(git.show_file(&tree, "a.txt").unwrap().unwrap()).unwrap();
+        assert_eq!(blob, "ours\n");
+        assert!(!blob.contains("<<<<<<<") && !blob.contains(">>>>>>>"));
+    }
+
+    #[test]
+    fn merge_tree_report_fails_on_a_bad_revision() {
+        let (_dir, git) = repo_with(&[("a.txt", "a\n")]);
+        let head = git.head().unwrap().unwrap();
+        assert!(
+            git.merge_tree_report(&head, &head, "0000000000000000000000000000000000000001")
+                .is_err()
+        );
     }
 
     #[test]
