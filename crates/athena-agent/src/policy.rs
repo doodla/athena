@@ -474,7 +474,9 @@ fn glob_prefix(word: &str) -> &str {
     &word[..end]
 }
 
-const CARGO_GLOBAL_FLAGS: [&str; 8] = [
+/// The global options a `cargo` command may carry before its subcommand. The policy allows only these, and the
+/// build-slot wrapper reads the same list to find the subcommand, so the two cannot disagree.
+pub const CARGO_GLOBAL_FLAGS: [&str; 8] = [
     "-q",
     "--quiet",
     "-v",
@@ -484,6 +486,42 @@ const CARGO_GLOBAL_FLAGS: [&str; 8] = [
     "--offline",
     "--frozen",
 ];
+
+/// What the leading words of a `cargo` command line (the words after the program name) hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CargoLead<'a> {
+    /// The first word that is not an option: the subcommand, and its position among the words.
+    Sub { index: usize, word: &'a str },
+    /// An option before the subcommand that is not in [`CARGO_GLOBAL_FLAGS`].
+    UnknownFlag(&'a str),
+    /// Only global options, or nothing.
+    NoSub,
+}
+
+/// Walks the leading option words of a `cargo` command line: every word that starts with `-` must be in
+/// [`CARGO_GLOBAL_FLAGS`], and the first word that does not start with `-` is the subcommand. This is the one
+/// walk behind [`check_cargo`] and [`cargo_subcommand`].
+pub fn cargo_lead<'a>(words: impl IntoIterator<Item = &'a str>) -> CargoLead<'a> {
+    for (index, word) in words.into_iter().enumerate() {
+        if !word.starts_with('-') {
+            return CargoLead::Sub { index, word };
+        }
+        if !CARGO_GLOBAL_FLAGS.contains(&word) {
+            return CargoLead::UnknownFlag(word);
+        }
+    }
+    CargoLead::NoSub
+}
+
+/// The subcommand of a `cargo` command line, found after the global options the policy allows (`cargo -q
+/// build`, `cargo --locked test`). `None` when there is none or an option other than those comes first; the
+/// policy refuses such a command, so a caller treats `None` as a form it does not recognise.
+pub fn cargo_subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
+    match cargo_lead(args.iter().copied()) {
+        CargoLead::Sub { word, .. } => Some(word),
+        CargoLead::UnknownFlag(_) | CargoLead::NoSub => None,
+    }
+}
 const GIT_DENIED_ARGS: [&str; 5] = [
     "--output",
     "--ext-diff",
@@ -620,19 +658,15 @@ fn check_cargo(
     allowed: &[String],
     args: &[(&str, bool)],
 ) -> Result<(), String> {
-    let mut i = 0;
-    while i < args.len() && args[i].0.starts_with('-') {
-        if !CARGO_GLOBAL_FLAGS.contains(&args[i].0) {
+    let (i, sub) = match cargo_lead(args.iter().map(|(a, _)| *a)) {
+        CargoLead::Sub { index, word } => (index, word),
+        CargoLead::UnknownFlag(flag) => {
             return Err(format!(
-                "cargo {}: global options other than {} are not allowed",
-                args[i].0,
+                "cargo {flag}: global options other than {} are not allowed",
                 CARGO_GLOBAL_FLAGS.join(", ")
             ));
         }
-        i += 1;
-    }
-    let Some(&(sub, _)) = args.get(i) else {
-        return Err("cargo without a subcommand".into());
+        CargoLead::NoSub => return Err("cargo without a subcommand".into()),
     };
     if sub.starts_with('+') {
         return Err("toolchain overrides are not allowed; the toolchain is pinned".into());
@@ -1018,6 +1052,65 @@ mod tests {
         ] {
             assert_eq!(bash(&p, command), Decision::NoObjection, "{command}");
         }
+    }
+
+    #[test]
+    fn the_cargo_subcommand_is_found_after_the_global_options_the_policy_allows() {
+        // The build-slot wrapper reads the subcommand with the policy's own walk and flag list.
+        assert_eq!(cargo_subcommand(&["build"]), Some("build"));
+        assert_eq!(cargo_subcommand(&["-q", "build"]), Some("build"));
+        assert_eq!(cargo_subcommand(&["--locked", "test"]), Some("test"));
+        assert_eq!(
+            cargo_subcommand(&["-vv", "check", "-p", "x"]),
+            Some("check")
+        );
+        assert_eq!(
+            cargo_subcommand(&["--offline", "--frozen", "-q", "clippy"]),
+            Some("clippy")
+        );
+        // A toolchain override is a word that does not start with `-`, so it is what the walk finds; the
+        // policy refuses it.
+        assert_eq!(cargo_subcommand(&["+nightly", "build"]), Some("+nightly"));
+        // No subcommand, or an option the policy refuses first: nothing is recognised.
+        assert_eq!(cargo_subcommand(&[]), None);
+        assert_eq!(cargo_subcommand(&["-q"]), None);
+        assert_eq!(cargo_subcommand(&["--config", "x", "build"]), None);
+        // Every flag in the shared list is skipped.
+        for flag in CARGO_GLOBAL_FLAGS {
+            assert_eq!(cargo_subcommand(&[flag, "test"]), Some("test"), "{flag}");
+        }
+        assert_eq!(
+            cargo_lead(["-q", "build", "-p", "x"]),
+            CargoLead::Sub {
+                index: 1,
+                word: "build"
+            }
+        );
+        assert_eq!(
+            cargo_lead(["-q", "--config"]),
+            CargoLead::UnknownFlag("--config")
+        );
+        assert_eq!(cargo_lead(["-q"]), CargoLead::NoSub);
+    }
+
+    #[test]
+    fn the_policy_and_the_wrapper_agree_on_what_comes_before_the_subcommand() {
+        // `check_cargo` refuses exactly the command lines `cargo_subcommand` does not recognise.
+        let dir = snapshot();
+        let p = policy(Role::Verifier, dir.path());
+        match bash(&p, "cargo --config x build") {
+            Decision::Deny(why) => assert!(
+                why.contains("global options other than -q, --quiet, -v, -vv, --verbose, --locked, --offline, --frozen are not allowed"),
+                "{why}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        match bash(&p, "cargo -q") {
+            Decision::Deny(why) => assert!(why.contains("cargo without a subcommand"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(bash(&p, "cargo -q build"), Decision::NoObjection);
+        assert_eq!(bash(&p, "cargo --locked test"), Decision::NoObjection);
     }
 
     #[test]

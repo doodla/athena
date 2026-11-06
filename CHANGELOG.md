@@ -95,7 +95,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   producer in the same run (it arrives with the next attempt); D08 is the only seeded decision. The commit
   visibility change of job 20261010-225741-yvk0 and the ceiling change of job 20261105-180339-w5h7 are not
   re-landed here. Recorded as D156.
-
+- The producer's `cargo build`, `test`, `clippy` and `check` now take a build slot. Root cause: only Athena's
+  checks went through the build-slot queue, so any number of producers built at once (each with its own target
+  directory) and `max_check_slots` bounded nothing for the biggest part of a job's builds. The `athena` binary,
+  linked as `cargo` in a `shim` directory of the job and first on the producer's `PATH` only, takes a
+  `Class::Producer` slot, runs the real `cargo` and frees the slot when it exits. It finds the subcommand after the
+  global options with the tool policy's own list (`CARGO_GLOBAL_FLAGS`, shared with `check_cargo`), so
+  `cargo -q build` and `cargo --locked test` count; `fmt`, `metadata` and the other subcommands take no slot. The
+  wrapper waits at most half the agent's default Bash timeout (300 s for the shipped settings, never more than
+  `build_wait_s`), because a longer wait would be cut off by the tool before it could say why. Past it, it prints
+  `no build slot free for 300 s; try again`, exits 75 without starting `cargo` and leaves a note; a producer that
+  ends on that note holds the job as `environment: build slot wait` (no failure, no attempt used). The verifier's
+  and the checks' environments are unchanged. The new test file is registered in `xtask/shard-timings.txt`.
 - The replay of accepted readings now runs as a check inside the producer's loop, so the producer sees the
   newly refused readings and the measured share while it can still fix them. Root cause: nothing made the
   producer measure a new or tightened refusal rule against past accepted readings while it worked. The replay

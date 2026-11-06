@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-180606-ymst",
+  "round": 2,
+  "at": "2026-11-06T18:17:52.25315524Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/close.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/close.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "Nothing checks that the agent's real Bash tool actually resolves `cargo` to the shim",
+      "evidence": "athena.toml:52 passes HOME and PATH, so Claude Code's Bash tool can read the user's shell rc files. If an rc file puts a cargo directory at the front of PATH without first checking whether it is already there, `cargo` resolves to the real cargo, no slot is taken, and nothing reports it. Every demonstration calls the shim directly, never through the Bash tool. The plan's Risks list does not mention this. Fix: Add this as a risk and say it in the design doc. A cheap guard: the wrapper touches a 'used' marker beside the note. If record.commands_run includes a gated cargo command but the marker is missing, producer_loop prints a warning line (or records a finding), so a bypass is visible.",
+      "location": "Decision 1 / Risks; crates/athena-agent/src/env.rs:70-74 (PATH comes from env_pass)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The SlotWait doc in disk.rs still says only a check waits and that the job keeps its candidate",
+      "evidence": "The doc reads 'A check waited for a build slot for `build_wait_s` and got none. The job is held, not failed: it keeps its candidate'. With this change a producer can wait too, for the capped limit and with no candidate. The plan widens close.rs and mod.rs:485 but leaves this doc and says disk.rs needs no change. Fix: Widen this doc comment the same way as close.rs:191-197: a check or a producer command, the limit, and a candidate only if one was kept.",
+      "location": "crates/athena-core/src/disk.rs:273-274",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 8 run test compares reader and verifier PATH to the parent's PATH, which depends on the test config's env_pass",
+      "evidence": "env::build (env.rs:70-74) copies PATH only when the config's env_pass lists it. The test config in run/tests.rs may differ from athena.toml. If PATH is not listed, the producer's PATH is the shim dir alone and the reader has no PATH, so an assertion that PATH equals the parent's could fail for reasons that have nothing to do with the shim. Fix: Assert what the criterion needs: the producer PATH's first entry is <job_dir>/agent/bin; reader and verifier envs have no ATHENA_SLOT_* keys and no PATH entry under the job's agent/bin.",
+      "location": "Demonstrations, criterion 8 (b)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The criterion 6 'Run' line names only one of its three commands",
+      "evidence": "The Run field is `cargo fmt --check`, but the demonstration describes three commands: fmt --check, clippy --all-targets -D warnings and test --locked. Fix: List all three commands in the Run field.",
+      "location": "Demonstrations, criterion 6",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "A Bash timeout shorter than the default still kills a waiting wrapper before the note is written",
+      "evidence": "The cap uses bash_default_timeout_ms. The agent can pass a shorter per-call timeout. The wrapper is then killed while waiting, no note is written, and the agent just sees a timeout. Fix: State this in the design doc next to the 540 s cap so readers know the cap covers only the default and longer timeouts.",
+      "location": "Decision 5",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I recommend accepting the plan. It rebuilds the earlier verified candidate on the current tip, and the code supports its claims (read for this review). CARGO_GLOBAL_FLAGS is private at policy.rs:477 and check_cargo walks it at :616-633. Agent commands that set environment variables or name a program by path are refused at policy.rs:546-558. main.rs:572-580 already dispatches on the argv[0] basename. SlotQueue::acquire(Class::Producer, stop), try_acquire and waiting exist in slots.rs. hold_for_slot_wait (close.rs:198) and the downcast pattern at mod.rs:2030-2033 are reusable as planned. producer_loop pushes the invocation record (producer.rs:285) before the timeout and failure branches, so a note read there takes precedence over both. The fake driver's script closure receives the full invocation spec, env included. The agent scratch dir is created but never wiped (claude.rs:320), so the shim and note survive between invocations. The shard-timings line sorts between `review` and `status_build_measurement`. Each demonstration exercises the shipped binary through the real argv[0] dispatch and PATH install, and each would fail without the behavior. The round-1 findings (wait cap below the Bash timeout, HELD tied to the slot dir, process-group kill, hold wording) are addressed with code citations. Athena's minor finding about close.rs is outside the listed deliverables, but the edit is a justified doc change. My findings are all minor or nit. The most important: nothing shows the agent's real Bash tool reaches the shim rather than a cargo put first on PATH by a shell rc file. The others: a stale SlotWait doc in disk.rs, a brittle PATH-equality assertion in the criterion 8 test, and two small wording fixes. No blocker or major finding."
+}
