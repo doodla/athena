@@ -4309,3 +4309,21 @@ should replace those estimates with its figures.
   `crates/athena-core/src/reading.rs`, `crates/athena-core/src/disk.rs`, D08. Measured: the tests named above.
   Not measured: how many future changes will touch the two D08 paths, and whether authors will add the link or
   work around it.
+
+## D157 · Test stand-in scripts are written by one shared helper that avoids ETXTBSY
+
+- **Case:** Tests that write a shell script, mark it executable and run it were rejected as flaky with "Text file
+  busy" (`ETXTBSY`): another test thread forks a child that inherits the open write descriptor until its `exec`,
+  and the kernel refuses to run a file with an open writer.
+- **Decision:** Amends D08 in prose only: D08 was checked and stands. The change touches only the test module of
+  `crates/athena-git/src/snapshot.rs`, not how snapshots are made. The new crate `athena-testutil` writes a
+  stand-in through a temporary name, closes it, sets the mode and renames it into place, and its `run` and
+  `retry_busy` try again while the error is `ETXTBSY`. The stand-in tests of `xtask`, `athena-cli`, `athena-agent`,
+  `athena-core` and `athena-git` use it. Test: `cargo test -p athena-testutil`.
+- **Alternatives:** (a) A retry in each test: it was the state before and is copied unevenly. (b) A crate from the
+  registry: none fits a few lines of `std`. (c) Run the tests on one thread: slower for the whole suite.
+- **Tradeoff:** The rename does not remove the race, because the inode keeps its writer; the retry does, and it
+  adds up to about two seconds of waiting in the worst case.
+- **Reversal cost:** Low. Inline the helper's body at each call site and remove the crate.
+- **Provenance:** Read: `crates/athena-git/src/snapshot.rs`, the five other test files, D156. Measured: the stress
+  test of the crate. Not measured: the failure rate of the old tests.
