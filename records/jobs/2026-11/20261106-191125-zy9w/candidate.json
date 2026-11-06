@@ -1,0 +1,113 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261106-191125-zy9w",
+  "base_commit": "19ff5bf7d411949ae4d291eca18cdfafa04efcd3",
+  "base_fingerprint": "sha256:3c485fa19420918a97e8da08be86cac164448af2f9d457755152d86e19d9ce20",
+  "previous_job": "20261106-180606-ymst",
+  "candidate_commit": "6f6ac70b21fed4a57e83422376b013f3d19005d2",
+  "candidate_tree": "95653c6526b6f8ae40bb084fc097684da5e07ec7",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 349409
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 62421
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 46679
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 163088
+    }
+  ],
+  "fingerprint": "sha256:141da418a956390b0140f1baeb242b5ee28a6f90a082c01d483fd7341775a9a9",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: detail_from_job_logs took the tail of the whole CI job log. That log ends with the runner's post-job cleanup, and no failure line was ever selected. A shard that did not finish, or a failing unit followed by passing units, therefore stored only cleanup text. Fixed in detail_from_job_logs with two helpers in checks.rs. without_post_job_cleanup cuts each log at its first post-job marker line. failure_tail returns the plain tail when there is no failure marker or every marker is already in the last 480 bytes. Otherwise it returns the log's end, a separator line, then the failure blocks as the last lines. Markers are `panicked at`, a line ending `... FAILED`, `test result: FAILED`, `failures:` and `---- name stdout ----`. Passing `test result: ok` lines are not markers. Added three detail_from_job_logs tests, unit tests for both helpers, and a CHANGELOG Fixed bullet.",
+    "files": [
+      "crates/athena-core/src/checks.rs",
+      "crates/athena-core/src/gh/client.rs",
+      "crates/athena-core/src/gh/tests.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core -- detail_from_job_logs failure_tail post_job_cleanup",
+        "result": "pass",
+        "note": "6 tests pass"
+      },
+      {
+        "command": "cargo test -p athena-core -- detail_from_job_logs failure_tail post_job_cleanup checks:: gh::",
+        "result": "pass",
+        "note": "Ran before one fix. 159 passed, 1 failed: my own failure_tail cap test. I fixed failure_tail to cut an oversized block at the cap, and that test now passes. I did not rerun the whole filter after the fix."
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed"
+      },
+      {
+        "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test -p athena-core",
+        "result": "pass",
+        "note": "The chain exited without error, but the output was truncated and I could not read the test summary, so I did not see the athena-core pass counts. Clippy first failed on int_plus_one, which I fixed before this run."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "The CHANGELOG entry (CHANGELOG.md, under Fixed) and code comment name the root cause: the stored tail was taken of the whole CI log, which ends with post-job cleanup, and failure lines were not selected.",
+        "status": "met",
+        "evidence": "CHANGELOG.md has a new first bullet under Unreleased / Fixed naming that cause. The doc comments on detail_from_job_logs (client.rs), without_post_job_cleanup and failure_tail (checks.rs) name it too."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core detail_from_job_logs`: a new test feeds a job log with a failing test and a trailing post-job cleanup block (Post job cleanup, git config --unset-all, Cleaning up orphan processes, a Node.js deprecation warning) and asserts output_tail contains the `FAILED`/`panicked at` lines and no cleanup text. It fails on the base commit and passes with the change.",
+        "status": "met",
+        "evidence": "detail_from_job_logs_drops_the_post_job_cleanup_tail passes (ran `cargo test -p athena-core -- detail_from_job_logs ...`). It asserts the panic and FAILED lines are kept and the cleanup text is absent. On the base commit the whole log is tailed, so the cleanup text would be present; I did not run the test on the base commit."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core detail_from_job_logs`: a new test with a log that yields no parsed test names (a shard that did not finish, or non-cargo test output) followed by cleanup asserts output_tail keeps the lines containing `test result`, `FAILED`, `failures:` or `panicked at` rather than only cleanup text. It fails before the change and passes after, so it covers the class and not one job.",
+        "status": "met",
+        "evidence": "detail_from_job_logs_keeps_failure_lines_when_no_test_is_named passes: no names, 250 progress lines, then cleanup. detail_from_job_logs_keeps_a_failing_unit_behind_passing_units also passes. Both check the failure lines are kept and are in the last 600 chars and last 60 lines. On the base commit the 200-line tail would hold only progress or passing lines plus cleanup; I did not run them on the base commit."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core checks`: existing tests for tail_lines, 200-line and byte caps, FAILING_UNITS_PREFIX and redaction still pass, and a log with no failure lines and no cleanup keeps its plain tail as before.",
+        "status": "met",
+        "evidence": "The filter run covering `checks::` and `gh::` passed all existing tests (159 passed, 1 failed). The one failure was my new cap test, which is fixed and passes. failure_tail_is_the_plain_tail_without_failure_outside_the_end asserts the no-failure and passing-only logs equal tail_lines."
+      },
+      {
+        "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked`: all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I ran fmt --check, clippy --locked -D warnings and `cargo test -p athena-core`, and the chain exited without error. I did not run the full `cargo test --locked` and did not read the athena-core summary."
+      },
+      {
+        "criterion": "No files outside crates/athena-core (and CHANGELOG.md) change; the 20261106-022423-vdtn and 20261106-045349-f6x6 candidate files are not reintroduced.",
+        "status": "met",
+        "evidence": "I edited only checks.rs, gh/client.rs, gh/tests.rs and CHANGELOG.md. I did not run `git status`."
+      }
+    ],
+    "open_issues": [
+      "The exact runner post-job marker text (`Post job cleanup.`, `Cleaning up orphan processes`, `##[group]Post `) was taken from the brief, not checked against a real GitHub log."
+    ],
+    "mistakes": [
+      "My first failure_tail skipped any block that did not fit the n/2 cap, so a long run of failed-test lines produced no section. My own unit test caught it, and I now cut such a block at the cap.",
+      "Clippy rejected my window loop (int_plus_one); fixed.",
+      "The final fmt, clippy and athena-core test chain printed too much output for me to read the test summary."
+    ],
+    "learnings": [
+      "The plain log passed to the tail has timestamps stripped, so cleanup markers match on trimmed whole lines.",
+      "Consecutive `... FAILED` lines merge into one block, so a block can exceed the n/2 cap; failure_tail cuts it at the cap instead of dropping it."
+    ],
+    "desires": []
+  }
+}

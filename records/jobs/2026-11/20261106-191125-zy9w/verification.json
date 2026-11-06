@@ -1,0 +1,208 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261106-191125-zy9w",
+  "candidate_commit": "6f6ac70b21fed4a57e83422376b013f3d19005d2",
+  "verified_fingerprint": "sha256:141da418a956390b0140f1baeb242b5ee28a6f90a082c01d483fd7341775a9a9",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42277518463 for 6f6ac70b21fed4a57e83422376b013f3d19005d2",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42277518463 for 6f6ac70b21fed4a57e83422376b013f3d19005d2",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42277518463 for 6f6ac70b21fed4a57e83422376b013f3d19005d2",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 2,
+  "criteria": [
+    {
+      "criterion": "CHANGELOG.md under Fixed and a code comment in crates/athena-core/src/gh/client.rs or checks.rs name the root cause: the stored tail was taken of the whole CI log, which ends with post-job cleanup, and failure lines were not selected.",
+      "kind": "content",
+      "met": true,
+      "evidence": "I read the diff. The new CHANGELOG entry under Fixed says `detail_from_job_logs` \"took the tail of the whole CI job log, which ends with the runner's post-job cleanup ... and never selected the failure lines\". The doc comment on detail_from_job_logs in client.rs says the same, and so do the comments on without_post_job_cleanup and failure_tail in checks.rs.",
+      "commands": [
+        "git diff HEAD~1"
+      ],
+      "commands_verified": false
+    },
+    {
+      "criterion": "Run `cargo test -p athena-core detail_from_job_logs`: a test in gh/tests.rs with a failing test followed by a post-job cleanup block asserts output_tail contains the FAILED/panicked at lines and no cleanup text. It compiles on base using only existing public items and fails on assertions there.",
+      "kind": "behavior",
+      "met": false,
+      "evidence": "detail_from_job_logs_drops_the_post_job_cleanup_tail passed when I ran it. It checks for `panicked at`, `test tests::a ... FAILED` and `test result: FAILED`, and assert_no_cleanup checks that no cleanup text is present. The test uses only `stamped` (gh/tests.rs line 376, an unchanged line, so it exists on base) and the public detail_from_job_logs and FailureDetail fields, so it should compile on base. On base the tail is taken of the whole log, cleanup lines included, so assert_no_cleanup would fail. I worked this out by reading the code. I did not run the test on base, because doing that needs a git checkout, which this role may not do.",
+      "commands": [
+        "cargo test -p athena-core detail_from_job_logs",
+        "git diff HEAD~1"
+      ],
+      "commands_verified": false
+    },
+    {
+      "criterion": "Run `cargo test -p athena-core detail_from_job_logs`: a test with a log yielding no parsed test names, followed by cleanup, asserts output_tail keeps lines with `test result`, `FAILED`, `failures:` or `panicked at`.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "detail_from_job_logs_keeps_failure_lines_when_no_test_is_named passed. Its log has 250 compiling lines and then the cleanup block. It asserts that `panicked at`, `assertion failed: ok`, `test result: FAILED` and `failures:` are all in output_tail and that no cleanup text is.",
+      "commands": [
+        "cargo test -p athena-core detail_from_job_logs"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test -p athena-core detail_from_job_logs`: a test with a multi-line panic message longer than 4 lines asserts the whole message survives in output_tail.",
+      "kind": "behavior",
+      "met": false,
+      "evidence": "The filter runs 3 tests and none has a panic message longer than 4 lines. The longest is the 4-line assert_eq message in failing_unit_lines, and it sits near the end of a short log, so the plain tail keeps it anyway. The code also still caps each block: checks.rs line 274 has `end <= m + FAILURE_BLOCK_AFTER` with FAILURE_BLOCK_AFTER = 4. So the fix the reading promised for Finding 2 (extend a block until a blank line or the next `----` header, within the n/2 cap) was not made. Lines after the fourth are lost whenever the failure lies outside the end window.",
+      "commands": [
+        "cargo test -p athena-core detail_from_job_logs",
+        "git diff HEAD~1"
+      ],
+      "commands_verified": false
+    },
+    {
+      "criterion": "Run `cargo test -p athena-core`: existing tail_lines, 200-line and byte cap, FAILING_UNITS_PREFIX and redaction tests pass, and a log with no failure lines and no cleanup keeps its plain tail.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded `cargo test --locked` passed on this tree (CI run 42277518463). I also ran the tail-related athena-core tests and all 18 passed, among them tail_lines_keeps_the_last_n_lines_and_the_final_newline, a_failed_run_keeps_its_last_200_lines_and_a_passing_run_its_byte_tail, the redaction and detail tests, and failure_tail_is_the_plain_tail_without_failure_outside_the_end. That last test asserts that a 300-line log with no failure markers gives exactly tail_lines.",
+      "commands": [
+        "cargo test --locked",
+        "cargo test -p athena-core tail"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked`: all pass.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's records show all three passing for 6f6ac70b21fe (reused from CI run 42277518463).",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Only crates/athena-core/src/gh/client.rs, gh/tests.rs, checks.rs and CHANGELOG.md change; no config, records, workflow or governance files change.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The diffstat lists exactly CHANGELOG.md, crates/athena-core/src/checks.rs, crates/athena-core/src/gh/client.rs and crates/athena-core/src/gh/tests.rs.",
+      "commands": [
+        "git diff HEAD~1"
+      ],
+      "commands_verified": false
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Behavior criterion 2 is unmet: its evidence must cite commands that ran (D43)",
+      "evidence": "cited but not seen running: `git diff HEAD~1`",
+      "location": null,
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Behavior criterion 4 is unmet: its evidence must cite commands that ran (D43)",
+      "evidence": "cited but not seen running: `git diff HEAD~1`",
+      "location": null,
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Finding 2 from the earlier job is not fixed: a failure block is still the marker plus at most 4 lines, and there is no test for a panic message longer than 4 lines (criterion 4).",
+      "evidence": "`const FAILURE_BLOCK_AFTER: usize = 4;` and `while end < lines.len() && end <= m + FAILURE_BLOCK_AFTER && !lines[end].trim().is_empty()`. The reading promised to extend a block until a blank line or the next `----` header, within the n/2 cap. None of the 3 tests in gh/tests.rs has a panic message longer than 4 lines. The simpler, correct rule: drop the fixed count and end a block at the first blank line or the next `---- ... ----` header, keeping the n/2 cap that already exists.",
+      "location": "crates/athena-core/src/checks.rs:209,274",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "I could only confirm by reading the code that the new tests fail on base, not by running them.",
+      "evidence": "The tests use only `stamped` (existing, line 376) and the public detail_from_job_logs, so they should compile on base, and on base the cleanup lines would make assert_no_cleanup fail. This role may not check out base, so the tests were not run there.",
+      "location": "crates/athena-core/src/gh/tests.rs:714-841",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 480-byte end window is a guess at what readers see, not a value taken from those readers.",
+      "evidence": "`const FAILURE_END_WINDOW_BYTES: usize = 480;` and its doc says \"end-keeping readers are sure to see\". Nothing ties it to the actual cut sizes in introspection or the verifier brief. Deriving it from those cuts, or always moving failure blocks to the end, would remove the guess.",
+      "location": "crates/athena-core/src/checks.rs:206",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "2 of 7 criteria unmet",
+    "3 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "The verdict is fail. The retry still keeps only 4 lines after each failure line, which was the main finding (Finding 2) of the earlier job, and the test that should catch this is missing. For a failure early in the log, any panic message longer than 4 lines is still cut. I ran the three new detail_from_job_logs tests and the 18 tail-related tests, and all pass. Athena's fmt, clippy and test checks also passed on this tree. The rest of the change works: each CI log is now cut before its post-job cleanup, failure lines from earlier in the log are moved to the end of the stored tail, and both CHANGELOG.md and the code comments name the root cause. The four changed files are exactly the expected ones. By reading the code I believe the new tests compile on base and fail there on the cleanup assertions, but I could not run them on base because this role may not check out other commits. The fix is to end a block at the first blank line or the next `---- ... ----` header, within the existing half-of-the-lines cap, and to add a gh test whose early panic message runs longer than 4 lines."
+}

@@ -1000,7 +1000,7 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored
         let state = tempfile::tempdir().unwrap();
         // A script named `cargo` that echoes its arguments, prints canned failing output and exits 101.
         let script = bin.path().join("cargo");
-        athena_git::script_writer::write_executable(
+        athena_testkit::write_executable(
             &script,
             format!("#!/bin/sh\necho \"args: $*\"\ncat <<'EOF'\n{TWO_BINARIES}EOF\nexit 101\n"),
         );

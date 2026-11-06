@@ -1,0 +1,263 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-194635-cg5z",
+  "n": 1,
+  "at": "2026-11-06T19:47:02.627398829Z",
+  "invocation_seq": 1,
+  "base_commit": "8882f9395e3f5140b2a75853c4b659b41a39262a",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Add athena-testkit write_executable helper and exec-write scan test",
+  "summary": "Retry of job 20261106-104023-w7my, which was refused at admission only because crates/athena-testkit/Cargo.toml (a governance file with [lints]) was not named in a criterion. Same plan: one test-only helper writing executable stand-ins via an sh child, all test sites converted, plus a scan test; now with the Cargo.toml named in a criterion.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All new code is Rust."
+    },
+    {
+      "id": "tested",
+      "how": "The testkit has unit and integration tests, and the workspace test and clippy criterion is included."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is one helper plus a scan, not per-site patches."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the scan against planted violations and the stress test."
+    },
+    {
+      "id": "mechanism",
+      "how": "The scan test enforces the rule mechanically."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The stress test measures ETXTBSY counts directly."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo commands the verifier can run."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Prior job 20261106-104023-w7my: its only recorded finding was the admission refusal for crates/athena-testkit/Cargo.toml as an unlisted-in-criteria governance file. It is fixed by listing that file as a deliverable and naming it in a criterion. The candidate's 25 file changes are all kept as deliverables, including the deletion of crates/athena-git/src/script_writer.rs.",
+    "Code survey: read crates/athena-git/src/snapshot.rs (script_writer use at ~513; production set_permissions at 445-478), crates/athena-git/src/lib.rs (pub mod script_writer), crates/athena-core/src/checks.rs (~1003), crates/athena-core/src/reading.rs (~8217), crates/athena-agent/src/claude.rs (~639), crates/athena-cli/tests/reconcile.rs (~134), crates/athena-cli/tests/slot_exec.rs (~54, a raw in-process set_permissions 0o755). Production uses in crates/athena-core/src/{toolconfig,pin,snapshot}.rs and crates/athena-cli/src/slot_exec.rs are not stand-in writes. The change adds no record or data file under crates/ and no refusal rule on readings.",
+    "Existing code: crates/athena-git/src/script_writer.rs, crates/athena-git/src/lib.rs and docs/architecture.md are extended or replaced by the new crate. The existing helper is moved to athena-testkit.",
+    "Governance: the new crate's Cargo.toml follows the workspace [lints] convention. Cargo.toml, Cargo.lock and the other crates' Cargo.toml files change only to add the dev-dependency and workspace member. athena.toml, defaults.toml and workflows do not change.",
+    "Audience: maintainers running cargo test, who need flaky ETXTBSY failures gone and a mechanical guard against new in-process executable writes."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "crates/athena-testkit/Cargo.toml exists as a std-only dev-dependency crate with a workspace [lints] table, and is a workspace member in Cargo.toml. CHANGELOG.md names the root cause: executable stand-ins written in-process with no single helper and no mechanical enumeration of write sites. It also names the fix at the origin: athena_testkit::write_executable, which writes via an sh child (cat > tmp && chmod 755 tmp && mv tmp final).",
+      "kind": "content"
+    },
+    {
+      "text": "Grep of test code (xtask/src/main.rs, crates/athena-cli/tests/*.rs, crates/athena-agent/src/claude.rs, crates/athena-core/src/{checks,reading}.rs, crates/athena-git/src/snapshot.rs tests) finds no in-process executable write. The xtask gitleaks fake and crates/athena-cli/tests/slot_exec.rs use the helper, and crates/athena-git/src/script_writer.rs is deleted with no remaining references.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-testkit`. The scan test no_in_process_exec_writes passes on the tree. Its planted-violation unit tests show it fails on set_executable(&fake) wrappers, set_permissions with 0o755, from_mode and Command::new(\"chmod\") in test code. These tests would fail without the detection logic.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-testkit --test stand_in_stress`. The helper variant records 0 ETXTBSY over many write-then-exec cycles with concurrent forking threads. The in-process variant's hit count appears in the recorded test output.",
+      "kind": "behavior"
+    },
+    {
+      "text": "git diff shows no non-test production change. The busy-file retry in reading.rs check_stub is removed, and production retry_busy in claude.rs is untouched.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md and docs/decision-links.toml have an appended entry saying the decision covering crates/athena-git/src/snapshot.rs was checked and stands. xtask/shard-timings.txt lists the new test files. docs/architecture.md's crate table lists athena-testkit.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --workspace --all-targets` and `cargo test --workspace`. All pass.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-testkit/Cargo.toml",
+      "action": "create",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-testkit/src/lib.rs",
+      "action": "create",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-testkit/tests/stand_in_stress.rs",
+      "action": "create",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-testkit/tests/no_in_process_exec_writes.rs",
+      "action": "create",
+      "p": 0.95
+    },
+    {
+      "path": "Cargo.toml",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "xtask/Cargo.toml",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/Cargo.toml",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-agent/Cargo.toml",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-git/Cargo.toml",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/tests/reconcile.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/tests/slot_exec.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-git/src/script_writer.rs",
+      "action": "delete",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "docs/architecture.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    }
+  ],
+  "out_of_scope": [
+    "Retries at run sites or in production code",
+    "Changing production behavior of claude.rs or other non-test code",
+    "Non-Linux platform support",
+    "athena.toml, defaults.toml and workflow changes",
+    "Production-code set_permissions uses in crates/athena-core/src/{toolconfig,pin,snapshot}.rs, crates/athena-cli/src/slot_exec.rs and crates/athena-git/src/snapshot.rs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 1.0,
+        "p50": 2.5,
+        "p90": 6.0
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2700.0,
+        "p90": 6000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6697247706422018,
+      "p_user_intervenes": 0.08033126293995858,
+      "cost_usd": {
+        "p10": 0.5592216999999999,
+        "p50": 1.3818654,
+        "p90": 4.4432084
+      },
+      "wall_time_s": {
+        "p10": 564.862613854083,
+        "p50": 2038.637820505073,
+        "p90": 4264.228619197845
+      }
+    }
+  },
+  "departures": "Large cross-crate change with a new crate and an AST scan test, so cost and time sit above the reference.",
+  "urgent_reason": "Cuts repeated ETXTBSY flaky-test failures and the retries and rejected attempts they cause."
+}

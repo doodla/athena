@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-104023-w7my",
+  "round": 1,
+  "at": "2026-11-06T19:37:17.856871448Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-git/src/script_writer.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-git/src/script_writer.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "The scan flags any permission or mode call in test code, whatever the mode, not only executable writes",
+      "evidence": "Detectors are set_permissions, from_mode, set_mode and one-argument .mode(..) with no check of the mode value. Legitimate test uses such as making a fixture read-only or writing a 0o600 file (production write_private at crates/athena-agent/src/claude.rs:246 uses .mode(0o600)) would need allow-list entries. That is a rule with obvious false positives for a scan named no_in_process_exec_writes. Fix: When the mode argument is an integer literal, flag only modes with an execute bit (mode & 0o111 != 0). Keep flagging non-literal modes, as in slot_exec.rs script(dir, name, mode), and set_readonly(false)-style toggles only if they can add execute bits. Add a negative control for from_mode(0o644) and .mode(0o600).",
+      "location": "Decision 2/5 (detectors); step 5",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stress test's in-process variant and held-handle test are deliberate in-process executable writes in test code that the tree scan will flag, but the plan does not plan for them",
+      "evidence": "The in-process variant uses fs::write plus set_permissions/from_mode(0o755) under crates/athena-testkit/tests/, which the scan counts as test code. The allow-list is seeded only with crates/athena-cli/src/slot_exec.rs fn script, and the criterion 2 observation says the scan passes 'with only the reviewed allow-list entry'. Fix: Name allow-list entries for stand_in_stress.rs (each enclosing fn, with the reason 'intentional control for the race'), or build the in-process writes from a shared fixture fn the allow-list names once. Update the criterion 2 observation to list the entries expected.",
+      "location": "Files: crates/athena-testkit/tests/stand_in_stress.rs; Demonstration for criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Out-of-line test modules are matched by file name across the workspace instead of being resolved to their file",
+      "evidence": "Declarations such as crates/athena-core/src/gh/mod.rs:113 `mod tests;`, lib.rs:115 `mod run_pin_tests;` and athena-gate/src/lib.rs:388 `mod landing_tests;` sit next to their files. Matching by name across the workspace would mark any production file with the same name as test code, which would then report its production permission calls as violations. Fix: Resolve each declaration relative to the declaring file: dir/x.rs or dir/x/mod.rs (for mod.rs or lib.rs parents), or the parent's stem directory otherwise, honouring #[path]. Keep the planted out-of-line test.",
+      "location": "Decision 2 (test-code classification: files named by #[cfg(test)] mod x; matched by stem)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Overwriting an already-executable stand-in with fs::write is the same race and is neither detected nor listed as a gap",
+      "evidence": "ETXTBSY happens whenever the test process holds a write handle to a file it later runs. fs::write onto a file first made by write_executable keeps mode 755 and needs no set_permissions, so none of the detectors fire. The named gaps are fs::copy, tar unpack and sh -c only. Fix: Add 'rewriting an existing executable in-process' to the documented gaps in the scan header. Optionally, flag fs::write or File::create in test code on a path expression that was earlier passed to write_executable in the same fn.",
+      "location": "Risks: 'The scan misses a form of in-process executable write'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "D160 does not say it amends D157, which introduced the athena_git::script_writer module this plan deletes",
+      "evidence": "docs/decisions.md:4313-4321 (D157) says 'The change adds `athena_git::script_writer` and converts the test fixture user_repo'. The plan's D160 only states that D08 stands. Fix: In D160, state that it amends D157: the helper moved to athena-testkit and the athena-git module was removed. Add a [[link]] older D157, newer D160, status amended, alongside the D08 link.",
+      "location": "Files: docs/decisions.md (D160)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A production copy-then-exec, open to the same race, is not named as out of scope with a proposed fix",
+      "evidence": "crates/athena-core/src/run/mod.rs:2429 copies target/debug/athena to `bin` with std::fs::copy and runs it right away (line 2431). The copy holds a write handle in-process, the same window. The root-cause default says to name a fault outside scope and propose its fix. The plan lists fs::copy only as a scan gap. Fix: Name this site in the change description or D160 as out of scope, with the proposed fix (copy through the child helper, or copy to a temporary name and rename).",
+      "location": "Approach / CHANGELOG bullet (root-cause default)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The clippy command in step 8 leaves out --workspace, which criterion 7 and the demonstration use",
+      "evidence": "Step 8: `cargo clippy --all-targets --locked -- -D warnings`. The criterion says `cargo clippy --workspace --all-targets`. The root Cargo.toml is a virtual manifest, so the two run the same. Fix: Use the same command as the criterion for clarity.",
+      "location": "Step 8",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan names the root cause, puts the one helper in a new test-only crate and removes the duplicate, converts the last in-process site (crates/athena-cli/tests/slot_exec.rs:54) and adds a syn scan with wrapper resolution and planted-violation tests. I read the snapshot to check its claims; I ran nothing. Every caller of athena_git::script_writer that the plan lists exists and no other caller does. athena-agent uses athena-git only at claude.rs:639. The graph test in xtask/tests/policy.rs:404 ignores dev-dependency edges. D08 is the only decision that governs a touched path. The scope gate (outside_allowed_paths) only applies when a criterion limits which files may change, and none does here, so deleting script_writer.rs (Athena's minor finding) will not trigger a send-back. The demonstrations have real seams: find_violations over real parsing, and the real helper under the stress test. The remaining issues are minor soundness points in the scan: it ignores the mode value, its own stress test's deliberate violations are not planned into the allow-list, out-of-line test modules are matched by file name, and one form of the race is left undocumented. There are also two record gaps: D160 does not mention D157, and a production copy-then-exec is not named as out of scope. None stops a criterion from being shown."
+}

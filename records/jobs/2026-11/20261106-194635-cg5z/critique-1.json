@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-194635-cg5z",
+  "round": 1,
+  "at": "2026-11-06T19:56:36.685990763Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The scan flags every permission write in test code, including non-executable modes.",
+      "evidence": "The rule flags every permission write in test code, whatever the mode. Criterion 3 names `set_permissions with 0o755`. A future test that makes a file read-only (0o444) or private (0o600, as claude.rs:246 does in production) would be flagged even though it writes nothing executable. The tree has no such test today (Grep), so this is a latent false positive, not a current one. Fix: Flag a permission call only when its literal mode has an execute bit (mode & 0o111 != 0), or when the mode is not a literal and so cannot be judged. Add a planted negative case for `from_mode(0o644)` or `0o600`, and a positive case for a variable mode.",
+      "location": "Plan Decision 1 (scan patterns `set_permissions(`, `.mode(<arg>)`, `.set_mode(`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The scan misses in-process executable writes that make no permission call, and some chmod forms.",
+      "evidence": "The race comes from a writable fd open in the test process at fork time, not from the chmod. `fs::write` over a file that is already 0o755 keeps the mode and needs no permission call. `fs::copy` of an executable copies its mode. `Command::new(` and `\"chmod\"` split across lines, or `sh -c \"chmod +x f\"`, do not match the `chmod\"`-on-the-same-line rule. None of these forms is in a test region today (Grep of fs::copy and #!/bin/sh sites). Fix: Name these limits in the scan's doc comment and in the CHANGELOG entry, marked prose-only. Or check `Command::new(` plus `chmod` within a small window of lines, and flag `fs::copy(` in test regions. Add planted cases for whichever forms are covered.",
+      "location": "Plan Decision 1 / Risks (what the scan cannot see)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The whole-file exemption for slot_exec.rs rests on a misreading of the out-of-scope list and would hide any new hit in that file.",
+      "evidence": "The reason given is that 'the brief puts that file's set_permissions out of scope'. The out-of-scope bullet covers only *production-code* uses there. Line 129 sits inside `#[cfg(test)] mod tests` (line 122), so it is test code. Because the whole file is exempt, any new in-process exec write added to that test module would escape the guard. The guard test only checks that some hit still exists. Fix: Keep the exemption, because those scripts are never executed (find_program only reads metadata, slot_exec.rs:115-119). Narrow it to (path, the exact `script` helper line or function), so any other hit in the file still fails. Correct the stated reason: the file is not a deliverable, and its scripts are never executed.",
+      "location": "Plan Decision 3 (exempt list entry crates/athena-cli/src/slot_exec.rs)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Whether the stress test fails without the helper depends on timing, but the plan states it as certain.",
+      "evidence": "The plan says that without the helper 'the helper variant would ... meet ETXTBSY, so its assertion of zero busy errors would fail'. It also concedes that the in-process variant may print 0 hits on a quiet host. So the negative result depends on timing, and the 0-ETXTBSY result does not prove on its own that the helper is what prevents the error. Fix: Rewrite the claim as probabilistic. Optionally add one deterministic control that does not need unsafe code: keep a writable `File` to the script open, exec it, and assert `ErrorKind::ExecutableFileBusy`. This shows the counter really catches ETXTBSY. The helper variant's every-exec-succeeds check then stands alongside it.",
+      "location": "Demonstration for criterion 4 ('Fails without the behavior')",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The tree-scan test has two names, and the step numbers in the seam lines are off by one.",
+      "evidence": "The tree-scan test is called both `no_in_process_exec_writes` and `the_tree_has_no_in_process_executable_write`. The seams are said to be added 'by step 6' and 'by step 7', but the scan is written in step 7 and the stress test in step 8. Fix: Pick one test name, preferably matching the name in criterion 3, and fix the step numbers in the seam lines.",
+      "location": "Decision 1 / Files / criterion 3 demonstration (test names)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Step 3 warns about a build failure that cannot happen at that point.",
+      "evidence": "`cargo build --workspace` builds no test targets, and script_writer.rs still exists at step 3, so the warning about 'unresolved script_writer paths' does not apply. Fix: Use `cargo metadata --format-version 1 >/dev/null` (or `cargo update -w`) once after the manifest edits to update Cargo.lock. Then use `--locked` everywhere.",
+      "location": "Step 3 (lockfile regeneration)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot with Read and Grep; I ran nothing. Its facts hold. There are exactly 7 `script_writer` callers, at the lines the plan names. `pub mod script_writer` is at athena-git/src/lib.rs:20. The only in-process executable writes in test regions are crates/athena-cli/tests/slot_exec.rs:54 and crates/athena-cli/src/slot_exec.rs:129. Every production set_permissions, set_mode and set_executable sits above its file's first `#[cfg(test)]` line: xtask main.rs 807/829, git snapshot.rs 445-478/492, core toolconfig 18/150, pin 186-199/507, snapshot 196/281, and claude.rs `.mode(0o600)` at 246/462. claude.rs:639 is athena-agent's only athena_git use. policy.rs `actual()` filters dev edges (line 404). D08 is the only `[[governs]]` entry and covers snapshot.rs. `unreconciled` needs a link to a new heading, which D160 provides. The athena-bin cache keys and BUILD_PATHS already cover `crates/**`. The workspace lints deny unsafe_code, and the plan needs none. The dependents list matches the readers I found. The approach fixes the problem at its source: one helper plus a scan. No demonstration hangs on a missing seam or a test double. What remains are soundness refinements, all minor: (1) the scan flags any permission write in test code, not just executable modes; (2) it misses some forms (overwriting an existing executable, `Command::new` split across lines, chmod run through `sh -c`); (3) slot_exec.rs is exempted as a whole file, on a misreading of the out-of-scope list; (4) the stress test's 'fails without the behavior' depends on timing. None stops the plan from working or leaves a criterion unshown."
+}

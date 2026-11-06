@@ -19,8 +19,12 @@
 //! [`SlotQueue::acquire`] returns [`crate::disk::SlotWait`], which the run turns into a held job, not a failed
 //! one. The caller's `stop` closure runs on every poll, so the kill switch still ends a long wait.
 //!
-//! Only [`Class::Check`] is requested today; the other classes are for the producer's commands and the landing
-//! rebuild (build jobs 4 and 7).
+//! Who asks. [`Class::Check`] is a check or rerun of a candidate. [`Class::Producer`] is a producer's `cargo
+//! build`, `test`, `clippy` or `check`: the `cargo` wrapper first on the producer's `PATH`
+//! ([`athena_agent::env::CargoShim`]) takes the slot from its own process and keeps it until cargo exits. A
+//! wrapper that waits the limit out writes a wait note under the job's directory ([`write_wait_note`]), which
+//! the run reads after the producer ends and turns into a held job. The landing rebuild is the one class still
+//! unused (build job 7).
 
 use crate::disk::SlotWait;
 use anyhow::{Context, Result};
@@ -326,6 +330,28 @@ fn parse_ticket(name: &str) -> Option<Queued> {
         queued_at,
         class,
     })
+}
+
+/// Where the `cargo` wrapper leaves its wait note for the job whose directory is `job_dir`.
+pub fn wait_note_path(job_dir: &Path) -> PathBuf {
+    job_dir.join(athena_agent::env::WAIT_NOTE_FILE)
+}
+
+/// Writes the note a wrapper leaves when no build slot came free within its limit.
+pub fn write_wait_note(note: &Path, wait: &SlotWait) -> Result<()> {
+    let text = serde_json::to_string(wait).context("writing the build-slot wait note")?;
+    std::fs::write(note, text).with_context(|| format!("writing {}", note.display()))
+}
+
+/// The wait the note at `note` records, or `None` when there is no note or it cannot be read.
+pub fn read_wait_note(note: &Path) -> Option<SlotWait> {
+    let text = std::fs::read_to_string(note).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Removes the note at `note`; no note is not an error.
+pub fn clear_wait_note(note: &Path) {
+    let _ = std::fs::remove_file(note);
 }
 
 /// Removes the workspace crates' output from a slot's target directory and keeps the third-party output.
@@ -875,6 +901,26 @@ mod tests {
                 .is_empty()
         );
         assert!(target.join("kept").is_file());
+    }
+
+    #[test]
+    fn a_wait_note_round_trips_and_is_cleared() {
+        let temp = tempfile::tempdir().unwrap();
+        let note = wait_note_path(temp.path());
+        assert_eq!(note, temp.path().join("slot-wait.json"));
+        assert_eq!(read_wait_note(&note), None, "no note yet");
+        let wait = SlotWait {
+            waited_s: 300,
+            limit_s: 300,
+        };
+        write_wait_note(&note, &wait).unwrap();
+        assert_eq!(read_wait_note(&note), Some(wait));
+        clear_wait_note(&note);
+        assert_eq!(read_wait_note(&note), None);
+        clear_wait_note(&note);
+        // A note that is not a wait reads as no note.
+        std::fs::write(&note, b"not json").unwrap();
+        assert_eq!(read_wait_note(&note), None);
     }
 
     #[test]

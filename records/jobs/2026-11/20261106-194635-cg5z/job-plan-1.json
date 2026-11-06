@@ -1,0 +1,504 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261106-194635-cg5z",
+  "round": 1,
+  "at": "2026-11-06T19:53:22.492422429Z",
+  "invocation_seq": 2,
+  "approach": "Move the existing, already-proven helper (crates/athena-git/src/script_writer.rs: `cat > tmp && chmod 755 tmp && mv tmp final` run by an `sh` child) into a new std-only crate, crates/athena-testkit, as `athena_testkit::write_executable`. Convert every test site that writes an executable: the 7 current `script_writer` callers plus the raw `fs::write` + `set_permissions` in crates/athena-cli/tests/slot_exec.rs. Delete script_writer.rs and its `pub mod`. Remove the retry loop in reading.rs `check_stub`. Add two integration tests in the new crate. `stand_in_stress` runs a helper variant (must see 0 ETXTBSY) and an in-process variant (prints its hit count, never asserts a count). `no_in_process_exec_writes` is a source scan of test code with planted-violation unit tests. Then update the workspace (members, workspace dependency, dev-dependencies, lock), the architecture crate table, shard timings, a D160 \"D08 checked and stands\" entry with its [[link]], and CHANGELOG. Production code is untouched: the diff to non-test code is only moving the helper's home and removing `pub mod script_writer`.",
+  "decisions": [
+    {
+      "choice": "The scan test is a text scan of test code. It is a pure function `violations(rel_path, text)` inside tests/no_in_process_exec_writes.rs. A tree-walk test feeds it every .rs file under crates/*/{src,tests} and xtask/{src,tests}; the planted-violation tests feed it strings. It flags a non-comment line containing `set_executable(`, `set_permissions(`, `from_mode(`, `.set_mode(`, `.mode(<arg>)`, or `Command::new(` together with `chmod\"`.",
+      "reason": "One rule, enforced by mechanism (user default 'mechanism'). The same function drives the tree scan and the planted cases, so the planted tests fail if detection is removed. The patterns cover the five forms the criterion names. Reads such as `.permissions().mode()` are not flagged because `.mode()` takes no argument. No new dependency is needed.",
+      "rejected": [
+        {
+          "option": "Parse with syn (a workspace dependency) to find calls",
+          "why": "A heavier dependency in a crate that must be std-only, for lines the five token patterns already catch; it would also need cfg(test) item resolution."
+        },
+        {
+          "option": "A regex crate dependency in the testkit",
+          "why": "Not needed; every pattern is a substring check, and a dev-dependency beyond tempfile weakens the 'std-only' claim."
+        },
+        {
+          "option": "Detect any `fs::write` followed by exec",
+          "why": "Not decidable from text; the permission-setting calls are the mechanical marker of an executable write."
+        }
+      ]
+    },
+    {
+      "choice": "Test code is: every file under a `tests/` directory; files named tests.rs, *_tests.rs or test_support.rs; and, for other files under `src/`, the text from the first `#[cfg(test)]` or `#[cfg(all(test` line to the end. This is the convention xtask/tests/policy.rs `compiled_in_files` already uses (lines 842-865).",
+      "reason": "Production set_permissions and set_executable sit above the first cfg(test) marker in xtask/src/main.rs (807-822, called at 415/490/550), crates/athena-git/src/snapshot.rs (445-478), core toolconfig.rs, pin.rs and snapshot.rs. They must stay unflagged, as the brief requires. The convention is already accepted in this repository.",
+      "rejected": [
+        {
+          "option": "Scan whole files and allow-list the production uses",
+          "why": "Many allow-list entries, and the list would need to change whenever production code changes."
+        },
+        {
+          "option": "Parse module structure to find cfg(test) modules",
+          "why": "More code for a result the marker convention gives; the known limit (an inline `#[cfg(test)]` statement in a production function, e.g. run/checks.rs:116, widens the region) only widens the scan and currently produces no hit."
+        }
+      ]
+    },
+    {
+      "choice": "A small exempt list `(path, reason)` in the scan test, with a guard test that each exempt file exists and still has a hit when scanned. It holds three files: the scan test file itself (the planted strings), tests/stand_in_stress.rs (its in-process variant deliberately writes the bad way), and crates/athena-cli/src/slot_exec.rs. In that last file the unit-test helper `script` (line 126-130) writes scripts with a given mode, including 0o644, that are never executed (`find_program` only reads the mode bits); the brief puts that file's set_permissions out of scope.",
+      "reason": "The brief's out-of-scope list names crates/athena-cli/src/slot_exec.rs, so it cannot be edited. A stale exemption is itself a failure, so the list cannot rot.",
+      "rejected": [
+        {
+          "option": "Convert slot_exec.rs's `script` helper",
+          "why": "Out of scope by the brief; it writes non-executable files too, which write_executable (always 755) cannot express."
+        },
+        {
+          "option": "Narrow the scan to the files named in criterion 2",
+          "why": "Then a new test file anywhere else would escape; the point is a guard for new writes."
+        }
+      ]
+    },
+    {
+      "choice": "Stress test: two tests serialised by a static Mutex. Writer threads do write-then-exec cycles while forker threads run `Command::new(\"true\")`. The helper variant asserts zero `ErrorKind::ExecutableFileBusy` and success of every exec. The in-process variant uses `std::fs::write` plus an in-process chmod and prints `in-process variant: {hits} ETXTBSY in {cycles} cycles` with `eprintln!`. It asserts only that non-busy errors do not occur. The demonstration runs it with `-- --nocapture` so the count is in the output.",
+      "reason": "The brief asks for the in-process hit count in the recorded output without requiring a nonzero count, which is timing dependent. Serialising keeps one variant's forkers from skewing the other's count. `ErrorKind::ExecutableFileBusy` is stable (rust-version 1.97) so the crate needs no libc.",
+      "rejected": [
+        {
+          "option": "Assert the in-process variant hits at least once",
+          "why": "The race is probabilistic; the assertion would make the suite flaky, the very thing being removed."
+        },
+        {
+          "option": "Use libc::ETXTBSY",
+          "why": "Adds a dependency; std::io::ErrorKind covers it."
+        }
+      ]
+    },
+    {
+      "choice": "Keep `check_stub` in reading.rs as a one-line wrapper (`BinaryChecker::new(bin).check(\"add a greeting\", reading)`), drop the loop and fix its doc comment.",
+      "reason": "Criterion 5 asks only that the retry be removed; the wrapper keeps the three call sites at reading.rs 8253-8262 unchanged. Remove the `Duration`/sleep import only if it becomes unused (clippy -D warnings catches it).",
+      "rejected": [
+        {
+          "option": "Inline into the callers",
+          "why": "A larger diff with no benefit."
+        }
+      ]
+    },
+    {
+      "choice": "Name the decision D160, appended after D159 (the last heading, file is 4433 lines). Its `Decision:` bullet begins `Amends D08 in prose only: ...`, as D157 did. The word `amends` appears only there, and none of `supersedes` or `superseded by` appears in the entry. Add `[[link]] older=\"D08\" newer=\"D160\" status=\"amended\"` with `line` equal to that Decision line's number in the final file.",
+      "reason": "athena_data::decision_links::unreconciled requires a candidate [[link]] from a governed decision (D08 governs crates/athena-git/src/snapshot.rs, decision-links.toml 190-195) to a newly added heading. backtest.rs:308-324 compares the parsed phrase hits with the listed links by exact line, older and newer; any other 'amends' phrase in the entry would create an unlisted hit.",
+      "rejected": [
+        {
+          "option": "Extend D157 in place",
+          "why": "The log is append-only and the check needs a new heading."
+        },
+        {
+          "option": "Add a [[governs]] entry for the testkit",
+          "why": "Not asked, and it adds a rule beyond the brief."
+        }
+      ]
+    },
+    {
+      "choice": "athena-testkit's [dependencies] is empty (std only). Its only dev-dependency is `tempfile.workspace = true`, for its own tests. The other crates take it as `[dev-dependencies] athena-testkit.workspace = true`, so it never reaches a normal-dependency edge.",
+      "reason": "The architecture check xtask/tests/policy.rs `actual()` counts only normal edges (`d[\"kind\"].is_null()`, line 404), so the doc row can say `none`. athena-git needs no cycle: testkit does not depend on it.",
+      "rejected": [
+        {
+          "option": "Put the helper in athena-core test_support",
+          "why": "athena-git (a leaf that must stay one) and athena-agent could not use it without depending on core."
+        },
+        {
+          "option": "A hand-rolled temp-dir inside the testkit to avoid tempfile",
+          "why": "More code for no gain; the `[dependencies]` table, which is what 'std-only' means for a dev crate, is empty."
+        }
+      ]
+    },
+    {
+      "choice": "athena-agent's dev-dependency on athena-git is removed and replaced by athena-testkit, because claude.rs:639 is the only `athena_git` use in that crate (grep). The athena-git dev-dependency is added for snapshot.rs tests; xtask keeps its normal athena-git dependency (xtask/src/decisions.rs:36, ci_cache.rs:16).",
+      "reason": "Leaves no unused dev-dependency, and the CHANGELOG line 49-50 that added it is superseded by the new entry.",
+      "rejected": [
+        {
+          "option": "Keep athena-git as an agent dev-dependency",
+          "why": "Unused after the change."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-testkit/Cargo.toml",
+      "action": "create",
+      "purpose": "New workspace crate: package fields from the workspace, empty [dependencies], [dev-dependencies] tempfile.workspace = true, [lints] workspace = true. Governance file named in criterion 1.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-testkit/src/lib.rs",
+      "action": "create",
+      "purpose": "`pub fn write_executable(path, bytes)` moved from script_writer.rs with its module docs, plus its unit tests (replaces an earlier file, mode 755, no `.writing` leftover, panics when the directory is missing).",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-testkit/tests/stand_in_stress.rs",
+      "action": "create",
+      "purpose": "Helper variant (asserts 0 ETXTBSY) and in-process control variant (prints its count), serialised by a Mutex, 4 writers x 200 cycles with 4 forkers.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-testkit/tests/no_in_process_exec_writes.rs",
+      "action": "create",
+      "purpose": "`violations`, the test-region rule, the exempt list, the tree scan `no_in_process_exec_writes` / `the_tree_has_no_in_process_executable_write`, and planted-violation unit tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "Cargo.toml",
+      "action": "modify",
+      "purpose": "Add crates/athena-testkit to `members` and `athena-testkit = { path = \"crates/athena-testkit\" }` to [workspace.dependencies].",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "purpose": "New athena-testkit package; edges for the dev-dependencies; drop athena-git from athena-agent's list. Produced by cargo, not by hand.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/Cargo.toml",
+      "action": "modify",
+      "purpose": "Add `athena-testkit.workspace = true` to [dev-dependencies].",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/Cargo.toml",
+      "action": "modify",
+      "purpose": "Add athena-testkit to [dev-dependencies] (reconcile.rs and slot_exec.rs).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/Cargo.toml",
+      "action": "modify",
+      "purpose": "Replace dev-dependency athena-git with athena-testkit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "purpose": "Add `[dev-dependencies] athena-testkit.workspace = true` (checks.rs and reading.rs tests).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/Cargo.toml",
+      "action": "modify",
+      "purpose": "Add `[dev-dependencies] athena-testkit.workspace = true` (snapshot.rs test fixture).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "purpose": "Test region only (from line 829): `stand_in_claude` (835) and the gitleaks fake (1020) call `athena_testkit::write_executable`. The production `set_executable` and its callers stay.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/reconcile.rs",
+      "action": "modify",
+      "purpose": "Line 134: call `athena_testkit::write_executable` for the fake `gh`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/slot_exec.rs",
+      "action": "modify",
+      "purpose": "Replace `fs::write` + `set_permissions` (53-54) with `athena_testkit::write_executable(&fake, FAKE_CARGO)`; remove the now-unused `PermissionsExt` import (line 11); keep FAKE_CARGO as is.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "purpose": "Test module `stand_in_tests` only: line 639 uses the testkit. `retry_busy` is untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "Test at line 1003 uses the testkit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Test module: `stub_binary` (8217) uses the testkit; `check_stub` (8221-8237) loses its busy retry, becoming a single `check` call; drop imports left unused.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "purpose": "Test fixture `user_repo` (513): `athena_testkit::write_executable` instead of `crate::script_writer`. No production lines change.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/script_writer.rs",
+      "action": "delete",
+      "purpose": "The helper and its tests move to athena-testkit.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "purpose": "Remove `pub mod script_writer;` (line 20).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Add one module-level doc line pointing stand-in executable writers to `athena_testkit::write_executable` (this file is scanned whole). No logic changes, and the doc must not contain a scanned pattern.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/architecture.md",
+      "action": "modify",
+      "purpose": "Add the `athena-testkit` row to the crate table (responsibility: the test-only helper for executable stand-ins and the scan that guards it; depends on: none).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append `## D160 · …; D08 stands` in the D157 format after line 4433.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Append the `[[link]]` D08 → D160, status amended, at the Decision line, with a one-line comment like the one at line 180.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "purpose": "Add four athena-testkit lines between the athena-score and xtask lines: `--doc 3.00`, `--lib 3.00`, `--test no_in_process_exec_writes 5.00`, `--test stand_in_stress 10.00` (estimates, like the rest of the file).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "[Unreleased] entry under Fixed: root cause (executable stand-ins written in-process; no single helper; no mechanical list of write sites), fix at the origin (`athena_testkit::write_executable` via `sh`: `cat > tmp && chmod 755 tmp && mv tmp final`; the script_writer module moved), the scan test, the stress test, and the removed retry in reading.rs.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Create crates/athena-testkit/Cargo.toml (workspace package fields, no [dependencies], tempfile dev-dependency, [lints] workspace = true) and src/lib.rs: copy `write_executable`, its PROGRAM constant and module docs from crates/athena-git/src/script_writer.rs, name the crate in the docs, and move the first unit test; add a `#[should_panic]` test for a missing directory.",
+    "Edit root Cargo.toml: add the member and the workspace dependency. Add `athena-testkit.workspace = true` under [dev-dependencies] in xtask, athena-cli, athena-core and athena-git. In athena-agent replace the athena-git dev-dependency with it.",
+    "Run `cargo build --workspace` once without --locked so cargo writes the Cargo.lock entries. The build will fail on the unresolved script_writer paths in test targets only if tests are built, so use `cargo metadata` first if needed.",
+    "Convert the test sites: claude.rs:639, checks.rs:1003, reading.rs:8217, reconcile.rs:134, xtask/src/main.rs:835 and 1020, and snapshot.rs:513 (`athena_testkit::write_executable`). In tests/slot_exec.rs replace lines 53-54 with the helper and remove the unused `PermissionsExt` import.",
+    "In reading.rs replace the body of `check_stub` with a single `BinaryChecker::new(bin).check(\"add a greeting\", reading)` call and update its doc comment (remove the claim about busy files). Remove any import that becomes unused.",
+    "Delete crates/athena-git/src/script_writer.rs and remove `pub mod script_writer;` from crates/athena-git/src/lib.rs. Add the one-line doc to crates/athena-core/src/test_support.rs.",
+    "Write crates/athena-testkit/tests/no_in_process_exec_writes.rs: `violations`, `test_region` (convention from xtask/tests/policy.rs 842-865), the exempt list with reasons, the tree walk over crates/*/{src,tests} and xtask/{src,tests} (skip `target`), `no_in_process_exec_writes`, planted positive and negative cases, and the exempt-list guard.",
+    "Write crates/athena-testkit/tests/stand_in_stress.rs with the Mutex-serialised helper variant (asserts 0 `ErrorKind::ExecutableFileBusy`) and the in-process control that prints `in-process variant: {hits} ETXTBSY in {cycles} cycles`. Run `cargo test -p athena-testkit -- --nocapture` and fix any tree hit the scan reports.",
+    "Add the four athena-testkit lines to xtask/shard-timings.txt in sorted position, and the `athena-testkit` row (depends on: none) to the crate table in docs/architecture.md.",
+    "Append D160 to docs/decisions.md in the D157 format (Case, Decision beginning `Amends D08 in prose only: D08 was checked for the crates/athena-git/src/snapshot.rs test-fixture change and stands`, Alternatives, Tradeoff, Reversal cost, Provenance). Use no other 'amends', 'supersedes' or 'superseded by' phrase in it.",
+    "Grep -n docs/decisions.md for the `Amends D08` line of D160 and append the matching `[[link]]` to docs/decision-links.toml with a comment line before it.",
+    "Add the CHANGELOG.md [Unreleased] ### Fixed entry naming the root cause and the origin fix (see the files list).",
+    "Run, in order: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, then `cargo test -p athena-testkit --test stand_in_stress -- --nocapture` and record the printed counts. Check `git diff` for production hunks and Grep for `script_writer`."
+  ],
+  "risks": [
+    {
+      "risk": "The D160 [[link]] line number must equal the exact line of the 'Amends D08' phrase; a wrong line or an extra phrase fails the backtest check (backtest.rs:308-324) and the decisions test.",
+      "mitigation": "Step 11 computes the line from the final file with a Grep (-n) for the `Amends D08` line, after the text is final, and checks that `amends`, `supersedes` and `superseded by` each occur once or not at all in the entry. `cargo test -p athena-cli decisions` shows a mismatch."
+    },
+    {
+      "risk": "The in-process stress variant may print 0 hits on a quiet host, so the output would not show the race.",
+      "mitigation": "The scan is a source pattern check and cannot prove an exec race. The stress test measures the race directly: helper variant must report 0. The in-process variant is a control and asserts no count."
+    },
+    {
+      "risk": "The stress test's runtime or contention with other tests in the same binary.",
+      "mitigation": "Serialise the two variants with a static Mutex. Each helper cycle starts four short processes; 4 x 200 cycles is near the existing 4 x 100 test's cost (estimate: a few seconds). Reduce cycles to 100 if the test exceeds roughly 10 s, which keeps the xtask shard-timings estimate honest."
+    },
+    {
+      "risk": "The test-region rule may mark production code as test code after an inline `#[cfg(test)]` (e.g. crates/athena-core/src/run/checks.rs:116) and flag a future production set_permissions there, or miss test code in a file whose first marker is later.",
+      "mitigation": "Only the first marker is used (as policy.rs does). The exempt-list guard test fails if an exemption goes stale. The tree scan asserts it saw more than 100 files, so it cannot pass vacuously."
+    },
+    {
+      "risk": "The scan test may flag lines in the tree not seen in the pre-survey (e.g. `from_mode` in a src test region).",
+      "mitigation": "Run the scan over the converted tree in step 8 before the doc steps. The planted-violation tests are the reference for the patterns, and a line-oriented comment skip (`//` after trim) avoids doc-comment false positives."
+    },
+    {
+      "risk": "A stale Cargo.lock fails every `--locked` check.",
+      "mitigation": "Run `cargo build` (not locked) once after the manifest edits, then run the locked commands. Include the lock in the diff."
+    },
+    {
+      "risk": "Old references to `athena_git::script_writer` remain in prose (CHANGELOG 41-50, decisions D157).",
+      "mitigation": "The module name is final in step 12 (`grep script_writer` finds nothing), and CHANGELOG history lines about the old path stay as history. The new entry says the module moved."
+    },
+    {
+      "risk": "A production-code diff would break criterion 5 and the D08 'tests only' claim.",
+      "mitigation": "Production hunks are limited to the removal of one `pub mod` line; step 13 checks `git diff` for any hunk before line 492 in snapshot.rs, before line 612 in claude.rs and before the test module in checks.rs, reading.rs and xtask/src/main.rs."
+    },
+    {
+      "risk": "The crates/athena-cli/src/slot_exec.rs test helper still writes with set_permissions; it is exempted rather than fixed.",
+      "mitigation": "The scan's exempt list names that file and the reason, and the guard test pins it. A later change to convert it can drop the entry, and the guard test then requires the removal."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "athena_git::script_writer::write_executable (moved to athena_testkit::write_executable; module deleted)",
+      "dependent": "crates/athena-core/src/checks.rs:1003, reading.rs:8217, crates/athena-agent/src/claude.rs:639, crates/athena-cli/tests/reconcile.rs:134, xtask/src/main.rs:835,1020, crates/athena-git/src/snapshot.rs:513 (each calls `script_writer::write_executable`)",
+      "kind": "code",
+      "test": "cargo test --workspace --locked: each site compiles against the new path, and its test (e.g. a_cargo_test_check_records_its_failing_tests_and_the_flag_it_ran_with, replay_binary_checker_runs_a_build_from_its_path_alone_and_parses_its_line, the stand_in_tests in claude.rs, snapshots_hold_only_what_agents_may_see) still runs its script",
+      "reason": null
+    },
+    {
+      "name": "athena-git public module list",
+      "dependent": "crates/athena-git/src/lib.rs:20 (`pub mod script_writer;`)",
+      "kind": "code",
+      "test": "cargo build --workspace --locked; the grep for `script_writer` in .rs files finds nothing; the athena-git unit tests still pass",
+      "reason": null
+    },
+    {
+      "name": "fake cargo in the slot_exec fixture",
+      "dependent": "crates/athena-cli/tests/slot_exec.rs (FAKE_CARGO written with fs::write and set_permissions 0o755 at 53-54; `use PermissionsExt` at line 11, used nowhere else in the file per grep)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test slot_exec (all its tests run the fake through the shim); the scan test also covers the file",
+      "reason": null
+    },
+    {
+      "name": "reading.rs check_stub busy retry",
+      "dependent": "crates/athena-core/src/reading.rs `check_stub` callers (replay_binary_checker_runs_a_build_from_its_path_alone_and_parses_its_line, around 8239-8270, and the other tests that call `check_stub`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --lib reading::tests (stubs are now written out-of-process, so the retry has nothing to cover)",
+      "reason": null
+    },
+    {
+      "name": "production ETXTBSY retry",
+      "dependent": "crates/athena-agent/src/claude.rs `retry_busy` (line 47, used at 89 and 340)",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged by design: the criterion keeps it and the brief puts production changes out of scope. The diff touches only the test module that starts at line 612."
+    },
+    {
+      "name": "workspace crate table in docs/architecture.md",
+      "dependent": "xtask/tests/policy.rs `dependency_direction_matches_the_architecture` (362-457) via docs/architecture.md rows",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test policy dependency_direction_matches_the_architecture: `actual()` lists every workspace package, so the new row `athena-testkit … none` is required; dev-dependency edges are filtered out (`kind` null, line 404), so the new dev edges need no row cell",
+      "reason": null
+    },
+    {
+      "name": "xtask/shard-timings.txt unit list",
+      "dependent": "xtask/tests/ci_shards.rs `checked_in_timings_cover_every_workspace_test_unit` (410-421); the mirrors registry rule for shard timings in crates/athena-core/src/mirrors.rs, run by crates/athena-cli/tests/mirrors.rs",
+      "kind": "rule",
+      "test": "cargo test -p xtask --test ci_shards checked_in_timings_cover_every_workspace_test_unit and cargo test -p athena-cli --test mirrors (the set must equal the units: athena-testkit --doc, --lib, --test no_in_process_exec_writes, --test stand_in_stress)",
+      "reason": null
+    },
+    {
+      "name": "D08 governs snapshot.rs: a change to that path must add a newer entry plus a [[link]]",
+      "dependent": "athena_data::decision_links::unreconciled (crates/athena-data/src/decision_links.rs:124) run by crates/athena-core/src/run/checks.rs (DECISION_LINKS, line 8 and 413-482); docs/decision-links.toml [[governs]] D08 → crates/athena-git/src/snapshot.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-data decision_links tests for the rule; cargo test -p athena-cli decisions for the real files (the_real_list_maps_d08_to_the_snapshot_and_candidate_code_and_names_only_logged_decisions)",
+      "reason": null
+    },
+    {
+      "name": "decisions.md phrase hits vs decision-links.toml links",
+      "dependent": "crates/athena-cli/src/backtest.rs:308-324 (`unlisted`, `not_found` compare parsed phrase hits with [[link]] by line, older, newer) and crates/athena-cli/src/decisions.rs:411-412",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli decisions; cargo test -p athena-cli backtest: D160 holds exactly one 'amends' phrase and the link's `line` is that line",
+      "reason": null
+    },
+    {
+      "name": "Cargo.lock (new package athena-testkit; new dev-dependency edges)",
+      "dependent": "Cargo.lock; the checks run `cargo clippy --locked` and `cargo test --locked`",
+      "kind": "host_setting",
+      "test": "cargo test --workspace --locked fails on a stale lock; the producer regenerates the lock with one non-locked `cargo build` before that",
+      "reason": null
+    },
+    {
+      "name": "athena-bin build path list",
+      "dependent": "crates/athena-core/src/status.rs BUILD_PATHS (`crates/`, `Cargo.toml`, `Cargo.lock`) and the CI athena-bin cache key mirrored by crates/athena-core/src/mirrors.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "Unaffected. The new files lie under paths the lists already cover by directory prefix (`crates/`) or name, so neither list needs a new entry."
+    },
+    {
+      "name": "banned-word and personal-data scan over tracked files",
+      "dependent": "xtask/tests/policy.rs boundary scan (`boundary_words()`) and the athena.toml [personal_data] allow-list",
+      "kind": "rule",
+      "test": null,
+      "reason": "The new files, D160 and the CHANGELOG entry contain no host or person names and no email-like text."
+    },
+    {
+      "name": "athena-core test-support module and reading refusal rules",
+      "dependent": "crates/athena-core/src/test_support.rs (feature `test-support`, compiled for athena-cli tests); crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "code",
+      "test": null,
+      "reason": "test_support.rs has no executable write (grep for set_permissions, from_mode, `#!/bin/sh`, Command found none), so the plan gives it only a doc line. No refusal or matching rule on readings is added or changed, so no corpus case is needed and refusal_corpus is not a demonstration."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the manifests and changelog in the diff. Also run `cargo test -p xtask --test policy dependency_direction_matches_the_architecture`, which fails if a workspace member is missing from the docs row and checks the member through cargo metadata.",
+      "command": "cargo metadata --no-deps --format-version 1 && git diff --stat && git diff -- Cargo.toml crates/athena-testkit/Cargo.toml CHANGELOG.md",
+      "observes": "`cargo metadata` lists package athena-testkit with an empty normal dependency list and `lints` inherited from the workspace; Cargo.toml `members` and `[workspace.dependencies]` name it; CHANGELOG.md [Unreleased] has an entry that states the root cause (stand-ins written in-process, no single helper, no mechanical enumeration of write sites) and the fix `athena_testkit::write_executable` via `cat > tmp && chmod 755 tmp && mv tmp final`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Content check by the scan itself over the listed paths: the test `the_tree_has_no_in_process_executable_write` walks xtask/src, xtask/tests, crates/*/src and crates/*/tests and asserts no violations outside the exempt list. A supporting grep (Grep tool, pattern `script_writer|set_permissions|from_mode|set_executable`) over the listed files shows only production hits; `ls crates/athena-git/src` shows no script_writer.rs.",
+      "command": "cargo test -p athena-testkit --test no_in_process_exec_writes",
+      "observes": "The test passes; the Grep finds `script_writer` nowhere in .rs files, and xtask/src/main.rs, crates/athena-cli/tests/slot_exec.rs, reconcile.rs, claude.rs, checks.rs, reading.rs and the snapshot.rs tests call `athena_testkit::write_executable`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "The test binary tests/no_in_process_exec_writes.rs contains `no_in_process_exec_writes` (the tree scan, named in the criterion, which passes on the tree) and planted-violation tests. A planted test passes a literal source string to `violations(path, text)`. It asserts a non-empty result for each planted form in a tests/ path and in the region after `#[cfg(test)]` of a src path. It asserts an empty result for a production-region use before `#[cfg(test)]`, a comment line, `.permissions().mode()` and a `write_executable` call. A guard test asserts each exempt-list file still exists and still has a hit.",
+      "command": "cargo test -p athena-testkit",
+      "observes": "All tests pass: the scan on the tree passes, and every planted test shows a violation was found.",
+      "fails_without": "If the detection function returned no violations, every planted-violation test (`set_executable(&fake)` wrapper, `set_permissions` with `0o755`, `Permissions::from_mode(0o755)`, `Command::new(\"chmod\")`, `.set_mode(0o755)`) would fail its assertion that the line is reported with its line number. If the tree walk found no files, the vacuity assertion (more than 100 files scanned, including xtask/src/main.rs and crates/athena-cli/tests/slot_exec.rs) would fail. Reverting any single converted site would fail `the_tree_has_no_in_process_executable_write`, naming the file and line.",
+      "seam": "Production entry point: `violations(rel_path: &str, text: &str) -> Vec<(usize, &'static str)>`, defined in crates/athena-testkit/tests/no_in_process_exec_writes.rs (added in step 6) and called by both the tree scan and the planted tests. Fixture: literal source strings and the real source tree, read through `CARGO_MANIFEST_DIR/../..`. The double holds only data (text); the detection logic is the function itself, not a stub. The seam is added by step 6."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the stress binary with `--nocapture`. The test `helper_variant_never_meets_a_busy_script` (4 writer threads x 200 cycles, 4 forker threads running `true`) calls `athena_testkit::write_executable` and then `Command::output()` on the file. It counts `ErrorKind::ExecutableFileBusy` and asserts 0, and asserts each output equals the cycle's expected line. `in_process_variant_reports_its_busy_count` does the same with `std::fs::write` plus an in-process chmod and prints the count.",
+      "command": "cargo test -p athena-testkit --test stand_in_stress -- --nocapture",
+      "observes": "Output has `helper variant: 0 ETXTBSY in 800 cycles` and `in-process variant: <n> ETXTBSY in 800 cycles` (n is whatever was measured, possibly 0); both tests pass.",
+      "fails_without": "Without the helper's out-of-process write, the helper variant would write in-process like the other variant and meet ETXTBSY, so its assertion of zero busy errors would fail (this is the flake the change removes). If `write_executable` were a no-op the exec would fail with NotFound or permission denied and the test would fail. The in-process variant's printed count shows the race is real on this host.",
+      "seam": "Production entry point: `athena_testkit::write_executable(path, bytes)` in crates/athena-testkit/src/lib.rs (step 1); the file is run through `std::process::Command`. Fixture: `tempfile::tempdir()` and forker threads (real `true` processes). Nothing is injected or doubled. The helper is the code under test, and the in-process variant is a deliberate negative control. Both are added by step 7."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the diff. Every touched .rs path is a test file, a `#[cfg(test)]` region, the new testkit crate, or crates/athena-git/src/lib.rs (the `pub mod script_writer;` line only). `git diff -- crates/athena-agent/src/claude.rs` shows hunks only inside `mod stand_in_tests` (starts line 612), and `retry_busy` (line 47) is unchanged. `git diff -- crates/athena-core/src/reading.rs` shows the loop in `check_stub` (8221-8237) gone.",
+      "command": "git diff --stat",
+      "observes": "No hunk outside test code or Cargo manifests; no `Text file busy` string and no `thread::sleep` retry in reading.rs `check_stub`.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "The decisions test (crates/athena-cli/src/decisions.rs, the real-file tests at 411-412 and 480-503) parses the real docs/decisions.md and docs/decision-links.toml and requires every parsed phrase hit to be listed and every listed link to be found, so the D160 line number must be exact. The ci_shards test requires xtask/shard-timings.txt to equal the set of workspace test units, so it fails unless the four athena-testkit lines are added. The policy test fails unless docs/architecture.md has an `athena-testkit` row.",
+      "command": "cargo test -p athena-cli decisions && cargo test -p xtask --test ci_shards checked_in_timings_cover_every_workspace_test_unit && cargo test -p xtask --test policy dependency_direction_matches_the_architecture",
+      "observes": "All three pass; the diff shows an appended `## D160` entry whose Decision line starts `Amends D08 in prose only`, a `[[link]]` with `older = \"D08\"`, `newer = \"D160\"`, `status = \"amended\"` and the matching `line`, four `athena-testkit` lines in shard-timings.txt (`--doc`, `--lib`, `--test no_in_process_exec_writes`, `--test stand_in_stress`) and the architecture row.",
+      "fails_without": null
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three workspace commands as the checks do (`--locked`). The producer first runs `cargo build` once without `--locked` to let cargo write the new Cargo.lock entries.",
+      "command": "cargo fmt --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked",
+      "observes": "All three exit 0; the test run includes athena-testkit's lib tests and both integration test files.",
+      "fails_without": "Each conversion step is covered. An unconverted `athena_git::script_writer` path would not compile once script_writer.rs is deleted. A leftover unused import (`PermissionsExt` in tests/slot_exec.rs, `Duration` in reading.rs) fails clippy under -D warnings. A stale Cargo.lock fails `--locked`. A missing shard-timings line or architecture row fails the policy and ci_shards tests. A wrong D160 link line fails the decisions test.",
+      "seam": "Entry points: the existing workspace cargo commands. Fixtures: none added beyond steps 1-12; each converted site now goes through `athena_testkit::write_executable` (exists from step 1)."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "7f4e6d264fe20146daba900121f833f28165ca1c0182bdc41ce40abc6458a2d4"
+}
