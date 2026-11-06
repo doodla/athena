@@ -291,6 +291,9 @@ impl Athena {
             match decision {
                 Plan::OtherBranch(_) => unreachable!("mapped to a stale outcome above"),
                 Plan::Stale(reason) => {
+                    let reason = format!(
+                        "{reason}; `athena retry {id}` merges the kept candidate onto the new tip and verifies it again"
+                    );
                     let mut files = closing_files.clone();
                     files.push(NewFile::record(&AnyRecord::Outcome(Box::new(outcome(
                         OutcomeState::Stale,

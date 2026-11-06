@@ -1093,7 +1093,7 @@ impl Athena {
         })
     }
 
-    /// `athena retry <job>`: reads a retry of a rejected, failed or interrupted job (dispatched with no
+    /// `athena retry <job>`: reads a retry of a rejected, failed, timed out, stale or interrupted job (dispatched with no
     /// process working on it, for example after a restart, or held for low disk space), seeded from that job's
     /// introspection record when it has one. The request recorded is "try again on <job id>", so a later
     /// retry of this job finds the original; nothing is run. The flag says whether the introspection
@@ -1132,7 +1132,7 @@ impl Athena {
         // retry that cannot be afforded prints no resume note; `ask` makes it again before the reader runs.
         let jc = JobConfig::at(&self.git, &head)?;
         self.preflight(&jc, 0.0, ReserveStage::Admission)?;
-        // `ask` refuses a job that is not rejected, failed or interrupted before any model is called.
+        // `ask` refuses a job that is not rejected, failed, timed out, stale or interrupted before any model is called.
         // A job that stopped for the environment, or was interrupted, after its candidate was built resumes
         // from that candidate: `go` runs no planner or producer. The reader still runs below.
         let request = format!("{RETRY_PREFIX}{id}");
@@ -1145,6 +1145,11 @@ impl Athena {
                     crate::state::ResumeStage::Checks => "checks",
                     crate::state::ResumeStage::Verifier => "verifier",
                 }
+            ));
+        }
+        if job.state() == JobState::Closed(OutcomeState::Stale) {
+            ui.line(&format!(
+                "stale      job {id} passed verification but could not land; `athena go` merges its kept candidate onto the branch tip and verifies it again, with no producer run when the merge is clean"
             ));
         }
         let proposal = self.ask(&request, ui)?;
@@ -1363,12 +1368,15 @@ pub fn earlier_attempt_with(
         && !matches!(
             state,
             JobState::Closed(
-                OutcomeState::Rejected | OutcomeState::Failed | OutcomeState::TimedOut
+                OutcomeState::Rejected
+                    | OutcomeState::Failed
+                    | OutcomeState::TimedOut
+                    | OutcomeState::Stale
             )
         )
     {
         bail!(
-            "job {id} is {}; only a rejected or failed job can be tried again (so can a timed out one), or one that was interrupted",
+            "job {id} is {}; only a rejected or failed job can be tried again (so can a timed out or stale one), or one that was interrupted",
             state.name()
         );
     }
@@ -1600,7 +1608,10 @@ pub fn retry_follow_up(records: &Records, retry: &str, running: bool) -> String 
             format!("it was interrupted too; run `athena retry {retry}`")
         }
         JobState::Closed(
-            OutcomeState::Rejected | OutcomeState::Failed | OutcomeState::TimedOut,
+            OutcomeState::Rejected
+            | OutcomeState::Failed
+            | OutcomeState::TimedOut
+            | OutcomeState::Stale,
         ) => format!("it did not land; run `athena retry {retry}`"),
         JobState::Closed(OutcomeState::Landed) => "it landed; nothing is left to do".into(),
         JobState::Closed(_) => "see `athena status`".into(),
@@ -2068,13 +2079,18 @@ fn carry(job: &JobRecords, redactor: &Redactor) -> Result<Option<EarlierAttempt>
         }));
     }
     // A job closed before verification has only its outcome reason to say why; a failed job's reason
-    // (for example an admission refusal) is carried even when it was verified.
+    // (for example an admission refusal) is carried even when it was verified, and so is a stale job's: it
+    // passed verification, so the reason is what says why it did not land.
     let failed = job
         .outcome
         .as_ref()
         .is_some_and(|o| matches!(o.state, OutcomeState::Failed | OutcomeState::TimedOut));
+    let stale = job
+        .outcome
+        .as_ref()
+        .is_some_and(|o| o.state == OutcomeState::Stale);
     if let Some(outcome) = &job.outcome
-        && (failed || job.verification.is_none())
+        && (failed || stale || job.verification.is_none())
         && !outcome.reason.trim().is_empty()
     {
         texts.push(format!("outcome: {}", outcome.reason));
@@ -4650,13 +4666,38 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_job_can_be_tried_again_and_carries_its_reason() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let mut job = job_with_checks(vec![]);
+        if let Some(verification) = job.verification.as_mut() {
+            verification.final_verdict = athena_data::records::Verdict::Pass;
+            verification.reasons = vec![];
+        }
+        job.outcome = Some(outcome(
+            &job,
+            OutcomeState::Stale,
+            "the branch moved; nothing landed",
+        ));
+        let id = job.id().as_str().to_string();
+        let attempt = earlier_attempt(&records_with(job), &format!("try again on {id}"), &redactor)
+            .unwrap()
+            .expect("a stale job can be tried again");
+        assert_eq!(attempt.end_state, "stale");
+        assert!(!attempt.failed);
+        assert!(
+            attempt
+                .findings
+                .iter()
+                .any(|f| f == "outcome: the branch moved; nothing landed"),
+            "{:?}",
+            attempt.findings
+        );
+    }
+
+    #[test]
     fn only_rejected_or_failed_jobs_can_be_tried_again() {
         let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
-        for state in [
-            OutcomeState::Landed,
-            OutcomeState::Stale,
-            OutcomeState::Abandoned,
-        ] {
+        for state in [OutcomeState::Landed, OutcomeState::Abandoned] {
             let mut job = job_with_checks(vec![]);
             job.outcome = Some(outcome(&job, state, "done"));
             let id = job.id().as_str().to_string();
@@ -5944,6 +5985,7 @@ mod tests {
                     must_address: seed.must_address.clone(),
                     progress_note: None,
                     candidate: None,
+                    conflicts: None,
                 });
             } else {
                 inputs.retry_findings = Some(RetryFindings {

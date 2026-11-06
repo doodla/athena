@@ -3819,6 +3819,230 @@ mod produce_and_verify_order_tests {
         assert_eq!(athena.state.read_resume(&first), None, "the mark is spent");
     }
 
+    /// The counting script, with `edit` run on the repository's branch the first time the verifier is invoked:
+    /// a commit by someone else lands while the job is being verified, so the job goes stale. `seen` keeps the
+    /// work-tree README and the prompt of every producer run after the first, as the producer sees them.
+    fn moving_tip(
+        counts: Arc<Counts>,
+        repo_path: PathBuf,
+        edit: fn(&std::path::Path),
+        seen: Arc<Mutex<Vec<(String, String)>>>,
+    ) -> athena_agent::fake::Script {
+        let inner = counting(counts.clone(), None);
+        let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        Box::new(move |spec: &AgentInvocation| {
+            if spec.role == Role::Verifier && !moved.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                edit(&repo_path);
+                let git = Git::at(&repo_path);
+                git.run(["add", "-A"]).unwrap();
+                git.run([
+                    "commit",
+                    "-q",
+                    "-m",
+                    "Edit by hand\n\nAthena-Job: bootstrap",
+                ])
+                .unwrap();
+            }
+            // The inner script counts this run, so the first producer run is seen while the count is 0.
+            if spec.role == Role::Producer && counts.all().1 >= 1 {
+                let readme = std::fs::read_to_string(spec.workdir.join("README.md")).unwrap();
+                seen.lock()
+                    .unwrap()
+                    .push((readme, spec.user_prompt.clone()));
+            }
+            inner(spec)
+        })
+    }
+
+    /// Runs a job to the point where it goes stale: the verifier passes it, and a commit by someone else
+    /// (see [`moving_tip`]) changed the branch while it was being verified. Returns the stale job.
+    fn stale_job(athena: &Athena) -> JobId {
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let first = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &Quiet)
+                .unwrap(),
+        );
+        assert_eq!(first.state, OutcomeState::Stale, "{}", first.reason);
+        assert!(first.reason.contains("athena retry"), "{}", first.reason);
+        assert!(first.landed_commit.is_none());
+        proposal.job
+    }
+
+    #[test]
+    fn a_stale_job_whose_candidate_merges_cleanly_is_verified_again_and_lands_with_no_producer_run()
+    {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            moving_tip(
+                counts.clone(),
+                repo.path().to_path_buf(),
+                |dir| std::fs::write(dir.join("OTHER.md"), "Someone else's file.\n").unwrap(),
+                Arc::default(),
+            ),
+        );
+        let stale = stale_job(&athena);
+        let (planner, producer, read_before, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 1));
+        assert!(
+            !readme_at_head(&athena).contains("A demo."),
+            "nothing landed"
+        );
+
+        // The retry of a stale job is a proposal, not an error.
+        let (retry, _) = athena.retry(stale.as_str(), &Quiet).unwrap();
+        assert_eq!(retry.reader_error, None);
+        assert!(retry.reading.is_some());
+        let (_, _, read_after, _) = counts.all();
+        assert!(read_after > read_before, "the reader ran again");
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(retry.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+
+        // No planner and no producer ran for the retry; the merged tree was verified again.
+        assert_eq!(counts.all(), (0, 1, read_after, 2));
+        let said = ui.0.lock().unwrap().clone();
+        for line in ["resume     ", "candidate  ", "checks     ", "replay     "] {
+            assert!(
+                said.iter().any(|l| l.starts_with(line)),
+                "{line}: {said:#?}"
+            );
+        }
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("resume     ") && l.contains("went stale")),
+            "{said:#?}"
+        );
+        // The candidate's change and the other commit are both on the branch.
+        assert!(readme_at_head(&athena).contains("A demo."));
+        assert!(athena.git.show_file("HEAD", "OTHER.md").unwrap().is_some());
+
+        // The verified content is the content that landed.
+        let head = athena.head().unwrap();
+        let records = Records::load(&athena.git, &head).unwrap();
+        let record = &records.jobs[retry.job.as_str()];
+        let base = record
+            .candidate
+            .as_ref()
+            .expect("a candidate")
+            .base_commit
+            .clone();
+        let landed = done.landed_commit.clone().expect("landed");
+        assert_eq!(
+            done.verification.as_ref().unwrap().verified_fingerprint,
+            fingerprint(&athena.git, &landed, &base).unwrap()
+        );
+        // The candidate was built on this job's own base, and holds the other commit's file too.
+        let candidate_commit = record
+            .candidate
+            .as_ref()
+            .unwrap()
+            .candidate_commit
+            .clone()
+            .unwrap();
+        assert!(
+            athena
+                .git
+                .show_file(&candidate_commit, "OTHER.md")
+                .unwrap()
+                .is_some()
+        );
+        // The stale job stays as it closed.
+        assert_eq!(
+            records.jobs[stale.as_str()].state(),
+            JobState::Closed(OutcomeState::Stale)
+        );
+    }
+
+    #[test]
+    fn a_stale_job_whose_candidate_conflicts_starts_a_producer_retry_from_it() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            moving_tip(
+                counts.clone(),
+                repo.path().to_path_buf(),
+                |dir| {
+                    std::fs::write(dir.join("README.md"), "# Demo\n\nThe tip's own text.\n")
+                        .unwrap()
+                },
+                seen.clone(),
+            ),
+        );
+        let stale = stale_job(&athena);
+        assert_eq!(counts.all().1, 1);
+
+        let (retry, _) = athena.retry(stale.as_str(), &Quiet).unwrap();
+        assert!(retry.reading.is_some());
+        let (_, _, read_after, _) = counts.all();
+        // Retrying changed nothing on the branch's files: the candidate is not landed.
+        assert!(!readme_at_head(&athena).contains("A demo."));
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(retry.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+
+        // A producer ran for the retry, and the verifier ran again before anything landed.
+        assert_eq!(counts.all(), (0, 2, read_after, 2));
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            !said.iter().any(|l| l.starts_with("resume     ")),
+            "{said:#?}"
+        );
+        // It started from the conflicted merge: markers in the README, with both sides.
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "one producer run after the first");
+        let (readme, prompt) = &seen[0];
+        assert!(readme.contains("<<<<<<<"), "{readme}");
+        assert!(readme.contains("The tip's own text."), "{readme}");
+        assert!(readme.contains("A demo."), "{readme}");
+        assert!(
+            prompt.contains(&format!(
+                "## Retry: job {stale} went stale and its verified candidate conflicts with the branch tip"
+            )),
+            "{prompt}"
+        );
+        assert!(prompt.contains("> README.md"), "{prompt}");
+
+        // The landed content is the content the second verification ran on.
+        let head = athena.head().unwrap();
+        let records = Records::load(&athena.git, &head).unwrap();
+        let record = &records.jobs[retry.job.as_str()];
+        let base = record
+            .candidate
+            .as_ref()
+            .expect("a candidate")
+            .base_commit
+            .clone();
+        let landed = done.landed_commit.clone().expect("landed");
+        let verification = done.verification.as_ref().expect("verified again");
+        assert_eq!(
+            verification.verified_fingerprint,
+            fingerprint(&athena.git, &landed, &base).unwrap()
+        );
+        assert!(!readme_at_head(&athena).contains("<<<<<<<"));
+    }
+
     /// One `go` run with the early seam holding a recording fake, so nothing reaches a network.
     struct CiRun {
         git: Git,

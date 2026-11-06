@@ -894,6 +894,114 @@ fn the_retry_command_takes_a_job_and_the_same_options_as_ask() {
     }
 }
 
+#[test]
+fn the_retry_command_help_covers_stale_jobs() {
+    let out = Command::new(env!("CARGO_BIN_EXE_athena"))
+        .env_remove("ATHENA_NESTED")
+        .args(["retry", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = String::from_utf8(out.stdout).unwrap();
+    let first = help.lines().next().unwrap_or_default();
+    assert!(first.contains("stale"), "the first help line: {first}");
+    assert!(
+        help.contains("merges the kept candidate onto the branch tip"),
+        "{help}"
+    );
+    assert!(
+        help.contains("no producer run when the merge is clean"),
+        "{help}"
+    );
+    assert!(
+        !help.contains("Try a rejected or failed job again"),
+        "{help}"
+    );
+}
+
+/// A fixture whose job goes stale: while the verifier runs, the branch gains a commit to `src/lib.rs`, a
+/// file the job's candidate (a change to README.md) does not touch.
+fn stale_setup(model: &Model) -> (Fixture, Athena) {
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    let root = fx.root().to_path_buf();
+    let once = Arc::new(Mutex::new(false));
+    scenario.during_verification = Some(Arc::new(move || {
+        if std::mem::replace(&mut *once.lock().unwrap(), true) {
+            return;
+        }
+        let git = athena_git::Git::at(&root);
+        write(
+            &root,
+            &[("src/lib.rs", "pub fn one() -> u32 {\n    1 // by hand\n}\n")],
+        );
+        git.run(["add", "-A"]).unwrap();
+        git.run(["commit", "-q", "-m", "Edit by hand"]).unwrap();
+    }));
+    let athena = fx.athena(model.script(scenario.script()));
+    (fx, athena)
+}
+
+#[test]
+fn the_reader_of_a_stale_retry_is_told_the_job_went_stale_and_a_landed_job_is_still_refused() {
+    let model = Model::default();
+    let (fx, athena) = stale_setup(&model);
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let job = proposal.job.to_string();
+    let GoResult::Finished(stale) = athena
+        .go(&job, AcceptedBy::User, &Lines::default())
+        .unwrap()
+    else {
+        panic!("expected the job to finish");
+    };
+    assert_eq!(stale.state, OutcomeState::Stale, "{}", stale.reason);
+    let producers = *model.producers.lock().unwrap();
+
+    let (retry, seeded) = athena.retry(&job, &Lines::default()).unwrap();
+    assert!(!seeded, "a stale job has no introspection to seed it");
+    assert!(retry.reading.is_some(), "{:?}", retry.reader_error);
+    let brief = model.last_brief();
+    assert!(brief.contains("# Earlier attempt"), "{brief}");
+    assert!(brief.contains("which went stale"), "{brief}");
+    assert!(!brief.contains("was rejected"), "{brief}");
+    assert!(!brief.contains("A retry starts from the base"), "{brief}");
+    assert!(
+        brief.contains("A retry merges the kept candidate onto the branch tip"),
+        "{brief}"
+    );
+    assert!(brief.contains("> add a greeting"), "{brief}");
+    assert_eq!(*model.producers.lock().unwrap(), producers);
+
+    // The retry lands without a producer run, and a landed job cannot be tried again.
+    let GoResult::Finished(done) = athena
+        .go(retry.job.as_str(), AcceptedBy::User, &Lines::default())
+        .unwrap()
+    else {
+        panic!("expected the retry to finish");
+    };
+    assert_eq!(done.state, OutcomeState::Landed, "{}", done.reason);
+    assert_eq!(
+        *model.producers.lock().unwrap(),
+        producers,
+        "no producer ran for the retry"
+    );
+    let before = fx.head();
+    let error = athena
+        .retry(retry.job.as_str(), &Lines::default())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("is landed"), "{error}");
+    assert!(
+        error.contains("only a rejected or failed job can be tried again"),
+        "{error}"
+    );
+    assert_eq!(fx.head(), before, "nothing was recorded");
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // An interrupted job stays dispatched after it is retried: a second retry is refused, and status says so.
 

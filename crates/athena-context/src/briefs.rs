@@ -333,14 +333,36 @@ pub struct RetrySeed {
     /// With `progress_note`: the short commit of the candidate the deadline kept, when it kept one (an older
     /// job kept a work tree instead).
     pub candidate: Option<String>,
+    /// Set when the job went stale and its verified candidate conflicts with the branch tip: the paths whose
+    /// merge left conflict markers in the working directory. The unmet criteria and findings are then empty.
+    pub conflicts: Option<Vec<String>>,
 }
 
 /// The "Retry" section: the findings the producer must address, shown only for a seeded retry. A retry of a
-/// job that timed out gets the "Resume" section with that job's progress note instead.
+/// job that timed out gets the "Resume" section with that job's progress note instead, and a retry of a stale
+/// job whose candidate conflicts with the tip gets the "Retry" section for the conflict.
 fn retry_section(out: &mut String, seed: Option<&RetrySeed>) {
     let Some(seed) = seed else {
         return;
     };
+    if let Some(paths) = &seed.conflicts {
+        let _ = writeln!(
+            out,
+            "## Retry: job {} went stale and its verified candidate conflicts with the branch tip\n\n\
+             That job passed verification, but the branch moved before it could land. Athena merged its kept candidate \
+             onto the branch tip and the merge conflicts in the files below. Your working directory holds the tip's files \
+             with the candidate's changes merged in, and the conflicting files hold conflict markers (`<<<<<<<`, `=======`, \
+             `>>>>>>>`). Resolve every marker so that both the tip's change and the candidate's change are kept where they \
+             do not contradict, and change nothing else that is not needed. Your result is checked and verified again in full.\n",
+            seed.job
+        );
+        let _ = writeln!(out, "Conflicting files:\n");
+        for path in paths {
+            let _ = writeln!(out, "{}", quote(path));
+        }
+        out.push('\n');
+        return;
+    }
     if let Some(note) = &seed.progress_note {
         let kept = match &seed.candidate {
             Some(commit) => format!("Its edits were kept as candidate {commit}"),
@@ -480,6 +502,17 @@ pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&s
     let _ = writeln!(out, "## Commands Bash may run\n");
     list(&mut out, &inputs.commands, "(none)");
     match &inputs.retry_from {
+        Some(seed) if seed.conflicts.is_some() => {
+            let _ = writeln!(
+                out,
+                "\n## Working directory\n\nThe work starts from the branch tip with the kept candidate of the stale job {} merged in: \
+                 the files of the base commit (the branch tip) with that candidate's changes merged in, uncommitted, in a one-commit git repository of its \
+                 own whose commit holds the base. The conflicting files hold conflict markers. records/, the owner's private files, \
+                 and history are absent by design. Your edits on top become the new candidate, which is compared with the base. \
+                 A run that changes nothing in this directory fails as an empty candidate.\n",
+                seed.job
+            );
+        }
         None => {
             let _ = writeln!(
                 out,
@@ -2025,8 +2058,11 @@ pub fn reader_brief(inputs: &ReaderInputs) -> String {
         );
     }
     if let Some(attempt) = &inputs.earlier_attempt {
+        let stale = attempt.end_state == "stale";
         let state = if attempt.failed {
             "failed"
+        } else if stale {
+            "went stale: it passed verification but could not land because the branch moved"
         } else {
             "was rejected"
         };
@@ -2067,12 +2103,22 @@ pub fn reader_brief(inputs: &ReaderInputs) -> String {
             }
             out.push('\n');
         }
-        let _ = writeln!(
-            out,
-            "Any changes that attempt made were discarded. They are not in the repository you see. A retry starts from the base, \
-             except the retry of a job that passed every check and was then rejected for unmet content criteria alone: its producer \
-             starts from that job's candidate and is sent the findings.\n"
-        );
+        if stale {
+            let _ = writeln!(
+                out,
+                "That attempt's verified candidate is kept, but it is not in the repository you see. A retry merges the kept candidate \
+                 onto the branch tip and verifies the merged tree again. When the merge is clean, the job lands with no new producer run. \
+                 When the candidate conflicts with the tip, a producer starts from the candidate and the tip's files and is sent the \
+                 conflicting paths.\n"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "Any changes that attempt made were discarded. They are not in the repository you see. A retry starts from the base, \
+                 except the retry of a job that passed every check and was then rejected for unmet content criteria alone: its producer \
+                 starts from that job's candidate and is sent the findings.\n"
+            );
+        }
         if attempt.findings.is_empty() {
             let _ = writeln!(out, "The job recorded no findings.\n");
         } else {
@@ -2507,6 +2553,7 @@ mod tests {
             must_address: vec!["major: the CHANGELOG entry lists no callers".into()],
             progress_note: None,
             candidate: None,
+            conflicts: None,
         }
     }
 
@@ -2553,6 +2600,7 @@ mod tests {
                 "Changed files:\n- M src/a.rs\n\nStill to do:\n- CHANGELOG.md".into(),
             ),
             candidate: Some("0123456789ab".into()),
+            conflicts: None,
         });
         let brief = producer_brief(&inputs);
         assert!(brief.contains(
@@ -4305,6 +4353,56 @@ mod tests {
         assert!(!brief.contains("Deliverables it listed"));
         assert!(!brief.contains("corrections and answers"));
         assert!(brief.contains("were discarded"));
+    }
+
+    #[test]
+    fn reader_briefs_say_a_stale_earlier_attempt_went_stale() {
+        let mut inputs = reader_inputs(&reading());
+        inputs.earlier_attempt = Some(EarlierAttempt {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a changelog file".into(),
+            end_state: "stale".into(),
+            verdict: Some("pass".into()),
+            findings: vec!["outcome: the branch moved; nothing landed".into()],
+            ..Default::default()
+        });
+        let brief = reader_brief(&inputs);
+        assert!(
+            brief.contains("which went stale: it passed verification but could not land"),
+            "{brief}"
+        );
+        assert!(!brief.contains("was rejected"), "{brief}");
+        assert!(!brief.contains("were discarded"), "{brief}");
+        assert!(!brief.contains("A retry starts from the base"), "{brief}");
+        assert!(
+            brief.contains("A retry merges the kept candidate onto the branch tip"),
+            "{brief}"
+        );
+        assert!(brief.contains("with no new producer run"), "{brief}");
+        assert!(brief.contains("> outcome: the branch moved; nothing landed"));
+    }
+
+    #[test]
+    fn a_stale_conflict_producer_brief_names_the_conflicting_files() {
+        let mut inputs = producer_inputs(None);
+        let mut stale = seed();
+        stale.unmet = Vec::new();
+        stale.findings = Vec::new();
+        stale.must_address = Vec::new();
+        stale.conflicts = Some(vec!["README.md".into(), "src/lib.rs".into()]);
+        inputs.retry_from = Some(stale);
+        let brief = producer_brief(&inputs);
+        assert!(
+            brief.contains(
+                "## Retry: job 20261010-120000-abcd went stale and its verified candidate conflicts with the branch tip"
+            ),
+            "{brief}"
+        );
+        assert!(brief.contains("> README.md\n> src/lib.rs"), "{brief}");
+        assert!(brief.contains("Resolve every marker"), "{brief}");
+        assert!(brief.contains("conflicting files hold conflict markers"));
+        assert!(!brief.contains("rejected candidate"), "{brief}");
+        assert!(!brief.contains("snapshot of the base commit"), "{brief}");
     }
 
     #[test]

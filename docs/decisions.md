@@ -4307,5 +4307,47 @@ should replace those estimates with its figures.
 - **Provenance:** Stated: the two introspections' causes and the request's failure class. Read:
   `crates/athena-cli/src/decisions.rs`, `crates/athena-cli/src/backtest.rs`, `crates/athena-core/src/run/mod.rs`,
   `crates/athena-core/src/reading.rs`, `crates/athena-core/src/disk.rs`, D08. Measured: the tests named above.
+
+## D157 · `athena retry` on a stale job merges its kept candidate onto the tip and verifies it again
+
+- **Case:** D10 left out alternative (d), "Automatic re-verification on the new base", "until stale landings
+  recur", and said "Stale jobs must be asked again". Running jobs in parallel makes them recur: each landing moves
+  the branch under every job still being verified, so a job that passed verification closes `stale` with nothing
+  landed. `athena retry` refused such a job (only a rejected, failed or timed out job could be tried again), so the
+  only way back was a new request, which read, planned and produced the same change again. Job
+  20261106-041052-wzy7 asked for this change.
+- **Decision:** This entry reverses the left-out alternative (d) of D10 for an explicit `athena retry`. D10's
+  landing rule stands, and so does the staleness rule: nothing lands unless its content has the fingerprint that
+  was verified under its own base's rules. `athena retry <job>` now accepts a job that closed `stale`. When the
+  stale job kept a candidate with no admission violations, whose passing verification still matches the
+  candidate commit (`Verified::from_record`), and both the candidate and its base are still in the repository,
+  `athena go` on the retry merges the candidate onto the branch tip with `merge-tree`, from the base the candidate
+  was built on. A clean merge becomes this job's candidate, on its own prediction commit. It is admitted, then
+  checked, replayed and verified again, with no planner and no producer run, and lands by the same plan as any
+  candidate. A conflict starts a producer whose working directory is the conflicted merge, with the conflicting
+  paths named in its brief; its result is admitted, checked and verified in full, so nothing lands without a new
+  verification. A stale job without such a candidate is retried from the base, as before. The drain does not start
+  this by itself: an explicit retry is the trigger. Tests: `cargo test -p athena-core --lib a_stale_job`,
+  `--lib a_merged_candidate_lands_content`, `cargo test -p athena-git merge_tree_conflicts`, `cargo test -p
+  athena-cli --test lifecycle retry_on_a_stale_job` and `--test retry stale`.
+- **Alternatives:** (a) Land the old verification on the merged content: it breaks the link between verification
+  and the artifact that D10 exists to keep. (b) Lay the candidate's files over the tip, as a resumed candidate is:
+  it silently drops the branch's change to any file both sides touched. (c) Merge in the drain with no explicit
+  request: the stale job's cause (a change by a person) may be unfinished, and a drain would verify and spend on
+  it unasked; named as a follow-up. (d) Rerun the producer on the new base every time: it pays for work already
+  verified, and the producer may not make the same change again. (e) Leave the stale outcome as it is and ask
+  again: the cost D10 accepted, now paid often.
+- **Tradeoff:** A merge that is clean in text can still be wrong in meaning, because the branch may have changed
+  something the candidate uses; only the second verification guards that, and it costs one verifier run and the
+  checks. The kept candidate is an unreferenced commit, so a repository that collects such objects before the
+  retry falls back to the producer from the base. A producer that changes nothing in a conflicted directory passes
+  the conflict markers on to the checks and the verifier, which must refuse them.
+- **Reversal cost:** Low. Remove `Athena::stale_seed` and the `stale` flag of the resume, and `retry` of a stale
+  job is refused again. Nothing recorded depends on them; the jobs they produced are ordinary jobs.
+- **Provenance:** Stated: the request of job 20261106-041052-wzy7 and D10's text. Read:
+  `crates/athena-core/src/land.rs`, `crates/athena-core/src/reading.rs`, `crates/athena-core/src/run/mod.rs`,
+  `crates/athena-core/src/run/close.rs`, `crates/athena-git/src/lib.rs`, `crates/athena-cli/src/decisions.rs`.
+  Measured: the tests named above. Not measured: how often stale landings occur, or how long the host keeps
+  unreferenced commits.
   Not measured: how many future changes will touch the two D08 paths, and whether authors will add the link or
   work around it.

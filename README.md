@@ -45,7 +45,7 @@ Enter, or athena go <job>
   landing                              → the change plus every record, one commit, fast-forwarded
 ```
 
-To retry a rejected or failed job, ask `athena ask "try again on <job>"` (the full id or a unique suffix; the form is
+To retry a rejected, failed or stale job, ask `athena ask "try again on <job>"` (the full id or a unique suffix; the form is
 matched case-insensitively at the start of the request). The reader then sees that job's request and its final
 verification's findings, redacted, in an "Earlier attempt" section. That section also shows the job's final
 reading (summary, acceptance criteria, deliverables) and the corrections and answers the user gave, and it says the
@@ -54,8 +54,15 @@ attempt was rejected with every check passed and only content criteria unmet: th
 candidate (the base's files with the attempt's changes applied) and is sent the verifier's findings. The new candidate
 is always checked and verified in full and compared with the base, and a producer that changes nothing fails as an
 empty candidate. If other work has landed since, the retry starts from the base. A failed job (for example one refused at
-admission, which has no verification) also has its recorded reason carried there. Jobs that are landed, stale,
-in flight, or unknown are refused.
+admission, which has no verification) also has its recorded reason carried there. Jobs that are landed, in flight,
+or unknown are refused.
+
+A stale job passed verification but could not land because the branch moved. Its retry does not start from the base:
+`athena go` on it merges the job's kept candidate onto the branch tip, from the base the candidate was built on.
+When the merge is clean, the merged tree is admitted, checked, replayed and verified again, and lands with no planner
+or producer run. When the candidate conflicts with the tip, a producer starts from the conflicted merge, is told which
+files conflict, and its result is checked and verified in full. Nothing lands without a new verification of the exact
+content that lands. A stale job whose candidate is no longer in the repository is retried from the base.
 
 `athena retry <job>` is the short form: it does the same, and when the job has an introspection record it also shows
 the reader that record's cause, prevention and proposed next request, and the earlier cases of the same class with

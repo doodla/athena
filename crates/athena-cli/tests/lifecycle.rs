@@ -2107,6 +2107,87 @@ fn a_governed_change_on_the_branch_makes_the_job_stale() {
     assert!(athena.check_history().unwrap().violations.is_empty());
 }
 
+#[test]
+fn retry_on_a_stale_job_returns_a_proposal_instead_of_an_error() {
+    // The job goes stale because the user committed to src/lib.rs while it was verified; its candidate
+    // changes only README.md, so the later merge is clean.
+    let fx = Fixture::new();
+    let mut scenario = Scenario::default();
+    let root = fx.root().to_path_buf();
+    let once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    scenario.during_verification = Some(Arc::new(move || {
+        if once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let git = athena_git::Git::at(&root);
+        let record = r#"{
+  "schema": "athena.intervention/1",
+  "id": "20261010-170000-abcd",
+  "at": "2026-10-10T17:00:00Z",
+  "what": "Edited the library by hand",
+  "why": "Faster than asking",
+  "class_of_work": "code",
+  "category": "did-work-themselves",
+  "job": null,
+  "source": "user",
+  "with_staged_changes": true
+}
+"#;
+        write(
+            &root,
+            &[
+                ("src/lib.rs", "pub fn one() -> u32 {\n    1 // by hand\n}\n"),
+                (
+                    "records/interventions/2026-10/20261010-170000-abcd.json",
+                    record,
+                ),
+            ],
+        );
+        git.run(["add", "-A"]).unwrap();
+        git.run([
+            "commit",
+            "-q",
+            "-m",
+            "Edit by hand\n\nAthena-Intervention: 20261010-170000-abcd",
+        ])
+        .unwrap();
+    }));
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let stale = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(stale.state, OutcomeState::Stale, "{}", stale.reason);
+    assert!(!fx.file("README.md").unwrap().contains("Hello, reader."));
+
+    // Before the change a stale job was refused: "only a rejected or failed job can be tried again".
+    let (retry, _) = athena
+        .retry(proposal.job.as_str(), &Lines::default())
+        .unwrap();
+    assert!(retry.reading.is_some(), "{:?}", retry.reader_error);
+    let records = athena_core::store::Records::load(&fx.git, &fx.head()).unwrap();
+    let request = records.jobs[retry.job.as_str()].request.as_ref().unwrap();
+    assert_eq!(request.text, format!("try again on {}", proposal.job));
+    assert_eq!(
+        records.jobs[proposal.job.as_str()].state(),
+        athena_core::store::JobState::Closed(OutcomeState::Stale),
+        "the stale job is left as it closed"
+    );
+
+    // Carrying out the retry lands the candidate on top of the user's own change.
+    let again = finished(
+        athena
+            .go(retry.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(again.state, OutcomeState::Landed, "{}", again.reason);
+    assert!(fx.file("README.md").unwrap().contains("Hello, reader."));
+    assert!(fx.file("src/lib.rs").unwrap().contains("// by hand"));
+    assert!(athena.check_history().unwrap().violations.is_empty());
+}
+
 fn intervene_on_latest(athena: &athena_core::Athena) -> athena_data::RecordId {
     athena
         .intervene(

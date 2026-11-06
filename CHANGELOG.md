@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena retry` now accepts a stale job: `athena go` on the retry merges the job's kept candidate onto the branch
+  tip. When the merge is clean, the merged tree is admitted, checked, replayed and verified again and lands with no
+  planner or producer run; when the candidate conflicts with the tip, a producer runs from the conflicted merge and
+  is told the conflicting files, and its result is checked and verified in full. Root cause: D10 left out
+  re-verification on the new base "until stale landings recur", and parallel jobs make them recur, but a stale job
+  could not be retried, so its verified work was rebuilt from the request. A job whose candidate is no longer in
+  the repository, or whose verification does not match it, is retried from the base as before. A stale job's
+  outcome reason now names `athena retry <job>`, `athena retry --help` and the reader brief describe the stale
+  retry instead of calling the job rejected or saying it starts from the base, and the README no longer lists
+  stale jobs as refused. `Git::merge_tree_conflicts` returns the merged tree with the conflicting paths. Landing
+  is unchanged: it still refuses content whose fingerprint differs from the verified one. D157 records the
+  reversal of D10's alternative (d).
 - A change to code that a decision of `docs/decisions.md` governs now fails before the verifier starts unless the
   change reconciles the decision, and the `athena drain --help` ceiling is read from the constant that enforces
   it. Root cause: The decision log is prose with no link from a decision to the code or limit it governs, so

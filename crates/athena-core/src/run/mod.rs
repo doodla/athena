@@ -185,6 +185,28 @@ impl LoopReplay {
 struct ResumeSeed {
     job: JobId,
     mark: ResumeMark,
+    /// Set for a stale job's candidate: it is merged onto this job's base, not laid over it, because the
+    /// branch moved after the candidate was verified.
+    stale: bool,
+}
+
+/// What a retry of a stale job starts from (see [`Athena::stale_seed`]).
+enum StaleSeed {
+    /// The kept candidate merges cleanly onto the branch tip: it is checked and verified again, with no
+    /// planner and no producer run.
+    Clean(Box<ResumeSeed>),
+    /// The kept candidate conflicts with the branch tip: a producer starts from the conflicted merge.
+    Conflict(StaleConflict),
+}
+
+/// A stale job whose verified candidate conflicts with the branch tip.
+struct StaleConflict {
+    job: JobId,
+    /// A commit whose tree is the conflicted merge (the tip's files and the candidate's changes, with conflict
+    /// markers in the conflicting files). It seeds the producer's working directory.
+    tree_commit: String,
+    /// The conflicting paths.
+    paths: Vec<String>,
 }
 
 /// Whether an accepted reading has a Behavior criterion that asks for a failing run without the fix, such as
@@ -511,7 +533,88 @@ impl Athena {
         if changed.iter().any(|c| !c.path.starts_with("records/")) {
             return Ok(None);
         }
-        Ok(Some(ResumeSeed { job, mark }))
+        Ok(Some(ResumeSeed {
+            job,
+            mark,
+            stale: false,
+        }))
+    }
+
+    /// What a retry of a stale job starts from. The request must be "try again on <job>" for a job that closed
+    /// stale: it passed verification, and the branch moved before it could land. The job must have kept a
+    /// candidate with no admission violations, whose verification passed on the content the candidate commit
+    /// still has ([`Verified::from_record`]), and both the candidate and its base must still be in the
+    /// repository. Otherwise `None`: the retry starts from the base, as it does for any other job.
+    ///
+    /// The candidate is merged onto `head` from the base it was built on, without touching any work tree. A
+    /// clean merge is [`StaleSeed::Clean`]; a conflict is [`StaleSeed::Conflict`], seeded with the conflicted
+    /// tree so the producer sees both sides.
+    fn stale_seed(
+        &self,
+        records: &Records,
+        request: &str,
+        head: &str,
+    ) -> Result<Option<StaleSeed>> {
+        let Some(id) = retried_job(records, request) else {
+            return Ok(None);
+        };
+        let Some(job) = records.jobs.get(id.as_str()) else {
+            return Ok(None);
+        };
+        if job.state() != JobState::Closed(OutcomeState::Stale) {
+            return Ok(None);
+        }
+        let (Some(candidate), Some(verification)) = (&job.candidate, &job.verification) else {
+            return Ok(None);
+        };
+        let Some(commit) = candidate.candidate_commit.clone() else {
+            return Ok(None);
+        };
+        if !candidate.violations.is_empty()
+            || verification.candidate_commit != commit
+            || self.git.rev_parse(&commit)?.is_none()
+            || self.git.rev_parse(&candidate.base_commit)?.is_none()
+        {
+            return Ok(None);
+        }
+        let now = fingerprint(&self.git, &commit, &candidate.base_commit)?;
+        if Verified::from_record(verification, &candidate.base_commit, &now).is_none() {
+            return Ok(None);
+        }
+        let Ok(merged) = self
+            .git
+            .merge_tree_conflicts(&candidate.base_commit, head, &commit)
+        else {
+            return Ok(None);
+        };
+        if merged.conflicts.is_empty() {
+            let mark = ResumeMark {
+                stage: ResumeStage::Checks,
+                base_commit: candidate.base_commit.clone(),
+                candidate: candidate.clone(),
+                check_runs: Vec::new(),
+                report_gaps: Vec::new(),
+                left_criteria: Vec::new(),
+            };
+            return Ok(Some(StaleSeed::Clean(Box::new(ResumeSeed {
+                job: id,
+                mark,
+                stale: true,
+            }))));
+        }
+        let tree_commit = self.git.commit_tree(
+            &merged.tree,
+            &[head],
+            &format!(
+                "Conflicted merge of the kept candidate of stale job {id}\n\nNot on any branch; it seeds a producer retry.\n"
+            ),
+            false,
+        )?;
+        Ok(Some(StaleSeed::Conflict(StaleConflict {
+            job: id,
+            tree_commit,
+            paths: merged.conflicts,
+        })))
     }
 
     /// Resumes a stopped job's kept candidate in this job, with no planner and no producer run. The candidate's
@@ -528,50 +631,92 @@ impl Athena {
     ) -> Result<Closing> {
         let id = ctx.id().clone();
         let p = ctx.prediction.clone();
-        let ResumeSeed { job: old_job, mark } = seed;
+        let ResumeSeed {
+            job: old_job,
+            mark,
+            stale,
+        } = seed;
         let old_commit = mark
             .candidate
             .candidate_commit
             .clone()
             .context("the resume mark has no candidate commit")?;
-        ctx.ui.line(&format!(
-            "resume     job {old_job} kept its candidate; resuming it at the {} stage, with no planner or producer run",
-            match mark.stage {
-                ResumeStage::Checks => "checks",
-                ResumeStage::Verifier => "verifier",
+        if stale {
+            ctx.ui.line(&format!(
+                "resume     job {old_job} went stale with a verified candidate; merging it onto the new tip, then checking and verifying the merged tree, with no planner or producer run"
+            ));
+        } else {
+            ctx.ui.line(&format!(
+                "resume     job {old_job} kept its candidate; resuming it at the {} stage, with no planner or producer run",
+                match mark.stage {
+                    ResumeStage::Checks => "checks",
+                    ResumeStage::Verifier => "verifier",
+                }
+            ));
+        }
+        // A resumed candidate's changes are laid over this job's base. A stale job's candidate is merged onto
+        // it instead, from the base the candidate was built on, so the branch's later changes to the same
+        // files are kept and a real conflict is found; its changes are then those of the merged tree.
+        let (changes, tree) = if stale {
+            let merged = self
+                .git
+                .merge_tree_conflicts(&mark.base_commit, &p, &old_commit)?;
+            let changes = self.git.diff_tree(&p, &merged.tree)?;
+            let refusal = if !merged.conflicts.is_empty() {
+                Some(format!(
+                    "the kept candidate of stale job {old_job} no longer merges cleanly onto the new tip; conflicting files: {}",
+                    merged.conflicts.join(", ")
+                ))
+            } else if changes.is_empty() {
+                Some(format!(
+                    "the new tip already holds every change of the kept candidate of stale job {old_job}; there is nothing left to land"
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = refusal {
+                closing.happened = self.failure(ctx, &reason);
+                closing.happened.reason = Some(reason);
+                return Ok(closing);
             }
-        ));
-        let changes = self.git.diff_tree(&mark.base_commit, &old_commit)?;
+            (changes, merged.tree)
+        } else {
+            let changes = self.git.diff_tree(&mark.base_commit, &old_commit)?;
+            let edits: Vec<IndexEdit> = changes
+                .iter()
+                .map(|change| {
+                    if change.status == 'D' {
+                        IndexEdit::Remove {
+                            path: change.path.clone(),
+                        }
+                    } else {
+                        IndexEdit::Put {
+                            mode: change.new_mode.clone(),
+                            oid: change.new_oid.clone(),
+                            path: change.path.clone(),
+                        }
+                    }
+                })
+                .collect();
+            let index = TempIndex::from_tree(&self.git, &p)?;
+            index.apply(&edits)?;
+            (changes, index.write_tree()?)
+        };
         let new_blobs: Vec<String> = changes
             .iter()
             .filter(|c| c.status != 'D')
             .map(|c| c.new_oid.clone())
             .collect();
         let sizes = self.git.blob_sizes(&new_blobs)?;
-        let mut edits = Vec::new();
-        let mut changed = Vec::new();
-        for change in &changes {
-            if change.status == 'D' {
-                edits.push(IndexEdit::Remove {
-                    path: change.path.clone(),
-                });
-            } else {
-                edits.push(IndexEdit::Put {
-                    mode: change.new_mode.clone(),
-                    oid: change.new_oid.clone(),
-                    path: change.path.clone(),
-                });
-            }
-            changed.push(Changed {
+        let changed: Vec<Changed> = changes
+            .iter()
+            .map(|change| Changed {
                 path: change.path.clone(),
                 status: change_status(change.status),
                 mode: change.new_mode.clone(),
                 size: sizes.get(&change.new_oid).copied().unwrap_or(0),
-            });
-        }
-        let index = TempIndex::from_tree(&self.git, &p)?;
-        index.apply(&edits)?;
-        let tree = index.write_tree()?;
+            })
+            .collect();
         let c = self.git.commit_tree(
             &tree,
             &[&p],
@@ -589,6 +734,18 @@ impl Athena {
         candidate.candidate_commit = Some(c.clone());
         candidate.candidate_tree = Some(tree);
         candidate.fingerprint = Some(f.clone());
+        if stale {
+            candidate.changes = changes
+                .iter()
+                .zip(&changed)
+                .map(|(change, c)| ChangeEntry {
+                    path: change.path.clone(),
+                    status: c.status,
+                    mode: (change.status != 'D').then(|| change.new_mode.clone()),
+                    bytes: (change.status != 'D').then_some(c.size),
+                })
+                .collect();
+        }
         let jc = ctx.jc;
         let mut violations: Vec<PolicyViolation> = admit(&AdmissionInput {
             git: &self.git,
@@ -617,7 +774,8 @@ impl Athena {
             &f[..18.min(f.len())]
         ));
         closing.happened.changed_paths = changes.iter().map(|c| c.path.clone()).collect();
-        closing.consumed_resume = Some(old_job);
+        // A stale job has no resume mark to spend: its candidate was kept in the records, not in a mark.
+        closing.consumed_resume = (!stale).then_some(old_job);
         if !violations.is_empty() {
             let summary = violations
                 .iter()
@@ -919,12 +1077,30 @@ impl Athena {
         } else {
             None
         };
-        // A retry that starts from the base still carries the blocker and major findings of the job it retries.
-        let earlier_findings = if retry_seed.is_none() && resume.is_none() {
-            retry_findings(records, request_text, &redactor)?
+        // A job that went stale with a verified candidate: the candidate is merged onto the branch tip. A clean
+        // merge is checked and verified again like a resumed candidate, with no planner and no producer run; a
+        // conflict starts a producer from the conflicted merge. These states never overlap with the seeds above,
+        // which each need a job in another state.
+        let mut stale_conflict = None;
+        let resume_from = match if pinned.is_none() && resume_from.is_none() {
+            self.stale_seed(records, request_text, head)?
         } else {
             None
+        } {
+            Some(StaleSeed::Clean(seed)) => Some(*seed),
+            Some(StaleSeed::Conflict(conflict)) => {
+                stale_conflict = Some(conflict);
+                resume_from
+            }
+            None => resume_from,
         };
+        // A retry that starts from the base still carries the blocker and major findings of the job it retries.
+        let earlier_findings =
+            if retry_seed.is_none() && resume.is_none() && stale_conflict.is_none() {
+                retry_findings(records, request_text, &redactor)?
+            } else {
+                None
+            };
 
         // The evidence snapshot: a read-only copy of records/, landings/ and main's first-parent history,
         // outside the producer's working copy, so the producer and the verifier can check real records. It is
@@ -960,24 +1136,35 @@ impl Athena {
                 checks: check_views.clone(),
                 commands: athena_agent::policy::describe_commands(&producer_grant.commands),
                 pin: pinned.as_ref().map(|(record, _)| record.clone()),
-                retry_from: match (&retry_seed, &resume) {
-                    (Some(s), _) => Some(RetrySeed {
+                retry_from: match (&retry_seed, &resume, &stale_conflict) {
+                    (Some(s), _, _) => Some(RetrySeed {
                         job: s.job.as_str().to_string(),
                         unmet: s.unmet.clone(),
                         findings: s.findings.clone(),
                         must_address: s.must_address.clone(),
                         progress_note: None,
                         candidate: None,
+                        conflicts: None,
                     }),
-                    (None, Some(r)) => Some(RetrySeed {
+                    (None, Some(r), _) => Some(RetrySeed {
                         job: r.job.as_str().to_string(),
                         unmet: Vec::new(),
                         findings: Vec::new(),
                         must_address: Vec::new(),
                         progress_note: Some(r.note.clone()),
                         candidate: r.commit.as_deref().map(|c| short(c).to_string()),
+                        conflicts: None,
                     }),
-                    (None, None) => None,
+                    (None, None, Some(c)) => Some(RetrySeed {
+                        job: c.job.as_str().to_string(),
+                        unmet: Vec::new(),
+                        findings: Vec::new(),
+                        must_address: Vec::new(),
+                        progress_note: None,
+                        candidate: None,
+                        conflicts: Some(c.paths.clone()),
+                    }),
+                    (None, None, None) => None,
                 },
                 retry_findings: earlier_findings.map(|(job, findings)| RetryFindings {
                     job: job.as_str().to_string(),
@@ -1061,9 +1248,10 @@ impl Athena {
             ui,
             stages,
             pin_dir: pinned.map(|(_, dir)| dir),
-            seed_commit: match &retry_seed {
-                Some(s) => Some(s.candidate_commit.clone()),
-                None => resume.as_ref().and_then(|r| r.commit.clone()),
+            seed_commit: match (&retry_seed, &stale_conflict) {
+                (Some(s), _) => Some(s.candidate_commit.clone()),
+                (None, Some(c)) => Some(c.tree_commit.clone()),
+                (None, None) => resume.as_ref().and_then(|r| r.commit.clone()),
             },
             resume,
         };
@@ -1131,7 +1319,8 @@ struct RunContext<'a> {
     /// The pinned tree's checkout, mounted read-only into both agents' working directories.
     pin_dir: Option<PathBuf>,
     /// The candidate commit the producer's working directory is seeded from: a rejected candidate for a
-    /// tree-seeded retry, or the candidate a timed out job kept for a resumed retry.
+    /// tree-seeded retry, the candidate a timed out job kept for a resumed retry, or the conflicted merge of a
+    /// stale job's candidate onto the branch tip.
     seed_commit: Option<String>,
     /// The timed out job whose kept work seeds the producer's working directory, for a resumed retry.
     resume: Option<TimeoutSeed>,

@@ -41,8 +41,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Try a rejected or failed job again, starting from its introspection record (the proposed next
-    /// request, the cause and the prevention) and shown as `ask` shows a reading; Enter runs it.
+    /// Try a rejected, failed, timed out, interrupted or stale job again, starting from its introspection record
+    /// (the proposed next request, the cause and the prevention) and shown as `ask` shows a reading; Enter
+    /// runs it. A stale job passed verification but could not land because the branch moved: running its
+    /// retry merges the kept candidate onto the branch tip and verifies the merged tree again, landing it with
+    /// no producer run when the merge is clean, and starting a producer from the candidate when it conflicts.
     Retry {
         job: String,
         /// Run without waiting at the prompt (the reading is printed, but its acceptance stays unresolved).

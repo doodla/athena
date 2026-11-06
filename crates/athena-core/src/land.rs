@@ -709,6 +709,52 @@ mod tests {
     }
 
     #[test]
+    fn a_merged_candidate_lands_content_with_the_verified_fingerprint() {
+        // A job verified on base P goes stale when the branch moves; its candidate, merged onto the new tip,
+        // is a candidate like any other: it lands exactly the content verified on the merged tree, and
+        // nothing else.
+        let (dir, git, p, c, f) = base_and_candidate();
+        let tip = commit(&git, dir.path(), "b.txt", "added on the branch\n");
+        assert!(matches!(
+            plan(&git, &pass(&p, &c, &f), &tip, &Dispatched::Unknown).unwrap(),
+            Plan::Stale(_)
+        ));
+
+        let merged = git.merge_tree_conflicts(&p, &tip, &c).unwrap();
+        assert!(merged.conflicts.is_empty());
+        let merged_commit = git
+            .commit_tree(&merged.tree, &[&tip], "merged candidate", false)
+            .unwrap();
+        let verified_fingerprint = fingerprint(&git, &merged_commit, &tip).unwrap();
+        assert_ne!(verified_fingerprint, f, "the merged content is new content");
+        let Plan::Tree(tree) = plan(
+            &git,
+            &pass(&tip, &merged_commit, &verified_fingerprint),
+            &tip,
+            &Dispatched::Unknown,
+        )
+        .unwrap() else {
+            panic!("a merged candidate on an unmoved tip lands");
+        };
+        assert_eq!(
+            fingerprint(&git, &tree, &tip).unwrap(),
+            verified_fingerprint,
+            "the landed content is the verified content"
+        );
+        // A verification of other content is still refused.
+        let other = fingerprint(&git, &tip, &tip).unwrap();
+        assert!(
+            plan(
+                &git,
+                &pass(&tip, &merged_commit, &other),
+                &tip,
+                &Dispatched::Unknown
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn a_base_that_is_no_longer_an_ancestor_makes_the_job_stale() {
         // M7 (blocks): landing when the base is no longer an ancestor.
         let (dir, git, p, c, f) = base_and_candidate();

@@ -99,6 +99,14 @@ pub struct Exit {
     pub stderr: String,
 }
 
+/// The result of [`Git::merge_tree_conflicts`]: the merged tree, and the paths that conflicted (empty for a
+/// clean merge). A conflicted file holds conflict markers in `tree`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedTree {
+    pub tree: String,
+    pub conflicts: Vec<String>,
+}
+
 /// A repository (a checkout or a snapshot) and the extra environment git runs with.
 #[derive(Debug, Clone)]
 pub struct Git {
@@ -684,6 +692,45 @@ impl Git {
                 stderr: exit.stderr,
             }),
         }
+    }
+
+    /// Like [`Git::merge_tree`], but a conflict returns its tree too: the result tree holds the conflict
+    /// markers in each conflicted file, and `conflicts` lists those paths. A clean merge has none.
+    pub fn merge_tree_conflicts(&self, base: &str, ours: &str, theirs: &str) -> Result<MergedTree> {
+        let exit = self.exit(
+            [
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                &format!("--merge-base={base}"),
+                ours,
+                theirs,
+            ],
+            None,
+            &[],
+        )?;
+        let failed = |exit: Exit| GitError::Failed {
+            command: "merge-tree".into(),
+            status: exit.code,
+            stderr: exit.stderr,
+        };
+        if !matches!(exit.code, Some(0 | 1)) {
+            return Err(failed(exit));
+        }
+        let stdout = String::from_utf8_lossy(&exit.stdout).into_owned();
+        let mut lines = stdout.lines();
+        let Some(tree) = lines.next().map(str::to_string) else {
+            return Err(failed(exit));
+        };
+        let conflicts: Vec<String> = if exit.code == Some(1) {
+            lines
+                .take_while(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(MergedTree { tree, conflicts })
     }
 
     /// Fast-forwards the current branch (and work tree) to `commit`; refuses rather than overwrite edits.
@@ -1446,6 +1493,41 @@ mod tests {
         write_files(dir.path(), &[("a.txt", "theirs\n")]);
         let theirs = commit_all(&git, "theirs");
         assert_eq!(git.merge_tree(&base, &ours, &theirs).unwrap(), None);
+    }
+
+    #[test]
+    fn merge_tree_conflicts_returns_the_tree_and_the_conflicting_paths() {
+        let (dir, git) = repo_with(&[("a.txt", "base\n"), ("b.txt", "b\n")]);
+        let base = git.head().unwrap().unwrap();
+        write_files(dir.path(), &[("a.txt", "ours\n")]);
+        let ours = commit_all(&git, "ours");
+        git.run(["checkout", "-q", "-b", "other", &base]).unwrap();
+        write_files(dir.path(), &[("b.txt", "theirs b\n")]);
+        let clean = commit_all(&git, "theirs b");
+        // Different files: a clean merge holds both changes and lists no conflict.
+        let file = |tree: &str, path: &str| {
+            String::from_utf8(git.show_file(tree, path).unwrap().unwrap()).unwrap()
+        };
+        let merged = git.merge_tree_conflicts(&base, &ours, &clean).unwrap();
+        assert!(merged.conflicts.is_empty());
+        assert_eq!(file(&merged.tree, "a.txt"), "ours\n");
+        assert_eq!(file(&merged.tree, "b.txt"), "theirs b\n");
+        // The same file: the tree comes back with markers, and the path is listed.
+        git.run(["checkout", "-q", "-b", "third", &base]).unwrap();
+        write_files(dir.path(), &[("a.txt", "theirs\n")]);
+        let theirs = commit_all(&git, "theirs");
+        let merged = git.merge_tree_conflicts(&base, &ours, &theirs).unwrap();
+        assert_eq!(merged.conflicts, vec!["a.txt".to_string()]);
+        let text = file(&merged.tree, "a.txt");
+        assert!(
+            text.contains("<<<<<<<") && text.contains("ours") && text.contains("theirs"),
+            "{text}"
+        );
+        // A revision git cannot resolve is an error, not a conflict.
+        assert!(
+            git.merge_tree_conflicts(&base, &ours, &"0".repeat(40))
+                .is_err()
+        );
     }
 
     #[test]
