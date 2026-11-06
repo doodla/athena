@@ -238,6 +238,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The test `status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain` no longer fails
+  at random on a busy machine. Its stand-in drain exited as soon as the stop file existed, and
+  `stop_and_wait` writes that file before it checks the drain, so the stand-in could exit in between and the
+  first (ask-only) call returned `NotRunning` instead of `Asked`. The stand-in now also waits for a second
+  file that the test creates after the ask-only checks. Only that test changed; the pid-file lookup and the
+  decoy checks are as before, and no production code changed.
 - `athena retry` no longer starts the same work twice for an interrupted job. An interrupted job (dispatched,
   no live process) stays dispatched after it is retried, so `athena status` kept telling the user to run
   `athena retry <id>` and a second retry made a second "try again on <id>" job. The check is in `Athena::retry`

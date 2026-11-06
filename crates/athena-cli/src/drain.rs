@@ -5053,12 +5053,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         // Two processes whose command lines read `athena drain ...`. Only one is named in the pid file.
-        let script = r#"while [ ! -e "$1" ]; do sleep 0.05; done"#;
+        // The stand-in drain exits only once the stop file exists AND the test has created `release`.
+        // `stop_and_wait` writes the stop file before it checks the drain, so a stand-in that exited at
+        // the stop file alone could exit (and become a zombie, which reads as dead) in that gap on a busy
+        // machine, making the asking-only call report NotRunning instead of Asked.
+        let release = root.join("release-drain-stand-in");
+        let script = r#"while [ ! -e "$1" ] || [ ! -e "$2" ]; do sleep 0.05; done"#;
         let drain_child = Reaped(
             std::process::Command::new("sh")
                 .arg0("athena drain --budget 5")
                 .args(["-c", script, "sh"])
                 .arg(stop_file(root))
+                .arg(&release)
                 .spawn()
                 .unwrap(),
         );
@@ -5085,7 +5091,9 @@ mod tests {
         let asked = stop_and_wait(root, &RealProcs, None, &Quiet).unwrap();
         assert_eq!(asked, StopOutcome::Asked(record.clone()));
         assert!(stop_file(root).exists());
-        // Asking again with a wait returns once the drain has exited, which its loop does at the stop file.
+        // Let the stand-in exit now that the stop file is there. Asking again with a wait returns once the
+        // drain has exited.
+        std::fs::write(&release, "").unwrap();
         let waited = stop_and_wait(
             root,
             &RealProcs,
