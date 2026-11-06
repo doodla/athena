@@ -1,0 +1,187 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-002344-jn5t",
+  "n": 1,
+  "at": "2026-11-06T02:25:42.51110775Z",
+  "invocation_seq": 1,
+  "base_commit": "f1f0ffad71bcf028f4269aa997a98d049d91de63",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Route producer cargo build/test/clippy/check through the build-slot",
+  "summary": "Build step 4: a cargo wrapper, first on the producer's PATH, finds the subcommand after the global flags (using the policy's shared flag list). For build, test, clippy and check it holds a slot from the existing queue for the command's duration; other subcommands run unslotted. The audience is the maintainer and the verifier, who check this through tests.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The wrapper and tests are written in Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests cover the queue wait, global flags, timeout and unslotted subcommands. cargo test and clippy must pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The criteria run the wrapper against a fake cargo and a real SlotQueue."
+    },
+    {
+      "id": "small",
+      "how": "The change is limited to the wrapper, its PATH install, the flag-list sharing, tests and the CHANGELOG."
+    },
+    {
+      "id": "mechanism",
+      "how": "The slot is enforced by the PATH wrapper, not by prose."
+    },
+    {
+      "id": "root-cause",
+      "how": "One shared global-flag list means the wrapper and the policy cannot drift apart."
+    },
+    {
+      "id": "verified",
+      "how": "The verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-agent/src/policy.rs (check_cargo skips leading flags found in the private const CARGO_GLOBAL_FLAGS at line 477, then reads the subcommand), crates/athena-core/src/slots.rs (SlotQueue::acquire(class, stop) returns a Slot that is freed on drop or process death; the wait limit surfaces as disk::SlotWait, which the run turns into a held job), crates/athena-agent/src/env.rs (builds the agent environment and PATH) and crates/athena-agent/src/claude.rs. The slot wait is measured directly by the wrapper test, which runs two real wrapper processes against one slot and observes the order and the freeing.",
+    "Existing code: the design is docs/design/agent-and-build-slots.md sections 4 and 8 (build step 4); the wrapper reuses crates/athena-core/src/slots.rs and shares CARGO_GLOBAL_FLAGS from crates/athena-agent/src/policy.rs. The design names a `build-slot -- <cmd>` subcommand in new crates/athena-cli/src/slot_exec.rs, wired in main.rs, and a wrapper directory set first on PATH in env.rs; the plan follows that.",
+    "The wrapper is a small generated script or binary that calls `athena build-slot -- <real cargo> <args>` only when the first non-global-flag argument is build, test, clippy or check. Otherwise it execs the real cargo directly.",
+    "On timeout, the design says the wrapper exits 75 with 'no build slot free for 1800 s; try again'. The request also says 'the job is held, not failed'. I read this as: the command ends with that documented message, exits as an environment result and not a policy denial, and is recorded as the hold reason `environment: build slot wait`. It uses no attempt and the job is not failed. The producer may retry.",
+    "No new record or data file is added under crates/, so the records allow-list is untouched. The verifier's commands, SnapExec and the check path are unchanged."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test run with `cargo test` drives the wrapper with one slot and two producer processes. The second blocks while the first holds the slot, then runs after the first finishes. Afterwards the slot is free (try_acquire succeeds).",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test runs `cargo -q build` and `cargo --locked test` through the wrapper against a fake cargo. It asserts that both took a slot while running and freed it afterwards. It fails if the wrapper reads only its first argument, so the test must break if the subcommand lookup is replaced with args[0].",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test where no slot frees within the wait limit asserts that the command ends with the documented message ('no build slot free for ... s; try again') and a non-failure environment exit, and that the job is recorded as held (`environment: build slot wait`), not failed. The real cargo is never started.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows `cargo fmt` and `cargo metadata` run through the wrapper without taking a slot, even when every slot is held. `cargo test` also passes and `cargo clippy` is clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CARGO_GLOBAL_FLAGS in crates/athena-agent/src/policy.rs is made shared, and Grep shows the wrapper uses that one list. No second copy of the list exists. check_cargo behavior is otherwise unchanged and its existing policy tests pass.",
+      "kind": "content"
+    },
+    {
+      "text": "The producer's PATH puts the wrapper directory first, and this is set in crates/athena-agent/src/env.rs. A test or Grep shows verifier environments and verifier commands are not changed.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for producer cargo commands taking a build slot. The diff touches no governance files (athena.toml, defaults.toml, workflows) and no records/.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/slot_exec.rs",
+      "action": "create",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-agent/src/env.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-agent/src/lib.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/slot_exec.rs",
+      "action": "create",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/slots.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-cli/Cargo.toml",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Changing the verifier's commands, SnapExec or the local check path",
+    "Slot-owned warm target directories (build step 5)",
+    "Recording queued_s per producer command or the peak-slots statistic in commands_run",
+    "Changing the policy's allowed commands beyond sharing the global-flag list",
+    "The landing rebuild slot"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.9,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2400.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.669833729216152,
+      "p_user_intervenes": 0.0829059829059829,
+      "cost_usd": {
+        "p10": 0.5591912491709432,
+        "p50": 1.3549802897948,
+        "p90": 4.169817924139591
+      },
+      "wall_time_s": {
+        "p10": 562.864890973,
+        "p50": 1992.5241273329998,
+        "p90": 4201.338760319
+      }
+    }
+  },
+  "departures": "The change spans three crates with process-level concurrency tests and a hold-versus-exit-75 ambiguity. I expect higher cost and lower verification odds than the reference."
+}
