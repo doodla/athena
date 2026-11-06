@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-170019-3v2x",
+  "round": 1,
+  "at": "2026-11-05T23:46:40.39544542Z",
+  "invocation_seq": 3,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The docs-only definition hard-codes this repository's `docs/` and `*.md` patterns in core, instead of using the patterns that actually made the skip.",
+      "evidence": "athena.toml:87,92 set skip_when_only = [\"docs/\", \"*.md\"], but the patterns are per-repository config (athena-data config.rs:433; a config.rs test parses `[\"docs/\", \"*.json\"]`). `skip_note` already embeds the patterns it used in the note ('... skip_when_only (docs/, *.md)'). A target repository whose prose patterns differ (for example `doc/` or `*.rst`) would silently never get the new rule. It fails safe, but it is a special case where the general data is at hand. Fix: Either pass the per-check skip patterns from verification.rs (`ctx.capability.checks(jc)`) and require every changed path to match the record's own patterns, or keep the hard-coded pair and state in the doc comment and CHANGELOG that the rule covers only `docs/` and `*.md`, whatever the configured patterns are. Either way, keep the non-empty-paths and note-prefix gates.",
+      "location": "Plan Decision 2 / Step 2 (`docs_only` helper in verify.rs)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two existing comments that say skipped checks never count must change along with the doc comments criterion 4 names.",
+      "evidence": "Line 165: 'A recorded check counts as a seen command only if this equals `candidate_tree` and the check passed with exit code 0 (D115).' Lines 372-373: 'Skipped checks and nested-run placeholders carry no exit code and are not reused, so they never count.' Step 1 names only `changed_paths`, `commands_run` and the `judge` comments. Fix: In step 1, also rewrite the `checks_tree` field doc and the inline comment at 370-373, so that no comment contradicts the new rule.",
+      "location": "crates/athena-core/src/verify.rs:164-166 (`checks_tree` doc) and 370-373 (`judge` inline comment)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The criterion 2 test guards against a regression; it does not fail on today's code.",
+      "evidence": "Without the change, a skipped clippy record is already unseen (verify.rs:382), so the test passes today. The plan says so and leans on test 1 for the failing case. Fix: No change needed. Optionally assert in the same test that the docs-only variant of the same record is met, so the test shows the contrast inside itself.",
+      "location": "Demonstrations, Criterion 2",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read verify.rs (`VerdictInputs` at lines 151-180, `judge` at 362-395, the D43 unmet logic at 523-554, and the test helpers `check`, `reused_from_ci`, `output`, `d43_finding`, `judge_recorded` and `a_skipped_check_that_was_not_reused_does_not_count_as_run` at 1991). I also read checks.rs (`path_matches` is pub; `skip_note` writes 'not run: every changed path matches skip_when_only (...)'; `skipped_run` gives exit None, passed, not reused), routing.rs (a skipped check stays a skipped record even when CI is green, line 301; `runs_from_record` marks reused records with exit None), run/mod.rs:1543 (`changed_for_skip` from `closing.candidate`) and verification.rs:389 (the only production `judge` call; `closing` is in scope). Every function, file and line the plan names exists, and the change is made where the fault starts: the `ran` filter at verify.rs:382. A grep for `VerdictInputs {` and `judge(&` finds only verify.rs, verification.rs and send_back.rs, which matches the plan's dependents list. `commands_verified` is read elsewhere (reading.rs, introspect.rs, records), but only from stored results, never by judging again, so nothing is left out. The demonstrations call the real `judge` seam and build the skipped record with the production `skip_note`/`skipped_run`. Without the change, test 1 fails. Test 2 and the negative cases catch a gate that is too loose. The design is sound and fails safe: it requires the note, the docs-only paths, passed, no exit code, not reused, and the same tree. The one soundness concern is minor: the docs-only patterns are hard-coded instead of taken from the configured `skip_when_only` patterns. This only narrows what counts, never widens it. No external service is called, and there is no new athena.toml field."
+}

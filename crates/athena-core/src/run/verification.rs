@@ -386,11 +386,19 @@ impl Athena {
         };
         let map_base = map_at("HEAD~1")?;
         let map_candidate = map_at("HEAD")?;
+        // The same list the skip decision used (run/mod.rs `changed_for_skip`), so the judgment and the skip
+        // see the same paths.
+        let changed_paths: Vec<String> = closing
+            .candidate
+            .as_ref()
+            .map(|cand| cand.changes.iter().map(|e| e.path.clone()).collect())
+            .unwrap_or_default();
         let judgment = judge(&VerdictInputs {
             criteria: &criteria,
             checks: &check_runs,
             output: verdict_output.as_ref(),
             commands_run: &redacted_commands,
+            changed_paths: &changed_paths,
             candidate_tree: Some(c.as_str()),
             // A nested run records "not run" placeholders, not results.
             checks_tree: self.nested.is_none().then_some(c.as_str()),
