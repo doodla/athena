@@ -11,7 +11,8 @@ use crate::pin::{is_full_sha, mount};
 use crate::reading::{
     BinaryChecker, NO_HISTORY_REASON, Proposal, ReadingChecker, ReplayCheckers, ReplayRun,
     ReserveStage, TreeRetrySeed, planning_resume_seed, replay, replay_cases, replay_declaration_of,
-    resumable_job, retried_job, retry_findings, same_scope, tree_retry_seed,
+    replay_limit_percent, resumable_job, retried_job, retry_findings, same_scope,
+    touches_reading_rules, tree_retry_seed,
 };
 use crate::scoring::{self, Happened, score, totals};
 use crate::state::{NoStages, ResumeMark, ResumeStage, Stage, StageSink};
@@ -25,10 +26,10 @@ use athena_agent::env::{EnvSpec, Side};
 use athena_agent::policy::Policy;
 use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
-    PlanRevision, PlannerInputs, ProducerInputs, ReplayView, RetryFindings, RetrySeed,
-    VerifierInputs, VerifierPlan, class_summaries, critic_brief, evidence_placeholder,
-    planner_brief, producer_brief_with_evidence, producer_prompt_with_plan, render_plan_section,
-    verifier_brief_with_evidence,
+    PlanRevision, PlannerInputs, ProducerInputs, REPLAY_BRIEF_MAX_LISTED, ReplayView,
+    RetryFindings, RetrySeed, VerifierInputs, VerifierPlan, class_summaries, critic_brief,
+    evidence_placeholder, planner_brief, producer_brief_with_evidence, producer_prompt_with_plan,
+    render_plan_section, verifier_brief_with_evidence,
 };
 use athena_context::outputs::{
     CriticOutput, CritiqueVerdictOutput, DeliverableActionOutput, DependentKindOutput, PlanOutput,
@@ -74,7 +75,9 @@ use verification::Checked;
 #[cfg(feature = "test-support")]
 pub use checks::demo_seam::{Guard as DemoRunnerGuard, install as install_demo_runner};
 pub use close::{build_text, closing_subject};
-pub(crate) use send_back::{left_to_athena, send_back_text, unmet_criteria};
+pub(crate) use send_back::{
+    left_to_athena, send_back_text, send_back_text_with_replay, unmet_criteria,
+};
 
 /// How `go` ended.
 #[derive(Debug, Clone)]
@@ -144,6 +147,38 @@ struct Built {
     left_criteria: Vec<String>,
     /// The check results of an earlier run on this very candidate: the checks do not run again.
     recorded_checks: Option<Vec<CheckRun>>,
+    /// The last replay the producer's loop measured, which the verification hold reuses when it covers the
+    /// same candidate tree and the same accepted readings. `None` for a resumed candidate and for a job whose
+    /// loop did not measure.
+    loop_replay: Option<LoopReplay>,
+}
+
+/// A replay of the newest accepted readings that the producer's loop measured while the producer could still
+/// act on it (see [`Athena::loop_replay`]), with what the loop's send-back and the verification hold need.
+///
+/// Root cause it answers: nothing made the producer measure a new or tightened refusal rule against past
+/// accepted readings while it worked. The replay ran once, after the producer finished, as a hold at
+/// verification, so a rule that newly refused too many past readings was found only after the work was done.
+#[derive(Debug, Clone)]
+struct LoopReplay {
+    /// The tree of the candidate commit the loop measured.
+    tree: String,
+    /// The accepted readings it replayed, newest first.
+    cases: Vec<JobId>,
+    /// The measurement. Never a `no replay` run: those are not kept.
+    run: ReplayRun,
+    /// What the send-back shows of the measurement.
+    view: ReplayView,
+    /// The limit in whole percent that applied.
+    limit: usize,
+}
+
+impl LoopReplay {
+    /// Whether this measurement stands for a candidate with `tree` replayed over `cases`: it was measured, and
+    /// the tree and the readings are the same. Anything else is measured again.
+    fn covers(&self, tree: &str, cases: &[JobId]) -> bool {
+        self.run.no_replay.is_none() && self.tree == tree && self.cases == cases
+    }
 }
 
 /// A stopped job's kept candidate that a retry resumes from.
@@ -608,6 +643,7 @@ impl Athena {
             left_criteria: mark.left_criteria,
             recorded_checks: (mark.stage == ResumeStage::Verifier && same_checks)
                 .then_some(mark.check_runs),
+            loop_replay: None,
         };
         self.write_resume_mark(ctx, &closing, &built);
         self.check_and_verify(ctx, accepted, closing, built)
@@ -1449,6 +1485,7 @@ impl Athena {
             report_gaps,
             report_kept_in,
             left_criteria,
+            loop_replay,
             seq,
             snapshot,
             work,
@@ -1480,6 +1517,7 @@ impl Athena {
             report_gaps,
             left_criteria,
             recorded_checks: None,
+            loop_replay,
         };
         // The candidate is built: from here a job that stops for the environment, or whose process dies, is
         // resumed from it by `athena retry`, with no planner and no producer run.
@@ -1506,6 +1544,7 @@ impl Athena {
         let p = built.base.clone();
         let c = built.commit.clone();
         let recorded_checks = built.recorded_checks.take();
+        let loop_replay = built.loop_replay.take();
 
         // The admitted candidate goes to the job's CI branch, so the repository's CI runs on it. The branch is
         // deleted when the job closes (`finish_dispatched`). The checks below read its push run, and a failure to
@@ -1710,8 +1749,10 @@ impl Athena {
         // The replay of the newest accepted readings through the base and candidate reading rules. It runs
         // after the checks and the removal of the producer's build directory, and before the gate that
         // measures the disk for the verifier, because it builds twice and removes what it built. It calls no
-        // model. A held replay fails the verdict (`judge`); the record is kept either way.
-        let replay_record = self.replay_stage(ctx, &id, &p, &c, &check_runs);
+        // model. A held replay fails the verdict (`judge`); the record is kept either way. This hold is the
+        // backstop: the producer's loop measured the same replay while it worked (`loop_replay`), and the
+        // hold reuses that measurement only for the same candidate tree and the same accepted readings.
+        let replay_record = self.replay_stage(ctx, &id, &p, &c, &check_runs, loop_replay.as_ref());
         closing
             .files
             .push(NewFile::record(&AnyRecord::Replay(Box::new(
@@ -1740,6 +1781,10 @@ impl Athena {
     /// The replay record of this job: the newest accepted readings run through the base and candidate builds'
     /// reading rules. It never fails the job and never passes silently: when the replay cannot run, the record
     /// says `no replay: <reason>`. Everything the replay builds is removed before this returns.
+    ///
+    /// This is the hold at verification and the backstop. The producer's loop runs the same replay while the
+    /// producer works ([`Athena::loop_replay`]); `loop_replay` is its last measurement, reused here only when
+    /// it covers the same candidate tree and the same accepted readings.
     fn replay_stage(
         &self,
         ctx: &RunContext<'_>,
@@ -1747,8 +1792,9 @@ impl Athena {
         base: &str,
         candidate: &str,
         checks: &[CheckRun],
+        loop_replay: Option<&LoopReplay>,
     ) -> Replay {
-        let run = self.replay_run(ctx, id, base, candidate, checks);
+        let run = self.replay_run(ctx, id, base, candidate, checks, loop_replay);
         ctx.ui.line(&match &run.no_replay {
             Some(reason) => format!("replay     {reason}"),
             None => format!(
@@ -1768,6 +1814,7 @@ impl Athena {
         base: &str,
         candidate: &str,
         checks: &[CheckRun],
+        loop_replay: Option<&LoopReplay>,
     ) -> ReplayRun {
         if !checks.iter().all(|r| r.passed) {
             return ReplayRun::none("a check failed");
@@ -1782,9 +1829,19 @@ impl Athena {
         if cases.is_empty() {
             return ReplayRun::none(NO_HISTORY_REASON);
         }
+        // Same base, same tree and same readings give the same answer, so the loop's measurement stands in
+        // for a second pair of builds. Any difference, or a loop run that was not measured, measures again.
+        if let Some(prior) = loop_replay
+            && let Ok(tree) = self.git.tree_of(candidate)
+        {
+            let ids: Vec<JobId> = cases.iter().map(|c| c.job.clone()).collect();
+            if prior.covers(&tree, &ids) {
+                return prior.run.clone();
+            }
+        }
         let dir = self.state.job_dir(id).join("replay");
         let timeout = std::time::Duration::from_secs(ctx.jc.config.budget.check_timeout_s);
-        let run = match self.replay_checkers(base, candidate, &dir, timeout) {
+        let run = match self.replay_checkers(base, candidate, &dir, &dir.join("target"), timeout) {
             Ok((base_checker, candidate_checker)) => replay(
                 &cases,
                 &*base_checker,
@@ -1797,15 +1854,169 @@ impl Athena {
         run
     }
 
+    /// The replay of the newest accepted readings, run inside the producer's loop on the work as it stands, so
+    /// the producer can still act on the result.
+    ///
+    /// Root cause this closes: nothing made the producer measure a new or tightened refusal rule against past
+    /// accepted readings while it worked. The replay ([`Athena::replay_stage`]) ran once, after the producer
+    /// finished, as a hold at verification; a rule that newly refused too many past readings was rejected
+    /// after the work was done, and the producer never saw the list or the share. Here the same replay (the
+    /// same cases, checkers and limit) runs after each parsed report, and the loop sends the list and the
+    /// share back to the producer.
+    ///
+    /// It runs only when the change list touches `crates/` or the Cargo files
+    /// ([`touches_reading_rules`]): a change of documents only cannot alter the compiled reading rules. It
+    /// builds the candidate commit, takes a [`crate::slots::Class::Producer`] build slot for the two builds
+    /// (into the slot's warm target directory, cleaned afterwards as the checks do), and measures. The
+    /// measurement is kept so the hold at verification reuses it for the same tree and readings.
+    ///
+    /// Anything that stops the replay from running prints `replay     in the loop: no replay: <reason>` and
+    /// returns `None`: an empty history, low disk, no free slot, an unbuildable side. That is never a pass and
+    /// never a send-back; the hold at verification still measures. Only the kill switch is an error.
+    fn loop_replay(&self, ctx: &RunContext<'_>, snapshot: &Snapshot) -> Result<Option<LoopReplay>> {
+        let id = ctx.id();
+        let paths: Vec<String> = snapshot
+            .change_list()?
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        if !touches_reading_rules(&paths) {
+            return Ok(None);
+        }
+        let skip = |reason: &str| -> Result<Option<LoopReplay>> {
+            let run = ReplayRun::none(reason);
+            ctx.ui.line(&format!(
+                "replay     in the loop: {}",
+                run.no_replay.unwrap_or_default()
+            ));
+            Ok(None)
+        };
+        let records = match self.head().and_then(|head| Records::load(&self.git, &head)) {
+            Ok(records) => records,
+            Err(error) => return skip(&format!("the records could not be read: {error:#}")),
+        };
+        let cases = replay_cases(&records, Some(id));
+        if cases.is_empty() {
+            return skip(NO_HISTORY_REASON);
+        }
+        let jc = ctx.jc;
+        if self
+            .disk_gate(jc.config.min_free_gb(), id, ctx.ui)
+            .is_some()
+        {
+            return skip("free disk space is low");
+        }
+        let built = self.build_candidate(ctx, snapshot, None)?;
+        let (Some(commit), Some(tree)) = (
+            built.candidate.candidate_commit,
+            built.candidate.candidate_tree,
+        ) else {
+            return skip("the change builds no candidate");
+        };
+        let base = ctx.prediction.as_str();
+
+        // The two builds take a build slot, so they count against `max_check_slots` like any other build.
+        let pipeline = jc.config.pipeline();
+        self.state
+            .ensure_slot_targets(pipeline.max_check_slots as usize)?;
+        let slots = crate::slots::SlotQueue::from_config(&self.state, &pipeline);
+        let slot = match slots.acquire(crate::slots::Class::Producer, &|| self.refuse_if_stopped())
+        {
+            Ok(slot) => slot,
+            Err(error) if error.downcast_ref::<crate::disk::SlotWait>().is_some() => {
+                return skip("no build slot was free within build_wait_s");
+            }
+            Err(error) => return Err(error),
+        };
+        if slot.waited()
+            && self
+                .disk_gate(jc.config.min_free_gb(), id, ctx.ui)
+                .is_some()
+        {
+            return skip("free disk space is low");
+        }
+        let dir = self.state.job_dir(id).join("replay");
+        let warm = match self
+            .state
+            .prepare_slot_target(slot.index(), checks::slot_limit_bytes(pipeline.slot_max_gb))
+        {
+            Ok(prepared) => {
+                if let Some(bytes) = prepared.deleted_bytes {
+                    ctx.ui.line(&format!(
+                        "disk       build slot {} target directory held {}, over its {} GB limit: deleted, the next build is cold",
+                        slot.index(),
+                        crate::state::format_bytes(bytes),
+                        pipeline.slot_max_gb
+                    ));
+                }
+                Some(prepared.dir)
+            }
+            Err(error) => {
+                ctx.ui.line(&format!(
+                    "warning: build slot {} has no usable target directory, so the replay builds cold: {error:#}",
+                    slot.index()
+                ));
+                None
+            }
+        };
+        let target = warm.clone().unwrap_or_else(|| dir.join("target"));
+        let timeout = std::time::Duration::from_secs(jc.config.budget.check_timeout_s);
+        let checkers = self.replay_checkers(base, &commit, &dir, &target, timeout);
+        if warm.is_some()
+            && let Err(error) =
+                crate::slots::clean_workspace_output(&dir.join("candidate-tree"), &target)
+        {
+            ctx.ui.line(&format!(
+                "warning: could not clean build slot {}, so its target directory is deleted: {error:#}",
+                slot.index()
+            ));
+            if let Err(error) = self.state.reset_slot_target(slot.index()) {
+                ctx.ui.line(&format!(
+                    "warning: could not delete build slot {}'s target directory: {error:#}",
+                    slot.index()
+                ));
+            }
+        }
+        drop(slot);
+        let declared = replay_declaration_of(ctx.reading).effective_share();
+        let run = match checkers {
+            Ok((base_checker, candidate_checker)) => {
+                replay(&cases, &*base_checker, &*candidate_checker, declared)
+            }
+            Err(reason) => ReplayRun::none(&reason),
+        };
+        let _ = crate::pin::remove_tree(&dir);
+        if let Some(reason) = &run.no_replay {
+            ctx.ui.line(&format!("replay     in the loop: {reason}"));
+            return Ok(None);
+        }
+        let limit = replay_limit_percent(declared);
+        ctx.ui.line(&format!(
+            "replay     in the loop: {} of {} accepted readings newly refused ({}%, limit {limit}%)",
+            run.newly_refused.len(),
+            run.total,
+            run.newly_refused.len() * 100 / run.total.max(1),
+        ));
+        let view = replay_view(&run.record(id, base, &commit), ctx.reading);
+        Ok(Some(LoopReplay {
+            tree,
+            cases: cases.iter().map(|c| c.job.clone()).collect(),
+            run,
+            view,
+            limit,
+        }))
+    }
+
     /// The base and the candidate reading rules as checkers. In tests the seam comes first, before any other
     /// step. Otherwise each is a build of `athena` from that commit's visible files, in `dir`, probed for the
     /// `check-reading` subcommand. A nested run, a fake driver, a missing package, a failed build or a missing
-    /// subcommand is an `Err` with the reason: `no replay`, never a pass.
+    /// subcommand is an `Err` with the reason: `no replay`, never a pass. Both builds write into `target`.
     fn replay_checkers(
         &self,
         base: &str,
         candidate: &str,
         dir: &std::path::Path,
+        target: &std::path::Path,
         timeout: std::time::Duration,
     ) -> std::result::Result<ReplayCheckers, String> {
         #[cfg(test)]
@@ -1818,7 +2029,6 @@ impl Athena {
         if self.is_fake() {
             return Err("the driver is a fake, so nothing is built".into());
         }
-        let target = dir.join("target");
         let mut checkers: Vec<std::rc::Rc<dyn ReadingChecker>> = Vec::new();
         for (side, rev) in [("base", base), ("candidate", candidate)] {
             let tree = dir.join(format!("{side}-tree"));
@@ -1837,7 +2047,7 @@ impl Athena {
             build
                 .args(["build", "-p", "athena-cli", "--bin", "athena", "--locked"])
                 .current_dir(&tree)
-                .env("CARGO_TARGET_DIR", &target)
+                .env("CARGO_TARGET_DIR", target)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
             run_bounded(&mut build, timeout)

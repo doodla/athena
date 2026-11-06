@@ -476,6 +476,7 @@ pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&s
         out,
         "\nYou may run them first. Athena runs them again on your result, with the base commit's tool configuration.\n"
     );
+    let _ = writeln!(out, "{}", replay_while_working_section());
     let _ = writeln!(out, "## Commands Bash may run\n");
     list(&mut out, &inputs.commands, "(none)");
     match &inputs.retry_from {
@@ -506,6 +507,50 @@ pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&s
         out,
         "## Report\n\nEnd with the producer report as your structured output."
     );
+    out
+}
+
+/// The producer brief's note on the replay of accepted readings. Athena runs it while the producer works, not
+/// only after: when the change touches code, the newest accepted readings go through the base and the
+/// candidate reading rules, and a candidate that newly refuses more than the limit is sent back with the list.
+fn replay_while_working_section() -> String {
+    "## Replay of accepted readings while you work\n\n\
+     When your change touches code (a path under `crates/`, or Cargo.toml or Cargo.lock), Athena replays \
+     the newest accepted readings through the base build and your candidate build before it judges your \
+     report. If your change makes the reading rules refuse more than 10% of them, or more than the share \
+     the acceptance criteria declare as \"N% of newly refused readings\" plus 5 points, your work is sent \
+     back with the list of newly refused job ids and the measured share. A rule that is too broad shows \
+     up there. Narrow the rule so it refuses what it is meant to refuse; do not hide the cases. A replay \
+     that cannot run says `no replay` and never counts as a pass.\n"
+        .to_string()
+}
+
+/// The part of the producer's send-back that reports the replay of accepted readings: the measured share,
+/// the limit that applies, and the capped list of newly refused job ids with their reasons. At most
+/// [`REPLAY_BRIEF_MAX_LISTED`] are listed, each reason cut to [`REPLAY_BRIEF_REASON_CHARS`] characters.
+pub fn replay_send_back_section(replay: &ReplayView, limit_percent: usize) -> String {
+    let newly = replay.newly_refused.len();
+    let percent = (newly * 100).checked_div(replay.total).unwrap_or(0);
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "Replay of accepted readings: {newly} of {} ({percent}%) newly refused, limit {limit_percent}%. \
+         The candidate's reading rules refuse these accepted readings and the base accepted them. Find what \
+         makes the rule fire on them, fix the cause so that it refuses only what it is meant to refuse, \
+         and do not hide or special-case these cases.\n",
+        replay.total
+    );
+    for (job, reason) in replay.newly_refused.iter().take(REPLAY_BRIEF_MAX_LISTED) {
+        let reason: String = reason.chars().take(REPLAY_BRIEF_REASON_CHARS).collect();
+        let _ = writeln!(out, "- {job}: {}", reason.replace('\n', " "));
+    }
+    if newly > REPLAY_BRIEF_MAX_LISTED {
+        let _ = writeln!(
+            out,
+            "- and {} more (the full list is in replay.json)",
+            newly - REPLAY_BRIEF_MAX_LISTED
+        );
+    }
     out
 }
 
@@ -3893,6 +3938,64 @@ mod tests {
         assert!(section.len() <= cap, "{} > {cap}", section.len());
         assert!(brief.len() < plain.len() + cap, "{}", brief.len());
         assert!(!section.contains(&"r".repeat(REPLAY_BRIEF_REASON_CHARS + 1)));
+    }
+
+    #[test]
+    fn producer_brief_tells_the_producer_the_replay_is_checked_while_it_works() {
+        let brief = producer_brief(&producer_inputs(None));
+        let at = brief
+            .find("## Replay of accepted readings while you work")
+            .expect("the producer brief has the replay section");
+        let section = &brief[at..];
+        let section = &section[..section[3..].find("\n## ").map_or(section.len(), |e| e + 3)];
+        for text in [
+            "newest accepted readings",
+            "10%",
+            "plus 5 points",
+            "sent back",
+            "list of newly refused job ids",
+            "`no replay`",
+        ] {
+            assert!(
+                section.contains(text),
+                "the section omits {text}: {section}"
+            );
+        }
+        // It comes after the checks and before the commands.
+        assert!(brief.find("## Checks Athena will run").unwrap() < at);
+        assert!(at < brief.find("## Commands Bash may run").unwrap());
+    }
+
+    #[test]
+    fn the_send_back_section_gives_the_ids_the_percent_and_the_limit() {
+        let mut view = replay_view(3, 10, 5);
+        view.newly_refused[0].0 = "20201001-000000-0000".into();
+        let text = replay_send_back_section(&view, 10);
+        assert!(
+            text.contains("3 of 10 (30%) newly refused, limit 10%"),
+            "{text}"
+        );
+        for n in 0..3 {
+            assert!(
+                text.contains(&format!("- 20201001-{n:06}-{n:04}: rrrrr")),
+                "{text}"
+            );
+        }
+        assert!(text.contains("do not hide"), "{text}");
+        // A declared limit is shown as given.
+        assert!(replay_send_back_section(&view, 35).contains("limit 35%"));
+    }
+
+    #[test]
+    fn the_send_back_section_stays_within_its_cap_with_a_very_long_list() {
+        let view = replay_view(1000, 1000, 2000);
+        let text = replay_send_back_section(&view, 10);
+        assert!(text.contains("1000 of 1000 (100%)"), "{text}");
+        assert!(text.contains("and 980 more"), "{text}");
+        assert_eq!(text.matches("\n- 2020").count(), REPLAY_BRIEF_MAX_LISTED);
+        assert!(!text.contains(&"r".repeat(REPLAY_BRIEF_REASON_CHARS + 1)));
+        // An empty replay does not divide by zero.
+        assert!(replay_send_back_section(&replay_view(0, 0, 0), 10).contains("0 of 0 (0%)"));
     }
 
     #[test]

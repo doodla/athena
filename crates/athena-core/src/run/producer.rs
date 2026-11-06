@@ -33,10 +33,37 @@ pub(super) struct Reported {
     pub(super) report_kept_in: String,
     /// The criteria the last report left to Athena's checks.
     pub(super) left_criteria: Vec<String>,
+    /// The replay the loop measured on the last report, when it ran. The hold at verification reuses it for
+    /// the same candidate tree and accepted readings.
+    pub(super) loop_replay: Option<LoopReplay>,
     /// The sequence number the next invocation gets.
     pub(super) seq: u32,
     pub(super) snapshot: Snapshot,
     pub(super) work: PathBuf,
+}
+
+/// The send-back problem a held replay adds: the count, the measured percent, the limit and the job ids
+/// (at most [`REPLAY_BRIEF_MAX_LISTED`] of them, then a count of the rest).
+fn replay_problem(replay: &LoopReplay) -> String {
+    let newly = &replay.run.newly_refused;
+    let mut ids: Vec<&str> = newly
+        .iter()
+        .take(REPLAY_BRIEF_MAX_LISTED)
+        .map(|r| r.job.as_str())
+        .collect();
+    let more = newly.len().saturating_sub(ids.len());
+    let rest = format!("and {more} more");
+    if more > 0 {
+        ids.push(&rest);
+    }
+    format!(
+        "replay of accepted readings: {} of {} ({}%) newly refused, over the {}% limit: {}",
+        newly.len(),
+        replay.run.total,
+        newly.len() * 100 / replay.run.total.max(1),
+        replay.limit,
+        ids.join(", ")
+    )
 }
 
 impl Athena {
@@ -119,6 +146,13 @@ impl Athena {
     }
 
     /// Stage S3: the producer loop. `Flow::Stop` means the job ended here and `closing` says how.
+    ///
+    /// Root cause of a repeated failure it answers: nothing made the producer measure a new or tightened
+    /// refusal rule against past accepted readings while it worked. The replay ran once, after the producer
+    /// finished, as a hold at verification, so the producer never saw the newly refused list or the share. Now
+    /// each parsed report is followed by [`Athena::loop_replay`], and a measured share over the limit joins the
+    /// unmet criteria and unchanged files in the one send-back, with the list and the share in the brief. The
+    /// hold at verification stays as the backstop.
     pub(super) fn producer_loop(
         &self,
         ctx: &RunContext<'_>,
@@ -150,6 +184,8 @@ impl Athena {
         let mut report_kept_in = String::new();
         // The criteria the last report left to Athena's checks; the verifier judges them from the checks.
         let mut left_criteria: Vec<String>;
+        // The replay of accepted readings measured on the last report, when it ran.
+        let mut loop_replay: Option<LoopReplay>;
         let report = loop {
             // Every pass enters the producer stage, so a send-back reports it again.
             ctx.stages.enter(&id, Stage::Producer);
@@ -237,7 +273,11 @@ impl Athena {
             };
             left_criteria = left_to_athena(&raw, accepted);
             let report = self.redact_report(raw, ctx.redactor)?;
-            if unmet.is_empty() && unchanged.is_empty() {
+            // The replay of accepted readings through the base and the work as it stands. A measured share
+            // over the limit is a problem like an unmet criterion; a replay that did not run is not.
+            loop_replay = self.loop_replay(ctx, &snapshot)?;
+            let held = loop_replay.as_ref().filter(|l| l.run.held);
+            if unmet.is_empty() && unchanged.is_empty() && held.is_none() {
                 break Some(report);
             }
             let mut problems = Vec::new();
@@ -256,6 +296,9 @@ impl Athena {
                     "planned files left unchanged without a reason: {}",
                     unchanged.join(", ")
                 ));
+            }
+            if let Some(replay) = held {
+                problems.push(replay_problem(replay));
             }
             // Keep the redacted report that failed the check: the attempt's invocation record carries it
             // in `detail`, so each attempt's report stays with the job's records.
@@ -288,13 +331,22 @@ impl Athena {
             send_backs += 1;
             ctx.ui
                 .line(&format!("producer   sent back: {}", problems.join("; ")));
-            attempt_brief = send_back_text(brief, &unmet, &unchanged);
+            attempt_brief = match held {
+                Some(replay) => send_back_text_with_replay(
+                    brief,
+                    &unmet,
+                    &unchanged,
+                    Some((&replay.view, replay.limit)),
+                ),
+                None => send_back_text(brief, &unmet, &unchanged),
+            };
         };
         Ok(Flow::Go(Reported {
             report,
             report_gaps,
             report_kept_in,
             left_criteria,
+            loop_replay,
             seq,
             snapshot,
             work,
