@@ -341,6 +341,21 @@ fn check_parse(parsed: &Parsed, confirmed: &ConfirmedLinks, findings: &mut Vec<F
     }
 }
 
+/// Condition (a), for the `[[governs]]` list: every governed decision is an entry of the log. A governed id with
+/// no entry could never be amended, so a change to its paths could never reconcile it.
+fn check_governs(parsed: &Parsed, confirmed: &ConfirmedLinks, findings: &mut Vec<Finding>) {
+    for governed in confirmed.unknown_governed(&parsed.entries) {
+        findings.push(Finding {
+            condition: "a",
+            reason: format!(
+                "[[governs]] names {}, which is not an entry of the log (paths: {})",
+                governed.decision,
+                governed.paths.join(", ")
+            ),
+        });
+    }
+}
+
 fn check_signals(
     runs: &[SignalRun],
     records: &Records,
@@ -447,6 +462,7 @@ pub fn run_on_from(
     let mut findings = Vec::new();
     findings.extend(validate_citations(&headers, &runs, records, starts));
     check_parse(&parsed, confirmed, &mut findings);
+    check_governs(&parsed, confirmed, &mut findings);
     let mut decision_view = view(&parsed, confirmed);
     let under_review = check_signals(&runs, records, &mut findings);
     for run in runs.iter().filter(|r| r.fired) {
@@ -607,6 +623,37 @@ mod tests {
     fn a_statement_without_an_id_is_reported_with_its_line() {
         let text = "## D01 · x\n- **Superseded by** nothing\n";
         assert_eq!(parse_supersessions(text).lacking_target, [2]);
+    }
+
+    #[test]
+    fn a_governed_decision_that_is_not_an_entry_of_the_log_is_a_condition_a_finding() {
+        let log = "## D01 · x\n\n- **Provenance:** p\n\n## D02 · y\n\n- **Provenance:** q\n";
+        let links = ConfirmedLinks::parse(
+            "[[governs]]\ndecision = \"D02\"\npaths = [\"src/\"]\n\n\
+             [[governs]]\ndecision = \"D9999\"\npaths = [\"docs/a.md\", \"b/\"]\n",
+        )
+        .unwrap();
+        let report = run_on(log, &links, &Records::default());
+        let governs: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.reason.contains("[[governs]]"))
+            .collect();
+        assert_eq!(governs.len(), 1, "{:?}", report.findings);
+        assert_eq!(governs[0].condition, "a");
+        assert!(governs[0].reason.contains("D9999"), "{}", governs[0].reason);
+        assert!(governs[0].reason.contains("docs/a.md, b/"));
+        // With the entry in the log there is nothing to report.
+        let log = format!("{log}\n## D9999 · z\n\n- **Provenance:** r\n");
+        let report = run_on(&log, &links, &Records::default());
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|f| !f.reason.contains("[[governs]]")),
+            "{:?}",
+            report.findings
+        );
     }
 
     #[test]

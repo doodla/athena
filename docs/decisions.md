@@ -4265,3 +4265,47 @@ should replace those estimates with its figures.
   `crates/athena-cli/src/drain.rs`, `crates/athena-cli/src/wiring.rs`, `crates/athena-core/src/gh/landing.rs`,
   `crates/athena-core/src/status.rs`. Not measured: the split of the 440.1 minutes by phase, the duration of one
   rebuild, and whether the host's auto-merge is enabled.
+
+## D156 · A decision names the code it governs, and a change to that code must reconcile it before verification
+
+- **Case:** Two jobs, 20261010-225741-yvk0 and 20261105-180339-w5h7, were each rejected at the final verdict for a
+  statement their change had made false. The first reversed a decision of this log (D08) and left it standing.
+  The second raised a limit and left the `athena drain --help` text saying "at most 8". Both are one failure.
+  The decision log is prose with no link from a decision to the code or limit it governs, so reversals were found only at the final verdict.
+  The producer had no step that searched for the decisions its change contradicts, and the verifier was the first
+  reader to try.
+- **Decision:** `docs/decision-links.toml` gains a `[[governs]]` table beside its `[[link]]` tables: a decision id
+  and the paths it governs (an exact file, or a directory prefix ending in `/`). The first entry maps D08 to
+  `crates/athena-git/src/snapshot.rs` and `crates/athena-core/src/run/candidate.rs`. One parser and one rule live
+  in `athena_data::decision_links`. At the top of `check_and_verify`, before the CI push, the early pull request,
+  the checks and the verifier, Athena compares the change's paths with the base commit's list. A governed
+  decision whose paths the change touches fails the job unless the change adds a `[[link]]` whose `older` is that
+  decision and whose `newer` is an entry the change adds to `docs/decisions.md`. The link's status is not read, so
+  an entry that amends the decision and an entry that replaces it both count, and a change that reverses nothing
+  can add a one-line entry that says the decision was checked and stands, with an `amended` link. The job closes
+  failed with a reason that begins `decisions not reconciled:` and names each decision, the paths and the fix. The
+  reason is not an environment stop, so `athena retry` starts a new producer, and `retry_findings` now returns
+  that reason for a job closed this way, so the retry brief lists the decision ids under "Findings you must
+  address". A governed id that is not an entry of the log is a finding of the backtest's condition (a). The
+  `athena drain --help` ceiling is filled in from `MAX_CONCURRENCY_CEILING` when the command is built, so the
+  limit the text states is the limit the code enforces. Tests: `cargo test -p athena-data decision_links`,
+  `cargo test -p athena-core --lib governed`, `--lib retry_findings`, and `cargo test -p athena-cli --bin athena
+  governs` and `drain_help`.
+- **Alternatives:** (a) A language-model judgment of whether a change reverses a decision: not mechanical and not
+  testable offline. (b) Scan the prose of the log for the words of the decision: it finds statements, not the
+  code they describe, and misses a limit repeated in help text. (c) Make the check a failing check run so the
+  verifier reports it: the verifier would still be started on a candidate already known to fail. (d) Send the
+  finding back inside the producer's loop, as the replay is: it would give the producer the finding in the same
+  run, but it needs changes to the producer loop and the send-back text; named as a follow-up. (e) Reword the
+  help text only: it fixes one instance and leaves the class.
+- **Tradeoff:** Every change to a governed path now needs a log entry and a link, even when it reverses nothing,
+  and the finding reaches the producer on the next attempt (the retry brief), not in the same run. The seed list
+  holds one decision, so only code that D08 describes is refused; each decision added raises the refusals on
+  changes to its paths. Other copies of the ceiling in design prose are not checked.
+- **Reversal cost:** Low. Remove the call in `check_and_verify`, the `[[governs]]` table and the module. Nothing
+  recorded depends on them.
+- **Provenance:** Stated: the two introspections' causes and the request's failure class. Read:
+  `crates/athena-cli/src/decisions.rs`, `crates/athena-cli/src/backtest.rs`, `crates/athena-core/src/run/mod.rs`,
+  `crates/athena-core/src/reading.rs`, `crates/athena-core/src/disk.rs`, D08. Measured: the tests named above.
+  Not measured: how many future changes will touch the two D08 paths, and whether authors will add the link or
+  work around it.
