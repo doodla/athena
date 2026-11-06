@@ -5,7 +5,7 @@
 //! `drain`, 0 means the target was met after a landing, and 2 any other stop.
 
 use anyhow::Result;
-use athena_cli::{display, drain, hooks, wiring};
+use athena_cli::{display, drain, hooks, slot_exec, wiring};
 use athena_core::reading::Proposal;
 use athena_core::run::GoResult;
 use athena_core::{Athena, Ui};
@@ -550,6 +550,11 @@ fn main() -> ExitCode {
         .unwrap_or_default();
     if name == "pre-commit" || name == "commit-msg" {
         return ExitCode::from(hooks::git_hook(&name, &args[1..]) as u8);
+    }
+    // The producer's `cargo`: a link to this binary that takes a build slot for build commands.
+    if name == "cargo" {
+        let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        return ExitCode::from(slot_exec::run_cargo(&rest) as u8);
     }
     let version: &'static str =
         Box::leak(wiring::version_string(&wiring::build_info()).into_boxed_str());

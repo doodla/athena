@@ -81,6 +81,7 @@ mod produce_and_verify_order_tests {
     use athena_git::Git;
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
 
     const CRITERION: &str = "README.md describes the demo";
@@ -3172,6 +3173,66 @@ mod produce_and_verify_order_tests {
         );
         assert_eq!(counts.all().3, 0, "no verifier ran");
         take_slot_soon(&probe);
+    }
+
+    #[test]
+    fn a_producer_cargo_command_that_found_no_build_slot_holds_the_job() {
+        let repo = repo_with_config("\n[drain.pipeline]\nbuild_wait_s = 1\n");
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let inner = counting(counts.clone(), None);
+        let seen_path = Arc::new(std::sync::Mutex::new(None));
+        let seen = seen_path.clone();
+        // The producer's environment names the wrapper; its cargo gives up on the slot as the wrapper does.
+        let script: athena_agent::fake::Script = Box::new(move |spec: &AgentInvocation| {
+            if spec.role == Role::Producer {
+                *seen.lock().unwrap() = Some((spec.env["PATH"].clone(), spec.env.clone()));
+                let marker = &spec.env[athena_agent::env::SLOT_HOLD_ENV];
+                std::fs::create_dir_all(Path::new(marker).parent().unwrap()).unwrap();
+                std::fs::write(marker, r#"{"waited_s":1,"limit_s":1}"#).unwrap();
+            }
+            inner(spec)
+        });
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let job = athena.ask("describe the demo", &Quiet).unwrap().job;
+        let ui = Lines::default();
+        let error = athena
+            .go(job.as_str(), AcceptedBy::User, &ui)
+            .expect_err("the producer's command found no build slot");
+        let wait = error
+            .downcast_ref::<crate::disk::SlotWait>()
+            .copied()
+            .unwrap_or_else(|| panic!("not a slot wait hold: {error:#}"));
+        assert_eq!((wait.waited_s, wait.limit_s), (1, 1));
+        let said = ui.0.lock().unwrap().clone();
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("held       environment: build slot wait")),
+            "{said:#?}"
+        );
+        // Held, not failed: no outcome, no score, no introspection, and no verifier ran.
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (1, 0));
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let held = &records.jobs[job.as_str()];
+        assert_eq!(held.state(), JobState::Dispatched);
+        assert!(held.outcome.is_none() && held.latest_score().is_none());
+        assert!(records.introspections.is_empty());
+        assert_eq!(crate::disk::read_slot_hold(&athena.state, &job), Some(wait));
+        // The producer's PATH began with the wrapper directory, which holds a `cargo`.
+        let (path, env) = seen_path.lock().unwrap().clone().expect("the producer ran");
+        let wrapper_dir = Path::new(path.split(':').next().unwrap());
+        assert_eq!(
+            wrapper_dir.to_str(),
+            Some(env[athena_agent::env::WRAPPER_DIR_ENV].as_str())
+        );
+        assert!(wrapper_dir.join("cargo").symlink_metadata().is_ok());
     }
 
     #[test]

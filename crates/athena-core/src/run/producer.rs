@@ -205,6 +205,25 @@ impl Athena {
                 jc.config.budget.producer_timeout_s,
                 producer_schema(),
             )?;
+            // The producer's cargo build, test, clippy and check take a build slot: a `cargo` wrapper goes first
+            // on its PATH. Only this environment gets it; the checks and the verifier are not changed.
+            let pipeline = jc.config.pipeline();
+            let hold_file = self.state.hold_file(&id);
+            athena_agent::env::install_cargo_wrapper(
+                &mut spec.env,
+                &athena_agent::env::CargoWrapper {
+                    athena_bin: &self.athena_bin,
+                    bin_dir: &self.state.job_dir(&id).join("agent").join("bin"),
+                    slots_dir: &self.state.slots_dir(),
+                    slots: pipeline.max_check_slots as usize,
+                    wait_s: pipeline.build_wait_s,
+                    promote_s: pipeline.build_age_promote_s,
+                    hold_file: &hold_file,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+            // A marker left by an earlier run's wrapper is not this run's.
+            crate::disk::clear_hold(&self.state, &id);
             // A hard job's reading carries the escalated effort; an ordinary one keeps the configured one.
             if let Some(effort) = &ctx.reading.producer_effort {
                 spec.effort = effort.clone();
@@ -232,6 +251,13 @@ impl Athena {
                 record.commands_run.len()
             ));
             closing.new_invocations.push(record.clone());
+            // A producer cargo command that waited its whole limit for a build slot left a marker. That is the
+            // environment's doing, not the work's: the job is held with no attempt used and a later drain
+            // retries it, however the producer ended.
+            if let Some(wait) = crate::disk::read_slot_hold(&self.state, &id) {
+                closing.slot_hold = Some(wait);
+                return Ok(Flow::Stop);
+            }
             if output.outcome == InvocationOutcome::TimedOut {
                 let reason = record.detail.clone().unwrap_or_default();
                 self.keep_timed_out_work(ctx, &snapshot, accepted, &reason, closing)?;

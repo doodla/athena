@@ -411,6 +411,18 @@ Each change is one focused job with its own tests, lands on its own, and reads i
    `commands_run`, read by the "build wait" line; and the peak number of slots held at once, which the queue records and the same line prints (it must never
    exceed `max_check_slots`).
    Depends on: 3.
+   **Built** (the slot itself; `queued_s` per command and the peak count are not recorded yet). Where the note
+   left room:
+   - There is no `build-slot` subcommand. The wrapper directory holds a link named `cargo` to the `athena` binary
+     (`install_cargo_wrapper` in `env.rs`, put first on the producer's `PATH` only), and `main` runs
+     `slot_exec::run_cargo` when its own name is `cargo`. The checks' and the verifier's environments are not given it.
+   - The wrapper finds the subcommand after the leading global options with `CARGO_GLOBAL_FLAGS`, the one list
+     `check_cargo` uses (now `pub`). `build`, `test`, `clippy` and `check` hold a producer-class slot while the real
+     `cargo` runs as a child; every other subcommand runs with no slot. The policy is otherwise unchanged.
+   - No slot within `build_wait_s`: the real `cargo` is not started; the wrapper prints
+     `no build slot free for <n> s; try again`, writes the slot hold marker the run reads and exits 75. After the
+     invocation the producer loop finds the marker and holds the job (`environment: build slot wait`), with no
+     attempt used; there is no candidate yet, so a later drain retries from the start.
 5. **Slot-owned warm target directories and smaller outputs.**
    Touches: `crates/athena-core/src/state.rs` (slot directories under the state directory, outliving a job),
    `crates/athena-agent/src/env.rs` (the per-command symlink under `{job_dir}/target/<side>`),

@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A producer's `cargo build`, `test`, `clippy` and `check` now take a build slot for the length of the command
+  (build step 4 of `docs/design/agent-and-build-slots.md`). A `cargo` wrapper, a link to the `athena` binary in
+  a directory first on the producer's `PATH` (`install_cargo_wrapper`), finds the subcommand after the global
+  options such as `-q` and `--locked` with `CARGO_GLOBAL_FLAGS`, now shared with the command policy, so those
+  forms cannot skip the queue. Other subcommands (`fmt`, `metadata`) run with no slot. When no slot frees within
+  `build_wait_s`, the real `cargo` is not started, the wrapper prints `no build slot free for <n> s; try again`
+  and exits 75, and the run holds the job (`environment: build slot wait`) instead of failing it. The checks'
+  and the verifier's commands are unchanged.
 - The replay of accepted readings now runs as a check inside the producer's loop, so the producer sees the
   newly refused readings and the measured share while it can still fix them. Root cause: nothing made the
   producer measure a new or tightened refusal rule against past accepted readings while it worked. The replay

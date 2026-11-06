@@ -474,7 +474,10 @@ fn glob_prefix(word: &str) -> &str {
     &word[..end]
 }
 
-const CARGO_GLOBAL_FLAGS: [&str; 8] = [
+/// The cargo options that may stand before the subcommand. The policy skips them to find the subcommand, and
+/// the producer's `cargo` wrapper skips the same ones to decide whether the command takes a build slot, so the
+/// two cannot disagree about which word is the subcommand.
+pub const CARGO_GLOBAL_FLAGS: [&str; 8] = [
     "-q",
     "--quiet",
     "-v",
