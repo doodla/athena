@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A registry of hand-kept mirrors, `athena_core::mirrors::REGISTRY`, that compares each mirror with its source
+  by content (D158). Root cause: a file kept by hand as a mirror of a governing source was tested for its
+  structure only, not its content against the source, so drift reached the final verdict in five jobs. Four
+  rules, each naming the file and the fix: every `--test` and `--lib` unit on disk has a line in
+  `xtask/shard-timings.txt` (and the reverse); `docs/decisions.md` starts with its base text; the CI `athena-bin`
+  `hashFiles` globs and `BUILD_PATHS` cover each other; every line of `BRIEF.md` or a term's source that names an
+  ontology term as a definition or role is covered by a sense or an excuse (the walk moved out of
+  `crates/athena-cli/tests/ontology.rs` into the module). The producer loop runs the entries a change touches
+  before verification and sends a drift back once; the new `athena-cli` test target `mirrors` runs every entry
+  over the real files and a drifted fixture for each, so a new entry is covered with no other edit. The producer
+  brief tells the producer to run it. `BUILD_PATHS` gains `rust-toolchain.toml`, `athena.toml`, `defaults.toml`
+  and `docs/system-facts.md` (nine roots, matching the CI key), so a landing that changes one now triggers the
+  drain's rebuild.
 - `athena_git::script_writer::write_executable(path, bytes)` writes a stand-in script from a short-lived `sh`
   child (`cat` to a temporary file, `chmod 755`, `mv` into place) and waits for it, so a test process never holds
   the script open for writing and cannot meet "Text file busy" when it runs the script. The tests that wrote a

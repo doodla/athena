@@ -190,7 +190,7 @@ pid are each reported as "no drain is running", with the reason, and no process 
   new drain starts.
 
 A drain also refuses to start, and dispatches nothing, when its build is older than the landed code (a change
-under `crates/`, `xtask/`, `Cargo.toml`, `Cargo.lock` or `setup.sh` since the commit it was built from); run
+under a path listed in `BUILD_PATHS` in `crates/athena-core/src/status.rs` since the commit it was built from); run
 `./setup.sh`, or `athena drain-restart`. One-time transition: a drain started by a build from before the pid file
 existed has no pid file, so `drain-status` and `drain-restart` cannot see it. Run `athena drain-stop` and let
 that drain finish before the first restart.
