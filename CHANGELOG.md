@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena_git::script_writer::write_executable(path, bytes)` writes a stand-in script from a short-lived `sh`
+  child (`cat` to a temporary file, `chmod 755`, `mv` into place) and waits for it, so a test process never holds
+  the script open for writing and cannot meet "Text file busy" when it runs the script. The tests that wrote a
+  file and then made it executable now use it: `checks.rs`
+  (`a_cargo_test_check_records_its_failing_tests_and_the_flag_it_ran_with`), `reading.rs` (the `stub_binary`
+  helper), `claude.rs` (the `stand_in` helper), `reconcile.rs` (the fake `gh`), `athena-git` `snapshot.rs`
+  (`user_repo`) and the `xtask` tests (`stand_in_claude` and
+  `a_cached_gitleaks_is_skipped_only_when_it_reports_the_pinned_version`). A stress test runs 400 write-then-exec
+  cycles on four threads while four other threads fork, and asserts every exec succeeds. `athena-agent` gains
+  `athena-git` as a dev-dependency.
 - A job whose accepted reading limits which files may change (a criterion such as "no file outside X changed",
   "only X may change", "test-only change" or "production unchanged") now stores that limit on its job record as
   `allowed_paths`, the reading's deliverable paths (an entry ending in `/` covers a directory tree, so a limiting

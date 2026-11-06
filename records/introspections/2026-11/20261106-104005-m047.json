@@ -1,0 +1,34 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261106-104005-m047",
+  "at": "2026-11-06T10:40:05.111808425Z",
+  "trigger": "rejection",
+  "job": "20261106-095820-edjm",
+  "intervention": null,
+  "class_of_work": "tests",
+  "category": "rejected",
+  "what_happened": "The job was the third attempt at the ETXTBSY (\"text file busy\") test flake. It moved test stand-in scripts to a shared child-process helper and added a scan test (no_in_process_exec_writes.rs) that fails if a test writes an executable stand-in in-process. The verifier rejected it with one major finding. The scan only matches the names set_permissions, from_mode and set_mode. A test that writes a stand-in in-process and then calls a production wrapper such as xtask's `set_executable`, or runs the external `chmod`, passes the scan. So the scan does not catch the regression that failed the previous job. No failed check is named, and no acceptance criterion is listed as unmet.",
+  "failure_class": "20261106-065823-5fm2",
+  "new_class": false,
+  "earlier_cases": [
+    "20261106-095756-138r"
+  ],
+  "decisions_matched": [],
+  "cause": "The flake still has no stated root cause: an executable file is written in-process and then run while a write handle or forked child may still hold it. Each attempt guarded the symptom it had just seen, which was call sites first and now a name-matching scan. Nothing required the guard to be stated in terms of that cause: an executable is created and run in the same process, whatever API does it. A scan keyed to function names is easy to get around through wrappers and external commands. Nothing checked the guard against the previous attempt's known failing pattern before the final verifier. The fix design was never settled, so each attempt kept leaving some path unprotected.",
+  "prevention_kind": "design-change",
+  "prevention": "Fix the root cause once, in one place, instead of detecting call sites. Test stand-ins would be created only through a single helper that writes the file and sets its mode in a child process (or writes to a temp name and renames after the handle is closed). Production code that runs a stand-in (for example xtask's set_executable and the gitleaks version check) would retry on ETXTBSY. A scan could then check the invariant at the right level, for example that no test file references any executable-mode-setting path other than the helper, including the wrappers and `chmod`. The scan would be verified against the known failing cases (the previous job's test and a wrapper-based fixture) before the job finishes. The reading should require the producer to name the root cause and list every writer of an executable stand-in, found by search.",
+  "proposed_request": "Finish the ETXTBSY fix for test stand-in scripts, with a root-cause design. Outcome: no test can hit \"text file busy\" when it runs a stand-in script it just wrote. Before changing code, state the root cause in the CHANGELOG entry (an executable written and run in the same process while a write handle or forked child still holds it) and list every place in tests and in xtask/athena-core that writes or marks a stand-in executable, found by searching for set_permissions, from_mode, set_mode, set_executable and chmod. Route all of them through the shared athena-testutil helper, which creates the file and sets its mode in a child process. Where production code runs a stand-in (for example the cached gitleaks version check in xtask), make that run retry briefly on ETXTBSY. Keep the scan test crates/athena-testkit/tests/no_in_process_exec_writes.rs, but make it flag any use of those names and of an external chmod outside the helper, including calls through wrappers such as xtask's set_executable. Add tests showing the scan flags a fixture that uses a wrapper and one that uses chmod, and does not flag the helper. Allowed edits: the files that contain the listed call sites, athena-testutil, the scan test, CHANGELOG.md, and the decisions entry for D08 if the change touches code it covers (amend or confirm it with a decision link). Acceptance: all listed call sites use the helper or the retry; the scan test passes and fails on the two wrapper fixtures; the full test suite passes; the CHANGELOG entry describes only what the diff does.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.1073121,
+    "input_tokens": 2,
+    "output_tokens": 1450
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [
+    "20261106-065736-dge9"
+  ],
+  "from_jev": false
+}
