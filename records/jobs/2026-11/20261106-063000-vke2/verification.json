@@ -1,0 +1,192 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261106-063000-vke2",
+  "candidate_commit": "cd7a0c3dd97977973db107f5c790424f2e6cbaab",
+  "verified_fingerprint": "sha256:67c8c0061a50556b54e6799724aebda57c54541763c51a12c726053d4bca9160",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42176001411 for cd7a0c3dd97977973db107f5c790424f2e6cbaab",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42176001411 for cd7a0c3dd97977973db107f5c790424f2e6cbaab",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42176001411 for cd7a0c3dd97977973db107f5c790424f2e6cbaab",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 3,
+  "criteria": [
+    {
+      "criterion": "Grep of crates/athena-testutil/src/lib.rs shows one helper that writes an executable script via a temp file, close, chmod, then rename, and a run helper that retries on ETXTBSY; doc comments explain the ETXTBSY cause for an outside reader.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Read lib.rs: `write_executable` writes to `.<name>.<pid>.<n>.tmp` (std::fs::write closes the handle), sets mode 0755, then renames over the path. `retry_busy` retries up to 100 times, 20 ms apart, while the error text contains \"Text file busy\", and `run` wraps `Command::output` in it. The module docs explain the fork-inherits-writer race in three numbered steps. They also say the rename alone does not close the race and that every spawn must go through `run` or `retry_busy`.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Grep finds no write-then-from_mode(0o755) stand-in pattern left in xtask/src/main.rs (stand_in_claude), crates/athena-cli/tests/reconcile.rs, crates/athena-agent/src/claude.rs, crates/athena-core/src/checks.rs, crates/athena-core/src/reading.rs or the tests of crates/athena-git/src/snapshot.rs; each calls the helper crate, which is a workspace member in Cargo.toml and a dev-dependency in the athena-agent, athena-core, athena-git, athena-cli and xtask manifests.",
+      "kind": "content",
+      "met": true,
+      "evidence": "Grep for `from_mode(0o7` in the six files finds only xtask/src/main.rs:809, which is non-test `set_executable` and out of scope. Grep for `athena_testutil::` finds a call in each of the six files. Per the diff, Cargo.toml adds the crate to the workspace members and to workspace.dependencies, and all five manifests add `athena-testutil.workspace = true` under [dev-dependencies].",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test -p athena-testutil`: a stress test writes and runs at least 200 scripts while other threads repeatedly fork/spawn processes, and none of the runs fails with ETXTBSY.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "3 passed, including `scripts_run_without_etxtbsy_while_other_threads_fork`: 8 writers × 50 = 400 scripts while 4 threads loop on `Command::new(\"true\").output()`. It finished in 0.49s with busy == 0. Caveat: the test counts only failures left after retrying, so it never shows that the race happened on a first attempt (see findings).",
+      "commands": [
+        "cargo test -p athena-testutil"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test --workspace`, `cargo clippy --workspace --all-targets` and `cargo fmt --check`: all pass or are clean.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded checks for cd7a0c3 (CI run 42176001411): fmt, clippy and test all succeeded. I also ran `cargo test -p athena-cli --lib decision`, and its 12 tests passed.",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "docs/decisions.md ends with a new entry that says D08 was checked and stands, and docs/decision-links.toml has a [[link]] with older = \"D08\" and newer = that entry's id, whose line matches the phrase in the entry, so the decisions-reconciled check passes.",
+      "kind": "content",
+      "met": true,
+      "evidence": "D157 is the last entry of docs/decisions.md. Its line 4318 reads \"Amends D08 in prose only: D08 was checked and stands.\" decision-links.toml adds a [[link]] with line = 4318, older = \"D08\", newer = \"D157\", status = \"amended\". The backtest parser in backtest.rs reads \"Amends\" followed by one id. The decisions and backtest tests passed, including `the_decision_log_is_well_formed_and_only_appended_to` and `the_real_list_maps_d08...`.",
+      "commands": [
+        "cargo test -p athena-cli --lib decision"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "CHANGELOG.md has an entry describing only what the diff does (shared stand-in helper, listed tests moved onto it, ETXTBSY retry, stress test, D08 reconcile entry), with no unrelated claims.",
+      "kind": "content",
+      "met": true,
+      "evidence": "The new Added bullet names the crate, the write/close/chmod/rename steps, the ETXTBSY retry, the six call sites, the 400-script stress test and the D157 entry with its link. It makes no unrelated claims. It does imply that the listed tests are now protected, which is only partly true (see findings).",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The diff touches only crates/athena-testutil, the manifests and Cargo.lock, the six listed test files, docs/architecture.md, docs/decisions.md, docs/decision-links.toml and CHANGELOG.md; athena.toml, defaults.toml and workflows are unchanged.",
+      "kind": "content",
+      "met": false,
+      "evidence": "The diff stat lists 20 files. One of them, xtask/shard-timings.txt (two lines added), is not in the criterion's list or in the deliverables. The change is needed: xtask/tests/ci_shards.rs:411 `checked_in_timings_cover_every_workspace_test_unit` fails without it. athena.toml, defaults.toml and workflows are unchanged. Non-test code in snapshot.rs is unchanged.",
+      "commands": [
+        "git diff HEAD~1 --stat"
+      ],
+      "commands_verified": false
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Soundness: most call sites only switched to write_executable; their stand-in runs are not retried, so the ETXTBSY flake can still happen there.",
+      "evidence": "The helper's own docs (lib.rs:22-25) and D157's Tradeoff say the rename does not close the race and the retry does: \"Use `run` (or wrap the spawn in `retry_busy`) for every stand-in a test starts.\" Grep for `retry_busy` and ETXTBSY finds a retry only in reading.rs:8150 (and claude.rs, whose production code already had its own retry_busy). The xtask tests call `repin_at(&file, &bin)`, which runs the stand-in directly. The checks.rs test runs its `cargo` stub through the check runner, which has no retry. The flake the request targets therefore remains at these sites, and the change there does nothing. Simpler, correct fix: wrap those calls in `athena_testutil::retry_busy`, as reading.rs does (e.g. `retry_busy(|| repin_at(&file, &bin))`). Alternatively, `write_executable` could block until the file is executable, for example by retrying a trivial exec or an open with O_WRONLY until it no longer reports ETXTBSY, so every call site is covered.",
+      "location": "xtask/src/main.rs:833-863, crates/athena-core/src/checks.rs:997-1010, crates/athena-cli/tests/reconcile.rs:134",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "The CHANGELOG and D157 imply that every listed stand-in test is now protected from ETXTBSY.",
+      "evidence": "\"runs them again while the kernel reports ETXTBSY ... The stand-in tests of xtask, athena-cli ..., athena-core (checks.rs, reading.rs) ... use it.\" Only reading.rs uses the retry. The others use only the write path, which the crate's own docs say does not fix the race.",
+      "location": "CHANGELOG.md:12-16, docs/decisions.md:4321-4322",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "A changed file is outside the deliverables list: xtask/shard-timings.txt.",
+      "evidence": "It adds `athena-testutil --doc 3.00` and `--lib 3.00`. The ci_shards test `checked_in_timings_cover_every_workspace_test_unit` requires these lines, so the change is justified. It is still not on the list, so criterion 7 is unmet as written. The 3.00 values look like placeholders, not measured timings (an estimate).",
+      "location": "xtask/shard-timings.txt:59-60",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stress test never shows that the race happens without the retry.",
+      "evidence": "It counts only ETXTBSY errors left after `run` has retried up to 100 times. A first-attempt ETXTBSY is never counted or reported, so a run where the race never occurred passes the same way. The behavior-evidence default asks the test to first show the failure without the protection, for example by counting first-try busy errors from a plain `Command::output()` under the same forkers.",
+      "location": "crates/athena-testutil/src/lib.rs:139-186",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "1 of 7 criteria unmet",
+    "1 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "The candidate adds the athena-testutil crate, moves all six listed stand-in sites onto `write_executable`, and reconciles D08 correctly: D157 says \"Amends D08 in prose only: D08 was checked and stands\", and a matching [[link]] at line 4318 points to it. The decision tests I ran passed. Athena's recorded fmt, clippy and test runs passed. `cargo test -p athena-testutil` passed, including the 400-script stress test. The verdict is still fail, for two reasons. First, a major soundness problem: the crate's own docs say the rename does not close the ETXTBSY race and that every stand-in run must go through `run` or `retry_busy`. Yet only reading.rs wraps its run in the retry; claude.rs is covered by retry code it already had. The stand-ins in the xtask, checks.rs and reconcile.rs tests still run without a retry, so the flake the request targets can still reject jobs there, and the CHANGELOG and D157 overstate the fix. Second, the diff also changes xtask/shard-timings.txt, which is outside the deliverables list. A CI test needs that change, but it leaves criterion 7 unmet as written. Fix: wrap those spawns in `athena_testutil::retry_busy`, or make `write_executable` wait until the file is executable, and add shard-timings.txt to the deliverables."
+}
