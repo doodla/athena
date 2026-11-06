@@ -1123,6 +1123,12 @@ pub struct Report {
     /// touch disjoint paths; they run side by side up to `[parallel] max_concurrency`, group after group in
     /// this order (one job at a time when the bound is 1).
     pub plan_groups: Vec<Vec<String>>,
+    /// How many items each of the plan's groups held when the run started, in group order. It measures how
+    /// much parallel work the plan offered, so it is the same whatever `[parallel] max_concurrency` was.
+    pub plan_group_sizes: Vec<usize>,
+    /// Queued items that had no plan entry when the run started. They belong to no group: they are counted
+    /// here and never as a group of one, so a lone planned item and an unplanned one stay apart.
+    pub unplanned: usize,
     /// Items refused for design or code because their plan lacks a goal, a ladder rung or acceptance.
     pub refused: Vec<Refusal>,
     /// Anything that went wrong beside the stop reason, such as a rating that could not be taken.
@@ -2939,6 +2945,13 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
     // queue as it then stands, by the same `prepare` as `athena plan`. `tried` is what this run has already
     // handed to a worker, so the loop ends.
     let first_plan = plan.clone();
+    // Measured from the plan the run started with, before any item is worked, for both paths.
+    let plan_group_sizes: Vec<usize> = first_plan.groups.iter().map(Vec::len).collect();
+    let unplanned = view
+        .items
+        .iter()
+        .filter(|i| !view.plan.iter().any(|e| e.id == i.job))
+        .count();
     let mut plan = plan;
     let mut wave: Vec<String> = Vec::new();
     loop {
@@ -3058,6 +3071,8 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
             .collect(),
         waiting: view.waiting,
         plan_groups: plan.groups,
+        plan_group_sizes,
+        unplanned,
         refused: plan
             .refused
             .into_iter()

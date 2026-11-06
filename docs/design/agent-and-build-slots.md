@@ -465,6 +465,10 @@ Each change is one focused job with its own tests, lands on its own, and reads i
    Effect measured by: peak in-flight jobs and mean group size in the drain's end-of-run lines, and the count
    of "low disk" outcomes (`records/jobs/**/outcome.json`; 6 so far, all dated 2026-10-25 to 2026-10-31) not rising
    while `max_concurrency` goes up. Rollback: set `max_concurrency` to 2.
+   Group sizes: **built** in the drain report (`plan_group_sizes`, with `unplanned` for queued items that have no
+   plan entry, in `crates/athena-cli/src/drain.rs`) and printed as the `group sizes` line of `athena drain`;
+   it is read from the plan, not from `plan.rs`, which is unchanged. Peak in-flight jobs, the mean group size over
+   many runs and the config change remain to do.
    Depends on: 1, 3, 4.
 7. **Put the landing rebuild behind a build slot at the top class.**
    Touches: `crates/athena-cli/src/drain.rs` (`rebuild_if_due` acquires a slot of class 1 before running
