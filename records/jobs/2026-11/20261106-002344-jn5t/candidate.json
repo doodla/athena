@@ -1,0 +1,197 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261106-002344-jn5t",
+  "base_commit": "41f655cfcfe5df5c39dfa3bb42de63459f5deb67",
+  "base_fingerprint": "sha256:6585a220fe863fd9229aafb27a580c1ea1a68a42144f9b51a25a3577e6ff731e",
+  "previous_job": "20261105-232005-y3wv",
+  "candidate_commit": "4371435c09c44cefab20f62c99610559895fc496",
+  "candidate_tree": "4f1bfbd3010dcfdf4e8227e30ca749fe99ee5e89",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 337564
+    },
+    {
+      "path": "crates/athena-agent/src/env.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 21631
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 55556
+    },
+    {
+      "path": "crates/athena-cli/src/lib.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 4566
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 87276
+    },
+    {
+      "path": "crates/athena-cli/src/slot_exec.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 7566
+    },
+    {
+      "path": "crates/athena-cli/tests/slot_exec.rs",
+      "status": "added",
+      "mode": "100644",
+      "bytes": 9016
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 94992
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 16449
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 227406
+    },
+    {
+      "path": "crates/athena-core/src/slots.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 33118
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 46571
+    }
+  ],
+  "fingerprint": "sha256:ec702e3ca9390dce8baac7d193521105eac3b3742e884cd7774baa7cb6c7f0f6",
+  "violations": [],
+  "producer_report": {
+    "summary": "A producer's `cargo build`, `test`, `clippy` and `check` now take a build slot for the length of the command. This includes forms with global flags before the subcommand, such as `cargo -q build` and `cargo --locked test`. The wrapper is the `athena` binary reached through a `cargo` link in a directory first on the producer's PATH. Root cause of a possible drift: the policy and the wrapper would each need their own idea of where the subcommand starts. `CARGO_GLOBAL_FLAGS` in policy.rs is now `pub` and is the only copy; the wrapper imports it. `main` runs `slot_exec::run_cargo` when its argv[0] name is `cargo`. The wrapper finds the real cargo on PATH, skipping its own directory. For the four slotted subcommands it acquires a `Class::Producer` slot from the existing `SlotQueue`, runs the real cargo as a child, and frees the slot when the child ends. Other subcommands run unslotted. On timeout the real cargo is not started. The wrapper prints `no build slot free for <n> s; try again`, writes the `SlotWait` hold marker to the job's hold file, and exits 75. After the invocation, `producer_loop` finds the marker and the run holds the job (`environment: build slot wait`) through the existing `hold_for_slot_wait`: no attempt is used and no outcome is recorded. `install_cargo_wrapper` in env.rs is called only on the producer's environment in producer.rs, so the checks' and the verifier's environments and commands are untouched. I also edited the design doc (step 4 now says what was built), the slots.rs module comment, and CHANGELOG.md.",
+    "files": [
+      "crates/athena-cli/src/slot_exec.rs",
+      "crates/athena-cli/src/lib.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/tests/slot_exec.rs",
+      "crates/athena-agent/src/env.rs",
+      "crates/athena-agent/src/policy.rs",
+      "crates/athena-core/src/slots.rs",
+      "crates/athena-core/src/run/producer.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/tests.rs",
+      "docs/design/agent-and-build-slots.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-cli --test slot_exec",
+        "result": "pass",
+        "note": "5 integration tests against a fake cargo and a real SlotQueue: two producers/one slot, -q build and --locked test, clippy/check, timeout, fmt/metadata unslotted. Also run once with the lookup replaced by args[0]: 3 of 5 failed, including the global-flag test, then restored."
+      },
+      {
+        "command": "cargo test -p athena-cli slot_exec",
+        "result": "pass",
+        "note": "4 unit tests for the subcommand lookup, over every flag in CARGO_GLOBAL_FLAGS"
+      },
+      {
+        "command": "cargo test -p athena-agent",
+        "result": "pass",
+        "note": "54 passed, 2 ignored helpers; includes the new env test and the existing policy tests"
+      },
+      {
+        "command": "cargo test -p athena-core producer_cargo_command",
+        "result": "pass",
+        "note": "run-level test: a producer's cargo that found no slot holds the job, not failed; PATH starts with the wrapper dir"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed. It reads only tracked files; I reread the new files against the banned words by hand."
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo fmt --all",
+        "result": "pass",
+        "note": "applied formatting; I did not run --check separately"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "A test run with `cargo test` drives the wrapper with one slot and two producer processes. The second blocks while the first holds the slot, then runs after the first finishes. Afterwards the slot is free (try_acquire succeeds).",
+        "status": "met",
+        "evidence": "crates/athena-cli/tests/slot_exec.rs `the_second_producer_waits_for_the_one_slot_then_runs` passed. It spawns two real wrapper processes with one slot. The queue shows 1 waiting and the log shows only 'start a build' while the first runs. After release the log is start a, end a, start b, end b. try_acquire then succeeds."
+      },
+      {
+        "criterion": "A test runs `cargo -q build` and `cargo --locked test` through the wrapper against a fake cargo. It asserts that both took a slot while running and freed it afterwards. It fails if the wrapper reads only its first argument, so the test must break if the subcommand lookup is replaced with args[0].",
+        "status": "met",
+        "evidence": "`a_global_flag_before_the_subcommand_does_not_skip_the_queue` passed. It checks try_acquire is None while the fake cargo runs and the slot is free after. I replaced takes_slot with args.first() and reran `cargo test -p athena-cli --test slot_exec`: that test failed ('`cargo -q build` took no slot'), as did the clippy/check and timeout tests. I then restored the real lookup."
+      },
+      {
+        "criterion": "A test where no slot frees within the wait limit asserts that the command ends with the documented message ('no build slot free for ... s; try again') and a non-failure environment exit, and that the job is recorded as held (`environment: build slot wait`), not failed. The real cargo is never started.",
+        "status": "met",
+        "evidence": "`no_slot_within_the_limit_ends_the_command_and_holds_the_job` asserts exit 75, stderr 'no build slot free for 1 s; try again', an empty fake-cargo log, and read_slot_hold text starting with BUILD_SLOT_WAIT. The fake cargo is released in advance, so a wrongly started cargo would show in the log. In athena-core, `a_producer_cargo_command_that_found_no_build_slot_holds_the_job` asserts the run returns SlotWait, the 'held       environment: build slot wait' line, state Dispatched, no outcome, score or introspection, and no verifier run."
+      },
+      {
+        "criterion": "A test shows `cargo fmt` and `cargo metadata` run through the wrapper without taking a slot, even when every slot is held. `cargo test` also passes and `cargo clippy` is clean.",
+        "status": "met",
+        "evidence": "`fmt_and_metadata_run_without_a_slot_even_when_every_slot_is_held` passed: the test holds the only slot, both commands exit 0 in under 900 ms and no hold marker is written. The targeted test runs above passed and `cargo clippy --all-targets --locked -- -D warnings` was clean. I did not run the full suite; Athena's checks cover it."
+      },
+      {
+        "criterion": "CARGO_GLOBAL_FLAGS in crates/athena-agent/src/policy.rs is made shared, and Grep shows the wrapper uses that one list. No second copy of the list exists. check_cargo behavior is otherwise unchanged and its existing policy tests pass.",
+        "status": "met",
+        "evidence": "policy.rs now has `pub const CARGO_GLOBAL_FLAGS` (visibility and doc comment only; check_cargo is untouched). slot_exec.rs imports `athena_agent::policy::CARGO_GLOBAL_FLAGS`. The unit test `every_policy_global_flag_is_skipped` iterates that same list. `cargo test -p athena-agent` passed all policy tests."
+      },
+      {
+        "criterion": "The producer's PATH puts the wrapper directory first, and this is set in crates/athena-agent/src/env.rs. A test or Grep shows verifier environments and verifier commands are not changed.",
+        "status": "met",
+        "evidence": "`install_cargo_wrapper` in env.rs prefixes PATH with the wrapper dir. The env test `the_producer_gets_the_cargo_wrapper_first_on_its_path_and_the_verifier_does_not` passed: producer PATH starts with the wrapper dir, which holds a cargo link; the Verify-side env has an unchanged PATH and no slot variables. The only call site is producer.rs, on the Producer invocation's spec.env. `agent_spec`, the checks and verification.rs are untouched. The athena-core run test also asserts the producer's PATH begins with the wrapper dir."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for producer cargo commands taking a build slot. The diff touches no governance files (athena.toml, defaults.toml, workflows) and no records/.",
+        "status": "met",
+        "evidence": "A new entry is first under [Unreleased] / Added in CHANGELOG.md. The files I changed are listed in `files`; none is athena.toml, defaults.toml, a workflow or under records/."
+      }
+    ],
+    "open_issues": [
+      "If the wrapper process is killed while its child cargo runs, the slot lock frees at once but the child keeps running. The design asks for 'frees the slot at exit or signal'; a process-group or parent-death mechanism would close this and was left out to keep the change small.",
+      "A hold from a producer slot timeout carries no candidate, because the work tree is removed. A later drain retries the job from the start; it does not resume from kept work. The design note records this.",
+      "`queued_s` per producer command and the peak-slots count are still not recorded in `commands_run` (out of scope).",
+      "The design text of step 4 says the policy allows only the wrapper form of cargo. I did not add that: the brief limits policy.rs to sharing the flag list."
+    ],
+    "mistakes": [
+      "The first fake-cargo fixture could hang under mutation (a wrongly unslotted command would block forever in `.output()`). My mutation run therefore hung for about 10 minutes, and its background cargo held the build lock for a while. I fixed it with a `done` file written on Fixture drop and a pre-released fake in the timeout test.",
+      "The first compile of the run test failed on a missing `use std::path::Path`; fixed."
+    ],
+    "learnings": [
+      "The producer's agent environment is built in `Athena::agent_spec` (reading.rs) from `env::build`. The producer stage then owns `spec.env`, so the wrapper is installed on the producer's invocation only, with no change to `EnvSpec` or its many call sites.",
+      "`ATHENA_STATE_DIR` inside an agent's environment points at the job's own `athena-state`, not the real state. The wrapper therefore gets the real slots dir and hold file through dedicated `ATHENA_SLOT_*` variables.",
+      "main.rs already dispatches on argv[0] (pre-commit, commit-msg), so a `cargo` link to the binary fits the existing pattern. This removes any need for a non-Rust shell wrapper.",
+      "A fake-cargo test that blocks waiting for a release file hangs the whole test run if a mutation breaks the wrapper and the test calls .output() before releasing it. The tests pre-release or write a `done` file on drop to avoid this.",
+      "`tail` and reading from /tmp are denied to the producer's Bash and Read tools, so background command output cannot be read."
+    ],
+    "desires": [
+      "A way to read a background command's output file, or a kill for a stray test process.",
+      "A shared test helper that makes a fake cargo, so other tests could reuse it."
+    ]
+  }
+}
