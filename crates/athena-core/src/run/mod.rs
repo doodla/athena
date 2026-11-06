@@ -28,8 +28,9 @@ use athena_context::briefs::{
     AcceptedReading, CandidateView, CheckResultView, CheckView, CriticInputs, DeliverableFact,
     PlanRevision, PlannerInputs, ProducerInputs, REPLAY_BRIEF_MAX_LISTED, ReplayView,
     RetryFindings, RetrySeed, VerifierInputs, VerifierPlan, class_summaries, critic_brief,
-    evidence_placeholder, planner_brief, producer_brief_with_evidence, producer_prompt_with_plan,
-    render_plan_section, verifier_brief_with_evidence,
+    evidence_placeholder, planner_brief, producer_brief_with_evidence,
+    producer_prompt_with_governing, producer_prompt_with_plan, render_plan_section,
+    verifier_brief_with_evidence,
 };
 use athena_context::outputs::{
     CriticOutput, CritiqueVerdictOutput, DeliverableActionOutput, DependentKindOutput, PlanOutput,
@@ -76,7 +77,7 @@ use verification::Checked;
 pub use checks::demo_seam::{Guard as DemoRunnerGuard, install as install_demo_runner};
 pub use close::{build_text, closing_subject};
 pub(crate) use send_back::{
-    left_to_athena, send_back_text, send_back_text_with_replay, unmet_criteria,
+    left_to_athena, send_back_text, send_back_text_full, send_back_text_with_replay, unmet_criteria,
 };
 
 /// How `go` ended.
@@ -1095,6 +1096,16 @@ impl Athena {
                 return self.close_dispatched(&ctx, closing);
             }
         }
+        // The decisions that govern the files the plan and the deliverables expect to change, so the
+        // producer reconciles them the first time. It is added to the prompt only: the stored brief and its
+        // hash are the ones committed at dispatch.
+        producer_prompt = producer_prompt_with_governing(
+            &producer_prompt,
+            &self.governing_decisions(
+                &ctx.prediction,
+                &planned_paths(closing.plans.last(), &accepted),
+            ),
+        );
         let run = self.produce_and_verify(&ctx, &producer_prompt, &accepted, closing);
         self.finish_dispatched(&ctx, run)
     }
@@ -1549,7 +1560,8 @@ impl Athena {
         // Decisions the change reverses are found here, at the producer's step, before the pull request, the
         // checks and the verifier cost anything. A resume at the verifier stage passed this on its first run,
         // and a nested run is judged by the outer job. The closing reason names each decision and the fix; the
-        // retry brief carries it to the next producer (`reading::retry_findings`).
+        // retry brief carries it to the next producer (`reading::retry_findings`). The producer loop has
+        // already sent a change back once with this message; a change still unreconciled ends here.
         if recorded_checks.is_none() && self.nested.is_none() {
             let changed: Vec<String> = closing
                 .candidate

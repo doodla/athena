@@ -7,6 +7,50 @@ use super::*;
 const DECISION_LOG: &str = "docs/decisions.md";
 const DECISION_LINKS: &str = "docs/decision-links.toml";
 
+/// The texts the decision gate reads besides the base list: the base's log, and the candidate's list and log.
+struct DecisionTexts {
+    base_log: String,
+    cand_links: String,
+    cand_log: String,
+}
+
+/// The gate's closing reason for a change, from the base list and the changed paths; `Ok(None)` when the change
+/// reconciles every decision it touches or the base has no list. `texts` is read only when the base has a
+/// list. `Err` is why the base list cannot be read. This is the one place the reason is worded, so the retry
+/// reader's [`athena_data::decision_links::GATE_REASON_PREFIX`] always matches it.
+fn decision_gate(
+    base_links: &str,
+    changed: &[String],
+    texts: impl FnOnce() -> DecisionTexts,
+) -> Result<Option<String>, String> {
+    use athena_data::decision_links::{GATE_REASON_PREFIX, unreconciled};
+    if base_links.is_empty() {
+        return Ok(None);
+    }
+    let texts = texts();
+    let found = unreconciled(
+        base_links,
+        &texts.cand_links,
+        &texts.base_log,
+        &texts.cand_log,
+        changed,
+    )?;
+    if found.is_empty() {
+        return Ok(None);
+    }
+    let each: Vec<String> = found
+        .iter()
+        .map(|u| format!("{} ({})", u.decision, u.touched.join(", ")))
+        .collect();
+    Ok(Some(format!(
+        "{GATE_REASON_PREFIX} the change touches code that {DECISION_LOG} records decisions for: {}. \
+         Add an entry to {DECISION_LOG} that amends or supersedes each decision (or says it was checked \
+         and stands), and a matching [[link]] in {DECISION_LINKS} whose older is the decision and whose \
+         newer is the new entry.",
+        each.join("; ")
+    )))
+}
+
 /// Runs one routed check in the verifier's snapshot, then puts the snapshot back as it was prepared.
 ///
 /// It is called only when a check really runs here, so it is also where the free-disk requirement of the
@@ -379,48 +423,74 @@ impl Athena {
         candidate: &str,
         changed: &[String],
     ) -> Option<String> {
-        use athena_data::decision_links::{GATE_REASON_PREFIX, unreconciled};
-        let text = |commit: &str, path: &str| -> String {
-            self.git
-                .show_file(commit, path)
-                .ok()
-                .flatten()
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                .unwrap_or_default()
-        };
-        let base_links = text(base, DECISION_LINKS);
-        if base_links.is_empty() {
-            return None;
-        }
-        let found = match unreconciled(
-            &base_links,
-            &text(candidate, DECISION_LINKS),
-            &text(base, DECISION_LOG),
-            &text(candidate, DECISION_LOG),
-            changed,
-        ) {
-            Ok(found) => found,
+        match decision_gate(&self.committed_text(base, DECISION_LINKS), changed, || {
+            DecisionTexts {
+                base_log: self.committed_text(base, DECISION_LOG),
+                cand_links: self.committed_text(candidate, DECISION_LINKS),
+                cand_log: self.committed_text(candidate, DECISION_LOG),
+            }
+        }) {
+            Ok(reason) => reason,
             Err(why) => {
                 ctx.ui.line(&format!(
                     "warning: {DECISION_LINKS} could not be read, so decisions are not checked: {why}"
                 ));
-                return None;
+                None
+            }
+        }
+    }
+
+    /// [`Athena::unreconciled_decisions`] for the producer's work tree, before a candidate commit exists: the
+    /// candidate's texts are the work tree's blobs for the changed files and the base's for the rest, which is
+    /// what the committed candidate holds. The producer loop uses it to send a change back once. A base list
+    /// that cannot be read gives `None` and no line: the gate at the candidate prints that warning.
+    pub(super) fn unreconciled_in_snapshot(
+        &self,
+        base: &str,
+        snapshot: &Snapshot,
+        changes: &[athena_git::DiffEntry],
+    ) -> Option<String> {
+        let changed: Vec<String> = changes.iter().map(|c| c.path.clone()).collect();
+        let candidate_text = |path: &str| -> String {
+            match changes.iter().find(|c| c.path == path) {
+                Some(c) if c.status == 'D' => String::new(),
+                Some(c) => snapshot
+                    .blob(&c.new_oid)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_default(),
+                None => self.committed_text(base, path),
             }
         };
-        if found.is_empty() {
-            return None;
-        }
-        let each: Vec<String> = found
-            .iter()
-            .map(|u| format!("{} ({})", u.decision, u.touched.join(", ")))
-            .collect();
-        Some(format!(
-            "{GATE_REASON_PREFIX} the change touches code that {DECISION_LOG} records decisions for: {}. \
-             Add an entry to {DECISION_LOG} that amends or supersedes each decision (or says it was checked \
-             and stands), and a matching [[link]] in {DECISION_LINKS} whose older is the decision and whose \
-             newer is the new entry.",
-            each.join("; ")
-        ))
+        decision_gate(&self.committed_text(base, DECISION_LINKS), &changed, || {
+            DecisionTexts {
+                base_log: self.committed_text(base, DECISION_LOG),
+                cand_links: candidate_text(DECISION_LINKS),
+                cand_log: candidate_text(DECISION_LOG),
+            }
+        })
+        .unwrap_or_default()
+    }
+
+    /// The decisions of the base's list that govern the `planned` paths, for the producer's brief. A base with
+    /// no list, or one that cannot be read, gives none and prints nothing: the gate at the candidate is where
+    /// an unreadable list is reported.
+    pub(super) fn governing_decisions(
+        &self,
+        base: &str,
+        planned: &[String],
+    ) -> Vec<athena_data::decision_links::Governing> {
+        athena_data::decision_links::governing(&self.committed_text(base, DECISION_LINKS), planned)
+            .unwrap_or_default()
+    }
+
+    /// The text of `path` at `commit`; empty when the file is absent or cannot be read.
+    fn committed_text(&self, commit: &str, path: &str) -> String {
+        self.git
+            .show_file(commit, path)
+            .ok()
+            .flatten()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default()
     }
 
     /// Removes the producer's build directory before the candidate's checks start. The checks build in their
