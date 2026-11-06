@@ -52,6 +52,25 @@ matching governance file (`.github/workflows/` or `athena.toml`), and a new conf
 it in an acceptance criterion, or name it in `out_of_scope`. Otherwise it is refused and the reader repairs it,
 instead of the job failing at admission after the producer has finished.
 
+The replay of accepted readings is a check inside the producer loop, not only a hold after it. Root cause of
+the repeated failure it answers: nothing made the producer measure a new or tightened refusal rule against past
+accepted readings while it worked; the replay ran once, after the producer finished, so a rule that newly
+refused too many past readings was rejected after the work was done and the producer never saw the list. Now,
+after each parsed producer report whose change list touches `crates/`, `Cargo.toml` or `Cargo.lock`
+(`touches_reading_rules`; a change of documents only cannot alter the compiled rules), the core builds the
+candidate commit, takes a build slot for the two builds (the producer class, into the slot's warm target
+directory) and replays the newest accepted readings through the base and candidate builds (`Athena::loop_replay`
+in `run/mod.rs`, called from `producer_loop`). The limit is the hold's own (`replay_limit_percent`):
+`REPLAY_HOLD_PERCENT` (10%), or the share the acceptance criteria declare as "N% of newly refused readings"
+plus 5 points; exactly the limit passes. A share over the limit joins the unmet criteria and unchanged files in
+the one send-back (`PRODUCER_SEND_BACKS`), and the brief names the newly refused job ids, their reasons, the
+measured percent and the limit. A replay that cannot run (an empty history, low disk, no free slot within
+`build_wait_s`, an unbuildable side, a fake driver) prints `replay     in the loop: no replay: <reason>`; it is
+never a pass and never a send-back. The hold at verification (`replay_stage`, the `replay.json` record and the
+verifier's blocker) is unchanged and stays as the backstop, for a producer that does not fix the share and for a
+job resumed from a kept candidate. It reuses the loop's measurement only when that was measured, the candidate
+tree is the same and the accepted readings are the same; otherwise it measures again.
+
 ## Crates and dependency direction
 
 The workspace is split into crates so that Cargo enforces "no cycles". The table below is checked against

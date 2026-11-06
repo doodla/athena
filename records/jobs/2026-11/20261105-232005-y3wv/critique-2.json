@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-232005-y3wv",
+  "round": 2,
+  "at": "2026-11-06T01:21:51.168117486Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "`finished_job` uses a Quiet UI, so the planned UI-line assertions cannot be made through it.",
+      "evidence": "`finished_job` calls `athena.ask(..., &Quiet)` and `athena.go(..., &Quiet)`, so no UI line is kept. Criteria 2-4 assert `replay     in the loop:` lines and that they come before `checks`. Those assertions need a `Lines` UI. Fix: Have the new run tests call `athena.ask` and `athena.go(job, AcceptedBy::User, &ui)` with `Lines::default()`, as `a_check_that_waits_past_build_wait_s_holds_the_job` does (tests.rs:2782-2794), instead of `finished_job`.",
+      "location": "Demonstrations, criterion 2 test seam ('via the existing `finished_job` helper'); crates/athena-core/src/run/tests.rs:1476-1485",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan contradicts itself on whether `loop_replay` goes through `replay_history`, and that changes whether the warm slot target survives.",
+      "evidence": "Step 4 puts the cleanup of `dir` (which holds `base-tree` and `candidate-tree`, mod.rs:1824) inside `replay_history`. Step 5 needs `clean_workspace_output(<candidate tree>, <target>)` to run after the builds, while that tree still exists, and before the slot is dropped and `replay` runs. If `loop_replay` goes through `replay_history`, the tree is gone when the clean runs. Each cleanup then falls back to `reset_slot_target`, so the warm-target saving the plan claims is lost, and the slot is held while `replay` runs. Fix: Say exactly which helper `loop_replay` calls. For example: `replay_checkers(target)`, then `clean_workspace_output` on `dir/candidate-tree`, then drop the slot, then `replay`, then remove `dir`. Or give `replay_history` a step that runs after the builds and before it removes `dir`.",
+      "location": "Files (run/mod.rs: loop_replay uses `replay_history`) vs Step 4 / Step 5(6)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The claim that a job not sent back adds no builds is false for jobs that fail their checks or admission.",
+      "evidence": "`replay_run` returns `no replay: a check failed` without building (mod.rs:1772-1774), and a job refused at admission never reaches it. The in-loop replay builds a pair before admission and before the checks, so those jobs now pay a pair they do not pay today. The claim of zero added builds holds only for jobs that pass admission and their checks. Fix: Correct the cost statement. Better: run the in-loop replay only once `admit` (candidate.rs:154) would admit the change list. That also avoids building, outside the producer's sandbox, code the secret scan would refuse (admission.rs:475-490).",
+      "location": "Risks: Cost ('a job that is not sent back adds zero builds'); Decision 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "With the default settings, the advisory in-loop replay can wait up to 30 minutes per pass and holds the only build slot.",
+      "evidence": "With the defaults, `max_check_slots` is 1 and `build_wait_s` is 1800 (athena-data config.rs:165-166). `Class::Producer` is the lowest class (slots.rs:37-44). An advisory in-loop replay can therefore wait up to 30 minutes per pass in the critical path of a job. While it holds the only slot for two builds, every other job's checks wait. The post-hoc replay takes no slot today, so this changes throughput and the plan does not state it. Fix: State the worst-case wait (estimate: up to `build_wait_s` per gated pass) and the serialization in Risks. Or bound the advisory wait with a fixed short constant (no config key), for example `try_acquire` with a short retry, since a `SlotWait` here only means `no replay` and the post-hoc hold still runs.",
+      "location": "Decision 4 / Risks: Slot contention",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The fake candidate checker is driven by a producer-run counter, so the test shows that the loop reacts, not that the producer's change fixed the share.",
+      "evidence": "The candidate closure refuses or accepts based on a producer-run counter, not on what the second pass changed. This is acceptable because the replay seam cannot see the candidate commit (lib.rs:153-182). Fix: Name this limit in the test's doc comment so a reader does not take it as evidence that the producer fixed the rule.",
+      "location": "Demonstrations, criterion 2 fake",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code the plan names: `producer_loop`, `replay_stage`/`replay_run`/`replay_checkers` (mod.rs:1714-1860), `build_candidate` (candidate.rs), `send_back_text`, `SlotQueue`/`Class`, `SnapExec::clean_slot_target`, `replay_is_held`/`ReplayRun`, the replay seam, the briefs constants and the test fixtures. All of them exist and match what the plan says. The plan fixes the cause where it starts. The producer loop never saw the replay. The plan runs the existing replay code inside that loop and sends the newly refused list and the share back through the one existing send-back, so the post-hoc hold stays as the backstop. Letting the hold reuse the in-loop measurement when the tree and cases are the same is sound. Trees, not commits, are compared, and the candidate tree depends only on the base and the change list. The demonstrations go through `Athena::go` with the existing seams, and each would fail on the base tree: the prompt count, the `## Sent back` content, the prefixed UI line, and the call count for reuse. The dependents list matches my searches. `report_gaps` is read in candidate.rs:140, verification.rs:100 and the resume mark, and adding a replay gap breaks none of them. `send_back_text` has two pinned callers, `replay_checkers` and `Built` have one and two construction sites, and no existing tests.rs producer edits `crates/`. The rule-input gate is sound: `check-reading` is a pure function of compiled code. The remaining findings are minor: two test details and claims about cost and wait time that are too strong."
+}

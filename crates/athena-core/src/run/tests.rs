@@ -1695,6 +1695,425 @@ mod produce_and_verify_order_tests {
         assert!(checker.check("add a greeting", &reading).is_err());
     }
 
+    // -- The replay inside the producer's loop
+    //
+    // Root cause under test: nothing made the producer measure a refusal rule against past accepted readings
+    // while it worked. These tests run whole jobs through `Athena::go`: the producer edits code, the replay
+    // seam stands for the candidate build's rules, and the replay, its limit, its build slot and the
+    // send-back text are production code.
+
+    /// What a job run for the in-loop replay left behind.
+    struct LoopRun {
+        /// The user prompt of every producer invocation, in order.
+        prompts: Vec<String>,
+        /// Every line the UI printed, in order.
+        lines: Vec<String>,
+        /// How many times the candidate checker was called.
+        candidate_calls: usize,
+        state: OutcomeState,
+        replay: Replay,
+    }
+
+    impl LoopRun {
+        /// The index of the first UI line starting with `prefix`.
+        fn position(&self, prefix: &str) -> Option<usize> {
+            self.lines.iter().position(|l| l.starts_with(prefix))
+        }
+
+        fn in_loop_lines(&self) -> Vec<&String> {
+            self.lines
+                .iter()
+                .filter(|l| l.contains("in the loop"))
+                .collect()
+        }
+    }
+
+    const IN_LOOP: &str = "replay     in the loop: ";
+
+    /// The fake agents of `base_script`, except that the producer also edits `edited` (a path), counts its
+    /// runs in `runs` and keeps every prompt it gets in `prompts`. With `declared`, the reader adds the
+    /// criterion "expected N% of newly refused readings" and the producer reports it met.
+    fn script_editing(
+        edited: Option<&'static str>,
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+        prompts: Arc<Mutex<Vec<String>>>,
+        declared: Option<u32>,
+    ) -> athena_agent::fake::Script {
+        let inner = base_script();
+        let criterion = declared.map(|d| format!("expected {d}% of newly refused readings"));
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            match spec.role {
+                Role::Reader => {
+                    if let (Some(text), Some(out)) = (&criterion, turn.structured.as_mut()) {
+                        out["acceptance_criteria"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!({ "text": text, "kind": "content" }));
+                    }
+                }
+                Role::Producer => {
+                    runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    prompts.lock().unwrap().push(spec.user_prompt.clone());
+                    if let Some(path) = edited {
+                        turn.edits
+                            .push((path.into(), Some("pub fn demo() {}\n".into())));
+                    }
+                    if let (Some(text), Some(out)) = (&criterion, turn.structured.as_mut()) {
+                        out["criteria_check"].as_array_mut().unwrap().push(
+                            json!({ "criterion": text, "status": "met", "evidence": "read it" }),
+                        );
+                    }
+                }
+                _ => {}
+            }
+            turn
+        })
+    }
+
+    /// The real reading rules plus a refusal for the marker in the title, but only while the producer has run
+    /// fewer than `refuse_below` times, so a producer that is sent back fixes the cause by its second run.
+    /// Every call is counted in `calls`.
+    fn marker_rules_while(
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+        refuse_below: usize,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> std::rc::Rc<dyn ReadingChecker> {
+        std::rc::Rc::new(move |request: &str, reading: &Reading| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let after = runs.load(std::sync::atomic::Ordering::SeqCst);
+            Ok(match crate::reading::check_reading_text(reading, request) {
+                crate::reading::ReadingCheck::Accept
+                    if reading.title.contains(MARKER) && after < refuse_below =>
+                {
+                    crate::reading::ReadingCheck::Refuse("the marker rule refuses this".into())
+                }
+                other => other,
+            })
+        })
+    }
+
+    /// One job over a history of 10 accepted readings of which `marked` carry the marker. The producer edits
+    /// `edited`, and the candidate rules refuse the marker while the producer has run fewer than
+    /// `refuse_below` times. `seam` off leaves the replay unrunnable; `seeded` off leaves the history empty.
+    #[allow(clippy::too_many_arguments)]
+    fn run_loop(
+        edited: Option<&'static str>,
+        seeded: bool,
+        seam: bool,
+        marked: usize,
+        refuse_below: usize,
+        declared: Option<u32>,
+        config: &str,
+        hold_slot: bool,
+    ) -> (LoopRun, Option<anyhow::Error>) {
+        use std::sync::atomic::AtomicUsize;
+        let repo = repo_with_config(config);
+        let state = tempfile::tempdir().unwrap();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script_editing(edited, runs.clone(), prompts.clone(), declared),
+        );
+        if seeded {
+            seed_accepted_jobs(&athena, 10, marked);
+        }
+        let _seam = seam.then(|| {
+            crate::replay_seam::install(
+                real_rules(),
+                marker_rules_while(runs.clone(), refuse_below, calls.clone()),
+            )
+        });
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let holder = hold_slot.then(|| take_slot_soon(&slot_queue(&athena)));
+        let ui = Lines::default();
+        let result = athena.go(proposal.job.as_str(), AcceptedBy::User, &ui);
+        drop(holder);
+        let lines = ui.0.lock().unwrap().clone();
+        let prompts = prompts.lock().unwrap().clone();
+        let candidate_calls = calls.load(std::sync::atomic::Ordering::SeqCst);
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let job = records.jobs.get(proposal.job.as_str());
+        let replay = job.and_then(|j| j.replay.clone());
+        let (state, error) = match result {
+            Ok(GoResult::Finished(finished)) => (finished.state, None),
+            Ok(GoResult::Reread(_)) => panic!("expected the job to finish"),
+            Err(error) => (OutcomeState::Failed, Some(error)),
+        };
+        (
+            LoopRun {
+                prompts,
+                lines,
+                candidate_calls,
+                state,
+                replay: replay
+                    .unwrap_or_else(|| ReplayRun::none("no record").record(&proposal.job, "", "")),
+            },
+            error,
+        )
+    }
+
+    const CODE: Option<&str> = Some("crates/demo/src/lib.rs");
+
+    #[test]
+    fn producer_is_sent_back_with_the_newly_refused_list_and_share_then_the_loop_ends_under_the_limit()
+     {
+        // 3 of 10 accepted readings carry the marker; the candidate rules refuse them on the producer's first
+        // run only, as a producer that fixed a too-broad rule would.
+        let (run, error) = run_loop(CODE, true, true, 3, 2, None, "", false);
+        assert!(error.is_none(), "{error:?}");
+        // The producer ran twice: the first prompt is the brief, the second is the send-back.
+        assert_eq!(run.prompts.len(), 2, "{:?}", run.lines);
+        assert!(!run.prompts[0].contains("## Sent back"));
+        let second = &run.prompts[1];
+        assert!(second.contains("## Sent back"), "{second}");
+        for id in [
+            "20200101-000000-0000",
+            "20200101-000001-0001",
+            "20200101-000002-0002",
+        ] {
+            assert!(second.contains(id), "the send-back omits {id}: {second}");
+        }
+        assert!(second.contains("30%"), "{second}");
+        assert!(second.contains("limit 10%"), "{second}");
+        // The UI shows both measurements, each before the checks.
+        let held = format!("{IN_LOOP}3 of 10 accepted readings newly refused (30%, limit 10%)");
+        let fixed = format!("{IN_LOOP}0 of 10 accepted readings newly refused (0%, limit 10%)");
+        let checks = run.position("checks     ").expect("a checks line");
+        let first = run
+            .position(&held)
+            .unwrap_or_else(|| panic!("{:#?}", run.lines));
+        let last = run
+            .position(&fixed)
+            .unwrap_or_else(|| panic!("{:#?}", run.lines));
+        assert!(first < last && last < checks, "{:#?}", run.lines);
+        assert!(
+            run.lines.iter().any(|l| l
+                .starts_with("producer   sent back: replay of accepted readings: 3 of 10 (30%)")),
+            "{:#?}",
+            run.lines
+        );
+        // The loop ended under the limit, so the hold at verification passes and the job lands.
+        assert_eq!(run.state, OutcomeState::Landed, "{:#?}", run.lines);
+        assert_eq!(run.replay.no_replay, None);
+        assert_eq!((run.replay.total, run.replay.newly_refused.len()), (10, 0));
+        assert!(!run.replay.held);
+        // The post-hoc hold reused the second measurement: two passes of 10 readings, no third.
+        assert_eq!(run.candidate_calls, 20);
+    }
+
+    #[test]
+    fn the_post_hoc_hold_reuses_the_in_loop_measurement_for_the_same_tree() {
+        // Nothing is refused, so the producer is not sent back; the loop measured once.
+        let (run, error) = run_loop(CODE, true, true, 3, 0, None, "", false);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(run.prompts.len(), 1);
+        assert_eq!(run.state, OutcomeState::Landed, "{:#?}", run.lines);
+        assert_eq!((run.replay.total, run.replay.newly_refused.len()), (10, 0));
+        // Ten candidate calls: the loop's. The hold at verification built and ran nothing more.
+        assert_eq!(run.candidate_calls, 10);
+        let said = run.position("replay     0 of 10 accepted readings newly refused");
+        assert!(said.is_some(), "the hold still reports: {:#?}", run.lines);
+        assert!(run.position(&format!("{IN_LOOP}0 of 10")).is_some());
+    }
+
+    #[test]
+    fn in_loop_replay_exactly_at_the_default_limit_passes_and_one_over_is_sent_back() {
+        // 1 of 10 is exactly 10%: not sent back, and not held.
+        let (at, error) = run_loop(CODE, true, true, 1, usize::MAX, None, "", false);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(at.prompts.len(), 1, "{:#?}", at.lines);
+        assert!(
+            at.position(&format!(
+                "{IN_LOOP}1 of 10 accepted readings newly refused (10%, limit 10%)"
+            ))
+            .is_some(),
+            "{:#?}",
+            at.lines
+        );
+        assert!(!at.prompts[0].contains("## Sent back"));
+        assert_eq!(at.state, OutcomeState::Landed, "{:#?}", at.lines);
+
+        // 2 of 10 is 20%: sent back with the share. The producer cannot fix it, so the work goes on with the
+        // gap and the hold at verification, the backstop, rejects it.
+        let (over, error) = run_loop(CODE, true, true, 2, usize::MAX, None, "", false);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(over.prompts.len(), 2, "{:#?}", over.lines);
+        assert!(
+            over.prompts[1].contains("2 of 10 (20%) newly refused, limit 10%"),
+            "{}",
+            over.prompts[1]
+        );
+        assert!(
+            over.lines.iter().any(|l| l.starts_with("producer   report still incomplete after the send-back: replay of accepted readings: 2 of 10 (20%)")),
+            "{:#?}",
+            over.lines
+        );
+        assert_eq!(over.state, OutcomeState::Rejected, "{:#?}", over.lines);
+        assert!(over.replay.held);
+    }
+
+    #[test]
+    fn in_loop_replay_applies_the_declared_share_plus_five_points() {
+        // A reading that declares 20% of newly refused readings is held above 25%.
+        let (at, error) = run_loop(CODE, true, true, 2, usize::MAX, Some(20), "", false);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(at.prompts.len(), 1, "{:#?}", at.lines);
+        assert!(
+            at.position(&format!(
+                "{IN_LOOP}2 of 10 accepted readings newly refused (20%, limit 25%)"
+            ))
+            .is_some(),
+            "{:#?}",
+            at.lines
+        );
+        let (over, error) = run_loop(CODE, true, true, 3, usize::MAX, Some(20), "", false);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(over.prompts.len(), 2, "{:#?}", over.lines);
+        assert!(
+            over.prompts[1].contains("3 of 10 (30%) newly refused, limit 25%"),
+            "{}",
+            over.prompts[1]
+        );
+    }
+
+    #[test]
+    fn an_unrunnable_replay_says_no_replay_in_the_loop() {
+        // The history exists, the work touches code, and no seam is installed: the fake driver builds nothing,
+        // so the replay cannot run. That is reported as no replay, never as a pass and never as a send-back.
+        let (run, error) = run_loop(CODE, true, false, 3, 0, None, "", false);
+        assert!(error.is_none(), "{error:?}");
+        let said = format!("{IN_LOOP}no replay: the driver is a fake, so nothing is built");
+        let at = run
+            .position(&said)
+            .unwrap_or_else(|| panic!("{:#?}", run.lines));
+        assert!(at < run.position("checks     ").unwrap());
+        assert!(
+            run.lines.iter().all(|l| !l.contains("in the loop: 0 of")),
+            "{:#?}",
+            run.lines
+        );
+        assert_eq!(run.prompts.len(), 1);
+        assert!(
+            run.replay
+                .no_replay
+                .as_deref()
+                .is_some_and(|r| r.starts_with("no replay:"))
+        );
+    }
+
+    #[test]
+    fn an_empty_history_in_the_loop_is_no_replay_and_not_success() {
+        let (run, error) = run_loop(CODE, false, true, 0, 0, None, "", false);
+        assert!(error.is_none(), "{error:?}");
+        let said = format!("{IN_LOOP}no replay: no accepted readings in the history");
+        let at = run
+            .position(&said)
+            .unwrap_or_else(|| panic!("{:#?}", run.lines));
+        assert!(at < run.position("checks     ").unwrap());
+        assert!(
+            run.lines.iter().all(|l| !l.contains("in the loop: 0 of")),
+            "{:#?}",
+            run.lines
+        );
+        assert_eq!(run.prompts.len(), 1);
+        assert_eq!(
+            run.replay.no_replay.as_deref(),
+            Some("no replay: no accepted readings in the history")
+        );
+        assert_eq!(run.candidate_calls, 0);
+    }
+
+    #[test]
+    fn a_job_whose_change_touches_no_reading_rule_is_not_replayed_in_the_loop() {
+        // The change is a document only, so the loop does not replay it: no in-loop line, one producer run.
+        // The seam refuses 3 of 10, so the hold at verification, the backstop, still rejects the job.
+        let (run, error) = run_loop(None, true, true, 3, usize::MAX, None, "", false);
+        assert!(error.is_none(), "{error:?}");
+        assert!(run.in_loop_lines().is_empty(), "{:#?}", run.lines);
+        assert_eq!(run.prompts.len(), 1);
+        assert_eq!(run.state, OutcomeState::Rejected, "{:#?}", run.lines);
+        assert!(run.replay.held);
+        assert_eq!(run.replay.newly_refused.len(), 3);
+    }
+
+    #[test]
+    fn an_in_loop_replay_waits_for_a_build_slot() {
+        // Another command holds the only build slot, so the loop's two builds cannot start within
+        // `build_wait_s`: the replay says so and is no pass. The producer is not sent back; the checks then
+        // wait for the same slot and hold the job.
+        let (run, error) = run_loop(
+            CODE,
+            true,
+            true,
+            3,
+            usize::MAX,
+            None,
+            "\n[drain.pipeline]\nbuild_wait_s = 1\n",
+            true,
+        );
+        let said = format!("{IN_LOOP}no replay: no build slot was free within build_wait_s");
+        assert!(run.position(&said).is_some(), "{:#?}", run.lines);
+        assert_eq!(run.prompts.len(), 1);
+        assert_eq!(run.candidate_calls, 0);
+        let error = error.expect("the checks wait for the slot too");
+        assert!(
+            error.downcast_ref::<crate::disk::SlotWait>().is_some(),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn loop_replay_covers_only_the_same_tree_and_cases() {
+        let ids = |list: &[&str]| -> Vec<JobId> {
+            list.iter().map(|s| JobId::parse(s).unwrap()).collect()
+        };
+        let cases = ids(&["20200101-000001-0001", "20200101-000000-0000"]);
+        let id = cases[0].clone();
+        let view = replay_view(
+            &ReplayRun {
+                total: 2,
+                newly_refused: vec![],
+                intended: false,
+                held: false,
+                no_replay: None,
+            }
+            .record(&id, "a", "b"),
+            &fixture_reading(&id, "Add a greeting"),
+        );
+        let measured = LoopReplay {
+            tree: "t1".into(),
+            cases: cases.clone(),
+            run: ReplayRun {
+                total: 2,
+                newly_refused: vec![],
+                intended: false,
+                held: false,
+                no_replay: None,
+            },
+            view,
+            limit: 10,
+        };
+        assert!(measured.covers("t1", &cases));
+        // Another tree, another set of readings, fewer readings or another order: measured again.
+        assert!(!measured.covers("t2", &cases));
+        assert!(!measured.covers("t1", &cases[..1]));
+        assert!(!measured.covers(
+            "t1",
+            &ids(&["20200101-000001-0001", "20200101-000009-0009"])
+        ));
+        assert!(!measured.covers("t1", &[cases[1].clone(), cases[0].clone()]));
+        // A run that did not measure is never reused.
+        let mut none = measured.clone();
+        none.run = ReplayRun::none("a check failed");
+        assert!(!none.covers("t1", &cases));
+    }
+
     /// How many times each agent role was invoked.
     #[derive(Default)]
     struct Counts {
