@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-030952-0f7a",
+  "round": 2,
+  "at": "2026-11-06T03:22:04.198078121Z",
+  "invocation_seq": 5,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "Nothing shows that `cargo` typed in the real agent's Bash resolves to the shim. A shell started by the agent could reorder PATH and bypass the slot without anyone noticing.",
+      "evidence": "athena.toml:52 passes HOME and PATH to the agent, so the user's shell startup files under HOME can run in the agent's Bash. The criterion 8 test only checks the order of spec.env's PATH as handed to the fake driver (claude.rs:331 `.envs(&spec.env)`). It never runs a real agent shell. A startup line that puts a directory holding cargo ahead of the shim would make every producer cargo call skip the slot, and every test would still pass. Fix: Have the wrapper add a line to a use marker in the job dir on each run. In producer_loop, compare it with `record.commands_run`: if the run includes `cargo build|test|clippy|check` but the marker is missing, print a warning line (or record it). At the least, name this bypass in the design doc's risks so a maintainer knows the PATH order is not enforced inside the agent's shell.",
+      "location": "Approach / Decision 1 (PATH shim); Demonstration for criterion 8",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A queued wrapper ignores the kill switch and waits out its full limit.",
+      "evidence": "slots.rs:186 `acquire(&self, class, stop: &dyn Fn() -> Result<()>)` takes a stop check. The plan passes one that never stops. While a wrapper waits, the kill switch is only honoured when the agent's process group is killed. Fix: Pass a stop check that reads the kill switch, if the wrapper can locate it from the slot variables, or say in the design doc that queued wrappers rely on the process-group kill.",
+      "location": "Step 5 (`acquire(Class::Producer, &|| Ok(()))`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The expected result of cargo_subcommand for `+nightly build` is not stated.",
+      "evidence": "The helper only skips words starting with '-', so it would return Some(\"+nightly\") and the wrapper would take no slot. check_cargo refuses that form anyway (policy.rs:637). Fix: State the expected value in the test (for example Some(\"+nightly\"), so no slot is taken because the policy already refuses it).",
+      "location": "Step 2 unit tests (`+nightly build`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "What the wrapper does when its slot variables are missing or malformed is not specified.",
+      "evidence": "The plan covers a missing real cargo (exit 127) and unknown subcommands, but not a binary linked as cargo and run without ATHENA_CARGO_SHIM_DIR and the other slot variables. Fix: Choose one behavior: run the real cargo with no slot, or exit with a clear message. Cover it with a unit test.",
+      "location": "Files: slot_exec.rs (`CargoShim::from_env`)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the snapshot and found it sound. Every anchor it names exists as described: CARGO_GLOBAL_FLAGS and check_cargo (policy.rs:477 and :616), the argv[0] hook dispatch (main.rs:545-553), the only Producer agent_spec call (producer.rs:192), produce_and_verify calling producer_loop (mod.rs:1492), the disk hold before the producer (mod.rs:1476), the check-stage slot hold (mod.rs:1666-1669), hold_for_slot_wait and commit_hold (close.rs:198 and :214), SlotWait being Copy, Serialize and Deserialize (disk.rs:275), SlotQueue::waiting, try_acquire and acquire (slots.rs:162-186), env::build and EnvSpec (env.rs:52-112), the review and status_build_measurement lines in shard-timings.txt (lines 35-36), and the test fixtures athena_with, counting and slot_queue in run/tests.rs. The fixes for the round-1 findings hold up. The shim is applied only in producer_loop, so reading.rs and the other roles are untouched. The wrapper's wait is capped below the shipped Bash default timeout (600000 ms) and checked against the real athena.toml. check_cargo and cargo_subcommand share one walk over the shared list. The new test file is registered in shard-timings.txt. Each demonstration drives production code through a real seam (the athena binary linked as cargo, a real SlotQueue, Athena::go with the existing fake driver, env::build). Each would fail without the behavior, including the args[0]-only lookup. The hold at the producer stage reuses the existing SlotWait hold path, which the disk gate before the producer already uses in the same no-candidate way, and the dependents list matches the readers I found. No step calls an external service, and no athena.toml field is added. What remains is minor: no test or host check shows that `cargo` inside the real agent's shell actually resolves to the shim, the wrapper ignores the kill switch while queued, and two edge cases are left unspecified."
+}

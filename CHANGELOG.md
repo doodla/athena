@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The ontology claim check in `crates/athena-cli/tests/ontology.rs` now scans `BRIEF.md`, `README.md` and every
+  `docs/*.md` for each term, plus the term's own file sources. Root cause: the checks verified the file's shape
+  and the sources an author chose to list, not each term's content against every governing source, so a sense of
+  a term named in another document (Hermes as a tool and as a named role, job 20261017-173508-0wtc) was found
+  only at the final verdict. A new test builds a scratch root where an unlisted governing doc names a term in a
+  sense its definition lacks and requires it to be flagged.
 - A change to code that a decision of `docs/decisions.md` governs now fails before the verifier starts unless the
   change reconciles the decision, and the `athena drain --help` ceiling is read from the constant that enforces
   it. Root cause: The decision log is prose with no link from a decision to the code or limit it governs, so
