@@ -23,7 +23,7 @@ use athena_agent::policy::{Decision, Policy, evaluate};
 use athena_data::config::PersonalData;
 use athena_data::records::{
     ChangeStatus, CriterionKind, DeliverableAction, Demonstration, Finding, FindingSource, JobPlan,
-    PlanDependent, PolicyViolation, Reading, Severity,
+    PlanDependent, PlanMirror, PolicyViolation, Reading, Severity,
 };
 use athena_data::{Config, DefaultsModel};
 use athena_gate::content::disallowed_emails;
@@ -162,6 +162,12 @@ fn athena_finding(
 ///   dependent, or when an entry has neither a test nor a reason it is unaffected (a blank string is absent).
 ///   Admission checks the section's shape; the search that finds the dependents is the planner's, and the
 ///   critic checks the list against its own search.
+/// - each `mirrored_sources` entry (content the plan writes that mirrors a governing source) names its content
+///   and its source, lists at least one non-blank place, and points at a comparing criterion that exists
+///   (from 1 to the number of criteria); a major finding otherwise. An empty list means the plan mirrors
+///   nothing and gives no finding. Admission checks the shape only: whether the list holds every place, and
+///   whether the comparing demonstration checks the content and not only its structure, is the critic's
+///   check (prose-only). That a criterion has a demonstration is the first rule above.
 ///
 /// - every planned path is a plain relative file path: not empty, not absolute, no `..`, no trailing `/`, and
 ///   not a directory in the base (`is_directory` says whether a path is one); a major finding otherwise.
@@ -308,6 +314,7 @@ pub fn plan_findings(
         }
     }
     findings.extend(dependents_findings(&plan.dependents));
+    findings.extend(mirrored_sources_findings(&plan.mirrored_sources, count));
     findings.extend(open_questions_findings(&plan.open_questions));
     findings
 }
@@ -419,6 +426,72 @@ fn dependents_findings(dependents: &[PlanDependent]) -> Vec<Finding> {
                     "Set `test` to the test that covers {} after the change, or `reason` to why it is unaffected.",
                     d.dependent.trim()
                 ),
+            ));
+        }
+    }
+    findings
+}
+
+/// The mirrored-sources rule. Root cause it addresses (failure class f62n): a job wrote content that
+/// summarises or mirrors a governing source (a term's senses, a cache key's inputs) from a partial view of
+/// that source, and the gap showed only at the final verdict.
+///
+/// A plan that writes such content declares it in `mirrored_sources`: the content, the source, every place in
+/// the source the content depends on, and the number of the criterion whose demonstration compares the written
+/// content to those places. Each fault is one major finding at `mirrored sources, entry N`: a blank content or
+/// source, no non-blank place, or a comparison criterion outside 1 to `criteria`. An empty list means the plan
+/// mirrors nothing and gives no finding.
+///
+/// Only the shape is checked. Whether the list is complete, and whether the comparing demonstration checks the
+/// content and not only its structure, is the critic's own search (prose-only in the critic prompt). A
+/// comparison criterion without a demonstration already gets the finding in `plan_findings`, so it is not
+/// repeated here.
+fn mirrored_sources_findings(mirrors: &[PlanMirror], criteria: usize) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (i, m) in mirrors.iter().enumerate() {
+        let number = i + 1;
+        let location = format!("mirrored sources, entry {number}");
+        let blank_part = if m.content.trim().is_empty() {
+            Some("content")
+        } else if m.source.trim().is_empty() {
+            Some("source")
+        } else {
+            None
+        };
+        if let Some(part) = blank_part {
+            findings.push(athena_finding(
+                Severity::Major,
+                location,
+                format!("Mirrored source entry {number} has a blank {part}"),
+                format!(
+                    "Each entry names the content the job writes (`content`) and the governing source it mirrors (`source`). This entry: content {:?}, source {:?}.",
+                    m.content.trim(),
+                    m.source.trim()
+                ),
+            ));
+            continue;
+        }
+        if m.places.iter().all(|p| p.trim().is_empty()) {
+            findings.push(athena_finding(
+                Severity::Major,
+                location.clone(),
+                format!(
+                    "Mirrored source entry {number} ({}) lists no places",
+                    m.source.trim()
+                ),
+                "Content that mirrors a governing source needs the source's dependent places listed: every mention of a term, every compiled-in file of a cache key. Search the source and list each place the content depends on.".into(),
+            ));
+        }
+        if m.comparison == 0 || m.comparison as usize > criteria {
+            findings.push(athena_finding(
+                Severity::Major,
+                location,
+                format!(
+                    "Mirrored source entry {number} ({}) points at comparison criterion {}, but the reading has {criteria} criteria",
+                    m.source.trim(),
+                    m.comparison
+                ),
+                "Set `comparison` to the number, from 1, of the criterion whose demonstration compares the written content to every listed place, not only its structure.".into(),
             ));
         }
     }
@@ -680,6 +753,7 @@ mod tests {
             steps: vec![],
             risks: vec![],
             dependents: vec![],
+            mirrored_sources: vec![],
             demonstrations: vec![],
             open_questions: vec![],
             producer_section_sha256: "0".repeat(64),
@@ -803,6 +877,7 @@ mod tests {
             steps: vec![],
             risks: vec![],
             dependents: vec![complete_dependent()],
+            mirrored_sources: vec![],
             demonstrations: vec![Demonstration {
                 criterion: 1,
                 method: "test".into(),
@@ -871,12 +946,25 @@ mod tests {
         dependents: Vec<PlanDependent>,
         open_questions: Vec<String>,
     ) -> Vec<Finding> {
+        plan_findings_with(dependents, open_questions, vec![], 1)
+    }
+
+    /// Athena's findings on a plan whose reading has `criteria` content criteria and one demonstration, of
+    /// criterion 1. The variable parts are `dependents`, `open_questions` and `mirrored_sources`.
+    fn plan_findings_with(
+        dependents: Vec<PlanDependent>,
+        open_questions: Vec<String>,
+        mirrored_sources: Vec<PlanMirror>,
+        criteria: usize,
+    ) -> Vec<Finding> {
         use athena_data::records::Role;
         let mut r = reading();
-        r.acceptance_criteria = vec![Criterion {
-            text: "the plan lists its dependents".into(),
-            kind: CriterionKind::Content,
-        }];
+        r.acceptance_criteria = (1..=criteria)
+            .map(|n| Criterion {
+                text: format!("criterion {n}: the plan lists its dependents"),
+                kind: CriterionKind::Content,
+            })
+            .collect();
         let plan = JobPlan {
             job: JobId::parse("20261012-084936-n1p0").unwrap(),
             round: 1,
@@ -888,6 +976,7 @@ mod tests {
             steps: vec![],
             risks: vec![],
             dependents,
+            mirrored_sources,
             demonstrations: vec![Demonstration {
                 criterion: 1,
                 method: "read".into(),
@@ -973,6 +1062,106 @@ mod tests {
             dependents_findings_for(vec![complete_dependent()]).len()
         );
         assert!(dependents_findings_for(vec![complete_dependent()]).is_empty());
+    }
+
+    fn mirror(source: &str, places: &[&str], comparison: u32) -> PlanMirror {
+        PlanMirror {
+            content: "the cache key written into the build script".into(),
+            source: source.into(),
+            places: places.iter().map(|p| p.to_string()).collect(),
+            comparison,
+        }
+    }
+
+    /// Athena's findings at `mirrored sources, entry 1` for a one-criterion plan with complete dependents
+    /// and the one mirrored source `m`.
+    fn mirror_findings_for(m: PlanMirror) -> Vec<Finding> {
+        plan_findings_with(vec![complete_dependent()], vec![], vec![m], 1)
+    }
+
+    #[test]
+    fn a_mirrored_source_with_no_places_is_a_major_finding_naming_the_missing_list() {
+        // The fixture: a source is named but no place in it is listed.
+        let found = mirror_findings_for(mirror("build.rs inputs", &[], 1));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].severity, Severity::Major);
+        assert_eq!(found[0].source, FindingSource::Athena);
+        assert_eq!(
+            found[0].location.as_deref(),
+            Some("mirrored sources, entry 1")
+        );
+        assert!(found[0].summary.contains("lists no places"), "{found:?}");
+        assert!(found[0].summary.contains("build.rs inputs"), "{found:?}");
+
+        // Places that are all blank are no list either.
+        let blank = mirror_findings_for(mirror("build.rs inputs", &["", "  "], 1));
+        assert_eq!(blank.len(), 1, "{blank:?}");
+        assert!(blank[0].summary.contains("lists no places"), "{blank:?}");
+
+        // The same fixture with its places listed gives no finding.
+        let listed = mirror_findings_for(mirror(
+            "build.rs inputs",
+            &[
+                "build.rs:12 include_str!(a.toml)",
+                "build.rs:30 include_bytes!(b.bin)",
+            ],
+            1,
+        ));
+        assert!(listed.is_empty(), "{listed:?}");
+    }
+
+    #[test]
+    fn a_mirrored_source_with_a_blank_part_or_a_bad_comparison_is_a_major_finding() {
+        for (m, text) in [
+            (mirror("  ", &["a.rs:1"], 1), "blank source"),
+            (mirror("", &[], 1), "blank source"),
+            (mirror("src", &["a.rs:1"], 0), "comparison criterion 0"),
+            (mirror("src", &["a.rs:1"], 2), "comparison criterion 2"),
+        ] {
+            let found = mirror_findings_for(m);
+            assert_eq!(found.len(), 1, "{text}: {found:?}");
+            assert_eq!(found[0].severity, Severity::Major, "{text}");
+            assert_eq!(
+                found[0].location.as_deref(),
+                Some("mirrored sources, entry 1")
+            );
+            assert!(found[0].summary.contains(text), "{text}: {found:?}");
+        }
+        let mut blank_content = mirror("src", &["a.rs:1"], 1);
+        blank_content.content = " ".into();
+        let found = mirror_findings_for(blank_content);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].summary.contains("blank content"), "{found:?}");
+    }
+
+    #[test]
+    fn a_complete_mirrored_source_adds_no_finding() {
+        let found = mirror_findings_for(mirror("docs/glossary.md", &["docs/glossary.md:12"], 1));
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_plan_with_no_mirrored_sources_adds_no_finding() {
+        let found = plan_findings_with(vec![complete_dependent()], vec![], vec![], 1);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_mirrored_source_comparing_a_criterion_with_no_demonstration_gets_only_the_existing_finding()
+     {
+        // The reading has two criteria and the plan one demonstration, of criterion 1.
+        let found = plan_findings_with(
+            vec![complete_dependent()],
+            vec![],
+            vec![mirror("src", &["a.rs:1"], 2)],
+            2,
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(
+            found[0].location.as_deref(),
+            Some("demonstrations, criterion 2")
+        );
+        assert!(found[0].summary.contains("needs exactly one"), "{found:?}");
     }
 
     #[test]

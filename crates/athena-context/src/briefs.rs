@@ -1457,6 +1457,21 @@ fn plan_body(out: &mut String, plan: &JobPlan) {
             let _ = writeln!(out, "{line}");
         }
     }
+    // Printed only when present, for the same reason.
+    if !plan.mirrored_sources.is_empty() {
+        let _ = writeln!(out, "\nMirrored sources:");
+        for m in &plan.mirrored_sources {
+            let places: Vec<&str> = m.places.iter().map(|p| p.trim()).collect();
+            let _ = writeln!(
+                out,
+                "- {} Source: {} Places: {} Compared by criterion {}",
+                m.content.trim(),
+                m.source.trim(),
+                places.join("; "),
+                m.comparison
+            );
+        }
+    }
     let _ = writeln!(out, "\nDemonstrations:");
     demonstration_lines(out, &plan.demonstrations);
     let _ = writeln!(out, "\nOpen questions:");
@@ -3029,6 +3044,7 @@ mod tests {
                 mitigation: "a test".into(),
             }],
             dependents: vec![],
+            mirrored_sources: vec![],
             demonstrations: vec![
                 Demonstration {
                     criterion: 1,
@@ -3271,6 +3287,41 @@ mod tests {
         let section = render_plan_section(&with);
         assert!(section.contains("Dependents:") && section.contains("DEPENDENT-MARK"));
         assert!(!render_plan_section(&bare).contains("Dependents:"));
+        assert_ne!(section, render_plan_section(&bare));
+    }
+
+    #[test]
+    fn the_critic_brief_and_producer_section_show_mirrored_sources_only_when_the_plan_has_them() {
+        use athena_data::records::PlanMirror;
+        let bare = plan(1);
+        let mut with = plan(1);
+        with.mirrored_sources = vec![PlanMirror {
+            content: "CONTENT-MARK term definitions".into(),
+            source: "SOURCE-MARK the brief".into(),
+            places: vec![
+                "PLACE-MARK-A brief:4".into(),
+                " PLACE-MARK-B brief:9 ".into(),
+            ],
+            comparison: 2,
+        }];
+        let critic = |plan: JobPlan| {
+            critic_brief(&CriticInputs {
+                plan,
+                ..critic_inputs()
+            })
+        };
+        assert!(
+            !critic(bare.clone()).contains("Mirrored sources:"),
+            "a plan without the section renders as before"
+        );
+        let shown = critic(with.clone());
+        assert!(
+            shown.contains("Mirrored sources:\n- CONTENT-MARK term definitions Source: SOURCE-MARK the brief Places: PLACE-MARK-A brief:4; PLACE-MARK-B brief:9 Compared by criterion 2\n"),
+            "the critic brief omits the mirrored source: {shown}"
+        );
+        let section = render_plan_section(&with);
+        assert!(section.contains("Mirrored sources:") && section.contains("PLACE-MARK-B"));
+        assert!(!render_plan_section(&bare).contains("Mirrored sources:"));
         assert_ne!(section, render_plan_section(&bare));
     }
 

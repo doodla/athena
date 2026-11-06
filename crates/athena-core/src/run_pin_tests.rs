@@ -1169,6 +1169,7 @@ fn planned(files: &[&str]) -> athena_data::records::JobPlan {
         steps: vec![],
         risks: vec![],
         dependents: vec![],
+        mirrored_sources: vec![],
         demonstrations: vec![],
         open_questions: vec![],
         producer_section_sha256: String::new(),

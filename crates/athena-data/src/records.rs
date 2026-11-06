@@ -2511,6 +2511,23 @@ pub struct PlanDependent {
     pub reason: Option<String>,
 }
 
+/// Content the plan writes that summarises or mirrors a governing source (term definitions, cache keys,
+/// seeded records), with the source and every place in it the content depends on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanMirror {
+    /// The content the job writes.
+    pub content: String,
+    /// The governing source the content mirrors.
+    pub source: String,
+    /// Every place in the source the content depends on: each mention of a term, each compiled-in file of a
+    /// cache key.
+    pub places: Vec<String>,
+    /// The number of the criterion, from 1, whose demonstration compares the written content to every place,
+    /// not only its structure.
+    pub comparison: u32,
+}
+
 /// How one acceptance criterion will be shown to hold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2550,6 +2567,11 @@ pub struct JobPlan {
     /// new plan without it. Records written before the field existed lack it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependents: Vec<PlanDependent>,
+    /// Content the plan writes that mirrors a governing source, each with the source, every dependent place
+    /// and the comparing criterion. Empty when the plan mirrors nothing; records written before the field
+    /// existed lack it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mirrored_sources: Vec<PlanMirror>,
     pub demonstrations: Vec<Demonstration>,
     pub open_questions: Vec<String>,
     /// The SHA-256 of the section of the producer's prompt that code renders from this plan.
@@ -4453,6 +4475,7 @@ mod tests {
                 mitigation: "A recorded digest test.".into(),
             }],
             dependents: vec![],
+            mirrored_sources: vec![],
             demonstrations: vec![Demonstration {
                 criterion: 1,
                 method: "test".into(),
@@ -4465,6 +4488,43 @@ mod tests {
             producer_section_sha256: "c".repeat(64),
             resumed_from: None,
         }
+    }
+
+    #[test]
+    fn plan_mirrored_sources_are_optional_in_old_records_and_round_trip_when_set() {
+        // A record written before the field existed has no `mirrored_sources` key; it parses with none and
+        // re-serializes to the same text.
+        let old = AnyRecord::JobPlan(Box::new(sample_plan(1)));
+        let old_json = old.to_json();
+        assert!(
+            !old_json.contains("mirrored_sources"),
+            "an empty list is not written"
+        );
+        let AnyRecord::JobPlan(parsed) = AnyRecord::parse("x", old_json.as_bytes()).unwrap() else {
+            panic!("a job plan");
+        };
+        assert!(parsed.mirrored_sources.is_empty());
+        assert_eq!(
+            AnyRecord::JobPlan(parsed).to_json(),
+            old_json,
+            "an old record re-serializes byte for byte"
+        );
+        let path = format!("{}/job-plan-1.json", job().dir());
+        assert!(check_record_file(&path, old_json.as_bytes()).is_ok());
+
+        // A record with a mirrored source keeps every field.
+        let mut plan = sample_plan(1);
+        plan.mirrored_sources = vec![PlanMirror {
+            content: "the term definitions in the glossary".into(),
+            source: "docs/glossary.md".into(),
+            places: vec!["docs/glossary.md:12".into(), "docs/design/a.md:40".into()],
+            comparison: 1,
+        }];
+        let with = AnyRecord::JobPlan(Box::new(plan));
+        let json = with.to_json();
+        assert!(json.contains("\"mirrored_sources\"") && json.contains("docs/design/a.md:40"));
+        assert_eq!(AnyRecord::parse("x", json.as_bytes()).unwrap(), with);
+        assert!(check_record_file(&path, json.as_bytes()).is_ok());
     }
 
     #[test]

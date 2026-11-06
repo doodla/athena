@@ -562,6 +562,16 @@ fn plan_record(
                 reason: d.reason,
             })
             .collect(),
+        mirrored_sources: out
+            .mirrored_sources
+            .into_iter()
+            .map(|m| PlanMirror {
+                content: m.content,
+                source: m.source,
+                places: m.places,
+                comparison: m.comparison,
+            })
+            .collect(),
         demonstrations: out
             .demonstrations
             .into_iter()

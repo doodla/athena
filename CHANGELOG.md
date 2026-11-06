@@ -9,6 +9,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A plan that writes content summarising or mirroring a governing source (term definitions taken from briefs or
+  docs, cache keys taken from build inputs, seeded records) must now name the source, list every place in it the
+  content depends on (each mention of a term, each compiled-in file of a cache key) and point at a criterion
+  whose demonstration compares the written content to that list, not only its structure. Root cause: Content a
+  job writes from a partial view of its governing source (a term's senses, a cache key's inputs) was caught only
+  at the final verdict; failure class f62n holds three such jobs, and introspections 20261017-182254-my85,
+  20261025-230247-cm9r, 20261102-102715-564y and 20261106-030930-hb84 record the repeated cause. The plan gains
+  an optional `mirrored_sources` section (`content`, `source`, `places`, `comparison`), stored on the job plan
+  with a default so older records parse and re-serialise unchanged, and shown to the critic and the producer
+  only when it is present. A new admission rule, `mirrored_sources_findings` in `plan_findings`, raises a major
+  finding at `mirrored sources, entry N` for an entry with a blank content or source, no non-blank place, or a
+  comparison criterion that is 0 or above the number of criteria; the plan then goes back to the planner with no
+  critic call, like a missing `dependents` section. An empty or missing section gives no finding. The planner
+  prompt states the rule and the critic prompt tells the critic to Grep the source and reject (major finding) an
+  empty section, an omitted place, or a comparing demonstration that checks only structure. Admission checks
+  only the shape: whether the list is complete and whether the comparison checks the content are the critic's
+  own search and are prose-only, so this entry does not close class f62n by itself. Cases are in the
+  `MirrorCase` table of `crates/athena-core/tests/refusal_corpus.rs`, and
+  `athena_sends_a_plan_that_mirrors_a_source_without_places_back_to_the_planner` drives the whole job. The
+  rule refuses only plans that declare a mirrored source with a fault, and none did before the section existed.
+  Left out: a keyword trigger that would find a plan that mirrors a source but declares none, and a check that
+  each place names an existing file.
 - The drain report now records how many items each plan group held when the run started (`plan_group_sizes`)
   and how many queued items had no plan entry (`unplanned`, never counted as a group of one), for the
   one-at-a-time and the parallel path alike. `athena drain`'s summary prints them as a `group sizes` line.

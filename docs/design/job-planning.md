@@ -64,6 +64,13 @@ read-only snapshot of the prediction commit with the reader's grant (Read, Grep,
   jobs broke a reader of a changed behavior (one is the CI-reuse rule in `verify.rs`: `judge` counts a passing
   check with no exit code as run when it is marked `reused`, so a change to how exit codes are recorded
   breaks it unless the plan names that rule);
+- mirrored sources (optional; empty when the plan mirrors nothing): content the job writes that summarises or
+  mirrors a governing source (term definitions taken from briefs or docs, cache keys taken from build inputs,
+  seeded records). Each entry has the `content`, the `source`, the `places` (every place in the source the
+  content depends on: each mention of a term, each compiled-in file of a cache key) and the `comparison`
+  criterion whose demonstration compares the written content to every place, not only its structure. Root
+  cause (failure class f62n): content written from a partial view of its governing source was caught only at
+  the final verdict;
 - one demonstration per acceptance criterion: the method, the command or test, what it observes, and
   `fails_without` (what would fail if the behavior were missing);
 - open questions: only what the code cannot show, each beginning `User:` (a decision for the user) or `Host:`
@@ -88,6 +95,16 @@ pure helper `dependents_unnamed`) and a prompt rule, not a production check. A p
 field existed has no `dependents`; it still parses and is not re-checked. The refusal is intended to refuse
 more plans than before, every plan without the section.
 
+The mirrored-sources rule (`admission::mirrored_sources_findings`, called from `plan_findings` after the
+dependents rule) is a major finding at location `mirrored sources, entry N` for an entry with a blank `content`
+or `source`, with no non-blank place, or whose `comparison` is 0 or above the number of criteria. An empty list
+gives no finding. A comparison criterion with no demonstration already gets the first rule's finding, so the
+new rule does not repeat it. Admission checks the shape only; it does not close failure class f62n by itself.
+Whether the list holds every place, and whether the comparing demonstration checks the content and not only
+its structure, is the critic's own search, a prompt rule and prose-only. A plan record written before the
+field existed has no `mirrored_sources`; it still parses and re-serialises unchanged. Cases are in the
+`MirrorCase` table of `crates/athena-core/tests/refusal_corpus.rs`.
+
 The open-questions rule (`admission::open_questions_findings`, called from `plan_findings`) is a major finding
 at location `open questions` for a question that does not begin `User:` or `Host:` (leading whitespace, `*`,
 `_` and backticks and letter case are ignored, so `Username:` does not match), and for a prefixed question
@@ -110,7 +127,9 @@ second revision stops the job with those findings.
 and the reading, that the code the plan names exists, that the change is made where the fault starts, that each
 demonstration would fail without the behavior, that a new `athena.toml` field ships with its schema field,
 that the work fits one producer run, and, as its own question, what else the change breaks: it searches the
-repository for the readers of each changed thing and checks the plan's dependents list against the result. It returns accept, revise or reject, findings (severity, location,
+repository for the readers of each changed thing and checks the plan's dependents list against the result. When the plan lists mirrored sources, or writes content
+that mirrors a governing source and lists none, it searches the source and raises a major finding for an empty
+list, an omitted place, or a comparing demonstration that checks only structure (prose-only). It returns accept, revise or reject, findings (severity, location,
 evidence, fix), and whether the reading misread the request. Athena decides the verdict as `verify::judge` does:
 accept only when neither source has a blocker or major finding. Reject, or a misread reading, stops the job.
 

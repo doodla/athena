@@ -398,6 +398,13 @@ pub struct PlanOutput {
     /// read as an empty list and refused with a finding, so the planner can revise it.
     #[serde(default)]
     pub dependents: Vec<PlanDependentOutput>,
+    /// Content the job writes that summarises or mirrors a governing source (term definitions taken from
+    /// briefs or docs, cache keys taken from build inputs, seeded records): one entry each, with the source
+    /// named and every place in it the content depends on. Empty when the plan mirrors nothing. Athena
+    /// refuses an entry with a blank source or content, no place or a missing comparing criterion; whether
+    /// the list is complete is the critic's check.
+    #[serde(default)]
+    pub mirrored_sources: Vec<PlanMirrorOutput>,
     /// Exactly one per acceptance criterion.
     pub demonstrations: Vec<DemonstrationOutput>,
     pub open_questions: Vec<String>,
@@ -427,6 +434,23 @@ pub struct PlanDependentOutput {
     pub test: Option<String>,
     /// Why the dependent is unaffected; give this or a test.
     pub reason: Option<String>,
+}
+
+/// Content the plan writes that mirrors a governing source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanMirrorOutput {
+    /// What the job writes: the definitions, the cache key, the seeded records.
+    pub content: String,
+    /// The governing source it mirrors: the brief, the doc, the build inputs.
+    pub source: String,
+    /// Every place in the source the content depends on, found by searching it: each mention of a term, each
+    /// compiled-in file of a cache key. Give `path:line` where the source is in the repository.
+    pub places: Vec<String>,
+    /// The number of the criterion whose demonstration compares the written content to every place, not only
+    /// its structure. If no criterion can carry that, point at the nearest one and raise a `User:` open
+    /// question.
+    pub comparison: u32,
 }
 
 /// One design choice.
@@ -646,6 +670,8 @@ mod tests {
             "risks": [{ "risk": "r", "mitigation": "m" }],
             "dependents": [{ "name": "n", "dependent": "d", "kind": "code",
                 "test": "t", "reason": null }],
+            "mirrored_sources": [{ "content": "c", "source": "s", "places": ["p:1"],
+                "comparison": 1 }],
             "demonstrations": [{ "criterion": 1, "method": "m", "command": "c",
                 "observes": "o", "fails_without": null, "seam": null }]
         })
@@ -720,8 +746,8 @@ mod tests {
     #[test]
     fn the_plan_and_critic_schemas_forbid_extra_properties_at_every_level() {
         for (schema, nested) in [
-            // top, decisions, rejected, files, risks, dependents, demonstrations: 7 objects
-            (plan_schema(), 6),
+            // top, decisions, rejected, files, risks, dependents, mirrored_sources, demonstrations: 8 objects
+            (plan_schema(), 7),
             (critic_schema(), 1), // top, findings: 2 objects
         ] {
             let mut found = Vec::new();
@@ -748,6 +774,7 @@ mod tests {
             ("files", 0),
             ("risks", 0),
             ("dependents", 0),
+            ("mirrored_sources", 0),
             ("demonstrations", 0),
         ] {
             let mut nested = plan.clone();
@@ -804,6 +831,57 @@ mod tests {
         bare.as_object_mut().unwrap().remove("dependents");
         let parsed: PlanOutput = serde_json::from_value(bare).unwrap();
         assert!(parsed.dependents.is_empty());
+    }
+
+    #[test]
+    fn the_plan_schema_requires_mirrored_sources_and_a_plan_without_the_key_reads_as_empty() {
+        let schema = plan_schema();
+        let item = &schema["properties"]["mirrored_sources"]["items"];
+        assert_eq!(item["additionalProperties"], json!(false));
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(required.contains(&"mirrored_sources"), "{required:?}");
+        let fields: Vec<&str> = item["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for field in ["content", "source", "places", "comparison"] {
+            assert!(fields.contains(&field), "{field} missing from {fields:?}");
+        }
+        // The planner sees the rule as the field descriptions in its schema.
+        // (the doc comments wrap, so compare with the line breaks collapsed)
+        let words = |field: &str| {
+            item["properties"][field]["description"]
+                .as_str()
+                .unwrap()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let places = words("places");
+        assert!(
+            places.contains("each mention of a term") && places.contains("compiled-in file"),
+            "{places}"
+        );
+        let comparison = words("comparison");
+        assert!(
+            comparison.contains("not only its structure"),
+            "{comparison}"
+        );
+
+        let parsed: PlanOutput = serde_json::from_value(sample_plan()).unwrap();
+        assert_eq!(parsed.mirrored_sources.len(), 1);
+        assert_eq!(parsed.mirrored_sources[0].places, vec!["p:1".to_string()]);
+        let mut bare = sample_plan();
+        bare.as_object_mut().unwrap().remove("mirrored_sources");
+        let parsed: PlanOutput = serde_json::from_value(bare).unwrap();
+        assert!(parsed.mirrored_sources.is_empty());
     }
 
     #[test]

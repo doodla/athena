@@ -43,7 +43,7 @@ use athena_data::records::{
     AcceptedBy, AnyRecord, Baseline, Build, Candidate, Caps, ChangeEntry, ChangeStatus, CheckRun,
     CriterionKind, Critique, CritiqueVerdict, DeliverableAction, Demonstration, DependentKind,
     Finding, FindingSource, Invocation, InvocationOutcome, Job, JobKind, JobPlan, Outcome,
-    OutcomeState, Owner, PinnedRepo, PlanDecision, PlanDependent, PlanFile, PlanRisk,
+    OutcomeState, Owner, PinnedRepo, PlanDecision, PlanDependent, PlanFile, PlanMirror, PlanRisk,
     PolicyViolation, ProducerReport, Reading, RejectedOption, Replay, ReportedCheck,
     ReportedCriterion, Role, Score, Severity, Totals, Verdict, Verification,
 };

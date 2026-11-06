@@ -883,6 +883,37 @@ fn athena_sends_a_plan_without_dependents_back_to_the_planner_with_no_critic_cal
 }
 
 #[test]
+fn athena_sends_a_plan_that_mirrors_a_source_without_places_back_to_the_planner() {
+    let fx = Fixture::with_config(&planned_config());
+    let mut scenario = Scenario::default();
+    // Round 1 names the source its content mirrors but lists no place in it; round 2 lists them.
+    let mut incomplete = good_plan();
+    incomplete["mirrored_sources"] = json!([{
+        "content": "the greeting text", "source": "the README greeting section",
+        "places": [], "comparison": 1
+    }]);
+    let mut complete = incomplete.clone();
+    complete["mirrored_sources"][0]["places"] = json!(["README.md:1", "README.md:7"]);
+    scenario.plans = vec![incomplete, complete];
+    let calls = scenario.invocations.clone();
+    let briefs = scenario.seen_by_planner.clone();
+    let athena = fx.athena(scenario.script());
+    let proposal = athena.ask("tidy the readme", &Lines::default()).unwrap();
+    let f = finished(
+        athena
+            .go(proposal.job.as_str(), AcceptedBy::User, &Lines::default())
+            .unwrap(),
+    );
+    assert_eq!(f.state, OutcomeState::Landed, "{}", f.reason);
+    // The first plan goes back without a critic call; the second reaches the critic, as round 1.
+    assert_eq!(count(&calls, Role::Planner), 2);
+    assert_eq!(count(&calls, Role::Critic), 1);
+    let briefs = briefs.lock().unwrap();
+    assert_eq!(briefs.len(), 2);
+    assert!(briefs[1].contains("lists no places"), "{}", briefs[1]);
+}
+
+#[test]
 fn athena_checks_that_files_to_modify_exist_and_files_to_create_do_not() {
     let fx = Fixture::with_config(&planned_config());
     let mut scenario = Scenario::default();

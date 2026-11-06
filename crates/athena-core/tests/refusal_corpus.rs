@@ -892,7 +892,7 @@ mod plan_side {
     use athena_data::JobId;
     use athena_data::records::{
         Criterion, CriterionKind, Demonstration, DependentKind, Finding, FindingSource, JobPlan,
-        PlanDependent, Role, Severity,
+        PlanDependent, PlanMirror, Role, Severity,
     };
 
     /// What `plan_findings` must do with a plan case.
@@ -996,6 +996,10 @@ mod plan_side {
     }
 
     fn plan_for(dependents: Vec<PlanDependent>) -> JobPlan {
+        plan_with_mirrors(dependents, vec![])
+    }
+
+    fn plan_with_mirrors(dependents: Vec<PlanDependent>, mirrors: Vec<PlanMirror>) -> JobPlan {
         JobPlan {
             job: JobId::parse("20261031-000000-aaaa").unwrap(),
             round: 1,
@@ -1007,6 +1011,7 @@ mod plan_side {
             steps: vec![],
             risks: vec![],
             dependents,
+            mirrored_sources: mirrors,
             demonstrations: vec![Demonstration {
                 criterion: 1,
                 method: "read".into(),
@@ -1022,6 +1027,13 @@ mod plan_side {
     }
 
     fn findings(dependents: Vec<PlanDependent>) -> Vec<Finding> {
+        findings_with_mirrors(dependents, vec![])
+    }
+
+    fn findings_with_mirrors(
+        dependents: Vec<PlanDependent>,
+        mirrors: Vec<PlanMirror>,
+    ) -> Vec<Finding> {
         let mut reading = super::base_reading("");
         reading.acceptance_criteria = vec![Criterion {
             text: "The plan lists its dependents".into(),
@@ -1034,7 +1046,12 @@ mod plan_side {
             writes: false,
             evidence: None,
         };
-        plan_findings(&plan_for(dependents), &reading, &verifier, &|_| false)
+        plan_findings(
+            &plan_with_mirrors(dependents, mirrors),
+            &reading,
+            &verifier,
+            &|_| false,
+        )
     }
 
     /// The plan cases that fail their expectation, each as a line naming the case and its source.
@@ -1098,6 +1115,170 @@ mod plan_side {
             },
         ];
         assert_eq!(plan_mismatches(&wrong).len(), 2);
+    }
+
+    // The mirrored-sources rule: a plan that writes content mirroring a governing source names the source and
+    // lists the places the content depends on. Admission checks the shape (a source, a place, an existing
+    // comparing criterion); whether the list is complete is the critic's check and is not tested here. The
+    // rule refuses only plans that declare a mirrored source with a fault, so no plan of the cases above is
+    // newly refused. Sources are failure class f62n and the four introspections that recorded its cause.
+
+    struct MirrorCase {
+        id: &'static str,
+        source: &'static str,
+        mirrors: Vec<PlanMirror>,
+        expected: PlanExpected,
+    }
+
+    fn mirror(source: &str, places: &[&str], comparison: u32) -> PlanMirror {
+        PlanMirror {
+            content: "the written content".into(),
+            source: source.into(),
+            places: places.iter().map(|p| p.to_string()).collect(),
+            comparison,
+        }
+    }
+
+    fn mirror_cases() -> Vec<MirrorCase> {
+        let f62n = "failure class f62n: content written from a partial view of its governing source \
+            (a term's senses, a cache key's inputs) was caught only at the final verdict; \
+            introspections 20261017-182254-my85, 20261025-230247-cm9r, 20261102-102715-564y and \
+            20261106-030930-hb84";
+        vec![
+            MirrorCase {
+                id: "mirrored-source-no-places",
+                source: f62n,
+                mirrors: vec![mirror("the brief's Definitions section", &[], 1)],
+                expected: PlanExpected::Refuse("lists no places"),
+            },
+            MirrorCase {
+                id: "mirrored-source-blank-place",
+                source: f62n,
+                mirrors: vec![mirror("the brief's Definitions section", &[" ", ""], 1)],
+                expected: PlanExpected::Refuse("lists no places"),
+            },
+            MirrorCase {
+                id: "mirrored-source-blank-source",
+                source: f62n,
+                mirrors: vec![mirror("  ", &["brief:4"], 1)],
+                expected: PlanExpected::Refuse("blank source"),
+            },
+            MirrorCase {
+                id: "mirrored-source-comparison-zero",
+                source: f62n,
+                mirrors: vec![mirror("build.rs inputs", &["build.rs:12"], 0)],
+                expected: PlanExpected::Refuse("comparison"),
+            },
+            MirrorCase {
+                id: "mirrored-source-comparison-out-of-range",
+                source: f62n,
+                mirrors: vec![mirror("build.rs inputs", &["build.rs:12"], 2)],
+                expected: PlanExpected::Refuse("comparison"),
+            },
+            MirrorCase {
+                id: "mirrored-source-complete-term-mentions",
+                source: f62n,
+                mirrors: vec![mirror(
+                    "the definition of a term in the brief and docs",
+                    &[
+                        "brief: Definitions",
+                        "docs/design/a.md:40",
+                        "docs/design/b.md:12",
+                    ],
+                    1,
+                )],
+                expected: PlanExpected::Accept,
+            },
+            MirrorCase {
+                id: "mirrored-source-complete-cache-key-files",
+                source: f62n,
+                mirrors: vec![mirror(
+                    "the files compiled into the binary",
+                    &[
+                        "crates/x/src/lib.rs:56 include_str!(a.md)",
+                        "crates/x/build.rs:3",
+                    ],
+                    1,
+                )],
+                expected: PlanExpected::Accept,
+            },
+            MirrorCase {
+                id: "mirrored-source-none-declared",
+                source: f62n,
+                mirrors: vec![],
+                expected: PlanExpected::Accept,
+            },
+        ]
+    }
+
+    /// The mirror cases that fail their expectation. The plan's dependents are complete, so only the
+    /// mirrored-sources rule can fire.
+    fn mirror_mismatches(cases: &[MirrorCase]) -> Vec<String> {
+        let mut found = Vec::new();
+        for c in cases {
+            let dependents = vec![entry(
+                "recorded exit code",
+                "verify.rs judge",
+                Some("a test"),
+                None,
+            )];
+            let got = findings_with_mirrors(dependents, c.mirrors.clone());
+            let ok = match c.expected {
+                PlanExpected::Accept => got.is_empty(),
+                PlanExpected::Refuse(text) => {
+                    got.len() == 1
+                        && got[0].severity == Severity::Major
+                        && got[0].source == FindingSource::Athena
+                        && got[0]
+                            .location
+                            .as_deref()
+                            .is_some_and(|l| l.starts_with("mirrored sources"))
+                        && got[0].summary.contains(text)
+                }
+            };
+            if !ok {
+                found.push(format!(
+                    "{} ({}): expected {:?}, got {got:?}",
+                    c.id, c.source, c.expected
+                ));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn mirror_cases_get_the_expected_outcome() {
+        let cases = mirror_cases();
+        let ids: std::collections::BTreeSet<&str> = cases.iter().map(|c| c.id).collect();
+        assert_eq!(ids.len(), cases.len(), "mirror case ids are unique");
+        assert!(
+            cases.iter().any(|c| c.expected == PlanExpected::Accept)
+                && cases
+                    .iter()
+                    .any(|c| matches!(c.expected, PlanExpected::Refuse(_))),
+            "the table holds accepted and refused plans"
+        );
+        let mismatches = mirror_mismatches(&cases);
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    #[test]
+    fn a_mirror_case_that_expects_the_wrong_outcome_is_reported() {
+        let wrong = vec![
+            MirrorCase {
+                id: "no-places-but-expected-accepted",
+                source: "test",
+                mirrors: vec![mirror("src", &[], 1)],
+                expected: PlanExpected::Accept,
+            },
+            MirrorCase {
+                id: "complete-but-expected-refused",
+                source: "test",
+                mirrors: vec![mirror("src", &["a:1"], 1)],
+                expected: PlanExpected::Refuse("lists no places"),
+            },
+        ];
+        assert_eq!(mirror_mismatches(&wrong).len(), 2);
     }
 
     // The open-questions rule: only a `User:` or `Host:` question stays open, and one that says the code

@@ -612,6 +612,7 @@ mod tests {
             steps: vec![],
             risks: vec![],
             dependents: vec![],
+            mirrored_sources: vec![],
             demonstrations: vec![Demonstration {
                 criterion: 1,
                 method: "test".into(),
