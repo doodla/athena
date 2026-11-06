@@ -612,6 +612,26 @@ pub fn plan(report: &crate::drain::PlanReport) -> String {
     out
 }
 
+/// The line that states the size of each plan group the run worked, in order, and their mean, so a reader can
+/// tell whether group size, not the `[parallel]` ceiling, held agent use down. `None` when no group was worked,
+/// so nothing is printed that could be read as a size of zero.
+fn group_sizes_line(sizes: &[usize]) -> Option<String> {
+    if sizes.is_empty() {
+        return None;
+    }
+    let list: Vec<String> = sizes.iter().map(usize::to_string).collect();
+    let mean = sizes.iter().sum::<usize>() as f64 / sizes.len() as f64;
+    Some(format!(
+        "group sizes {} (mean {mean:.1}, {} worked)\n",
+        list.join(", "),
+        if sizes.len() == 1 {
+            "1 group".to_string()
+        } else {
+            format!("{} groups", sizes.len())
+        }
+    ))
+}
+
 /// What `athena drain` prints: why it stopped, each job and whether it landed, the money, the rating against
 /// the target and whether it was taken after a landing, and what is still queued or waiting for a person.
 pub fn drain(report: &crate::drain::Report) -> String {
@@ -710,6 +730,9 @@ pub fn drain(report: &crate::drain::Report) -> String {
                 ""
             }
         );
+    }
+    if let Some(line) = group_sizes_line(&report.group_sizes) {
+        out.push_str(&line);
     }
     for r in &report.refused {
         let _ = writeln!(out, "refused     {} · {}: {}", r.id, r.title, r.reason);
@@ -1838,6 +1861,23 @@ mod tests {
     use super::*;
     use athena_core::gh::{Checks, PrReport};
     use athena_core::pr::{LinkState, PrLink};
+
+    #[test]
+    fn group_sizes_are_listed_in_order_with_their_mean() {
+        assert_eq!(
+            group_sizes_line(&[2, 1]).as_deref(),
+            Some("group sizes 2, 1 (mean 1.5, 2 groups worked)\n")
+        );
+        assert_eq!(
+            group_sizes_line(&[3]).as_deref(),
+            Some("group sizes 3 (mean 3.0, 1 group worked)\n")
+        );
+    }
+
+    #[test]
+    fn no_group_worked_prints_no_group_sizes_line() {
+        assert_eq!(group_sizes_line(&[]), None);
+    }
 
     fn report(checks: Checks, reruns: u32, test: Option<&str>) -> PrReport {
         PrReport {

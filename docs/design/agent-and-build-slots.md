@@ -466,6 +466,16 @@ Each change is one focused job with its own tests, lands on its own, and reads i
    of "low disk" outcomes (`records/jobs/**/outcome.json`; 6 so far, all dated 2026-10-25 to 2026-10-31) not rising
    while `max_concurrency` goes up. Rollback: set `max_concurrency` to 2.
    Depends on: 1, 3, 4.
+   Built. `MAX_CONCURRENCY_CEILING` is 16 (it bounds `[parallel] max_concurrency` and `[drain.pipeline]
+   max_in_flight`; 17 is refused with "from 1 to 16"), and `athena.toml` sets `max_concurrency` to 12, the
+   starting value of section 7.2. Each drain run records the item count of every plan group it dispatched, in
+   order (`Report::group_sizes`; groups not reached are absent), and the end-of-run lines print them with their
+   mean as a `group sizes` line. The size counts the items that began, so an item held back by the budget
+   or job limit is not counted, and a plan group run one item at a time counts as groups of one. Rollback is a config edit, not code: set `max_concurrency` to 2.
+   **Not measured:** peak in-flight jobs and the count of "low disk" outcomes. They are read after real drains
+   at 12 and later at 16; no test here shows either. The mean group size is what tells whether group size, not
+   the ceiling, caps agent use. `plan.rs` is unchanged because the planned group sizes were already the
+   lengths of `Plan.groups`.
 7. **Put the landing rebuild behind a build slot at the top class.**
    Touches: `crates/athena-cli/src/drain.rs` (`rebuild_if_due` acquires a slot of class 1 before running
    `setup.sh`; the `landing` lock stays); `crates/athena-core/src/slots.rs` (class 1).
