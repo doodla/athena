@@ -195,18 +195,37 @@ mod tests {
     use super::*;
     use crate::backtest::parse_supersessions;
 
-    /// Length in bytes of `docs/decisions.md` when the log was last known good (it ended with D121). Entries
+    /// Length in bytes of `docs/decisions.md` when the log was last known good (it ended with D158). Entries
     /// are never rewritten, so these bytes must stay exactly as they were; new entries go after them.
-    const PINNED_LEN: usize = 230046;
+    const PINNED_LEN: usize = 359622;
     /// SHA-256 of the first `PINNED_LEN` bytes, computed from the file at that commit (`git show
-    /// <commit>:docs/decisions.md`) before D122 was appended. Raise both constants only when a later
+    /// <commit>:docs/decisions.md`) before D159 was appended. Raise both constants only when a later
     /// entry is appended, to the length and hash of the log up to and including that entry.
-    const PINNED_SHA256: &str = "bbb3929b73240f6c45520338447ec5b17083aa2a96a171674ac2999b0b5bdca1";
+    const PINNED_SHA256: &str = "4bec69d2468c86b0c361a6daa9eacb1ac63f0558e48d62ce4227e4087b19d648";
 
-    /// Check the log's structure: every `## D<n> · ` entry has a Provenance bullet, ids are unique and
-    /// ascending, and the first `pinned_len` bytes hash to `pinned_sha256` (existing entries untouched, with
-    /// additions only after them).
+    /// The tail of every error about the pinned base or the place a new entry goes.
+    const APPEND_AT_END: &str = "append at end of file";
+
+    /// Check the log's structure: the first `pinned_len` bytes hash to `pinned_sha256` (existing entries
+    /// untouched, with additions only after them); every `## D<n> · ` entry has a Provenance bullet; ids are
+    /// unique and ascending; and an entry that starts at or after the pinned base has the id one greater than
+    /// the highest before it. The pin is checked first, so an insertion before the end of the pinned base is
+    /// reported as that and not as whatever else the insertion upsets. Every error about the pin or about a
+    /// new entry's place ends with `append at end of file`.
+    ///
+    /// The id rule applies only past the pin: the pinned part of the real log has a gap that the parse cannot
+    /// see (the heading of D145 is not in the `## D<n> · ` shape), and it may not be rewritten.
     fn check_log(text: &str, pinned_len: usize, pinned_sha256: &str) -> Result<(), String> {
+        let prefix = text.as_bytes().get(..pinned_len).ok_or_else(|| {
+            format!(
+                "the log is shorter than the pinned base: existing entries were removed; {APPEND_AT_END}"
+            )
+        })?;
+        if athena_data::sha256_hex(prefix) != pinned_sha256 {
+            return Err(format!(
+                "the first {pinned_len} bytes changed: entries are append-only; {APPEND_AT_END}"
+            ));
+        }
         let mut starts: Vec<(u32, usize)> = Vec::new();
         let mut offset = 0;
         for line in text.split_inclusive('\n') {
@@ -222,6 +241,12 @@ mod tests {
                         if id < prev {
                             return Err(format!("D{id} comes after D{prev}: ids must ascend"));
                         }
+                        if offset >= pinned_len && id != prev + 1 {
+                            return Err(format!(
+                                "D{id} follows D{prev}: a new entry's id is one greater than the previous highest (D{}); {APPEND_AT_END}",
+                                prev + 1
+                            ));
+                        }
                     }
                     starts.push((id, offset));
                 }
@@ -236,15 +261,6 @@ mod tests {
             if !text[from..to].contains("- **Provenance:**") {
                 return Err(format!("D{id} has no Provenance bullet"));
             }
-        }
-        let prefix = text
-            .as_bytes()
-            .get(..pinned_len)
-            .ok_or("the log is shorter than the pinned base: existing entries were removed")?;
-        if athena_data::sha256_hex(prefix) != pinned_sha256 {
-            return Err(format!(
-                "the first {pinned_len} bytes changed: entries are append-only, add new ones at the end"
-            ));
         }
         Ok(())
     }
@@ -300,11 +316,9 @@ mod tests {
         let mid = spaced.replace("## D03", "## D02 · m\n\n- **Provenance:** m\n\n## D03");
         let hash = spaced_hash;
         let good = spaced;
-        assert!(
-            check_log(&mid, good.len(), &hash)
-                .unwrap_err()
-                .contains("changed")
-        );
+        let error = check_log(&mid, good.len(), &hash).unwrap_err();
+        assert!(error.contains("changed"), "{error}");
+        assert!(error.ends_with("append at end of file"), "{error}");
         // An edit to an existing entry, and a removal.
         let edited = good.replace("x", "q");
         assert!(
@@ -312,10 +326,71 @@ mod tests {
                 .unwrap_err()
                 .contains("changed")
         );
+        let error = check_log(&good[..good.len() - 1], good.len(), &hash).unwrap_err();
+        assert!(error.contains("shorter"), "{error}");
+        assert!(error.ends_with("append at end of file"), "{error}");
+    }
+
+    #[test]
+    fn the_log_guard_tells_where_a_new_entry_goes() {
+        let base =
+            "# t\n\n## D01 · a\n\n- **Provenance:** x\n\n## D02 · b\n\n- **Provenance:** y\n";
+        let hash = athena_data::sha256_hex(base.as_bytes());
+        let entry = |id: &str| format!("\n## D{id} · c\n\n- **Provenance:** z\n");
+        // (a) An entry inserted before the end of the pinned base, ids ascending, whole entry well formed.
+        let inserted = base.replacen("## D02", "## D015 · m\n\n- **Provenance:** m\n\n## D02", 1);
+        // The inserted id does not matter: the bytes before the end of the pinned base changed.
+        let error = check_log(&inserted, base.len(), &hash).unwrap_err();
+        assert!(error.contains("changed"), "{error}");
+        assert!(error.ends_with("append at end of file"), "{error}");
+        // The same insertion as a duplicate id is still reported as a change of the pinned base.
+        let duplicate = base.replacen("## D02", "## D01 · m\n\n- **Provenance:** m\n\n## D02", 1);
+        let error = check_log(&duplicate, base.len(), &hash).unwrap_err();
+        assert!(error.ends_with("append at end of file"), "{error}");
+        // (b) A new entry whose id skips one, or repeats the highest, or goes back.
+        for id in ["04", "10"] {
+            let skipped = format!("{base}{}", entry(id));
+            let error = check_log(&skipped, base.len(), &hash).unwrap_err();
+            assert!(
+                error.contains(&format!("D{} follows D2", id.trim_start_matches('0'))),
+                "{error}"
+            );
+            assert!(
+                error.contains("one greater than the previous highest (D3)"),
+                "{error}"
+            );
+            assert!(error.ends_with("append at end of file"), "{error}");
+        }
         assert!(
-            check_log(&good[..good.len() - 1], good.len(), &hash)
+            check_log(&format!("{base}{}", entry("02")), base.len(), &hash)
                 .unwrap_err()
-                .contains("shorter")
+                .contains("twice")
+        );
+        // (c) The entry with the next id is accepted, and so is another one after it.
+        let appended = format!("{base}{}", entry("03"));
+        assert_eq!(check_log(&appended, base.len(), &hash), Ok(()));
+        let two = format!("{appended}{}", entry("04"));
+        assert_eq!(check_log(&two, base.len(), &hash), Ok(()));
+        // A gap inside the pinned base is not judged: the rule applies from the end of the pin.
+        let gapped =
+            "# t\n\n## D01 · a\n\n- **Provenance:** x\n\n## D04 · b\n\n- **Provenance:** y\n";
+        let gapped_hash = athena_data::sha256_hex(gapped.as_bytes());
+        assert_eq!(check_log(gapped, gapped.len(), &gapped_hash), Ok(()));
+        assert!(
+            check_log(
+                &format!("{gapped}{}", entry("06")),
+                gapped.len(),
+                &gapped_hash
+            )
+            .is_err()
+        );
+        assert_eq!(
+            check_log(
+                &format!("{gapped}{}", entry("05")),
+                gapped.len(),
+                &gapped_hash
+            ),
+            Ok(())
         );
     }
 

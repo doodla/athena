@@ -423,6 +423,11 @@ impl Athena {
             )),
             other => ctx.ui.line(&format!("{:<10} {reason}", other.as_str())),
         }
+        if state == OutcomeState::Stale {
+            ctx.ui.line(&format!(
+                "           `athena retry {id}` merges the kept candidate onto the branch tip and checks and verifies it again"
+            ));
+        }
         self.settle_resume_marks(&id, closing.consumed_resume.as_ref(), state, &reason);
         if state != OutcomeState::Blocked {
             crate::state::report_clean(ctx.ui, &self.state.clean_job(&id));
