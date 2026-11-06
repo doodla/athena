@@ -1,0 +1,83 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-180330-tb41",
+  "round": 3,
+  "at": "2026-11-06T00:07:41.882092363Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/invocation.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/invocation.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/pr_check.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/pr_check.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/reconcile.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/reconcile.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-gate/src/landing_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-gate/src/landing_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/records.md is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, docs/records.md",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The 540 s producer wait cap is below build_age_promote_s (600 s). A producer request never ages into the check class, so a steady stream of checks can starve producers. The design's ageing rule is quietly lost.",
+      "evidence": "is_head computes `effective = class - (now - queued_at) / promote`. Producer is class 2 and Check is class 1 (slots.rs:37-44), so a producer request ties the checks only after 600 s of waiting (config.rs:167 default build_age_promote_s = 600). SlotSettings::producer caps wait_s at bash_default_timeout_ms/1000 - 60 = 540 s, so the request exits 75 before its first promotion. A retry makes a new ticket with a fresh queued_at (enqueue, slots.rs:245-251), so retries never build up age. The design (agent-and-build-slots.md:155-156) says the ageing exists 'so class 3 cannot starve behind a steady stream of class 2'. With max_check_slots = 1 and several jobs in flight, every check that arrives while a producer waits goes ahead of it. Neither the plan's risks nor its Built note mention this. Fix: Add a decision on how the cap and the ageing interact, and test it. Do not give the producer's SlotSettings its own promote_s. is_head orders every ticket with the reader's own self.promote, so processes using different intervals would disagree on which ticket is the head, and every waiter could stall until timeout. Workable options: (a) state the starvation risk in the Risks and the Built note, and add a User question about setting build_age_promote_s below the cap in a governance job, since athena.toml is out of scope; or (b) have SlotSettings::producer assert or warn when wait_s <= promote_s, and print that in the Built note, with a slots.rs test that shows a producer ticket cannot reach the check class within wait_s under the shipped defaults.",
+      "location": "Decision 4 (wait cap) with slots.rs is_head (slots.rs:298-308) and config.rs:166-167",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Nothing demonstrates the 'job is not failed' half of criterion 3. The plan argues it holds by construction.",
+      "evidence": "The plan rejects a run-level test because 'a command's exit code never reaches job state'. That may be true, but the criterion names it as a behavior to show, and the request says 'held, not failed'. Only the exit code and the message are tested. The user question about a real hold is the right channel. Fix: Keep the User question. Also add a cheap test: a fake-driver producer run whose record carries a build_slots entry and a commands_run cargo command, ending normally with the job not closed as failed. Or state in criterion 3's demonstration that this part is shown by design argument only, so the verifier does not expect a test.",
+      "location": "Decision 9 / Criterion 3 demonstration ('the producer's job is not failed')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Two different conditions decide whether the wrapper is installed and whether the env names it. If they ever diverge, every slotted cargo is denied, or a wrapper is installed that nothing points to.",
+      "evidence": "env.rs::build sets ATHENA_BUILD_SLOT_BIN for Side::Produce. reading.rs installs the wrapper when role == Role::Producer. BuildWrapper::from_env requires the wrapper for Role::Producer. Today only run/producer.rs:166 passes Side::Produce, so the conditions match, but nothing ties them together. Fix: Gate the reading.rs install on the same `side == Side::Produce` that env.rs uses, or assert both in the planned reading.rs test (the producer spec has the files and variables; a Side::Produce spec always has the wrapper installed).",
+      "location": "Step 7 (reading.rs agent_spec, gated on role == Role::Producer) vs step 2 (env.rs, gated on Side::Produce)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The production record builder branches on the driver being fake.",
+      "evidence": "slotted_seen is forced to 0 for the fake driver so existing fake-producer tests (run/tests.rs:4805, tests/common/mod.rs:618) do not print the unslotted note. The record already carries `driver: DriverInfo` (records.rs:687). Fix: Consider leaving the record honest (count seen commands) and having status skip the note when invocation.driver is the fake driver, or keep the flag and name it in the Built note as a test-driver exception.",
+      "location": "Decision 8 (build_slots_record(..., fake: bool))",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read slots.rs, policy.rs, env.rs, reading.rs, hooks.rs, main.rs, records.rs, config.rs, the step-4 text of the design doc and binary.rs/live.rs, and grepped for every Invocation literal and every caller of policy::evaluate. The claims the plan makes about the code check out. Invocation literals are only at invocation.rs:195/281, status.rs:2431, pr_check.rs:269, reconcile.rs:245 and landing_tests.rs:125. `evaluate` is called outside policy.rs only at hooks.rs:67 and admission.rs:222. The only hook test that goes through the binary uses a verifier policy. env::build gets PATH through env_pass (athena.toml:52). athena_bin is current_exe (wiring.rs:178). Slot locks use std's File::try_lock (flock), so counting held slots inside one process works. Class::Producer is 2 in code. The design, the reading and the plan agree on the wrapper, the policy rule, the record field and the measurements. One design problem is new, though. The plan caps the producer's wait at 540 s, but the queue's ageing interval is 600 s (config.rs:167). So a producer request can never age up to the check class, and the design's anti-starvation rule (agent-and-build-slots.md:155-156) stops working for producers under the shipped settings. Each retry after exit 75 also starts a new ticket with zero age. This needs a stated decision and a fix in the plan. The other findings are minor."
+}

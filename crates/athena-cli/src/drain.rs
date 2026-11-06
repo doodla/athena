@@ -1123,6 +1123,9 @@ pub struct Report {
     /// touch disjoint paths; they run side by side up to `[parallel] max_concurrency`, group after group in
     /// this order (one job at a time when the bound is 1).
     pub plan_groups: Vec<Vec<String>>,
+    /// The count of items that began in each group this run worked, in the order worked. Groups the run did not
+    /// reach are not listed. It shows whether group size, not the `[parallel]` ceiling, caps agent use.
+    pub group_sizes: Vec<usize>,
     /// Items refused for design or code because their plan lacks a goal, a ladder rung or acceptance.
     pub refused: Vec<Refusal>,
     /// Anything that went wrong beside the stop reason, such as a rating that could not be taken.
@@ -1192,6 +1195,8 @@ struct State {
     pump_gone: bool,
     /// Items this run has handed to a worker; a new plan never offers them again.
     tried: BTreeSet<String>,
+    /// The item count of each group this run dispatched, in the order worked ([`Report::group_sizes`]).
+    group_sizes: Vec<usize>,
     /// Items that have a "passed over" line, so none gets two.
     passed_over: BTreeSet<String>,
     /// Items the last plan held back because their line is paused (or they wait on one that is), with the
@@ -2415,6 +2420,7 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 pump_done: false,
                 pump_gone: false,
                 tried: BTreeSet::new(),
+                group_sizes: Vec::new(),
                 passed_over: BTreeSet::new(),
                 pause_held: BTreeMap::new(),
                 carry: Carry::default(),
@@ -2967,6 +2973,15 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         wave = now.iter().map(|i| i.job.clone()).collect();
         d.st().tried.extend(wave.iter().cloned());
         run(d, vec![now], batches);
+        {
+            // The group counts by the items that began: one held back by the budget or the job limit did not
+            // work, and a group with none that began is not recorded.
+            let mut st = d.st();
+            let worked = wave.iter().filter(|job| st.begun.contains(*job)).count();
+            if worked > 0 {
+                st.group_sizes.push(worked);
+            }
+        }
         if d.stopped() {
             break;
         }
@@ -3058,6 +3073,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
             .collect(),
         waiting: view.waiting,
         plan_groups: plan.groups,
+        group_sizes: st.group_sizes.clone(),
         refused: plan
             .refused
             .into_iter()

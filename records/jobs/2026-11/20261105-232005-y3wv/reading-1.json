@@ -1,0 +1,176 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261105-232005-y3wv",
+  "n": 1,
+  "at": "2026-11-06T01:07:28.522900781Z",
+  "invocation_seq": 1,
+  "base_commit": "6e78a2cbc89609c4bec8fea46806a71ad720a4e2",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Replay new refusal rules over past readings inside the producer loop",
+  "summary": "Root cause: the replay of past accepted readings (`replay_stage` in run/mod.rs) runs only after the producer finishes, as a hold at verification. The producer never sees the newly refused list or the measured share, so a rule such as job 20261105-093556-zyt3's bug-fix check lands at 18% newly refused and is rejected after the work is done. Fix: run the replay as a check in the producer's loop and feed the list and share back to it. Audience: Athena's operator and the producer. Job 20261027-054211-a2n5 landed and is kept; job 20261105-093556-zyt3's candidate is dropped.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests, plus fmt, clippy and test passing."
+    },
+    {
+      "id": "root-cause",
+      "how": "The fix is where the producer's loop lacks the replay, not in one job's rule."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests assert the producer is sent back with the list and share."
+    },
+    {
+      "id": "no-empty-success",
+      "how": "An empty corpus or an unrunnable replay reports `no replay`, never a pass."
+    },
+    {
+      "id": "mechanism",
+      "how": "The limit is enforced in the producer loop by code."
+    },
+    {
+      "id": "verified",
+      "how": "An independent verifier runs cargo build, test, clippy and fmt --check."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and CHANGELOG written for an outside reader."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: I read crates/athena-core/src/run/mod.rs (`produce_and_verify`, `replay_stage`, `replay_run`, `replay_checkers`), crates/athena-core/src/reading.rs (`replay_cases`, `replay`, `REPLAY_HOLD_PERCENT`, `replay_declaration_of`, `check_governance_coverage`, `refusing_check`) and crates/athena-core/src/verify.rs (the replay blocker). Today the replay runs once after the checks pass and before verification, and it never fails the job on its own. No record or data file is added under crates/, so `check_record_file`, `AnyRecord` and the round-trip test are not affected. The share is measured directly: base and candidate `check-reading` builds are run over the newest accepted readings, and the newly refused ones are counted.",
+    "Job 20261027-054211-a2n5 (landed, verdict pass): its governance-coverage work in reading.rs, admission.rs, CHANGELOG.md and docs/architecture.md is kept as it is. Its findings are minor: broad keywords, and a keyword table test that has its own phrasings. They are not the cause here, so this job does not address them.",
+    "Job 20261105-093556-zyt3 (rejected): its candidate is dropped, including `check_root_cause_diagnosis`, the changes to briefs.rs, refusal_corpus.rs and run/mod.rs, and its CHANGELOG and architecture edits. Its findings are addressed by the generic mechanism: the producer now sees the newly refused list and the measured share during its own loop, so false positives such as 'the fix' in 'fails without the fix' show up before verification. That bug-fix check is not re-landed here.",
+    "The numeric limit is the existing one: `REPLAY_HOLD_PERCENT` (10) or the share the criteria declare plus 5 points. No new config key, so athena.toml stays unchanged.",
+    "The in-loop replay reuses `replay_cases`, `replay` and `replay_checkers`, and runs after the producer's checks pass. When it exceeds the limit, the list and share go back to the producer as a send-back, within the existing retry budget. When the replay cannot run, it says `no replay: <reason>` and does not count as a pass.",
+    "This job adds no new refusal rule, so the 'expected N% of newly refused readings' criterion does not apply."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The root cause is named in the change description and CHANGELOG.md: nothing makes the producer measure a new or tightened refusal rule against past accepted readings while it works. The replay (`replay_stage` in crates/athena-core/src/run/mod.rs) runs once after the producer finishes, as a verification hold. Checked by reading the diff.",
+      "kind": "content"
+    },
+    {
+      "text": "The test(s) added in crates/athena-core/src/run/tests.rs (the producer-loop replay tests) fail on the base tree and pass with the change. They use a fake candidate checker that newly refuses more than the limit of a corpus of recorded accepted readings. They assert that the producer is sent back, that its brief names the newly refused job ids and the measured percent, and that the loop ends once the share is under the limit. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test in crates/athena-core/src/run/tests.rs or crates/athena-core/src/reading.rs shows that the in-loop replay respects the declared share and the 10% default (`REPLAY_HOLD_PERCENT`): exactly the limit passes, one over is sent back. It also shows that an unrunnable replay reports `no replay: <reason>` and is not treated as a pass. Run `cargo test -p athena-core`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test shows that a job whose reading adds no refusal rule, or whose replay has no history, is not sent back, and that an empty corpus is reported as `no replay` and not as success.",
+      "kind": "behavior"
+    },
+    {
+      "text": "docs/architecture.md and CHANGELOG.md describe the replay as a check inside the producer loop, with its limit, and say the post-hoc verification hold stays as the backstop.",
+      "kind": "content"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass from the repository root.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/architecture.md",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "p": 0.25
+    }
+  ],
+  "out_of_scope": [
+    "Re-landing `check_root_cause_diagnosis` or any other new refusal rule from job 20261105-093556-zyt3: its candidate files (crates/athena-core/tests/refusal_corpus.rs and its other edits) are dropped",
+    "Reworking job 20261027-054211-a2n5's governance keyword table or its crates/athena-core/src/admission.rs changes: that work is kept as it is",
+    "Editing athena.toml, defaults.toml, workflows or other governance files",
+    "Editing prompt files (the reader and verifier prompts have no token headroom)",
+    "Changing the replay hold thresholds or the verifier's blocker in crates/athena-core/src/verify.rs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 2.2,
+        "p90": 5.5
+      },
+      "wall_time_s": {
+        "p10": 900.0,
+        "p50": 2700.0,
+        "p90": 6000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6722488038277512,
+      "p_user_intervenes": 0.08344086021505376,
+      "cost_usd": {
+        "p10": 0.5591729794694095,
+        "p50": 1.3551466,
+        "p90": 4.135936365953603
+      },
+      "wall_time_s": {
+        "p10": 557.7752824240381,
+        "p50": 1991.7202877799025,
+        "p90": 4206.327679514252
+      }
+    }
+  },
+  "departures": "Higher than the reference because the change touches the run pipeline's producer loop and replay with cold-built checkers, and two earlier attempts at this class were rejected.",
+  "urgent_reason": "It cuts rejected attempts and redo work: jobs that add a refusal rule are currently rejected by the replay hold only after the producer has finished.",
+  "hard_reason": "It changes the run pipeline (the producer loop and the replay stage) and the hold that judges other jobs' reading rules, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}

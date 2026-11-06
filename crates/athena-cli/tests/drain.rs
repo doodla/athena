@@ -8314,6 +8314,44 @@ mod rebase_recheck {
             }
         );
     }
+
+    /// Two disjoint items (one group) and a third that needs `a` (a group of its own).
+    fn two_then_one() -> Rebasing {
+        let mut steps = Rebasing::with(&["a", "b", "c"]);
+        steps.plan[2] = planned("c", Ladder::Implementation, &["src/c.rs"], &["a"]);
+        steps
+    }
+
+    #[test]
+    fn the_report_records_the_size_of_each_group_the_batch_worked_in_order() {
+        let steps = two_then_one();
+        let report = drain::drain_concurrent(&steps, limits(9.0), &Quiet, 2).unwrap();
+        assert_eq!(report.landed, 3);
+        assert_eq!(report.group_sizes, [2, 1]);
+    }
+
+    #[test]
+    fn a_group_the_batch_did_not_reach_is_not_recorded() {
+        let steps = two_then_one();
+        // Each job costs 0.6 and the group's rating 0.2; what is left of 2.5 cannot start the third job.
+        let report = drain::drain_concurrent(&steps, limits(2.5), &Quiet, 2).unwrap();
+        assert_eq!(report.stop, Stop::BudgetSpent);
+        assert_eq!(report.landed, 2);
+        assert_eq!(
+            report.plan_groups.len(),
+            2,
+            "the plan holds both groups: {:?}",
+            report.plan_groups
+        );
+        assert_eq!(report.group_sizes, [2], "only the group worked is recorded");
+    }
+
+    #[test]
+    fn one_job_at_a_time_records_groups_of_one() {
+        let steps = two_then_one();
+        let report = drain::drain_concurrent(&steps, limits(9.0), &Quiet, 1).unwrap();
+        assert_eq!(report.group_sizes, [1, 1, 1]);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------

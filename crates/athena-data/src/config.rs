@@ -265,8 +265,9 @@ impl Default for JobPlanConfig {
 }
 
 /// The most jobs `[parallel] max_concurrency` may allow at once. A drain runs a model and a build per job, so
-/// the ceiling keeps one setting from starting an unbounded number of them.
-pub const MAX_CONCURRENCY_CEILING: u32 = 8;
+/// the ceiling keeps one setting from starting an unbounded number of them. Sixteen is the design's ceiling for
+/// agent slots (docs/design/agent-and-build-slots.md); the shipped value starts lower.
+pub const MAX_CONCURRENCY_CEILING: u32 = 16;
 
 /// `[parallel]`: how `athena drain` runs the independent items of one plan group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1466,6 +1467,27 @@ pub(crate) mod tests {
             with(MAX_CONCURRENCY_CEILING + 1),
             Err(ConfigError::Parallel(_))
         ));
+    }
+
+    #[test]
+    fn the_ceiling_is_sixteen_and_the_shipped_start_is_twelve() {
+        assert_eq!(MAX_CONCURRENCY_CEILING, 16);
+        let config = Config::parse(REPO_CONFIG).unwrap();
+        assert_eq!(config.parallel.max_concurrency, 12);
+        let pipeline = |n: u32| {
+            Config::parse(&format!(
+                "{REPO_CONFIG}\n[drain.pipeline]\nmax_in_flight = {n}\n"
+            ))
+        };
+        assert_eq!(pipeline(16).unwrap().pipeline().max_in_flight, 16);
+        let error = pipeline(17).unwrap_err().to_string();
+        assert!(error.contains("max_in_flight"), "{error}");
+        let (stripped, _) = REPO_CONFIG.split_once("[parallel]").unwrap();
+        let with =
+            |n: u32| Config::parse(&format!("{stripped}\n[parallel]\nmax_concurrency = {n}\n"));
+        assert_eq!(with(16).unwrap().parallel.max_concurrency, 16);
+        let error = with(17).unwrap_err().to_string();
+        assert!(error.contains("from 1 to 16"), "{error}");
     }
 
     #[test]

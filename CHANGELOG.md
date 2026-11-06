@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The agent ceiling `MAX_CONCURRENCY_CEILING` (the most `[parallel] max_concurrency` and `[drain.pipeline]
+  max_in_flight` may be) is raised from 8 to 16, and `athena.toml` sets `max_concurrency` to 12, the starting
+  value of `docs/design/agent-and-build-slots.md` section 7.2 (build order step 6). Each drain run now records
+  the size of every plan group it dispatched, in order (`Report::group_sizes`), and the end-of-run lines print
+  them with their mean, so the maintainer can see whether group size, not the ceiling, caps agent use. Not
+  measured here: peak in-flight jobs and the count of low-disk outcomes, which are read after real drains.
+  Rollback: set `max_concurrency` to 2.
 - On a docs-only change (every changed path is under `docs/` or ends in `.md`), the verdict now counts a check
   Athena skipped by the docs-only path rule (`skip_when_only`) as seen running, as it already did a check
   reused from a green GitHub run, so a criterion such as "cargo test and cargo clippy still pass" can cite it.
