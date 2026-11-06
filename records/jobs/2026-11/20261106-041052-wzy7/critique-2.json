@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-041052-wzy7",
+  "round": 2,
+  "at": "2026-11-06T05:12:58.183570514Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The replay part of criterion 2 is never observed, and the test does not show that the checks or the verifier ran on the merged tree.",
+      "evidence": "Criterion 2 says 'checks, replay and verification run on the merged tree'. The test asserts non-empty `checks`, a `Role::Verifier` entry and the landed tree. The replay runs inside `check_and_verify` (`replay_stage`, run/mod.rs:1774), and the resume path passes `loop_replay: None` (mod.rs:646). Nothing in the plan checks that a Replay record exists for the retry job. `Replay` in athena-data records.rs:2729 has `candidate_commit` and `base_commit`, so this is checkable. A verifier entry alone does not show the verifier saw the merged files; `seen_by_verifier` in common/mod.rs:430 records what the verifier was given. Fix: In the clean-merge test, load the retry job's records and assert: a Replay record exists; its `candidate_commit` equals the retry job's Candidate `candidate_commit` (the merged commit); its `base_commit` equals the retry job's prediction commit. Also assert that `seen_by_verifier` holds both A's README.md greeting and the hand edit to src/lib.rs. Add to 'fails without the behavior' that with no clean-merge path there is no replay record on a merged candidate.",
+      "location": "Demonstrations, criterion 2 (clean-merge lifecycle test)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Two readers of the rule 'which states `athena retry` accepts' are missing from the dependents list.",
+      "evidence": "README.md:76 documents `athena retry <job>` as 'Try a rejected or failed job again'. That becomes incomplete, and nothing in the plan updates it or raises it. drain.rs:1654-1657 holds the drain's own copy of the rule (`retry: matches!(other, Some(Rejected | Failed | TimedOut))`). That copy is what keeps a stale job from being retried automatically, which is out of scope. The plan's drain entry covers only `ReadOf::Retry` (4216) and says the drain 'passes only the job it just ran'. It does not name this guard or say it must stay unchanged. Fix: Add both to Dependents. For drain.rs:1654, state that it stays unchanged so the drain never retries a stale job automatically, and name a test that covers it: an existing drain test, or a short new one that runs a stale job through the drain and asserts no retry job was made. For README.md:76, either add the one-line update to the deliverables (with the reason that the retry command's documentation changes) or raise it as an open question. Do not leave it silently stale.",
+      "location": "Dependents (refusal of a Stale job in earlier_attempt_with)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Without `-z`, git quotes conflicted paths that contain unusual characters, so the parsed paths would not match files in the snapshot.",
+      "evidence": "The plan runs `merge-tree --write-tree --name-only` and splits stdout into lines. With core.quotePath, a path holding non-ASCII characters or quotes is printed C-quoted. The gate's `snapshot.dir().join(path)` and `show_file(seed, path)` would then look up a different path. `show_file` returns None, and `fs::read` of the quoted path fails, so a missing file on both sides counts as unchanged and the job fails wrongly. Fix: Add `-z` and split on NUL: the tree, then the paths, then an empty field before the messages. Add a unit test with a path containing a space or a non-ASCII character.",
+      "location": "Step 1 (Git::merge_tree_report parsing)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The rebuilt resume mark sets `report_gaps` and `left_criteria` to empty, so the merged candidate's verification loses what the original producer left to Athena.",
+      "evidence": "`resume_candidate` passes `mark.report_gaps` and `mark.left_criteria` into `Built` (mod.rs:642-643), and these feed `check_and_verify`. For a stale job the plan sets both to empty, although the stale job's committed producer report and verification still hold them. Fix: Rebuild `left_criteria` and `report_gaps` from the stale job's committed producer report or verification where they exist. If that is not done, say in D157 that the verifier of a clean-merge retry does not get them, and why that is acceptable.",
+      "location": "Decision 3 / Step 6 (ResumeMark built from records)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After a full producer run the gate fails the job outright, and the producer's work is dropped without a Candidate record. The existing single send-back would be cheaper.",
+      "evidence": "producer_loop already has one send-back for unmet criteria and unchanged planned files (producer.rs:262-341). The gate runs after the loop and calls `self.failure`, with `closing.candidate` unset. A later `athena retry` on that Failed job matches neither `qualifies_for_tree_retry` (Rejected only) nor `resumable_job` (environment failures only). So it starts from the base, and both the kept candidate and the producer's work are lost. Fix: Either fold the unresolved-conflict paths into the loop's existing send-back (producer.rs), so the producer gets one chance to fix them, or keep the gate and say in D157 and the risks that a failed conflict retry loses the kept candidate on a later retry. The first option is the better design if widening to producer.rs is acceptable; raise it as an open question if not.",
+      "location": "Decision 4 / Step 9 (conflict gate)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The ancestry gate is not needed for the three-way merge to be correct, and it silently drops one of the two stale causes in `plan()` back to a full producer run.",
+      "evidence": "`git merge-tree --merge-base=<old_base>` applies the candidate's change from old_base onto any `head`, whether or not old_base is its ancestor. `plan()` marks a job stale both when the base is not an ancestor (land.rs:97-100) and when governed content changed (land.rs:126-134). The plan's stated reason for the gate is shared with the missing-commit case, which is a different problem. Fix: Either drop the ancestry condition and keep the commit-exists and dispatch-branch gates, or state a concrete reason for it (for example, rewritten history makes the merge base meaningless). Then name the case in D157 and the CHANGELOG rather than only 'any other stale job'.",
+      "location": "Decision 5 / Step 6 (is_ancestor gate)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The common parallel-job case in this repository will usually take the conflict path, because both jobs add a CHANGELOG bullet in the same place.",
+      "evidence": "plan.rs:461 lists CHANGELOG.md and docs/decisions.md as shared append-only files that nearly every item touches. Two jobs that each insert a bullet at the top of `### Added` make the three-way merge conflict. Fix: Add this to the risks so users are not surprised, and optionally make the conflict lifecycle test conflict on CHANGELOG.md, which is the realistic case. A union merge for append-only files would be a separate request.",
+      "location": "Risks",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against the code in the snapshot (reading.rs, run/mod.rs, producer.rs, candidate.rs, close.rs, land.rs, athena-git lib.rs and snapshot.rs, drain.rs, the test fixtures in tests/common/mod.rs and lifecycle.rs) and it is sound. The functions, seams and line numbers it names exist as described: `earlier_attempt_with` at 1362-1374, `tree_seed` and `resume_seed` and their non-records guard, `resume_candidate`, the `producer_loop`/`candidate_stage` split at 1492-1510, `SnapshotRepo::BaseThenTree`, `merge_tree` with `--merge-base`, the `Scenario.invocations` log and the one-shot `during_verification` hook. Deciding clean vs conflict on `head`, re-merging against P, getting a fresh `Verified` per retry job, the dispatch-branch gate and the conflict gate before `candidate_stage` all fit the code. The fingerprint rule in `plan()` stays enforced and is tested on the real `plan()`. Two gaps keep this from accept, so the verdict is revise. First, criterion 2 asks that checks, replay and verification run on the merged tree, but the demonstration does not observe the replay at all, and it only shows that a verifier ran, not that it saw the merged tree. Second, the dependents list leaves out README.md:76, which still says `athena retry` takes only a rejected or failed job, and the drain's own copy of the retryable-state rule (drain.rs:1654), which is what keeps automatic retries of stale jobs out of scope. The remaining findings are minor: path quoting in the merge-tree parse, what the rebuilt resume mark drops, the conflict gate failing the job instead of sending the work back once, the ancestry gate, and CHANGELOG edits from parallel jobs usually conflicting."
+}
