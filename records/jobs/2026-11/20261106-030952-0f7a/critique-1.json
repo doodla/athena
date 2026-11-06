@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-030952-0f7a",
+  "round": 1,
+  "at": "2026-11-06T03:16:22.105642708Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The wrapper waits up to build_wait_s, which is 1800 s. The producer's Bash tool kills the command at 600 s by default and at 1200 s at most. So in production the wrapper never reaches SlotWait: no message, no note and no hold. Time spent waiting for a slot also comes out of the build's own Bash timeout.",
+      "evidence": "athena.toml:64-65 sets `bash_default_timeout_ms = 600000` and `bash_max_timeout_ms = 1200000`. crates/athena-data/src/config.rs:166 defaults `build_wait_s` to 1800, and env.rs:81-88 passes those Bash limits to the agent. In slots.rs:186-213, `acquire` returns SlotWait only after `self.wait` has passed. A Bash call killed at 600 s ends the wrapper first. The ticket is then left unlocked and swept later, and the agent sees a Bash timeout, not 'no build slot free ... try again'. Criterion 3's tests use a 1 s wait, so they pass while the production path cannot happen. The plan's soundness rests on 'the wait is 1800 s', which is longer than any Bash call can run. Fix: Bound the wrapper's wait by the Bash timeout. In `agent_spec`, build `CargoShim`'s wait as min(build_wait_s, bash_default_timeout_ms/1000 minus a margin for the build itself, for example half), or pass both values and let the wrapper take the minimum. Record the choice and its reason in the design doc, whose section 4 text says '1800 s'. Add a unit test that the shim's wait is below the Bash default timeout for the shipped athena.toml. Do not edit athena.toml (governance). If the planner prefers to keep 1800 s, name the conflict as a root cause outside scope and propose the config change. Either way, the plan must not claim criterion 3's behavior happens in production when it cannot.",
+      "location": "Decision 5 / Decision 4 (wrapper wait limit = build_wait_s); Risks ('the wait is 1800 s')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The demonstration says the fake driver script records 'the checks' env'. Checks do not run through the agent driver, so the script cannot see their environment.",
+      "evidence": "Checks build their environment with `env::build` in crates/athena-core/src/run/checks.rs (:556, :826) and run it through SnapExec, not through `AgentDriver`. The fake `Script` in run/tests.rs:2152 receives only an `AgentInvocation`, which covers agent roles. Fix: Narrow the core test's claim to producer versus verifier. For checks, rely on the diff showing `env::build`/`EnvSpec` unchanged, or add one assertion at the checks seam (for example, the env SnapExec gets has no `ATHENA_CARGO_SHIM_DIR` and PATH has no shim dir).",
+      "location": "Demonstrations, criterion 8",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The flag list is shared, but the walk that skips leading global flags now exists twice: once in `check_cargo` and once in `cargo_subcommand`. The two can drift, which is what criterion 7 is meant to prevent.",
+      "evidence": "policy.rs:623-636 has the skip loop inline. The plan adds a second loop in `cargo_subcommand` that applies the same rule (skip listed flags; an unknown dash flag or no word gives None) and leaves `check_cargo` alone. Fix: Add one helper that returns the subcommand's index, or the first unknown flag, and have both `check_cargo` and `cargo_subcommand` call it. Keep `check_cargo`'s error strings exactly as they are, so its existing tests still guard it.",
+      "location": "Decision 2 (`check_cargo` keeps its own loop)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the retry correctly. It keeps the argv[0] `cargo` shim, registers `athena-cli --test slot_exec` in xtask/shard-timings.txt (the cause of the earlier failure), and keeps the fmt/metadata no-slot test. The code it names exists: CARGO_GLOBAL_FLAGS and check_cargo at policy.rs:477 and :616, the argv[0] hook dispatch at main.rs:545-553, agent_spec at reading.rs:338, producer_loop at producer.rs:156, hold_for_slot_wait at close.rs:198, the disk gate hold before the producer at mod.rs:1476, SlotWait (Serialize) in disk.rs, and SlotQueue acquire, try_acquire and waiting in slots.rs. The demonstrations for criteria 1, 2 and 4 use the real binary and a real SlotQueue, and each would fail without the behavior. The dependents list matches the readers I found. One soundness problem is major: the wrapper's wait limit is build_wait_s (1800 s), longer than the producer's Bash timeout (600 s default, 1200 s max in athena.toml). The Bash tool would kill the wrapper before it gives up, so the documented message, the wait note and the hold could never happen in production, though the 1 s-wait tests pass. The wait also eats into the build's Bash time. Two minor findings: the criterion 8 demonstration claims the fake driver sees the checks' environment, which it cannot; and the loop that skips leading global flags is duplicated, so the two copies can drift. Verdict: revise."
+}

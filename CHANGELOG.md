@@ -180,6 +180,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The ceiling of `[parallel] max_concurrency` is raised from 8 to 16 (`MAX_CONCURRENCY_CEILING` in
+  `athena_data::config`), so the setting accepts 1 to 16 and 17 is refused with an error that says "from 1 to 16".
+  `max_in_flight` in `[drain.pipeline]` shares the constant and now also accepts 1 to 16; `max_check_slots` stays
+  1 to 8. The `athena drain --help` text reads the constant, so it now says 16. The design notes
+  `async-drain.md`, `parallel-jobs.md` and `agent-and-build-slots.md` and the range comment in `athena.toml` state
+  the new range; the value `max_concurrency = 2` is unchanged.
 - The default `[parallel] max_concurrency` in `athena.toml` is now 2, so `athena drain` runs two independent
   jobs of a plan group at once. The schema range (1 to 8) and the disk check are unchanged. The athena-cli
   test fixture pins the value to 1, so drain tests no longer read the live setting.
