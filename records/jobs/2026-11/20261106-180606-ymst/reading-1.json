@@ -1,0 +1,225 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-180606-ymst",
+  "n": 1,
+  "at": "2026-11-06T18:06:33.94483248Z",
+  "invocation_seq": 1,
+  "base_commit": "d9b3b58a43d70a14fdf536ceeadc0984615c1cf4",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Retry: producer cargo build/test/clippy/check take a build slot",
+  "summary": "Retry of job 20261106-030952-0f7a (stale: branch moved during verification). Keep its verified candidate (athena-linked `cargo` wrapper first on the producer PATH, holding a build slot for build/test/clippy/check, subcommand found after global flags via the shared policy list) and merge it onto the tip; audience is the maintainer and verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Criteria require cargo test, clippy and fmt --check to pass."
+    },
+    {
+      "id": "small",
+      "how": "Reuses the verified candidate; scope limited to wrapper, PATH install and tests."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria are exercised by cargo test."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check slots held and freed, waits, and held-not-failed state."
+    },
+    {
+      "id": "mechanism",
+      "how": "Slot gating is enforced by the wrapper on the producer PATH."
+    },
+    {
+      "id": "root-cause",
+      "how": "The global-flag list is shared, so flag forms cannot skip the queue."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is the slot actually being held, tested directly."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261106-030952-0f7a: its candidate passed final verification but went stale because governed content moved on the branch (290f31101ef0). The candidate is kept and merged onto the tip; no behavior change is intended beyond resolving merge conflicts, if any.",
+    "Job 20261106-030952-0f7a finding 1 (stale artifact in the verifier's shared target dir, E0432 no CargoShim): environment-only, not a candidate defect; the candidate's CI passed and a release rebuild passed. No code fix.",
+    "Job 20261106-030952-0f7a finding 2 (a later command leaves the wait note, so the job stays held): documented conservative choice in the design doc; kept as is, not changed.",
+    "Job 20261106-030952-0f7a finding 3 (SIGKILL of the wrapper frees the slot while the child cargo may still run): documented trade-off, since the workspace denies unsafe and so cannot exec; kept as is.",
+    "Job 20261106-030952-0f7a finding 4 (outcome: governed content changed since dispatch): addressed by this retry merging onto the new tip and re-verifying.",
+    "Code survey: read crates/athena-agent/src/policy.rs (CARGO_GLOBAL_FLAGS at line 477, check_cargo walk near line 625) and listed crates/athena-cli/src and tests. The entry point is main.rs, which dispatches on argv[0]==cargo to slot_exec::run. The wrapper takes a Class::Producer slot via athena-core/src/slots.rs for build/test/clippy/check, and puts a shim dir first on the producer PATH in athena-agent/src/env.rs. The slot hold is measured by direct tests against a fake cargo. No record or data file is added under crates/, so check_record_file and AnyRecord are not involved.",
+    "Governance: xtask/shard-timings.txt is a deliverable (new slot_exec test unit needs a line). athena.toml, defaults.toml and workflows are not changed."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test --locked`: the slot_exec tests pass, including one with one slot and two producer processes where the second blocks while the first holds the slot, then runs, and afterwards try_acquire succeeds.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test --locked`: a test runs `cargo -q build` and `cargo --locked test` through the wrapper against a fake cargo and asserts both held a slot while running and freed it after; it fails if the subcommand lookup reads only args[0].",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test --locked`: a test where no slot frees within the wait limit asserts the documented message ('no build slot free for ... s; try again'), a non-failure environment exit, and that the job is recorded as held, not failed; the real cargo is never started.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test --locked`: a test shows `cargo fmt` and `cargo metadata` run through the wrapper without taking a slot even when every slot is held.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p xtask --test ci_shards`: checked_in_timings_cover_every_workspace_test_unit passes. Grep shows xtask/shard-timings.txt has an `athena-cli --test slot_exec` line.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test --locked` from the repo root on the merged tree: all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CARGO_GLOBAL_FLAGS in crates/athena-agent/src/policy.rs is the single shared list, Grep shows the wrapper uses it, and no second copy exists; check_cargo behavior is unchanged and its existing tests pass.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-agent/src/env.rs puts the wrapper directory first on the producer PATH only; the diff leaves verifier commands and environments unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry for producer cargo commands taking a build slot. The diff touches no governance files (athena.toml, defaults.toml, workflows) and no records/.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/slot_exec.rs",
+      "action": "create",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/slot_exec.rs",
+      "action": "create",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/src/lib.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-agent/src/env.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-agent/src/lib.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/slots.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/Cargo.toml",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "action": "modify",
+      "p": 0.9
+    }
+  ],
+  "out_of_scope": [
+    "A general early check for unregistered test files and better recorded test-check output (separate job)",
+    "Changing the verifier's commands, SnapExec or the local check path",
+    "Slot-owned warm target directories (build step 5)",
+    "Recording queued_s per producer command or the peak-slots statistic",
+    "Changing the policy's allowed commands beyond sharing the global-flag list",
+    "The landing rebuild slot",
+    "Changing the hold-note semantics or SIGKILL behavior noted in findings 2 and 3"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.8,
+      "p_verification_passes": 0.75,
+      "p_user_intervenes": 0.07,
+      "cost_usd": {
+        "p10": 0.2,
+        "p50": 0.7,
+        "p90": 3.0
+      },
+      "wall_time_s": {
+        "p10": 300.0,
+        "p50": 1200.0,
+        "p90": 3600.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6705069124423964,
+      "p_user_intervenes": 0.08066528066528066,
+      "cost_usd": {
+        "p10": 0.5611216138324234,
+        "p50": 1.3818654,
+        "p90": 4.363400482486806
+      },
+      "wall_time_s": {
+        "p10": 564.7484709766289,
+        "p50": 2038.637820505073,
+        "p90": 4280.843694894521
+      }
+    }
+  },
+  "departures": "Verified candidate is merged and re-verified without a new producer run when it merges cleanly, so cost and time are lower than the reference; a conflict would bring a producer run.",
+  "hard_reason": "Changes the run pipeline: how producer commands are gated by the build-slot queue and how a job is held on slot timeout.",
+  "producer_effort": "high"
+}

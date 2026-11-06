@@ -9,6 +9,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- `athena retry <job>` and `athena ask "try again on <job>"` accept a stale job (D159, which reverses
+  alternative (d) of D10, because stale landings now recur with parallel jobs). The retry reads the candidate commit
+  from the stale job's `candidate` record and merges it onto the branch tip with a three-way merge from the
+  candidate's own base (`athena_git::Git::merge_tree_report`, which also returns the conflicted paths and the tree
+  git wrote). A clean merge becomes the retry's candidate on the new base: admission, the checks, the replay and the
+  verifier run on the merged tree, no planner or producer runs, and the job lands through the unchanged landing rule,
+  so the landed fingerprint is the verified one. A merge that leaves the tree equal to the tip fails the job instead
+  of landing nothing. A conflict starts a producer run whose working directory is git's conflicted merge, with a
+  brief that names the conflicted paths; a candidate that still holds an opening and a closing conflict marker line
+  in one of those paths is closed before the checks and the verifier. Conflicts that git reports without marker lines
+  (modify/delete, rename, binary) are not seen by that check: the brief asks the producer to decide such a path
+  explicitly and report it, and the verifier judges the result. When the candidate or its base is gone, the base is
+  no longer an ancestor of the tip, or the request is pinned, the retry starts from the base. Staleness rules
+  (`land::plan`) and the drain are unchanged: nothing re-verifies a stale job without an explicit retry, and the
+  hint of `display::finished`, "ask again to redo the work", is unchanged. The stale line printed when a job goes
+  stale gains a second line that names `athena retry <job>`.
 - A registry of hand-kept mirrors, `athena_core::mirrors::REGISTRY`, that compares each mirror with its source
   by content (D158). Root cause: a file kept by hand as a mirror of a governing source was tested for its
   structure only, not its content against the source, so drift reached the final verdict in five jobs. Four
@@ -79,7 +95,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   producer in the same run (it arrives with the next attempt); D08 is the only seeded decision. The commit
   visibility change of job 20261010-225741-yvk0 and the ceiling change of job 20261105-180339-w5h7 are not
   re-landed here. Recorded as D156.
-
+- The producer's `cargo build`, `test`, `clippy` and `check` now take a build slot. Root cause: only Athena's
+  checks went through the build-slot queue, so any number of producers built at once (each with its own target
+  directory) and `max_check_slots` bounded nothing for the biggest part of a job's builds. The `athena` binary,
+  linked as `cargo` in a `shim` directory of the job and first on the producer's `PATH` only, takes a
+  `Class::Producer` slot, runs the real `cargo` and frees the slot when it exits. It finds the subcommand after the
+  global options with the tool policy's own list (`CARGO_GLOBAL_FLAGS`, shared with `check_cargo`), so
+  `cargo -q build` and `cargo --locked test` count; `fmt`, `metadata` and the other subcommands take no slot. The
+  wrapper waits at most half the agent's default Bash timeout (300 s for the shipped settings, never more than
+  `build_wait_s`), because a longer wait would be cut off by the tool before it could say why. Past it, it prints
+  `no build slot free for 300 s; try again`, exits 75 without starting `cargo` and leaves a note; a producer that
+  ends on that note holds the job as `environment: build slot wait` (no failure, no attempt used). The verifier's
+  and the checks' environments are unchanged. The new test file is registered in `xtask/shard-timings.txt`.
 - The replay of accepted readings now runs as a check inside the producer's loop, so the producer sees the
   newly refused readings and the measured share while it can still fix them. Root cause: nothing made the
   producer measure a new or tightened refusal rule against past accepted readings while it worked. The replay
@@ -225,6 +252,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The reader brief no longer says a stale earlier attempt "was rejected" or that its changes were discarded: it says
+  the job went stale, that the retry merges its kept candidate onto the tip (a clean merge is verified again with no
+  producer run, a conflict goes to a producer), and that the retry starts from the base when the candidate cannot be
+  merged. The `athena retry` help says the same, the error for a job that cannot be retried now also names a stale
+  one, and the README text that listed stale jobs as refused is corrected. The producer brief gains a "Retry"
+  section for a stale candidate that conflicts with the tip (`RetrySeed.conflicts`).
+- The decision-log guard in `crates/athena-cli/src/decisions.rs` pins the whole log up to D158 (359622 bytes) and
+  checks the pin first. A change to those bytes, or a log shorter than them, fails with a message that ends with
+  "append at end of file". A new entry past the pin must have the id one greater than the highest before it, or the
+  guard fails with the same ending. The rule does not apply inside the pinned bytes.
 - The ceiling of `[parallel] max_concurrency` is raised from 8 to 16 (`MAX_CONCURRENCY_CEILING` in
   `athena_data::config`), so the setting accepts 1 to 16 and 17 is refused with an error that says "from 1 to 16".
   `max_in_flight` in `[drain.pipeline]` shares the constant and now also accepts 1 to 16; `max_check_slots` stays
@@ -261,6 +298,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A failed CI check's stored output now keeps the failing section of the log. The root cause was that
+  `detail_from_job_logs` took the tail of the whole CI job log, which ends with the runner's post-job cleanup
+  (`Post job cleanup.`, `git config --unset-all`, `Cleaning up orphan processes`), and never selected the
+  failure lines, so a shard that did not finish or a failing unit followed by passing units left only cleanup
+  text. Each log is now cut before its post-job block, and when a failure line (`panicked at`, `... FAILED`,
+  `test result: FAILED`, `failures:`, `---- name stdout ----`) lies outside the log's end, those lines are
+  kept as the last lines of the stored tail.
 - `athena retry` no longer starts the same work twice for an interrupted job. An interrupted job (dispatched,
   no live process) stays dispatched after it is retried, so `athena status` kept telling the user to run
   `athena retry <id>` and a second retry made a second "try again on <id>" job. The check is in `Athena::retry`

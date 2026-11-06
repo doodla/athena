@@ -711,6 +711,135 @@ fn job_log_parser_strips_stamps_keeps_the_indent_and_names_the_units() {
     );
 }
 
+const CLEANUP: [&str; 5] = [
+    "Post job cleanup.",
+    "[command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader",
+    "Cleaning up orphan processes",
+    "##[warning]Node.js 20 actions are deprecated.",
+    "",
+];
+
+fn assert_no_cleanup(tail: &str) {
+    for noise in [
+        "Post job cleanup",
+        "unset-all",
+        "Cleaning up orphan processes",
+        "Node.js",
+    ] {
+        assert!(!tail.contains(noise), "{noise} leaked into:\n{tail}");
+    }
+}
+
+fn assert_end_has_panic(tail: &str) {
+    let last_chars: String = {
+        let mut c: Vec<char> = tail.chars().rev().take(600).collect();
+        c.reverse();
+        c.into_iter().collect()
+    };
+    assert!(last_chars.contains("panicked at"), "{last_chars}");
+    let last_lines: Vec<&str> = tail.lines().rev().take(60).collect();
+    assert!(last_lines.iter().any(|l| l.contains("panicked at")));
+}
+
+fn failing_unit_lines() -> Vec<String> {
+    [
+        "    Running unittests src/lib.rs (target/debug/deps/athena_core-0f3a9b)",
+        "running 1 test",
+        "test tests::a ... FAILED",
+        "",
+        "failures:",
+        "",
+        "---- tests::a stdout ----",
+        "thread 'tests::a' panicked at src/lib.rs:9:5:",
+        "assertion `left == right` failed",
+        "  left: 1",
+        " right: 2",
+        "",
+        "failures:",
+        "    tests::a",
+        "",
+        "test result: FAILED. 0 passed; 1 failed",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn detail_of(lines: Vec<String>, conclusion: &str) -> crate::ci_result::FailureDetail {
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    detail_from_job_logs(&[(
+        "test (shard 1)".to_string(),
+        conclusion.to_string(),
+        Some(stamped(&refs)),
+    )])
+    .unwrap()
+}
+
+#[test]
+fn detail_from_job_logs_drops_the_post_job_cleanup_tail() {
+    let mut lines = failing_unit_lines();
+    lines.extend(CLEANUP.iter().map(|s| s.to_string()));
+    let detail = detail_of(lines, "failure");
+    let tail = &detail.output_tail;
+    for want in [
+        "panicked at",
+        "test tests::a ... FAILED",
+        " right: 2",
+        "test result: FAILED",
+    ] {
+        assert!(tail.contains(want), "{want} missing from:\n{tail}");
+    }
+    assert_no_cleanup(tail);
+    assert_end_has_panic(tail);
+    assert_eq!(detail.failed_tests, vec!["athena_core tests::a"]);
+}
+
+#[test]
+fn detail_from_job_logs_keeps_failure_lines_when_no_test_is_named() {
+    let mut lines: Vec<String> = [
+        "thread 'x' panicked at src/main.rs:3:5:",
+        "assertion failed: ok",
+        "test result: FAILED. 0 passed; 1 failed",
+        "failures:",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    lines.extend((0..250).map(|i| format!("compiling crate_{i}")));
+    lines.extend(CLEANUP.iter().map(|s| s.to_string()));
+    let detail = detail_of(lines, "cancelled");
+    assert!(detail.failed_tests.iter().all(|t| t.contains('(')));
+    let tail = &detail.output_tail;
+    for want in [
+        "panicked at",
+        "assertion failed: ok",
+        "test result: FAILED",
+        "failures:",
+    ] {
+        assert!(tail.contains(want), "{want} missing from:\n{tail}");
+    }
+    assert_no_cleanup(tail);
+    assert_end_has_panic(tail);
+}
+
+#[test]
+fn detail_from_job_logs_keeps_a_failing_unit_behind_passing_units() {
+    let mut lines = failing_unit_lines();
+    lines.push("    Running unittests src/main.rs (target/debug/deps/other-1a2b3c)".to_string());
+    lines.push("running 250 tests".to_string());
+    lines.extend((0..250).map(|i| format!("test t_{i} ... ok")));
+    lines.push("test result: ok. 250 passed; 0 failed".to_string());
+    lines.extend(CLEANUP.iter().map(|s| s.to_string()));
+    let detail = detail_of(lines, "failure");
+    assert_eq!(detail.failed_tests, vec!["athena_core tests::a"]);
+    let tail = &detail.output_tail;
+    for want in ["panicked at", " right: 2", "test result: FAILED"] {
+        assert!(tail.contains(want), "{want} missing from:\n{tail}");
+    }
+    assert_no_cleanup(tail);
+    assert_end_has_panic(tail);
+}
+
 fn one_poll() -> crate::ci_result::Wait {
     crate::ci_result::Wait {
         polls: 1,
