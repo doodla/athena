@@ -17,11 +17,11 @@ previous attempt got wrong, so it is first.
 | Dependency | Current state | Where |
 | --- | --- | --- |
 | Build cache | **Off.** The sccache wiring was removed after a report of 0 hits; the cause was not reproduced. Support code for an optional pin remains, unused. No `*.toml` in the repository names sccache. | D84; D79, D80 (removed by D84); `athena.toml` has no `[tools.sccache]` |
-| Drain | Runs one job at a time unless `[parallel] max_concurrency` is raised (schema allows 1 to 8, set to 1). It rebuilds Athena after landing its own code. | `crates/athena-cli/src/drain.rs`, `athena.toml` `[parallel]`, D140 |
+| Drain | Runs one job at a time unless `[parallel] max_concurrency` is raised (schema allows 1 to 16, set to 1). It rebuilds Athena after landing its own code. | `crates/athena-cli/src/drain.rs`, `athena.toml` `[parallel]`, D140 |
 | Producer | One agent run per job in the job's own directories, with a per-job `CARGO_TARGET_DIR`. Hard jobs get a stronger setting. | D46, D136, `athena.toml` `[capabilities.change.env]` |
 | Verifier | Runs after the checks on a fresh snapshot, and the environment is checked again right before it. | D142 |
 | Disk guard | `[disk] min_free_gb` (default 10) checked at dispatch, before the checks and before the verifier; idle jobs' `target/` is removed first. | `crates/athena-core/src/disk.rs`, `crates/athena-data/src/config.rs` `DEFAULT_MIN_FREE_GB`, D142 |
-| Config limits | `[parallel] max_concurrency` 1 to 8; `[job_plan]` plans hard jobs only. No `[drain.pipeline]` table exists yet. | `athena.toml`, D143 |
+| Config limits | `[parallel] max_concurrency` 1 to 16; `[job_plan]` plans hard jobs only. No `[drain.pipeline]` table exists yet. | `athena.toml`, D143 |
 | Planning | Runs for hard jobs only, so reading and planning is short for most jobs. | D143 |
 
 Consequence: every number in this design is computed with **no shared build cache**. If the cache is re-enabled, that
@@ -261,7 +261,7 @@ max_conflict_returns = 2 # conflict returns before a thrash stop
 The block ships with every value at today's behavior. Job 10 is the one that raises `max_in_flight`.
 
 Build job 2 implemented this block in `athena-data`'s `Config` (`[drain.pipeline]`). The config refuses
-`max_in_flight` outside 1 to 8 (the `[parallel]` ceiling), `max_check_slots` outside 1 to 8, `read_ahead` of 0,
+`max_in_flight` outside 1 to 16 (the `[parallel]` ceiling), `max_check_slots` outside 1 to 8, `read_ahead` of 0,
 `max_conflict_returns` of 0 and any unknown key. `reserve_disk_gb` may be any non-negative whole number. The table is
 left out of a reading's config digest. Build job 4 reads `max_in_flight`, `max_check_slots` and `reserve_disk_gb` for
 the start bound (section 12); the other values are not read yet.
