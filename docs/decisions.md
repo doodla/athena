@@ -4122,8 +4122,12 @@ should replace those estimates with its figures.
   job 20261027-054251-33v7 had an unbounded excuse, a file-wide one with no marker. A check that can be met by
   excusing is met by excusing, so it became the prose-only guard again, only longer.
 - **Decision:** (1) `claim_problems` in `crates/athena-cli/tests/ontology.rs` is generic over all terms. For each
-  term it scans `BRIEF.md` and the term's file sources for lines naming the term or an optional alias, as a whole
-  word, case-sensitive. (2) Each term lists `senses`, `{ in, marker, says }`: the marker is a whole-word phrase that
+  term it scans `BRIEF.md`, `README.md`, every `docs/*.md` file and the term's file sources for lines naming the
+  term or an optional alias, as a whole word, case-sensitive. (Amended 2026-11-06: the scan first covered only
+  `BRIEF.md` and the term's listed sources, so a governing doc that no term listed could use a term in a sense
+  its definition lacked and pass. The root cause was that the checks covered the file's shape and its listed
+  sources, not every governing source. The `docs/` scan is non-recursive: files in subfolders such as
+  `docs/design/` are scanned only when a term lists them as a source.) (2) Each term lists `senses`, `{ in, marker, says }`: the marker is a whole-word phrase that
   must be on such a line in that file, and the definition must hold the `says` phrase. A stale marker is flagged,
   and so is a term with no sense that passes both ways. (3) A line where the term opens a bullet, heading or table
   row and is followed by `:` or `|` defines it or gives it a role. Every such line must be covered by a sense
@@ -4152,7 +4156,8 @@ should replace those estimates with its figures.
   until someone lists it; the check bounds the common case (a definition or role line) and not every mention. The
   identifying-line rule is a heuristic on line shape, and a wrapped line that starts with a term name and a colon
   needs an excuse. Markers are tied to current wording of the sources, so a reworded source line makes a marker
-  stale and the test asks for it to be updated. The limit of two lines per excuse is a judgement, not measured.
+  stale and the test asks for it to be updated. Subfolders of `docs/` are scanned only if a term lists them as a
+  source, so a governing doc there can still drift unseen. The limit of two lines per excuse is a judgement, not measured.
 - **Reversal cost:** Low. Remove `senses`, `aliases` and `excused` from the file and `claim_problems` from the
   test; the structural check is unchanged.
 - **Provenance:** Stated: the request to retry job 20261027-054251-33v7 and its verifier's finding that source-only
