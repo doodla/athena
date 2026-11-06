@@ -99,6 +99,14 @@ pub struct Exit {
     pub stderr: String,
 }
 
+/// The result of [`Git::merge_tree_report`]: the merged tree, and the paths that conflicted (empty when the
+/// merge was clean).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeReport {
+    pub tree: String,
+    pub conflicts: Vec<String>,
+}
+
 /// A repository (a checkout or a snapshot) and the extra environment git runs with.
 #[derive(Debug, Clone)]
 pub struct Git {
@@ -684,6 +692,51 @@ impl Git {
                 stderr: exit.stderr,
             }),
         }
+    }
+
+    /// Three-way merges `theirs` into `ours` from `base` like [`Git::merge_tree`], but keeps the tree of a
+    /// conflicted merge (conflicted files hold conflict markers) and lists the conflicted paths. The paths come
+    /// from `-z` output, so a name with spaces, quotes or non-ASCII characters is not quoted. Needs git 2.38.
+    pub fn merge_tree_report(&self, base: &str, ours: &str, theirs: &str) -> Result<MergeReport> {
+        let exit = self.exit(
+            [
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "-z",
+                &format!("--merge-base={base}"),
+                ours,
+                theirs,
+            ],
+            None,
+            &[],
+        )?;
+        if !matches!(exit.code, Some(0 | 1)) {
+            return Err(GitError::Failed {
+                command: "merge-tree".into(),
+                status: exit.code,
+                stderr: exit.stderr,
+            });
+        }
+        let mut fields = exit.stdout.split(|b| *b == 0);
+        let tree = fields
+            .next()
+            .map(|t| String::from_utf8_lossy(t).trim().to_string())
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| GitError::Failed {
+                command: "merge-tree".into(),
+                status: exit.code,
+                stderr: "merge-tree printed no tree".into(),
+            })?;
+        let conflicts = if exit.code == Some(1) {
+            fields
+                .take_while(|f| !f.is_empty())
+                .map(|f| String::from_utf8_lossy(f).into_owned())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(MergeReport { tree, conflicts })
     }
 
     /// Fast-forwards the current branch (and work tree) to `commit`; refuses rather than overwrite edits.
@@ -1446,6 +1499,70 @@ mod tests {
         write_files(dir.path(), &[("a.txt", "theirs\n")]);
         let theirs = commit_all(&git, "theirs");
         assert_eq!(git.merge_tree(&base, &ours, &theirs).unwrap(), None);
+    }
+
+    #[test]
+    fn merge_tree_report_returns_a_clean_tree_with_no_conflicts() {
+        let (dir, git) = repo_with(&[("a.txt", "base\n"), ("b.txt", "base\n")]);
+        let base = git.head().unwrap().unwrap();
+        write_files(dir.path(), &[("a.txt", "ours\n")]);
+        let ours = commit_all(&git, "ours");
+        git.run(["checkout", "-q", "-b", "other", &base]).unwrap();
+        write_files(dir.path(), &[("b.txt", "theirs\n")]);
+        let theirs = commit_all(&git, "theirs");
+        let report = git.merge_tree_report(&base, &ours, &theirs).unwrap();
+        assert!(report.conflicts.is_empty());
+        assert_eq!(
+            git.merge_tree(&base, &ours, &theirs).unwrap().as_deref(),
+            Some(report.tree.as_str())
+        );
+        assert_eq!(
+            git.show_file(&report.tree, "a.txt").unwrap().unwrap(),
+            b"ours\n"
+        );
+        assert_eq!(
+            git.show_file(&report.tree, "b.txt").unwrap().unwrap(),
+            b"theirs\n"
+        );
+    }
+
+    #[test]
+    fn merge_tree_report_returns_the_conflicted_tree_and_paths() {
+        let (dir, git) = repo_with(&[("a.txt", "base\n"), ("b.txt", "base\n")]);
+        let base = git.head().unwrap().unwrap();
+        write_files(dir.path(), &[("a.txt", "ours\n"), ("b.txt", "ours\n")]);
+        let ours = commit_all(&git, "ours");
+        git.run(["checkout", "-q", "-b", "other", &base]).unwrap();
+        write_files(dir.path(), &[("a.txt", "theirs\n")]);
+        let theirs = commit_all(&git, "theirs");
+        let report = git.merge_tree_report(&base, &ours, &theirs).unwrap();
+        assert_eq!(report.conflicts, vec!["a.txt".to_string()]);
+        let conflicted = git.show_file(&report.tree, "a.txt").unwrap().unwrap();
+        let text = String::from_utf8(conflicted).unwrap();
+        assert!(
+            text.contains("<<<<<<<") && text.contains(">>>>>>>"),
+            "{text}"
+        );
+        // The unconflicted change is merged.
+        assert_eq!(
+            git.show_file(&report.tree, "b.txt").unwrap().unwrap(),
+            b"ours\n"
+        );
+    }
+
+    #[test]
+    fn merge_tree_report_returns_a_path_with_a_space_and_a_non_ascii_letter_unquoted() {
+        let name = "a file \u{e9}.txt";
+        let (dir, git) = repo_with(&[(name, "base\n")]);
+        let base = git.head().unwrap().unwrap();
+        write_files(dir.path(), &[(name, "ours\n")]);
+        let ours = commit_all(&git, "ours");
+        git.run(["checkout", "-q", "-b", "other", &base]).unwrap();
+        write_files(dir.path(), &[(name, "theirs\n")]);
+        let theirs = commit_all(&git, "theirs");
+        let report = git.merge_tree_report(&base, &ours, &theirs).unwrap();
+        assert_eq!(report.conflicts, vec![name.to_string()]);
+        assert!(git.show_file(&report.tree, name).unwrap().is_some());
     }
 
     #[test]

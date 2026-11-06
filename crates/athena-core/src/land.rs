@@ -19,6 +19,10 @@
 //!
 //! The caller adds the closing records to the tree, gates the commit, and fast-forwards; a refused
 //! fast-forward makes the job `blocked`.
+//!
+//! A stale job does not land in place. `athena retry` can merge the job's kept candidate onto the tip
+//! ([`merge_kept_candidate`]); the merged tree becomes a new job's candidate, verified against a new base,
+//! so the rule above compares that job's own verified fingerprint with what lands. [`plan`] is the same.
 
 use crate::gh::verification_id;
 use crate::verify::Verified;
@@ -141,6 +145,49 @@ pub fn plan(git: &Git, verified: &Verified, head: &str, dispatched: &Dispatched)
         );
     }
     Ok(Plan::Tree(tree))
+}
+
+/// What merging a stale job's kept candidate onto the current tip gives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleMerge {
+    /// The candidate's change applies cleanly; this is the merged tree.
+    Clean(String),
+    /// The candidate and the tip changed the same place. `tree` holds the conflicted files with conflict
+    /// markers; `paths` names them.
+    Conflict { tree: String, paths: Vec<String> },
+}
+
+/// Three-way merges a stale job's kept candidate `old_candidate` onto `tip`, using the job's own base
+/// `old_base` as the merge base. Only the candidate's change relative to its base is applied, so what the
+/// other job landed on the tip is kept. The result is not verified: the caller verifies the merged tree
+/// against a new base before anything lands, and [`plan`] still refuses content that differs from that.
+pub fn merge_kept_candidate(
+    git: &Git,
+    old_base: &str,
+    tip: &str,
+    old_candidate: &str,
+) -> Result<StaleMerge> {
+    let report = git.merge_tree_report(old_base, tip, old_candidate)?;
+    Ok(if report.conflicts.is_empty() {
+        StaleMerge::Clean(report.tree)
+    } else {
+        StaleMerge::Conflict {
+            tree: report.tree,
+            paths: report.conflicts,
+        }
+    })
+}
+
+/// Whether `bytes` holds a line that opens or closes a conflict region: seven `<` or seven `>` at the start
+/// of a line, alone or followed by a space and a label. A Markdown `=====` underline, or prose that merely
+/// names the marker mid-line, does not count.
+pub fn has_conflict_markers(bytes: &[u8]) -> bool {
+    bytes.split(|b| *b == b'\n').any(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        [&b"<<<<<<<"[..], &b">>>>>>>"[..]].iter().any(|marker| {
+            line.starts_with(marker) && line.get(marker.len()).is_none_or(|b| *b == b' ')
+        })
+    })
 }
 
 /// Where the local branch should move after the host merged a job's pull request, or `None` when it need not.
@@ -706,6 +753,86 @@ mod tests {
         let (_dir, git, p, c, _f) = base_and_candidate();
         let wrong = fingerprint(&git, &p, &p).unwrap();
         assert!(plan(&git, &pass(&p, &c, &wrong), &p, &Dispatched::Unknown).is_err());
+    }
+
+    #[test]
+    fn a_kept_candidate_merged_onto_a_moved_tip() {
+        let (dir, git, p, c, f) = base_and_candidate();
+        // The other job lands first, on a file the candidate did not touch: governed content moves.
+        let moved = commit(&git, dir.path(), "b.txt", "other job\n");
+        assert!(matches!(
+            plan(&git, &pass(&p, &c, &f), &moved, &Dispatched::Unknown).unwrap(),
+            Plan::Stale(_)
+        ));
+
+        let StaleMerge::Clean(tree) = merge_kept_candidate(&git, &p, &moved, &c).unwrap() else {
+            panic!("the candidate and the tip changed different files");
+        };
+        assert_eq!(
+            git.show_file(&tree, "a.txt").unwrap().unwrap(),
+            b"changed\n"
+        );
+        assert_eq!(
+            git.show_file(&tree, "b.txt").unwrap().unwrap(),
+            b"other job\n"
+        );
+
+        // Verified afresh on the merged tree against the tip as the new base, it lands.
+        let merged = git.commit_tree(&tree, &[&moved], "merged", false).unwrap();
+        let fresh = fingerprint(&git, &merged, &moved).unwrap();
+        assert_ne!(fresh, f, "the merged tree is not the original candidate");
+        assert_eq!(
+            plan(
+                &git,
+                &pass(&moved, &merged, &fresh),
+                &moved,
+                &Dispatched::Unknown
+            )
+            .unwrap(),
+            Plan::Tree(tree)
+        );
+        // The original candidate's fingerprint no longer describes what would land.
+        let err = plan(
+            &git,
+            &pass(&moved, &merged, &f),
+            &moved,
+            &Dispatched::Unknown,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("differs from the verified content")
+        );
+    }
+
+    #[test]
+    fn a_kept_candidate_that_changed_the_same_lines_as_the_tip_conflicts() {
+        let (dir, git, p, c, _f) = base_and_candidate();
+        let moved = commit(&git, dir.path(), "a.txt", "the other job's line\n");
+        match merge_kept_candidate(&git, &p, &moved, &c).unwrap() {
+            StaleMerge::Conflict { tree, paths } => {
+                assert_eq!(paths, vec!["a.txt".to_string()]);
+                let text = git.show_file(&tree, "a.txt").unwrap().unwrap();
+                assert!(has_conflict_markers(&text));
+            }
+            StaleMerge::Clean(_) => panic!("both sides changed a.txt line 1"),
+        }
+    }
+
+    #[test]
+    fn conflict_markers_are_found_by_line_not_by_substring() {
+        assert!(has_conflict_markers(
+            b"a\n<<<<<<< ours\nb\n=======\nc\n>>>>>>> theirs\n"
+        ));
+        assert!(has_conflict_markers(b">>>>>>> 0123abc"));
+        assert!(has_conflict_markers(b"x\r\n<<<<<<<\r\n"));
+        // A Markdown heading underline and prose that names the marker mid-line are not conflicts.
+        assert!(!has_conflict_markers(b"Title\n=======\ntext\n"));
+        assert!(!has_conflict_markers(
+            b"the marker `<<<<<<< ours` opens a region\n"
+        ));
+        assert!(!has_conflict_markers(b"<<<<<<<<< eight\n"));
+        assert!(!has_conflict_markers(b""));
     }
 
     #[test]

@@ -43,6 +43,13 @@ enum Command {
     },
     /// Try a rejected or failed job again, starting from its introspection record (the proposed next
     /// request, the cause and the prevention) and shown as `ask` shows a reading; Enter runs it.
+    ///
+    /// A stale job can be tried again too. Its kept candidate is merged onto the current branch tip. A clean
+    /// merge is checked, replayed and verified again on the merged tree and lands with no producer run; a
+    /// merge that adds nothing to the tip fails the retry. A merge that conflicts starts a producer retry
+    /// from the conflicted tree, which fails before the checks if a conflicted file is left unresolved. A
+    /// stale job whose dispatch branch is not checked out, or whose kept commits are gone, is tried again
+    /// from the base.
     Retry {
         job: String,
         /// Run without waiting at the prompt (the reading is printed, but its acceptance stays unresolved).

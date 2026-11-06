@@ -4309,3 +4309,74 @@ should replace those estimates with its figures.
   `crates/athena-core/src/reading.rs`, `crates/athena-core/src/disk.rs`, D08. Measured: the tests named above.
   Not measured: how many future changes will touch the two D08 paths, and whether authors will add the link or
   work around it.
+
+## D157 · `athena retry` re-verifies a stale job's kept candidate on the new tip
+
+- **Case:** With two jobs running at once, a job that passed its checks, replay and verification can go stale
+  because the other job landed first on content it governs. Before this entry a stale job could only be asked
+  again from scratch, which repeated the whole producer run for work that had already passed. D10 left out
+  automatic re-verification on the new base (alternative (d)) "until stale landings recur". They now recur with
+  parallel jobs (D145, D155), so this entry reverses that alternative.
+- **Decision:** Reverses alternative (d) of D10 for the explicit `athena retry <job>` (or `athena ask "try again
+  on <job>"`) of a stale job; nothing re-verifies a stale job by itself, and the drain does not retry one. The
+  retry merges the job's kept candidate onto the current branch tip, once, in `dispatch` and before any producer
+  call (`land::merge_kept_candidate`, over the new `Git::merge_tree_report`: `merge-tree --write-tree
+  --name-only -z`, which keeps a conflicted tree and its unquoted paths; git 2.38 or later, D19 pins 2.40). The
+  merge uses the stale job's own base as the merge base, so only the candidate's change is applied and the other
+  job's change is kept.
+  - A clean merge is resumed through `resume_candidate` with no planner and no producer run. The merge is
+    repeated against the new job's prediction commit, the candidate is built from the merged tree with its own
+    change list, and admission, the checks, the replay and the verifier run on it. The new job has a new base, a
+    new candidate and a new fingerprint, so the rule of D10 holds unchanged: `land::plan` still refuses content
+    whose fingerprint differs from the verified one. The stale job's verification is not reused and the stale
+    job is not landed in place.
+  - A merge that adds nothing to the tip (the other change already holds the candidate's content) closes the
+    retry job failed with the reason "the kept candidate's content is already on the branch tip", with no
+    producer run. A retry from scratch would repeat the producer run for work already landed.
+  - A merge that conflicts commits the conflicted tree as a seed and starts a producer retry from it, through
+    the seeded-retry path of rejected jobs. The producer brief names the stale job and the conflicted files. A
+    gate between the producer loop and the candidate stage closes the job failed, before any check or verifier,
+    if a conflicted file is unchanged from the seed or still holds a marker line (`<<<<<<<` or `>>>>>>>` at the
+    start of a line). Markers in a file no check compiles, and modify/delete or rename conflicts, would otherwise
+    pass the checks. A producer that correctly keeps the seeded version of a conflicted file also fails this
+    gate; the cost is a failed retry, not a wrong landing.
+  - The step applies only when the stale job was dispatched on the branch that is checked out and its candidate
+    and base commits still exist. There is no ancestry condition: the three-way merge takes the candidate's
+    change against its own base, and landing still requires the new base to be an ancestor of the tip. A job
+    that went stale because another branch was checked out is not carried onto this one; it, and a job whose
+    commits are gone, get the ordinary retry from the base, as before.
+  - What stays: the fingerprint rule of D10, the staleness rules of `land::plan`, and the drain's own retry set.
+  - D10's own lines (alternative (d), "(d) is left out until stale landings recur", and "Stale jobs must be asked
+    again") are not edited: the log is append-only (`decisions::tests::the_decision_log_is_well_formed_and_only_appended_to`
+    pins the bytes before D122). Read them with this entry: alternative (d) is reversed, and a stale job can be
+    tried again.
+- **Alternatives:** (a) Re-apply the stale candidate's change list onto the new base, as a resume does: it
+  overwrites the other job's changes to the same files. (b) Land the stale job in place after a merge: its
+  verified fingerprint is for the old tree, which is what the landing rule refuses. (c) Merge in `Athena::retry`
+  at reading time: the tip can move before `go`, which must decide on the tip it dispatches on. (d) Seed a
+  conflict retry from the old candidate commit, as a rejected job is: it would restore that commit's whole tree
+  and undo the other job's landing. (e) Retry stale jobs from the drain: automatic re-verification, left out of
+  this change. (f) Parse `--name-only` output without `-z`: git quotes unusual file names. (g) Fold the
+  unresolved-conflict finding into the producer's send-back: it needs `producer.rs`, named as a follow-up.
+- **Tradeoff:** Known limits.
+  - The clean-merge verifier does not receive the original producer's `report_gaps` and `left_criteria`; they
+    are held only in the resume mark, which a closed job no longer has. The stale job's verification already
+    weighed them, and the merged tree is checked and verified afresh.
+  - A failed conflict retry has no candidate record, so a later `athena retry` of that failed job starts from the
+    base. Running `athena retry` on the original stale job again merges its candidate afresh.
+  - Jobs that each add a bullet at the top of `CHANGELOG.md` or `docs/decisions.md` change the same lines, so the
+    usual stale retry in this repository takes the conflict path and a producer run. A union merge for
+    append-only files is a separate request.
+  - The reader brief for a retry says the earlier job "was rejected" and that a retry starts from the base. For a
+    stale job that is wrong: it passed verification and its candidate is merged. `briefs.rs` holds prompt text
+    and is unchanged; a test pins what the reader is told today.
+  - "No producer run" is not "no model cost": the retry is read first, and the verifier runs.
+- **Reversal cost:** Low. Remove `stale_retry`, `StaleRetry`, the `merged` branch of `resume_candidate`, the gate
+  and `Git::merge_tree_report`, and put `Stale` back in the refusal of `earlier_attempt_with`. Nothing recorded
+  depends on them: the records are the existing candidate, verification, replay and outcome records.
+- **Provenance:** Stated: the request's reasoning, that stale landings now recur with parallel jobs. Read: D10,
+  D145, D155, `crates/athena-core/src/land.rs`, `crates/athena-core/src/reading.rs`,
+  `crates/athena-core/src/run/mod.rs`, `crates/athena-core/src/run/close.rs`. Measured: the tests
+  `cargo test -p athena-cli --test lifecycle stale`, `--test lifecycle unresolved`, `cargo test -p athena-core
+  --lib land::tests` and `cargo test -p athena-git merge_tree`. Not measured: how often a stale job's candidate
+  merges cleanly in real use.
