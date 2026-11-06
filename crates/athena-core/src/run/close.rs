@@ -188,11 +188,13 @@ impl Athena {
         }
     }
 
-    /// Holds a job because no build slot came free within `build_wait_s`, at the checks. It is held the way
-    /// [`Athena::hold_for_disk`] holds a job: the records (candidate, invocations, plans) are committed with no
-    /// score and no outcome, a marker records the wait, the resume mark stays, and the next drain resumes the
-    /// job from its kept candidate with no attempt used. The error returned is the [`SlotWait`] hold; the
-    /// caller returns it from `go`.
+    /// Holds a job because no build slot came free within the wait limit, at the checks or while the
+    /// producer ran its own `cargo` command. It is held the way [`Athena::hold_for_disk`] holds a job: the
+    /// records (candidate, invocations, plans) are committed with no score and no outcome, a marker records
+    /// the wait, the resume mark stays, and the next drain resumes the job with no attempt used. At the
+    /// checks it resumes from the kept candidate; held during the producer there is no candidate and no
+    /// resume mark, so the next drain starts from the start, as for a disk hold before the producer. The
+    /// error returned is the [`SlotWait`] hold; the caller returns it from `go`.
     ///
     /// [`SlotWait`]: crate::disk::SlotWait
     pub(super) fn hold_for_slot_wait(
