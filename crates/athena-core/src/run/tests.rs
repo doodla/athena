@@ -2502,6 +2502,382 @@ mod produce_and_verify_order_tests {
         assert_eq!(counts.all().3, 1);
     }
 
+    /// The criterion that limits which files may change in the scope tests. The base reading's one deliverable
+    /// is README.md, so that is the only allowed path.
+    const LIMIT: &str = "No file outside README.md changed";
+    const NOTES: &str = "NOTES.md";
+    const EXTRA: &str = "EXTRA.md";
+
+    fn add(path: &str) -> (String, Option<String>) {
+        (path.into(), Some("text\n".into()))
+    }
+
+    fn remove(path: &str) -> (String, Option<String>) {
+        (path.into(), None)
+    }
+
+    /// The editing script, except that the reader adds [`LIMIT`] to its criteria from its `limit_from`th call
+    /// on (counting from 0) and the producer makes the extra edits `edits(attempt)` (attempt from 0). The
+    /// producer and the verifier report the criterion when their prompt lists it.
+    fn scoped(
+        counts: Arc<Counts>,
+        prompts: Arc<Mutex<Vec<String>>>,
+        limit_from: usize,
+        edits: impl Fn(usize) -> Vec<(String, Option<String>)> + Send + Sync + 'static,
+    ) -> athena_agent::fake::Script {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let inner = editing(counts, prompts, Vec::new());
+        let reads = AtomicUsize::new(0);
+        let attempts = AtomicUsize::new(0);
+        Box::new(move |spec: &AgentInvocation| {
+            let mut turn = inner(spec);
+            let listed = spec.user_prompt.contains(LIMIT);
+            match spec.role {
+                Role::Reader => {
+                    let read = reads.fetch_add(1, SeqCst);
+                    if let Some(out) = turn.structured.as_mut() {
+                        if read >= limit_from {
+                            out["acceptance_criteria"]
+                                .as_array_mut()
+                                .unwrap()
+                                .push(json!({ "text": LIMIT, "kind": "content" }));
+                        }
+                        // A reading of a retry must say what becomes of the earlier job's files: here the
+                        // earlier job changed NOTES.md, which the retry leaves out of scope.
+                        if read >= 1 {
+                            out["out_of_scope"]
+                                .as_array_mut()
+                                .unwrap()
+                                .push(json!(NOTES));
+                        }
+                    }
+                }
+                Role::Producer => {
+                    turn.edits.extend(edits(attempts.fetch_add(1, SeqCst)));
+                    if let (true, Some(out)) = (listed, turn.structured.as_mut()) {
+                        out["criteria_check"].as_array_mut().unwrap().push(
+                            json!({ "criterion": LIMIT, "status": "met", "evidence": "read it" }),
+                        );
+                    }
+                }
+                Role::Verifier => {
+                    if let (true, Some(out)) = (listed, turn.structured.as_mut()) {
+                        out["criteria"].as_array_mut().unwrap().push(json!({
+                            "criterion": LIMIT, "met": true, "evidence": "checked", "commands": []
+                        }));
+                    }
+                }
+                _ => {}
+            }
+            turn
+        })
+    }
+
+    /// Runs one job over `repo` with the fake agents of `script`: the Athena (so its records can be read), the
+    /// closing and what the UI said.
+    fn run_job(
+        repo: &tempfile::TempDir,
+        state: &tempfile::TempDir,
+        script: athena_agent::fake::Script,
+    ) -> (Athena, Finished, Vec<String>) {
+        let athena = athena_with(
+            repo,
+            state,
+            PASSES,
+            crate::test_support::plenty_of_space,
+            script,
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(proposal.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        let said = ui.0.lock().unwrap().clone();
+        (athena, done, said)
+    }
+
+    /// The stored job record of `done`.
+    fn stored_job(athena: &Athena, done: &Finished) -> athena_data::records::Job {
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        records.jobs[done.job.as_str()]
+            .job
+            .clone()
+            .expect("a job record")
+    }
+
+    #[test]
+    fn scope_send_back_a_file_outside_the_allowed_paths_is_sent_back_before_the_verifier() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        // The first attempt adds NOTES.md; the send-back brings the diff inside the list.
+        let script = scoped(counts.clone(), prompts.clone(), 0, |attempt| {
+            if attempt == 0 {
+                vec![add(NOTES)]
+            } else {
+                vec![remove(NOTES)]
+            }
+        });
+        let (athena, done, said) = run_job(&repo, &state, script);
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (2, 1), "{said:#?}");
+        let prompts = prompts.lock().unwrap().clone();
+        assert!(!prompts[0].contains("## Sent back"), "{}", prompts[0]);
+        let (_, sent_back) = prompts[1].split_once("## Sent back").expect("a send-back");
+        assert!(
+            sent_back.contains(
+                "Files changed outside the job's allowed paths (revert each):\n\n- NOTES.md\n"
+            ),
+            "{sent_back}"
+        );
+        assert!(sent_back.contains(LIMIT), "{sent_back}");
+        assert!(!sent_back.contains("- README.md"), "{sent_back}");
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("scope      allowed paths: README.md (from criterion")),
+            "{said:#?}"
+        );
+        // The stored record holds the reading's deliverable paths.
+        assert_eq!(
+            stored_job(&athena, &done).allowed_paths,
+            Some(vec!["README.md".to_string()])
+        );
+    }
+
+    #[test]
+    fn scope_send_back_a_change_made_outside_after_the_first_send_back_is_sent_back_again() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        // NOTES.md on the first attempt; the first send-back swaps it for EXTRA.md; the second clears both.
+        let script = scoped(
+            counts.clone(),
+            prompts.clone(),
+            0,
+            |attempt| match attempt {
+                0 => vec![add(NOTES)],
+                1 => vec![remove(NOTES), add(EXTRA)],
+                _ => vec![remove(NOTES), remove(EXTRA)],
+            },
+        );
+        let (_athena, done, said) = run_job(&repo, &state, script);
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (3, 1), "{said:#?}");
+        let prompts = prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 3);
+        let (_, second) = prompts[2].split_once("## Sent back").expect("a send-back");
+        assert!(second.contains("\n- EXTRA.md\n"), "{second}");
+        assert!(!second.contains("\n- NOTES.md\n"), "{second}");
+    }
+
+    #[test]
+    fn scope_send_back_a_diff_still_outside_closes_before_the_verifier_and_names_the_files() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let script = scoped(counts.clone(), Arc::default(), 0, |_| {
+            vec![add(NOTES), add(EXTRA)]
+        });
+        let (athena, done, said) = run_job(&repo, &state, script);
+        assert_eq!(done.state, OutcomeState::Failed, "{}", done.reason);
+        assert!(
+            done.reason.starts_with(SCOPE_REASON_PREFIX),
+            "{}",
+            done.reason
+        );
+        assert!(
+            done.reason.contains("EXTRA.md, NOTES.md"),
+            "{}",
+            done.reason
+        );
+        assert!(done.reason.contains(LIMIT), "{}", done.reason);
+        assert!(done.reason.contains("Revert each"), "{}", done.reason);
+        // The shared send-back, the scope send-back, and the run that ends the job; no verifier.
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (3, 0), "{said:#?}");
+        assert!(
+            said.iter().any(|l| l
+                == "producer   files still outside the allowed paths after the send-back; the job ends before the verifier"),
+            "{said:#?}"
+        );
+        assert!(
+            said.iter()
+                .any(|l| l.starts_with("failed     files outside the allowed paths:")),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.starts_with("verifier   ")),
+            "{said:#?}"
+        );
+        // A retry's producer is told which files to leave alone.
+        let records = Records::load(&athena.git, &athena.head().unwrap()).unwrap();
+        let redactor = athena_gate::redact::Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let (_, findings) = crate::reading::retry_findings(
+            &records,
+            &format!("try again on {}", done.job),
+            &redactor,
+        )
+        .unwrap()
+        .expect("the scope reason reaches the retry");
+        assert_eq!(findings, vec![done.reason.clone()]);
+    }
+
+    #[test]
+    fn scope_send_back_inside_the_allowed_paths_reaches_the_verifier_with_deletions() {
+        // Deleting the allowed README.md stays inside the list.
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let script = scoped(counts.clone(), Arc::default(), 0, |_| {
+            vec![remove("README.md")]
+        });
+        let (_athena, done, said) = run_job(&repo, &state, script);
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        assert_eq!((counts.all().1, counts.all().3), (1, 1), "{said:#?}");
+
+        // Deleting a committed file outside the list is a change outside it, and is sent back.
+        let repo = repo_with_file("OLD.md");
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
+        let script = scoped(counts.clone(), prompts.clone(), 0, |attempt| {
+            if attempt == 0 {
+                vec![remove("OLD.md")]
+            } else {
+                // The send-back restores the file to its base content.
+                vec![("OLD.md".into(), Some("old\n".into()))]
+            }
+        });
+        let (_athena, done, said) = run_job(&repo, &state, script);
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        assert_eq!((counts.all().1, counts.all().3), (2, 1), "{said:#?}");
+        let prompts = prompts.lock().unwrap().clone();
+        assert!(prompts[1].contains("\n- OLD.md\n"), "{}", prompts[1]);
+    }
+
+    /// The test repository with a committed `OLD.md` whose text is `old`.
+    fn repo_with_file(path: &str) -> tempfile::TempDir {
+        let repo = repo();
+        commit_file(&repo, path, "old\n");
+        repo
+    }
+
+    #[test]
+    fn scope_send_back_a_job_whose_reading_has_no_limit_stores_no_list_and_is_not_checked() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let counts = Arc::new(Counts::default());
+        let script = editing(counts.clone(), Arc::default(), vec![add(NOTES), add(EXTRA)]);
+        let (athena, done, said) = run_job(&repo, &state, script);
+        assert_eq!(
+            done.state,
+            OutcomeState::Landed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        let (_, producer, _, verifier) = counts.all();
+        assert_eq!((producer, verifier), (1, 1), "{said:#?}");
+        assert!(
+            !said.iter().any(|l| l.starts_with("scope      ")),
+            "{said:#?}"
+        );
+        assert_eq!(stored_job(&athena, &done).allowed_paths, None);
+        let text = athena
+            .git
+            .show_file("HEAD", &format!("{}/job.json", done.job.dir()))
+            .unwrap()
+            .expect("the committed job record");
+        let text = String::from_utf8(text).unwrap();
+        assert!(text.contains("\"kind\""), "{text}");
+        assert!(!text.contains("allowed_paths"), "{text}");
+    }
+
+    #[test]
+    fn scope_send_back_a_resumed_candidate_outside_the_list_closes_at_the_checks_stage() {
+        let repo = repo();
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("repo");
+        let counts = Arc::new(Counts::default());
+        // The first reading has no limit; the retry's reading adds it.
+        let athena = athena_with(
+            &repo,
+            &state,
+            PASSES,
+            low_while_checking,
+            scoped(counts.clone(), Arc::default(), 1, |_| vec![add(NOTES)]),
+        );
+        let proposal = athena.ask("describe the demo", &Quiet).unwrap();
+        let first = proposal.job.clone();
+        athena
+            .go(first.as_str(), AcceptedBy::User, &Quiet)
+            .expect_err("low space before the checks holds the job");
+        assert_eq!(
+            athena.state.read_resume(&first).map(|m| m.stage),
+            Some(crate::state::ResumeStage::Checks)
+        );
+        assert_eq!((counts.all().1, counts.all().3), (1, 0));
+
+        std::fs::write(root.join("freed"), b"").unwrap();
+        let (retry, _) = athena.retry(first.as_str(), &Quiet).unwrap();
+        assert_eq!(retry.reader_error, None);
+        let ui = Lines::default();
+        let done = finished(
+            athena
+                .go(retry.job.as_str(), AcceptedBy::User, &ui)
+                .unwrap(),
+        );
+        let said = ui.0.lock().unwrap().clone();
+        assert_eq!(
+            done.state,
+            OutcomeState::Failed,
+            "{}\n{said:#?}",
+            done.reason
+        );
+        assert!(
+            done.reason.starts_with(SCOPE_REASON_PREFIX),
+            "{}",
+            done.reason
+        );
+        assert!(done.reason.contains("NOTES.md"), "{}", done.reason);
+        // No producer or planner ran again, and neither did the checks or the verifier.
+        let (planner, producer, _, verifier) = counts.all();
+        assert_eq!((planner, producer, verifier), (0, 1, 0), "{said:#?}");
+        assert!(
+            !said.iter().any(|l| l.starts_with("checks     ")),
+            "{said:#?}"
+        );
+    }
+
     #[test]
     fn governed_check_is_skipped_for_a_resume_at_the_verifier() {
         // A base list that cannot be read makes the check say so with a warning line and let the job go on.

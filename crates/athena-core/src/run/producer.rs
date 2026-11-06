@@ -159,6 +159,12 @@ impl Athena {
     /// with the gate's message in the brief; the send-back is shared with the unmet criteria, so a producer
     /// already sent back for those gets none for the gate. A change still unreconciled at the limit leaves the
     /// loop, and the gate at the candidate (`check_and_verify`) closes the job with the gate's message.
+    ///
+    /// Files changed outside the job's allowed paths ([`outside_allowed_paths`]) are sent back the same way,
+    /// with the files and the limiting criterion in the brief. They have a send-back of their own after the
+    /// shared one ([`SCOPE_SEND_BACKS`]), so a change made outside the list after the first send-back is still
+    /// sent back. A change still outside afterwards leaves the loop, and the check at the candidate closes the
+    /// job before the verifier runs. A job with no allowed paths, and a nested run, are not checked.
     pub(super) fn producer_loop(
         &self,
         ctx: &RunContext<'_>,
@@ -182,6 +188,20 @@ impl Athena {
         // the same working directory, up to `PRODUCER_SEND_BACKS` times.
         let mut attempt_brief = brief.to_string();
         let mut send_backs = 0;
+        // Send-backs for files outside the allowed paths, counted apart from the shared one above.
+        let mut scope_send_backs = 0;
+        // The job's allowed paths and the criterion that limits them, when an accepted criterion limits which
+        // files may change. A nested run is judged by the outer job, whose check sees the combined change.
+        let scope = match (
+            ctx.job
+                .job
+                .as_ref()
+                .and_then(|j| j.allowed_paths.as_deref()),
+            accepted.limiting_criterion(),
+        ) {
+            (Some(allowed), Some(criterion)) if self.nested.is_none() => Some((allowed, criterion)),
+            _ => None,
+        };
         // The files the plan and the reading's deliverables expect the candidate to change; the same send-back
         // also covers any of them left unchanged without a reason in the report.
         let planned = planned_paths(closing.plans.last(), accepted);
@@ -266,14 +286,17 @@ impl Athena {
             // Planned files and expected deliverables the work tree does not change, with no reason in the
             // report. A run with no change at all fails below as an idle producer, so it is not listed here.
             let changes = snapshot.change_list()?;
-            let unchanged = {
-                let changed: Vec<String> = changes.iter().map(|c| c.path.clone()).collect();
-                if changed.is_empty() {
-                    Vec::new()
-                } else {
-                    unchanged_planned_files(&raw, &planned, &changed)
-                }
+            let changed: Vec<String> = changes.iter().map(|c| c.path.clone()).collect();
+            let unchanged = if changed.is_empty() {
+                Vec::new()
+            } else {
+                unchanged_planned_files(&raw, &planned, &changed)
             };
+            // Changed files, deleted ones included, outside the job's allowed paths. Empty for a job with no
+            // limit, so every branch below that reads it behaves as before.
+            let outside = scope
+                .map(|(allowed, _)| outside_allowed_paths(allowed, &changed))
+                .unwrap_or_default();
             // The decision gate's finding on the work tree as it stands: the same message the gate at the
             // candidate would close the job with. A nested run is judged by the outer job.
             let gate = if self.nested.is_none() && !changes.is_empty() {
@@ -287,7 +310,12 @@ impl Athena {
             // over the limit is a problem like an unmet criterion; a replay that did not run is not.
             loop_replay = self.loop_replay(ctx, &snapshot)?;
             let held = loop_replay.as_ref().filter(|l| l.run.held);
-            if unmet.is_empty() && unchanged.is_empty() && held.is_none() && gate.is_none() {
+            if unmet.is_empty()
+                && unchanged.is_empty()
+                && held.is_none()
+                && gate.is_none()
+                && outside.is_empty()
+            {
                 break Some(report);
             }
             let mut problems = Vec::new();
@@ -316,6 +344,14 @@ impl Athena {
             if gate.is_some() {
                 problems.push("decisions not reconciled".to_string());
             }
+            // Like the gate's finding, files outside the allowed paths are not part of what the verifier is
+            // told the report lacked: the job ends before the verifier when they remain.
+            if !outside.is_empty() {
+                problems.push(format!(
+                    "files changed outside the job's allowed paths: {}",
+                    outside.join(", ")
+                ));
+            }
             // Keep the redacted report that failed the check: the attempt's invocation record carries it
             // in `detail`, so each attempt's report stays with the job's records.
             let kept = {
@@ -333,7 +369,9 @@ impl Athena {
                     AnyRecord::Invocation(Box::new(attempt.clone())).canonical_path()
                 )
             };
-            if send_backs >= PRODUCER_SEND_BACKS {
+            // The shared send-back is used first; a change outside the allowed paths gets one more after it.
+            let scope_slot_free = !outside.is_empty() && scope_send_backs < SCOPE_SEND_BACKS;
+            if send_backs >= PRODUCER_SEND_BACKS && !scope_slot_free {
                 // The work may be finished even though the report is not: the verifier judges it. A run
                 // that changed nothing still fails, below, after the loop.
                 if !report_problems.is_empty() {
@@ -350,18 +388,38 @@ impl Athena {
                         "producer   decisions still not reconciled after the send-back; the job ends at the decision gate",
                     );
                 }
+                if !outside.is_empty() {
+                    // The job ends before the verifier, at the check on the candidate.
+                    ctx.ui.line(
+                        "producer   files still outside the allowed paths after the send-back; the job ends before the verifier",
+                    );
+                }
                 break Some(report);
             }
-            send_backs += 1;
+            if send_backs < PRODUCER_SEND_BACKS {
+                send_backs += 1;
+            } else {
+                scope_send_backs += 1;
+            }
             ctx.ui
                 .line(&format!("producer   sent back: {}", problems.join("; ")));
             let replay = held.map(|replay| (&replay.view, replay.limit));
-            attempt_brief = match (&gate, replay) {
-                (Some(message), replay) => {
+            attempt_brief = match (&gate, replay, scope.filter(|_| !outside.is_empty())) {
+                (gate, replay, Some((_, criterion))) => send_back_text_scoped(
+                    brief,
+                    &unmet,
+                    &unchanged,
+                    replay,
+                    gate.as_deref(),
+                    Some((&outside, criterion)),
+                ),
+                (Some(message), replay, None) => {
                     send_back_text_full(brief, &unmet, &unchanged, replay, Some(message))
                 }
-                (None, Some(_)) => send_back_text_with_replay(brief, &unmet, &unchanged, replay),
-                (None, None) => send_back_text(brief, &unmet, &unchanged),
+                (None, Some(_), None) => {
+                    send_back_text_with_replay(brief, &unmet, &unchanged, replay)
+                }
+                (None, None, None) => send_back_text(brief, &unmet, &unchanged),
             };
         };
         Ok(Flow::Go(Reported {

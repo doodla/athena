@@ -1773,14 +1773,21 @@ fn finding_text(f: &Finding) -> String {
     .to_string()
 }
 
+/// The start of the closing reason of a job whose candidate still changed files outside the job's allowed
+/// paths when the check before verification ran. The reason names each file and the criterion that limits
+/// the files.
+pub(crate) const SCOPE_REASON_PREFIX: &str = "files outside the allowed paths:";
+
 /// The job a request "try again on <job>" retries, and every blocker and major finding of that job's final
 /// verification, redacted, in the form [`tree_retry_seed`] uses. Findings have no resolved state, so none is
 /// left out because a later round might have fixed it. `None` when the request is not a retry, the job has
 /// no verification, or no finding blocks.
 ///
-/// One job has no verification and still has a finding: a job the decision check closed before the verifier
-/// started ([`athena_data::decision_links::GATE_REASON_PREFIX`]). Its closing reason names the decisions the
-/// change left unreconciled and the fix, so that reason, redacted, is the one finding.
+/// Two kinds of job have no verification and still have a finding: a job the decision check closed before
+/// the verifier started ([`athena_data::decision_links::GATE_REASON_PREFIX`]), and a job the allowed-paths
+/// check closed there ([`SCOPE_REASON_PREFIX`]). Its closing reason names the decisions the change left
+/// unreconciled, or the files outside the allowed paths, and the fix, so that reason, redacted, is the one
+/// finding.
 pub fn retry_findings(
     records: &Records,
     request: &str,
@@ -1797,6 +1804,7 @@ pub fn retry_findings(
             .filter(|o| {
                 o.reason
                     .starts_with(athena_data::decision_links::GATE_REASON_PREFIX)
+                    || o.reason.starts_with(SCOPE_REASON_PREFIX)
             })
         else {
             return Ok(None);
@@ -6031,6 +6039,39 @@ mod tests {
             .expect("findings");
         assert_eq!(texts.len(), 2, "{texts:?}");
         assert!(texts.iter().all(|t| !t.starts_with(GATE_REASON_PREFIX)));
+    }
+
+    #[test]
+    fn retry_findings_carry_the_reason_of_a_job_closed_by_the_allowed_paths_check() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let scoped = |state: OutcomeState, reason: &str| {
+            let mut job = two_majors_and_a_minor();
+            job.verification = None;
+            job.outcome = Some(outcome(&job, state, reason));
+            job
+        };
+        let reason = format!(
+            "{SCOPE_REASON_PREFIX} NOTES.md, src/extra.rs (criterion \"No file outside X changed\"); revert each"
+        );
+        let job = scoped(OutcomeState::Failed, &reason);
+        let id = job.id().clone();
+        let request = format!("try again on {id}");
+        let found = retry_findings(&records_with(job), &request, &redactor)
+            .unwrap()
+            .expect("the scope reason is a finding");
+        assert_eq!(found, (id, vec![reason.clone()]));
+
+        // The same words without the prefix, or a job that did not close failed, carry nothing.
+        for job in [
+            scoped(OutcomeState::Failed, &reason[SCOPE_REASON_PREFIX.len()..]),
+            scoped(OutcomeState::Landed, &reason),
+        ] {
+            let request = format!("try again on {}", job.id());
+            assert_eq!(
+                retry_findings(&records_with(job), &request, &redactor).unwrap(),
+                None
+            );
+        }
     }
 
     fn dispatched_job_stub() -> athena_data::records::Job {
