@@ -1,0 +1,32 @@
+{
+  "schema": "athena.introspection/1",
+  "id": "20261106-095756-138r",
+  "at": "2026-11-06T09:57:56.953485314Z",
+  "trigger": "rejection",
+  "job": "20261106-065752-jexx",
+  "intervention": null,
+  "class_of_work": "tests",
+  "category": "rejected",
+  "what_happened": "The job was meant to write test stand-in scripts from a child process, so tests no longer hit ETXTBSY (\"text file busy\"). The verifier rejected it with 2 of 8 acceptance criteria unmet and one major finding. The first unmet criterion required that no listed file still writes an executable stand-in itself (no `set_permissions` / `from_mode(0o755)` in test code). The second required a CHANGELOG entry that describes only what the diff does. The major finding is that the test `a_cached_gitleaks_is_skipped_only_when_it_reports_the_pinned_version` (xtask/src/main.rs:1020-1021) still writes its stand-in in-process and runs it through production code, so the race remains there. No failed check is named. This is a second attempt at the same flaky-test work as the earlier job 20261106-065736-dge9.",
+  "failure_class": "20261106-065823-5fm2",
+  "new_class": false,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "The fix was applied call site by call site with no root-cause design and no mechanical way to find every site. Nothing listed all the places that write an executable stand-in, and nothing failed when one was left behind. The criterion was a grep over six files, but the producer was not made to run that grep itself before finishing, so a missed site was seen only by the final verifier. Test code that writes a script and then runs it through production code has no single place to protect, so a helper alone leaves paths open. The changelog claim was likewise never compared with the diff.",
+  "prevention_kind": "code-check",
+  "prevention": "Add a repo test that scans all test code for in-process executable writes (`set_permissions` with an executable mode, `from_mode(0o755)`) outside the one shared helper and fails on any hit. The test would cover all call sites, including xtask/src/main.rs, and the producer would run it as a check. The root-cause design should be settled first: stand-ins are written and made executable only through the shared helper, which also covers the case where production code spawns the script (for example a retry on ETXTBSY, or the write done by a child process). The changelog entry should then be written from the final diff.",
+  "proposed_request": "Finish the ETXTBSY fix for test stand-in scripts. Outcome: no test in the repo writes an executable stand-in script in-process; every such test creates it through the one shared helper in athena-testutil, which writes it from a child process so the file is never open for writing when it runs. Start by finding every site: search all test code, including xtask/src/main.rs, crates/athena-cli/tests/reconcile.rs, crates/athena-agent/src/claude.rs, crates/athena-core/src/checks.rs, crates/athena-core/src/reading.rs and crates/athena-git/src/snapshot.rs, for `set_permissions` and `from_mode(0o755)`. The known remaining case is the xtask test a_cached_gitleaks_is_skipped_only_when_it_reports_the_pinned_version (around lines 1020-1021), which runs its stand-in through production code. Convert it, and make sure the helper-written script is the one production code runs. Add a repo test that fails if any test code outside the shared helper writes an executable file itself. Acceptance: (1) the grep above finds no in-process executable write outside the helper; (2) the new scan test passes and fails on a planted violation; (3) the converted tests pass repeatedly (run the affected test binaries several times); (4) the diff may touch only the listed test files, athena-testutil, manifests, Cargo.lock, docs/decisions.md for the D08 reconcile, and CHANGELOG.md; (5) CHANGELOG.md has one entry describing only what the diff does.",
+  "evidence": {
+    "model": "claude-sonnet-5-5",
+    "cost_usd": 0.111504,
+    "input_tokens": 2,
+    "output_tokens": 1400
+  },
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [
+    "20261106-065736-dge9"
+  ],
+  "from_jev": false
+}
