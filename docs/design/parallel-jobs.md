@@ -7,7 +7,7 @@ tables map each one to its section. The revision does not mark itself accepted.
 
 **First slice built: a bounded parallel drain.** `athena drain` now runs the independent items of one plan group
 at the same time, up to `[parallel] max_concurrency` in `athena.toml` (default 1, which is the old serial drain;
-the schema allows 1 to 8, `MAX_CONCURRENCY_CEILING` in `crates/athena-data/src/config.rs`). What it is, and is
+the schema allows 1 to 16, `MAX_CONCURRENCY_CEILING` in `crates/athena-data/src/config.rs`). What it is, and is
 not, as built **(read, `crates/athena-cli/src/drain.rs`)**:
 
 - It runs in one process with one thread per worker; it is not the process-per-job launcher of sections 4 and 5.
