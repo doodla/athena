@@ -9,6 +9,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A change to code that a decision of `docs/decisions.md` governs now fails before the verifier starts unless the
+  change reconciles the decision, and the `athena drain --help` ceiling is read from the constant that enforces
+  it. Root cause: The decision log is prose with no link from a decision to the code or limit it governs, so
+  reversals were found only at the final verdict. Job 20261010-225741-yvk0 reversed D08 and job
+  20261105-180339-w5h7 left "at most 8" in the drain help after raising the limit; each was found by the
+  verifier, after the checks and the verifier's cost, and the producer had no step that searched for the
+  statements its change makes false. `docs/decision-links.toml` gains a `[[governs]]` table (a decision id and
+  the paths it governs, an exact file or a directory prefix ending in `/`), read and validated by
+  `ConfirmedLinks` through one parser in `athena_data::decision_links`; D08 is mapped to
+  `crates/athena-git/src/snapshot.rs` and `crates/athena-core/src/run/candidate.rs`. At the top of
+  `check_and_verify`, before the CI push, the early pull request, the checks and the verifier, Athena compares the
+  paths of the change with the base commit's list. A governed decision whose paths the change touches (added,
+  changed, deleted or renamed) fails the job unless the change adds a `[[link]]` from that decision to an entry
+  it adds to `docs/decisions.md`; `amended` and `superseded` both count, so a change that reverses nothing adds a
+  one-line entry that says the decision was checked and stands. The job closes failed with a reason that begins
+  `decisions not reconciled:` and names each decision, its paths and the fix. It is not an environment stop, so
+  `athena retry` starts a new producer, and `retry_findings` now returns that reason for a job closed this way
+  (it has no verification), so the retry brief lists the decision ids under "Findings you must address". A
+  governed id that is not an entry of the log is a condition (a) finding of `athena backtest`. A resume at the
+  verifier stage and a nested run do not run the check again. The `athena drain` help text states its ceiling
+  from `MAX_CONCURRENCY_CEILING` when the command is built (`cli_command`), so raising the constant cannot leave
+  "at most 8" behind. Left out: other copies of the ceiling in design prose, and sending the finding back to the
+  producer in the same run (it arrives with the next attempt); D08 is the only seeded decision. The commit
+  visibility change of job 20261010-225741-yvk0 and the ceiling change of job 20261105-180339-w5h7 are not
+  re-landed here. Recorded as D156.
+
 - The replay of accepted readings now runs as a check inside the producer's loop, so the producer sees the
   newly refused readings and the measured share while it can still fix them. Root cause: nothing made the
   producer measure a new or tightened refusal rule against past accepted readings while it worked. The replay

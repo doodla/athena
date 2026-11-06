@@ -272,7 +272,7 @@ items in plan order (a dependent after what it needs, then priority urgent, high
 then higher rung, then age as the tiebreak; no priority means normal), not oldest \
 first, and the report shows the plan's groups: items in one group have no dependency and touch disjoint paths, \
 so they can run in parallel: drain runs up to `[parallel] max_concurrency` of them at once (athena.toml; \
-default 1, which is one job at a time; at most 8). Landing and rating stay one at a time, and a group starts \
+default 1, which is one job at a time; at most {ceiling}). Landing and rating stay one at a time, and a group starts \
 only when the group before it is done. Nothing is defaulted into a plan: acceptance \
 comes only from explicit bullets in the request or a reading's criteria, and the rung from the proposal that made \
 the job or from evidence in the request. The planning pass is deterministic code, not a model call. An unread \
@@ -542,6 +542,29 @@ impl Ui for Terminal {
     }
 }
 
+/// The text of `after_help` with the `{ceiling}` placeholder replaced by `ceiling`. A limit that help text
+/// states comes from the constant that enforces it, never from a number typed into the text, so a change to the
+/// constant cannot leave the help stale (decision D156).
+fn drain_after_help(template: &str, ceiling: u32) -> String {
+    template.replace("{ceiling}", &ceiling.to_string())
+}
+
+/// The command line as `main` runs it: the derived command with the `athena drain` help filled in from
+/// `[parallel] max_concurrency`'s ceiling, [`athena_data::config::MAX_CONCURRENCY_CEILING`]. Anything that
+/// renders the help builds the command here, not with `Cli::command()`, which leaves the placeholder unfilled.
+fn cli_command() -> clap::Command {
+    Cli::command().mut_subcommand("drain", |drain| {
+        let template = drain
+            .get_after_help()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        drain.after_help(drain_after_help(
+            &template,
+            athena_data::config::MAX_CONCURRENCY_CEILING,
+        ))
+    })
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let name = args
@@ -553,7 +576,7 @@ fn main() -> ExitCode {
     }
     let version: &'static str =
         Box::leak(wiring::version_string(&wiring::build_info()).into_boxed_str());
-    let matches = Cli::command().version(version).get_matches();
+    let matches = cli_command().version(version).get_matches();
     let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(error) => error.exit(),
@@ -1816,13 +1839,60 @@ mod tests {
         assert!(sub.contains("worktrees"), "{sub}");
     }
 
+    /// The long help of `athena drain` as a person reads it.
+    fn drain_help(command: &mut clap::Command) -> String {
+        command
+            .find_subcommand_mut("drain")
+            .expect("a drain subcommand")
+            .render_long_help()
+            .to_string()
+    }
+
+    #[test]
+    fn drain_help_states_the_ceiling_the_config_enforces() {
+        use athena_data::config::MAX_CONCURRENCY_CEILING;
+        let help = drain_help(&mut cli_command());
+        let stated = format!("at most {MAX_CONCURRENCY_CEILING})");
+        assert!(help.contains(&stated), "{stated:?} missing from:\n{help}");
+        assert!(!help.contains("{ceiling}"), "the placeholder survived");
+    }
+
+    #[test]
+    fn drain_help_follows_the_ceiling_it_is_built_from() {
+        // The text the derive carries is a template with a placeholder, not a number: with a hard-coded
+        // number the filled text would not change when the ceiling does.
+        let mut derived = Cli::command();
+        let template = derived
+            .find_subcommand_mut("drain")
+            .and_then(|d| d.get_after_help())
+            .expect("drain has after_help")
+            .to_string();
+        assert!(template.contains("at most {ceiling})"), "{template}");
+        for ceiling in [3, 13, 64] {
+            let filled = drain_after_help(&template, ceiling);
+            assert!(filled.contains(&format!("at most {ceiling})")), "{ceiling}");
+            assert!(!filled.contains("{ceiling}"));
+            for stale in (1..=64).filter(|n| *n != ceiling) {
+                assert!(
+                    !filled.contains(&format!("at most {stale})")),
+                    "{ceiling}: {stale}"
+                );
+            }
+        }
+        // Everything but the number is the same text.
+        assert_eq!(
+            drain_after_help(&template, 7).replace("at most 7)", "at most {ceiling})"),
+            template
+        );
+    }
+
     #[test]
     fn the_new_commands_are_in_the_help_and_the_code_does_no_text_matching() {
         let top = Cli::command().render_help().to_string();
         assert!(top.contains("drain-status"), "{top}");
         assert!(top.contains("drain-restart"), "{top}");
         let help_of = |name: &str| {
-            Cli::command()
+            cli_command()
                 .find_subcommand_mut(name)
                 .unwrap_or_else(|| panic!("no subcommand {name}"))
                 .render_long_help()

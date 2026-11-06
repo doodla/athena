@@ -1777,6 +1777,10 @@ fn finding_text(f: &Finding) -> String {
 /// verification, redacted, in the form [`tree_retry_seed`] uses. Findings have no resolved state, so none is
 /// left out because a later round might have fixed it. `None` when the request is not a retry, the job has
 /// no verification, or no finding blocks.
+///
+/// One job has no verification and still has a finding: a job the decision check closed before the verifier
+/// started ([`athena_data::decision_links::GATE_REASON_PREFIX`]). Its closing reason names the decisions the
+/// change left unreconciled and the fix, so that reason, redacted, is the one finding.
 pub fn retry_findings(
     records: &Records,
     request: &str,
@@ -1785,12 +1789,21 @@ pub fn retry_findings(
     let Some(id) = retried_job(records, request) else {
         return Ok(None);
     };
-    let Some(verification) = records
-        .jobs
-        .get(id.as_str())
-        .and_then(|j| j.verification.as_ref())
-    else {
-        return Ok(None);
+    let job = records.jobs.get(id.as_str());
+    let Some(verification) = job.and_then(|j| j.verification.as_ref()) else {
+        let Some(outcome) = job
+            .and_then(|j| j.outcome.as_ref())
+            .filter(|o| o.state == OutcomeState::Failed)
+            .filter(|o| {
+                o.reason
+                    .starts_with(athena_data::decision_links::GATE_REASON_PREFIX)
+            })
+        else {
+            return Ok(None);
+        };
+        let mut texts = vec![outcome.reason.clone()];
+        redactor.redact_all(&mut texts)?;
+        return Ok(Some((id, texts)));
     };
     let mut texts: Vec<String> = verification
         .findings
@@ -5969,6 +5982,55 @@ mod tests {
             retry_findings(&records, &format!("try again on {id}"), &redactor).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn retry_findings_carry_the_reason_of_a_job_closed_by_the_decision_gate() {
+        use athena_data::decision_links::GATE_REASON_PREFIX;
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        // A job the decision check closed has no verification: it never reached the verifier.
+        let gated = |state: OutcomeState, reason: &str| {
+            let mut job = two_majors_and_a_minor();
+            job.verification = None;
+            job.outcome = Some(outcome(&job, state, reason));
+            job
+        };
+        let reason = format!(
+            "{GATE_REASON_PREFIX} touches D02 (README.md) and D12 (src/a.rs); add an entry"
+        );
+        let job = gated(OutcomeState::Failed, &reason);
+        let id = job.id().clone();
+        let request = format!("try again on {id}");
+        let found = retry_findings(&records_with(job), &request, &redactor)
+            .unwrap()
+            .expect("the gate's reason is a finding");
+        assert_eq!(found, (id.clone(), vec![reason.clone()]));
+
+        // The same words without the prefix, or a job that did not close failed, carry nothing.
+        for job in [
+            gated(
+                OutcomeState::Failed,
+                "the verifier returned no valid verdict",
+            ),
+            gated(OutcomeState::Failed, &reason[GATE_REASON_PREFIX.len()..]),
+            gated(OutcomeState::Landed, &reason),
+        ] {
+            let request = format!("try again on {}", job.id());
+            assert_eq!(
+                retry_findings(&records_with(job), &request, &redactor).unwrap(),
+                None
+            );
+        }
+
+        // A job that has a verification still answers from its findings, whatever its reason says.
+        let mut verified = two_majors_and_a_minor();
+        verified.outcome = Some(outcome(&verified, OutcomeState::Failed, &reason));
+        let request = format!("try again on {}", verified.id());
+        let (_, texts) = retry_findings(&records_with(verified), &request, &redactor)
+            .unwrap()
+            .expect("findings");
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(texts.iter().all(|t| !t.starts_with(GATE_REASON_PREFIX)));
     }
 
     fn dispatched_job_stub() -> athena_data::records::Job {

@@ -13,9 +13,17 @@
 //!
 //! A parsed hit that is not in the list, or a listed hit the parse does not find, is a finding of the backtest's
 //! condition (a); see [`crate::backtest::run_on`]. The view only applies hits that are in both.
+//!
+//! The same file holds a `[[governs]]` table: each decision and the code paths it governs. The log is prose, so
+//! nothing else tied a decision to the code it describes, and a change that reversed one was found only at the
+//! final verdict. A change that touches a governed path must now add an entry that amends or supersedes the
+//! decision, with a `[[link]]`, before the verifier starts (`athena_data::decision_links`, run by
+//! `athena-core`). The list is read and validated here through the same parser; a governed id that is not an
+//! entry of the log is a finding of condition (a).
 
 use crate::backtest::{Hit, Parsed, Status};
 use anyhow::{Context, Result, bail};
+use athena_data::decision_links::Governs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -49,19 +57,25 @@ impl Link {
     }
 }
 
-/// The confirmed list, as stored in `docs/decision-links.toml` (`[[link]]` tables).
+/// The confirmed list, as stored in `docs/decision-links.toml` (`[[link]]` and `[[governs]]` tables).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ConfirmedLinks {
     #[serde(default, rename = "link")]
     pub links: Vec<Link>,
+    /// The decisions and the code paths they govern. A change to a governed path must amend or supersede the
+    /// decision before verification (`athena_data::decision_links`).
+    #[serde(default, rename = "governs")]
+    pub governs: Vec<Governs>,
 }
 
 impl ConfirmedLinks {
     /// Parse the text of the list. A decision superseded by two different entries is an error: `superseded_by`
-    /// of the view holds one id.
+    /// of the view holds one id. A `[[governs]]` entry with a malformed id, no paths or a path outside the
+    /// repository is an error too; whether its id is an entry of the log is checked by [`Self::unknown_governed`].
     pub fn parse(text: &str) -> Result<Self> {
         let list: ConfirmedLinks =
             toml::from_str(text).context("parsing the confirmed link list")?;
+        athena_data::decision_links::parse_governs(text).map_err(anyhow::Error::msg)?;
         for link in &list.links {
             let rivals: BTreeSet<&str> = list
                 .links
@@ -99,6 +113,15 @@ impl ConfirmedLinks {
         self.links
             .iter()
             .filter(|l| !hits.iter().any(|h| l.matches(h)))
+            .collect()
+    }
+
+    /// The governs entries whose decision is not among `entries`, the ids of the log's headings. Such an entry
+    /// governs a decision that does not exist, so no entry could ever amend it.
+    pub fn unknown_governed(&self, entries: &[String]) -> Vec<&Governs> {
+        self.governs
+            .iter()
+            .filter(|g| !entries.contains(&g.decision))
             .collect()
     }
 }
@@ -333,6 +356,101 @@ mod tests {
             view(&parsed, &links)
                 .iter()
                 .all(|v| v.status == Status::Active)
+        );
+    }
+
+    #[test]
+    fn governs_entries_are_read_and_a_list_without_any_still_parses() {
+        let links = list(
+            "[[link]]\nline = 2\nolder = \"D01\"\nnewer = \"D02\"\nstatus = \"amended\"\n\n\
+             [[governs]]\ndecision = \"D01\"\npaths = [\"src/a.rs\", \"docs/\"]\n",
+        );
+        assert_eq!(links.links.len(), 1);
+        assert_eq!(links.governs.len(), 1);
+        assert_eq!(links.governs[0].decision, "D01");
+        assert_eq!(links.governs[0].paths, ["src/a.rs", "docs/"]);
+        assert!(list("").governs.is_empty());
+    }
+
+    #[test]
+    fn a_malformed_governs_entry_is_an_error() {
+        for bad in [
+            "[[governs]]\ndecision = \"D1\"\npaths = [\"a\"]\n",
+            "[[governs]]\ndecision = \"D01\"\npaths = []\n",
+            "[[governs]]\ndecision = \"D01\"\npaths = [\"/abs\"]\n",
+            "[[governs]]\ndecision = \"D01\"\npaths = [\"../up\"]\n",
+            "[[governs]]\ndecision = \"D01\"\n",
+            "[[governs]]\ndecision = \"D01\"\npaths = [\"a\"]\ntypo = 1\n",
+        ] {
+            assert!(ConfirmedLinks::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_governed_decision_is_reported() {
+        let links = list(
+            "[[governs]]\ndecision = \"D01\"\npaths = [\"a\"]\n\n\
+             [[governs]]\ndecision = \"D9999\"\npaths = [\"b\"]\n",
+        );
+        let entries = vec!["D01".to_string(), "D02".to_string()];
+        let unknown = links.unknown_governed(&entries);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].decision, "D9999");
+    }
+
+    fn repo_file(path: &str) -> String {
+        std::fs::read_to_string(format!("{}/../../{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    #[test]
+    fn the_real_list_maps_d08_to_the_snapshot_and_candidate_code_and_names_only_logged_decisions() {
+        let links = ConfirmedLinks::parse(&repo_file(LINKS_PATH)).unwrap();
+        let d08 = links
+            .governs
+            .iter()
+            .find(|g| g.decision == "D08")
+            .expect("D08 is governed");
+        for path in [
+            "crates/athena-git/src/snapshot.rs",
+            "crates/athena-core/src/run/candidate.rs",
+        ] {
+            assert!(d08.covers(path), "{path}");
+            assert!(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join(path)
+                    .exists(),
+                "{path} no longer exists: update the list"
+            );
+        }
+        let entries = parse_supersessions(&repo_file("docs/decisions.md")).entries;
+        assert!(links.unknown_governed(&entries).is_empty());
+    }
+
+    /// The sentence that names the root cause, in the changelog and in the log entry that records the fix.
+    const ROOT_CAUSE: &str = "The decision log is prose with no link from a decision to the code or limit it governs, so reversals were found only at the final verdict.";
+
+    #[test]
+    fn the_root_cause_is_named_in_the_changelog_and_the_log() {
+        let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let log = repo_file("docs/decisions.md");
+        let entry = log
+            .split("\n## ")
+            .find(|e| e.starts_with("D156 · "))
+            .expect("D156 records the decision-to-code link");
+        assert!(entry.contains("- **Provenance:**"));
+        assert!(
+            words(entry).contains(ROOT_CAUSE),
+            "D156 lacks the root cause"
+        );
+        let changelog = repo_file("CHANGELOG.md");
+        let unreleased = changelog
+            .split("\n## [")
+            .find(|s| s.starts_with("Unreleased]"))
+            .expect("an Unreleased section");
+        assert!(
+            words(unreleased).contains(ROOT_CAUSE),
+            "the Unreleased changelog lacks the root cause"
         );
     }
 

@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// The decision log, and the list that links its decisions to the code they govern.
+const DECISION_LOG: &str = "docs/decisions.md";
+const DECISION_LINKS: &str = "docs/decision-links.toml";
+
 /// Runs one routed check in the verifier's snapshot, then puts the snapshot back as it was prepared.
 ///
 /// It is called only when a check really runs here, so it is also where the free-disk requirement of the
@@ -360,6 +364,65 @@ pub(crate) mod demo_seam {
 }
 
 impl Athena {
+    /// The decisions of `docs/decisions.md` that the change reverses or may reverse and does not reconcile:
+    /// the closing reason when there are any, `None` when the change is fine. The base's `[[governs]]` list in
+    /// `docs/decision-links.toml` names each decision and the paths it governs; a change that touches one of
+    /// them must add a log entry that amends or supersedes the decision (or says it was checked and stands)
+    /// with a matching `[[link]]` ([`athena_data::decision_links::unreconciled`]). It runs before the pull
+    /// request, the checks and the verifier, so a reversal is found at the producer's step and not at the
+    /// final verdict. A base with no list governs nothing; a base list that cannot be read is a warning line
+    /// and the check is skipped, so a change that repairs the list can pass.
+    pub(super) fn unreconciled_decisions(
+        &self,
+        ctx: &RunContext<'_>,
+        base: &str,
+        candidate: &str,
+        changed: &[String],
+    ) -> Option<String> {
+        use athena_data::decision_links::{GATE_REASON_PREFIX, unreconciled};
+        let text = |commit: &str, path: &str| -> String {
+            self.git
+                .show_file(commit, path)
+                .ok()
+                .flatten()
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default()
+        };
+        let base_links = text(base, DECISION_LINKS);
+        if base_links.is_empty() {
+            return None;
+        }
+        let found = match unreconciled(
+            &base_links,
+            &text(candidate, DECISION_LINKS),
+            &text(base, DECISION_LOG),
+            &text(candidate, DECISION_LOG),
+            changed,
+        ) {
+            Ok(found) => found,
+            Err(why) => {
+                ctx.ui.line(&format!(
+                    "warning: {DECISION_LINKS} could not be read, so decisions are not checked: {why}"
+                ));
+                return None;
+            }
+        };
+        if found.is_empty() {
+            return None;
+        }
+        let each: Vec<String> = found
+            .iter()
+            .map(|u| format!("{} ({})", u.decision, u.touched.join(", ")))
+            .collect();
+        Some(format!(
+            "{GATE_REASON_PREFIX} the change touches code that {DECISION_LOG} records decisions for: {}. \
+             Add an entry to {DECISION_LOG} that amends or supersedes each decision (or says it was checked \
+             and stands), and a matching [[link]] in {DECISION_LINKS} whose older is the decision and whose \
+             newer is the new entry.",
+            each.join("; ")
+        ))
+    }
+
     /// Removes the producer's build directory before the candidate's checks start. The checks build in their
     /// own directory, so this one is idle from here on, and it is the largest thing on the disk: left in place
     /// the job would hold two full builds while the checks compile and run. Only the build goes; the

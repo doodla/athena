@@ -1,0 +1,179 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-012841-gbjy",
+  "n": 1,
+  "at": "2026-11-06T02:25:52.388130121Z",
+  "invocation_seq": 1,
+  "base_commit": "f1f0ffad71bcf028f4269aa997a98d049d91de63",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Link decisions to governed code and check reversals before verification",
+  "summary": "Root cause: docs/decisions.md is prose and nothing ties a decision to the paths or limits it governs, so a change that reverses a decision (job 20261010-225741-yvk0: D08) or a stated limit (job 20261105-180339-w5h7: drain help \"at most 8\") is caught only at the final verdict. Fix: add a machine-readable `governs` list beside the existing docs/decision-links.toml, and a check that runs before verification and fails when a change touches governed code without amending or superseding the decision. Derive the drain help ceiling from MAX_CONCURRENCY_CEILING.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "Fix the missing decision-to-code link, not the two stale instances."
+    },
+    {
+      "id": "mechanism",
+      "how": "A check enforces it before verification."
+    },
+    {
+      "id": "tested",
+      "how": "Tests plus fmt, clippy, test criteria."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run cargo test on the check's pass and fail."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The outcome is that reversals fail early."
+    },
+    {
+      "id": "small",
+      "how": "One focused mechanism."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/decisions.rs (DecisionView, ConfirmedLinks parsed from docs/decision-links.toml, LinkStatus Superseded/Amended, tied to crates/athena-cli/src/backtest.rs parse_supersessions) and crates/athena-core/src/run/checks.rs and run/mod.rs check_and_verify (the checks that run before verification). The new check is added where checks run before the verifier; the governs list is read the same way as ConfirmedLinks. docs/decision-links.toml is a docs file, not a crates/ record, so no AnyRecord or check_record_file change is expected; the existing decision-links round-trip tests are extended.",
+    "Goal and audience: the maintainer and the producer. The producer gets the failure at the producer step (a finding listing the decision ids the change reverses) instead of the verifier finding it at the end.",
+    "Design: a `[[governs]]` table (decision id, path or pattern) in docs/decision-links.toml. When a diff touches a governed path and docs/decisions.md has no new 'Amended by'/'Superseded by' link for that id or a reworded entry, the check fails and names the decision id. Chosen over an LLM judgment because it is mechanical and testable.",
+    "Second root-cause part: a stated limit in help or docs must come from the constant. The `athena drain --help` ceiling text in crates/athena-cli/src/main.rs is built from MAX_CONCURRENCY_CEILING (athena-data config.rs), so a change to the constant cannot leave it stale.",
+    "Job 20261010-225741-yvk0: its candidate (git-history snapshot ATHENA-COMMITS.txt) was rejected. This job addresses the D08 finding by making that class mechanical: the check would have flagged D08. The commit-visibility work itself is dropped, not re-done; its changed files (CHANGELOG.md earlier entry, briefs.rs, run/mod.rs, producer.rs, verification.rs, run_pin_tests.rs, athena-git snapshot.rs and lib.rs, docs/enforcement.md) are excluded in out_of_scope.",
+    "Job 20261105-180339-w5h7: its candidate (ceiling 16, athena.toml 12, group_sizes) was rejected for the stale main.rs help. This job addresses that finding by deriving the help text from the constant, with a test. The candidate's other changes (config.rs, drain.rs, display.rs, tests/drain.rs, athena.toml, design doc) are excluded in out_of_scope and not re-applied here.",
+    "Deliverables of the change: modify crates/athena-cli/src/decisions.rs, crates/athena-cli/src/main.rs, crates/athena-core/src/run/checks.rs, crates/athena-core/src/run/mod.rs, docs/decision-links.toml, docs/decisions.md, CHANGELOG.md. Governance files athena.toml, defaults.toml and workflows are not changed: the check runs in the existing pipeline.",
+    "Standing defaults applied: tested, mechanism, root-cause, behavior-evidence, outcome-check, small, strangers."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "CHANGELOG.md and the new decisions.md entry name the root cause: the decision log is prose with no link from a decision to the code or limit it governs, so reversals were found only at the final verdict.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decision-links.toml holds a `[[governs]]` list with at least D08 mapped to the snapshot/history code paths, and ConfirmedLinks parsing in crates/athena-cli/src/decisions.rs reads and validates it (unknown decision ids are an error).",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test`: a new test builds a diff that touches a governed path with no amend/supersede link and asserts the pre-verification check fails naming the decision id; the same diff with 'Amended by' added passes. The test fails when the check is removed, and uses a decision other than D08 as well so it covers the class.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test renders the `athena drain` help and asserts it contains the current MAX_CONCURRENCY_CEILING value; it fails if the text is hard-coded and the constant changes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "crates/athena-core/src/run/mod.rs calls the new check before the verifier is started (Grep check_and_verify), so a failure is returned to the producer as a finding.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy` and `cargo test`: all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Expected 5% of newly refused readings: the new check refuses more changes (those touching governed paths without a link); a higher refusal rate on past governed-path changes is intended, because those are exactly the unreconciled reversals.",
+      "kind": "behavior"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/decisions.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/src/backtest.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Re-doing the dropped candidate of job 20261010-225741-yvk0: ATHENA-COMMITS.txt, crates/athena-git/src/snapshot.rs, crates/athena-git/src/lib.rs, crates/athena-context/src/briefs.rs, crates/athena-core/src/run/producer.rs, crates/athena-core/src/run/verification.rs, crates/athena-core/src/run_pin_tests.rs, docs/enforcement.md",
+    "Re-doing the dropped candidate of job 20261105-180339-w5h7: ceiling 16, athena.toml max_concurrency, group_sizes, crates/athena-cli/src/drain.rs, display.rs, tests/drain.rs, docs/design/agent-and-build-slots.md",
+    "Editing athena.toml, defaults.toml or workflows",
+    "Checking prose claims in design docs beyond the governed list",
+    "Changing records/ or adding a record type"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.6,
+      "p_verification_passes": 0.5,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.7,
+        "p50": 1.6,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2400.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.669833729216152,
+      "p_user_intervenes": 0.0829059829059829,
+      "cost_usd": {
+        "p10": 0.5591912491709432,
+        "p50": 1.3549802897948,
+        "p90": 4.169817924139591
+      },
+      "wall_time_s": {
+        "p10": 562.864890973,
+        "p50": 1992.5241273329998,
+        "p90": 4201.338760319
+      }
+    }
+  },
+  "departures": "Higher cost and lower pass rate than reference: a new pipeline check across several crates, and the retry scope rules.",
+  "urgent_reason": "It cuts failed or rejected attempts: both referenced jobs were rejected at the final verdict for a stale decision or help text a pre-verification check would have caught.",
+  "hard_reason": "It adds a check that can refuse work before verification and changes the run pipeline's checks, so a mistake is costly or hard to see.",
+  "producer_effort": "high"
+}

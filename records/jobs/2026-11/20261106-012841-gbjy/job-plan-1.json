@@ -1,0 +1,373 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261106-012841-gbjy",
+  "round": 1,
+  "at": "2026-11-06T02:32:56.724710053Z",
+  "invocation_seq": 3,
+  "approach": "Root cause: docs/decisions.md is prose and nothing links a decision to the code or limit it governs, so a change that reverses a decision (D08, job 20261010-225741-yvk0) or a stated limit (drain help \"at most 8\", job 20261105-180339-w5h7) is found only at the final verdict. Fix in three parts. (1) A small new athena-data module `decision_links` defines the `[[governs]]` table (decision id plus paths: an exact file, or a directory prefix ending `/`) and one pure function `unreconciled(base_links, cand_links, base_log, cand_log, changed_paths)`. It returns each governed decision whose paths the change touches, unless the candidate adds a `[[link]]` with `older = <id>` whose newer heading is new in the candidate's decisions.md. docs/decision-links.toml must already list every Amends/Supersedes phrase (backtest condition (a)), so a new link is the machine-readable form of \"amended by / superseded by\". decisions.md is append-only (pinned hash test), so a new entry plus a link is the only way to reconcile. The base's list judges. (2) `Athena::check_and_verify` (run/mod.rs) calls the new `Athena::unreconciled_decisions` (run/checks.rs) first, before the CI push, the early pull request, the checks and the verifier. On a hit the job closes failed with a reason naming each decision id, its governed paths and the fix; the retry brief carries it to the producer. A resume at the verifier stage, a nested run and a base with no list skip it. (3) `ConfirmedLinks` (athena-cli decisions.rs) reads and validates `[[governs]]` through the same athena-data parser; backtest.rs reports a governed id absent from the log as a condition (a) finding. D08 is mapped to crates/athena-git/src/snapshot.rs and crates/athena-core/src/run/candidate.rs. For the limit class, the drain help text becomes a template with a `{ceiling}` placeholder, filled from `athena_data::config::MAX_CONCURRENCY_CEILING` by `drain_after_help(ceiling)` and attached in a new `cli_command()` that `main` uses. Revision: tests for the real files now sit inline in decisions.rs and backtest.rs (no new tests/backtest.rs); criterion 6 now names its seam and what fails without the work.",
+  "decisions": [
+    {
+      "choice": "The reconcile signal is a new `[[link]]` in docs/decision-links.toml (older = governed id, newer = a heading new in the candidate's decisions.md), not a scan of the prose for 'Amended by'.",
+      "reason": "The prose parse (`parse_supersessions`) lives in athena-cli, which athena-core cannot import. The links list is already forced to agree with the prose by backtest condition (a) and the `hits.len() == links.len()` test, so a new link cannot exist without the prose phrase. The check stays a pure comparison of two toml texts and two heading lists.",
+      "rejected": [
+        {
+          "option": "Parse 'Amends/Supersedes' phrases inside athena-core",
+          "why": "Duplicates `parse_supersessions` in a second crate and can drift from it; core cannot depend on athena-cli."
+        },
+        {
+          "option": "Accept a reworded entry as reconciliation",
+          "why": "decisions.md is append-only; `the_decision_log_is_well_formed_and_only_appended_to` (decisions.rs line 230) pins the first 230046 bytes, so an edit fails the tests."
+        },
+        {
+          "option": "A language-model judgment of whether the change reverses a decision",
+          "why": "Not mechanical and not testable offline; the reading chose a mechanical check."
+        }
+      ]
+    },
+    {
+      "choice": "Put the shared `Governs` type, its parser and `unreconciled` in a new athena-data module `decision_links` (new file plus one `pub mod` line in athena-data lib.rs). These two files are outside the reading's deliverable list on purpose; no listed file can hold the code.",
+      "reason": "athena-core (toml_edit, no toml) and athena-cli (toml) both depend on athena-data, which already has serde and toml (athena-data/Cargo.toml lines 13-17). One parser and one rule serve the producer-side check and the backtest validation, so they cannot drift. Of the listed files, config.rs is the schema of athena.toml and would mix a docs-file schema into it; decisions.rs and checks.rs sit in different crates that cannot import each other.",
+      "rejected": [
+        {
+          "option": "Parse `[[governs]]` separately in core (toml_edit) and cli (serde)",
+          "why": "Two parsers of one schema is the same drift this job removes."
+        },
+        {
+          "option": "Host the code in athena-data/src/config.rs, which the reading lists",
+          "why": "config.rs is the athena.toml schema (62 KB); the links file is a docs file. It would save two small files at the cost of a muddled module."
+        },
+        {
+          "option": "Export the function from athena-core for cli to call",
+          "why": "`mod checks` is private under run and exporting needs a lib.rs edit in core as well, which is no smaller."
+        }
+      ]
+    },
+    {
+      "choice": "Keep tests in files that already hold their neighbours: pure tests inline in decision_links.rs; ConfirmedLinks and real-file tests inline in decisions.rs and backtest.rs (both listed); the end-to-end job tests in crates/athena-core/src/run/tests.rs.",
+      "reason": "The job fixtures (`athena_with`, `repo_with_config`, `commit_file`, `base_script`, `counting`) are private fns inside `mod produce_and_verify_order_tests` (tests.rs lines 73-341), so an end-to-end test can only live there. decisions.rs already reads the real docs through `env!(\"CARGO_MANIFEST_DIR\")` (line 232). This drops the earlier tests/backtest.rs edit, which keeps the scope smaller.",
+      "rejected": [
+        {
+          "option": "Add the real-file tests to crates/athena-cli/tests/backtest.rs",
+          "why": "Not a listed file; inline tests in decisions.rs reach the same files."
+        }
+      ]
+    },
+    {
+      "choice": "Run the check at the top of `check_and_verify`, closing the job as failed with a non-environment reason, rather than as a failing CheckRun or as a send-back inside `producer_loop`.",
+      "reason": "It is before the CI push, the early pull request, the checks and the verifier, so no verifier cost is spent and the failure names the decision ids. `settle_resume_marks` spends the mark on a non-environment failed close. A send-back in `producer_loop` would be earlier still, but producer.rs is out of scope (dropped candidate of job 20261010-225741-yvk0). The pure function takes plain texts, so a later send-back can reuse it.",
+      "rejected": [
+        {
+          "option": "Send the finding back inside producer_loop (producer.rs)",
+          "why": "Out-of-scope file; changes the send-back flow."
+        },
+        {
+          "option": "A failing CheckRun so the verifier rejects",
+          "why": "Starts the verifier and spends model cost on a candidate already known to fail."
+        }
+      ]
+    },
+    {
+      "choice": "If the base's decision-links.toml cannot be parsed, print a `warning:` line and skip the check; a candidate list that cannot be parsed counts as adding no link.",
+      "reason": "Failing on a broken base list would block the very job that repairs it. The base list is validated by `cargo test` (the real-file test in decisions.rs).",
+      "rejected": [
+        {
+          "option": "Fail the job on an unreadable base list",
+          "why": "A repair job could never pass the check."
+        }
+      ]
+    },
+    {
+      "choice": "Derive the drain help ceiling by a template placeholder filled by `drain_after_help(ceiling)`, attached through `Cli::command().mut_subcommand(\"drain\", ..)` in a new `cli_command()`.",
+      "reason": "clap's derive attribute needs a literal, and `concat!` cannot take a constant. The runtime attach lets a test pass a different ceiling and prove the text follows the argument; a second test renders the real help and checks it against the constant.",
+      "rejected": [
+        {
+          "option": "Keep the literal and add a test that greps main.rs for '8'",
+          "why": "Detects one number after the fact and leaves the text free to go stale."
+        },
+        {
+          "option": "Change the ceiling or athena.toml",
+          "why": "That is the dropped candidate of job 20261105-180339-w5h7 and is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Seed the real list with D08 only: crates/athena-git/src/snapshot.rs and crates/athena-core/src/run/candidate.rs.",
+      "reason": "D08 (decisions.md line 217) describes the snapshot writer and the candidate builder. A short list limits new refusals to code the decision describes. The class is covered by tests that use D02 and D12 as well.",
+      "rejected": [
+        {
+          "option": "Map many decisions at once",
+          "why": "Raises refusals on changes nobody has reviewed against the decisions; each mapping is a later one-line addition."
+        }
+      ]
+    },
+    {
+      "choice": "athena-data/src/config.rs is listed as a deliverable but is not modified; `MAX_CONCURRENCY_CEILING` is already `pub` (config.rs line 269).",
+      "reason": "No change is needed there, which is the smaller design.",
+      "rejected": [
+        {
+          "option": "Add a help-text helper to config.rs",
+          "why": "Puts CLI wording in the schema crate."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/decision_links.rs",
+      "action": "create",
+      "purpose": "Not in the reading's deliverables; needed so core and cli share one parser and one rule. `Governs { decision, paths }`, `parse_governs`, `link_pairs`, `covers`, the pure `unreconciled(...)`, and inline unit tests using D08, D12 and D02.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-data/src/lib.rs",
+      "action": "modify",
+      "purpose": "Not in the reading's deliverables; registers `pub mod decision_links;` and adds one line to the crate doc's module list.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/decisions.rs",
+      "action": "modify",
+      "purpose": "`ConfirmedLinks.governs` (serde default); `parse` validates it through athena_data; `unknown_governed(&entries)`; module doc; inline tests `governs_*`, the real-list test and `the_root_cause_is_named_in_the_changelog_and_the_log`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/backtest.rs",
+      "action": "modify",
+      "purpose": "A condition (a) finding for every governs id that is not an entry of the log, called from `run_on_from` after `check_parse`; one inline test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Drain `after_help` becomes a template const with `{ceiling}`; add `drain_after_help(ceiling)` and `cli_command()`; `main` and the existing `help_of` use `cli_command()`; add the `drain_help_*` tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "action": "modify",
+      "purpose": "`Athena::unreconciled_decisions(ctx, base, candidate, changed)`: reads the four texts with `self.git.show_file`, calls `unreconciled`, returns the failure reason (None when fine); a warning line and skip on an unreadable base list.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "At the top of `check_and_verify`, for a job neither resumed at the verifier stage nor nested, call the check and close the job failed with the reason, keeping `changed_paths`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Not in the reading's deliverables; the job fixtures are private to `produce_and_verify_order_tests`, so the end-to-end `governed_*` and `ungoverned_*` tests can only go here.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Header comment for `[[governs]]`; `[[governs]] decision = \"D08\"` with the two paths.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D156 after D155 with a Provenance bullet: root cause, governs list, pre-verification check, derived help ceiling. Avoid the phrases the backtest parses.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "An Unreleased/Added entry that names the root cause, the check and the derived help text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/config.rs",
+      "action": "modify",
+      "purpose": "Listed as a deliverable but left unchanged: `MAX_CONCURRENCY_CEILING` is already public and no helper is needed there.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Create crates/athena-data/src/decision_links.rs and register it in athena-data lib.rs. Define `Governs` (serde Deserialize/Serialize, Clone, PartialEq, Eq, Debug); `parse_governs(text) -> Result<Vec<Governs>, String>` (id shape `D` plus 2 or more digits, non-empty paths, no leading `/` or `..`); `link_pairs(text) -> Result<BTreeSet<(String,String)>, String>` reading only `older` and `newer` of each `[[link]]`; `Governs::covers(path)` (exact, or directory prefix when the entry ends `/`); and `unreconciled(base_links, cand_links, base_log, cand_log, changed) -> Result<Vec<Unreconciled>, String>`. A decision is reconciled when the candidate has a pair (id, N) the base lacks, where `## N ` starts a line in the candidate log and in no line of the base log. The base's `[[governs]]` judges; a candidate list that does not parse counts as no new links. Add inline unit tests for D08, D12 and D02: not touched, touched without a link, touched with a link, a link for another id, a link whose heading is not new, a directory prefix versus a sibling path, a deleted path, a malformed list.",
+    "In crates/athena-cli/src/decisions.rs add `#[serde(default, rename = \"governs\")] pub governs: Vec<Governs>` to `ConfirmedLinks`; have `parse` validate it through `athena_data::decision_links::parse_governs` and turn its error into `anyhow`; add `unknown_governed(&self, entries: &[String]) -> Vec<&Governs>`; update the module doc; add inline tests named `governs_*`, a real-list test (loads docs/decision-links.toml, D08 maps to crates/athena-git/src/snapshot.rs) and `the_root_cause_is_named_in_the_changelog_and_the_log`.",
+    "In crates/athena-cli/src/backtest.rs add `check_governs(parsed, confirmed, findings)` pushing a `Finding { condition: \"a\", .. }` for each unknown governs id; call it in `run_on_from` after `check_parse` (line 307 region); add a unit test with a governs id of D9999.",
+    "Edit docs/decision-links.toml: describe `[[governs]]` in the header (fields, the reconcile rule, that the base list judges) and add D08 with `crates/athena-git/src/snapshot.rs` and `crates/athena-core/src/run/candidate.rs`.",
+    "In crates/athena-cli/src/main.rs move the drain `after_help` string into `const DRAIN_AFTER_HELP: &str` with `at most {ceiling}` in place of `at most 8` (the rest byte-for-byte the same); remove the attribute; add `fn drain_after_help(ceiling: u32) -> String` and `fn cli_command() -> clap::Command` (`Cli::command().mut_subcommand(\"drain\", |d| d.after_help(drain_after_help(athena_data::config::MAX_CONCURRENCY_CEILING)))`); use `cli_command()` in `main` and in the existing `help_of` test helper; add the `drain_help_*` tests. Check the constant's type and cast to u32 only if needed.",
+    "In crates/athena-core/src/run/checks.rs add `Athena::unreconciled_decisions` (`pub(super)`): read docs/decision-links.toml and docs/decisions.md at `base` and `candidate` with `self.git.show_file` (None is the empty text); return None at once when the base links text is empty; on `Err` from the base list print a `warning:` line through `ctx.ui` and return None; otherwise return `Some(reason)`. The reason reads: the change touches code that a decision governs: for each, `Dnn (path, ...)`; add a decisions.md entry that amends or supersedes it, with a matching `[[link]]` in docs/decision-links.toml. It must hold none of the words `is_environment_reason` reads.",
+    "In crates/athena-core/src/run/mod.rs, at the top of `check_and_verify` before `push_ci_branch`, when `recorded_checks.is_none() && self.nested.is_none()`, collect the candidate's changed paths from `closing.candidate`, call `unreconciled_decisions`, and on Some(reason) set `closing.happened = self.failure(ctx, &reason)` with `changed_paths` kept, then return `Ok(closing)`. Add to run/tests.rs `produce_and_verify_order_tests`: `governed_edit_closes_before_the_verifier_starts`, `governed_edit_with_an_amending_entry_and_link_reaches_the_verifier`, `governed_check_is_skipped_for_a_resume_at_the_verifier`, `ungoverned_edit_reaches_the_verifier`; each repo commits docs/decision-links.toml and docs/decisions.md with `commit_file`, and the wrapper script sets the producer's edits and counts verifier calls.",
+    "Append D156 to docs/decisions.md after D155 with Case, Decision, Alternatives, Tradeoff, Reversal cost and a Provenance bullet. Name the root cause in the sentence the step-2 test looks for; do not use the phrases 'superseded by', 'supersedes' or 'amends'.",
+    "Add the CHANGELOG.md Unreleased/Added entry naming the root cause (same sentence), the check, the failure reason, the derived help text and what is left out (other prose copies of the ceiling).",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; then `cargo test -p athena-core --test refusal_corpus`."
+  ],
+  "risks": [
+    {
+      "risk": "A legitimate change to a governed file that does not reverse the decision is refused until an entry and a link are added.",
+      "mitigation": "The failure reason says exactly what to add (a new decisions.md entry and a `[[link]]`, status amended is allowed). The seed list is D08 only, with two files."
+    },
+    {
+      "risk": "The producer's fake-run test may be refused by admission when it edits docs/decisions.md and docs/decision-links.toml beyond the reading's deliverables.",
+      "mitigation": "Step 7 lists those two files as deliverables in the test script's reading. If admission still refuses, the reconcile case is asserted on `unreconciled_decisions` through `Athena` directly and the pure tests keep the coverage."
+    },
+    {
+      "risk": "D156's text contains a phrase `parse_supersessions` reads (amends, supersedes, superseded by), so the real-log backtest finds an unlisted hit.",
+      "mitigation": "Step 9 forbids the three phrases; the real-log condition (a) test fails on any such hit."
+    },
+    {
+      "risk": "Moving the drain `after_help` text out of the derive attribute drops it from any path that builds `Cli::command()` directly.",
+      "mitigation": "Only main.rs (line 556 and the tests) builds it; step 5 switches `main` and the test helper to `cli_command()`; tests/drain.rs binary tests keep the text in view."
+    },
+    {
+      "risk": "Scope drift into the dropped candidates (commit-visibility files, ceiling 16).",
+      "mitigation": "The file list excludes every out-of-scope path; the ceiling value and athena.toml are untouched. Three non-listed files remain (decision_links.rs, athena-data lib.rs, run/tests.rs), each with a reason above."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "docs/decision-links.toml gains a `[[governs]]` table beside `[[link]]`",
+      "dependent": "crates/athena-cli/src/backtest.rs `check_parse` and `run_on_from` (backtest condition (a))",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --bin athena backtest (and the real-log condition (a) test asserting `hits.len() == links.len()`; governs is a separate table so the equality is unchanged); the new condition (a) finding for an unknown governs id is covered by a new backtest.rs unit test.",
+      "reason": null
+    },
+    {
+      "name": "ConfirmedLinks gains a `governs` field",
+      "dependent": "crates/athena-cli/src/decisions.rs `ConfirmedLinks::parse`/`load`, `view`, and crates/athena-cli/tests/backtest.rs (existing, unmodified)",
+      "kind": "code",
+      "test": "decisions::tests (existing the_confirmed_status_decides_not_the_phrase, two_superseders_of_one_entry_are_an_error use lists with no governs and must still parse) plus new governs_* parse tests. `#[serde(default)]` keeps old lists valid.",
+      "reason": null
+    },
+    {
+      "name": "docs/decisions.md gets a new entry D156",
+      "dependent": "`the_decision_log_is_well_formed_and_only_appended_to` (decisions.rs) and the backtest phrase parser `parse_supersessions`; crates/athena-cli/tests/ontology.rs reads decisions.md",
+      "kind": "rule",
+      "test": "The existing pin test (first 230046 bytes unchanged, D156 has a Provenance bullet, ids ascend). D156 is written without 'superseded by', 'supersedes' and 'amends' so the `hits == links` equality is unchanged; the real-log condition (a) test guards this.",
+      "reason": null
+    },
+    {
+      "name": "check_and_verify runs a new first step",
+      "dependent": "crates/athena-core/src/run/mod.rs `produce_and_verify` and the resume path, which both call `check_and_verify`",
+      "kind": "code",
+      "test": "Every existing run/tests.rs job test: their repositories have no docs/decision-links.toml, so `show_file` returns None and the step does nothing. New governed_* and ungoverned_* tests cover the changed cases; a resume with `recorded_checks` Some and a nested run (`self.nested` Some) skip the step, shown by tests.",
+      "reason": null
+    },
+    {
+      "name": "A new failed-close reason",
+      "dependent": "crates/athena-core/src/run/mod.rs `settle_resume_marks` and crates/athena-core/src/disk.rs `is_environment_reason` / `resumable_stop`",
+      "kind": "rule",
+      "test": "The end-to-end test asserts `!is_environment_reason(&finished.reason)`, so the mark is spent and `athena retry` starts a fresh producer from the failure instead of resuming the kept candidate.",
+      "reason": null
+    },
+    {
+      "name": "The drain after_help text moves from the derive attribute to a runtime attach",
+      "dependent": "crates/athena-cli/tests/drain.rs `drain_help_documents_the_flags_and_lists_every_stop_reason` and `priority_help_and_the_drain_help_mention_urgent_and_the_command` (run the binary with `drain --help`); main.rs test `the_new_commands_are_in_the_help_and_the_code_does_no_text_matching`",
+      "kind": "code",
+      "test": "The two integration tests run the real binary, which uses `cli_command()`, so stop-reason labels, 'urgent' and 'athena priority' stay in the help. The unit test's `help_of` is switched to `cli_command()` in step 5. The template keeps the old text except the number.",
+      "reason": null
+    },
+    {
+      "name": "MAX_CONCURRENCY_CEILING is read, not changed",
+      "dependent": "crates/athena-data/src/config.rs validation (lines near 722 and 745) and its tests",
+      "kind": "code",
+      "test": null,
+      "reason": "Only read from main.rs; the value, the validation and the `ConfigError` text are untouched."
+    },
+    {
+      "name": "Other stated copies of the ceiling (prose '1 to 8')",
+      "dependent": "docs/design/async-drain.md, docs/design/parallel-jobs.md, athena.toml line 192",
+      "kind": "rule",
+      "test": null,
+      "reason": "Out of scope: no athena.toml edit and no prose checks beyond the governed list. Only the help text, which users read from the binary, is derived."
+    },
+    {
+      "name": "Reading gate and refusal corpus",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs and the reading gate (`refusing_check`)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "The new rule matches candidate paths against governed paths after the candidate exists. It is not a reading check, parser, stem list or stop list, so no corpus case is added or changed (I did not map case ids). Path forms handled (exact file, directory prefix ending `/`, deleted path, renamed path as delete plus add, sibling sharing a prefix, one id with several paths) are covered by the pure tests in decision_links.rs."
+    },
+    {
+      "name": "The job edits CHANGELOG.md and decisions.md",
+      "dependent": "crates/athena-core/src/plan.rs and crates/athena-cli/src/drain.rs `SHARED_APPEND_ONLY` (CHANGELOG.md, docs/decisions.md, README.md)",
+      "kind": "code",
+      "test": null,
+      "reason": "Both files are already shared append-only files for parallel planning; docs/decision-links.toml is not shared and is touched by this job alone."
+    },
+    {
+      "name": "New athena-data module and one line in athena-data lib.rs",
+      "dependent": "athena-data tests and Cargo.lock",
+      "kind": "code",
+      "test": "cargo test -p athena-data",
+      "reason": "The module uses only serde and toml, already dependencies of athena-data (Cargo.toml lines 13-17), so Cargo.lock and the workspace are unchanged."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Content test over the real files, plus reading the diff.",
+      "command": "cargo test -p athena-cli --bin athena decisions::tests::the_root_cause_is_named_in_the_changelog_and_the_log",
+      "observes": "The test reads CHANGELOG.md (Unreleased section) and docs/decisions.md. It asserts a D156 heading with a Provenance bullet exists and that both files contain the sentence naming the cause: the decision log is prose with no link from a decision to the code or limit it governs, so reversals were found only at the final verdict. `git diff -- CHANGELOG.md docs/decisions.md` shows the same text.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests of the parser and a real-file test, both inline in decisions.rs and backtest.rs.",
+      "command": "cargo test -p athena-cli --bin athena governs",
+      "observes": "Calls `ConfirmedLinks::parse` on literal toml: `[[governs]]` entries are read; a malformed id, an empty path list and an absolute or `..` path are errors; `unknown_governed(&entries)` returns an id that is not in the log. The real-file test loads docs/decision-links.toml with `ConfirmedLinks::load` through `CARGO_MANIFEST_DIR/../..`, asserts D08 maps to crates/athena-git/src/snapshot.rs, and asserts `backtest::run_on` yields no governs finding on the real log. A literal list with D9999 yields a condition (a) finding.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Pure-function unit tests, then an end-to-end job through `Athena::go` with the scripted fake agent driver.",
+      "command": "cargo test -p athena-data decision_links && cargo test -p athena-core run::tests::produce_and_verify_order_tests::governed",
+      "observes": "Pure: `unreconciled` is driven with literal toml and log strings. For each of D08, D12 and D02: a change touching a governed path with no new link is returned naming the id; the same change with a new `[[link]]` plus a new heading in the candidate log returns nothing; a link whose newer heading is not new, a link for another id, a directory prefix versus a sibling path, a deleted path and a malformed candidate list are covered. End-to-end: the repository commits docs/decision-links.toml with `[[governs]]` for D02 (README.md) and D12 (src/), and docs/decisions.md with matching headings; the fake producer edits README.md only; the job closes Failed with a reason naming D02 that is not `is_environment_reason`, and a counter in the script shows the verifier was never called. The same producer also appending a D03 entry to decisions.md and a `[[link]]` older D02 newer D03 gets past the check: the verifier is called and the reason lacks the check's text.",
+      "fails_without": "With the call in `check_and_verify` removed, or `unreconciled` returning empty, the end-to-end governed-edit job is not closed Failed naming D02 and the verifier counter is not 0; the pure tests for D08, D12 and D02 each fail.",
+      "seam": "Production entry points: `athena_data::decision_links::unreconciled` (pure, literal strings, no double; added by step 1) and `Athena::go` -> `produce_and_verify` -> `check_and_verify` -> `unreconciled_decisions` (added by steps 6 and 7). Fixture: existing `athena_with(&repo, &state, PASSES, plenty_of_space, script)`, `repo_with_config` and `commit_file` in run/tests.rs (exist, lines 187, 295, 341); the script is `base_script()` (exists, line 219) wrapped like `each_job_its_own_edit` (line 2935) and `counting` (line 2152) to set the producer's edits and count verifier calls (wrapper added by step 7). The check logic lives in athena-data and run/checks.rs, never in the script."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit tests in main.rs over the real command and the template function.",
+      "command": "cargo test -p athena-cli --bin athena drain_help",
+      "observes": "Test one renders the long help of `drain` from `cli_command()` and asserts it contains `format!(\"at most {}\", athena_data::config::MAX_CONCURRENCY_CEILING)`. Test two calls `drain_after_help(13)` and asserts it contains `at most 13` and not `at most 8`, simulating a changed constant. A third assertion shows the `{ceiling}` placeholder never survives. The existing `help_of(\"drain\")` in `the_new_commands_are_in_the_help...` is switched to `cli_command()`.",
+      "fails_without": "With the literal `at most 8` kept in the text, the `drain_after_help(13)` assertion fails, and the rendered-help test fails as soon as the constant differs from 8.",
+      "seam": "Entry points `drain_after_help(ceiling: u32) -> String` and `cli_command() -> clap::Command` in crates/athena-cli/src/main.rs, added by step 5. The ceiling is the function argument; the constant is read only inside `cli_command()`. The `Cli::command()` plus `render_long_help()` pattern in the main.rs tests (around lines 1824-1829) exists and is reused."
+    },
+    {
+      "criterion": 5,
+      "method": "Search plus the end-to-end test of criterion 3.",
+      "command": "cargo test -p athena-core run::tests::produce_and_verify_order_tests::governed_edit_closes_before_the_verifier_starts",
+      "observes": "Grep `unreconciled_decisions` in crates/athena-core/src/run/mod.rs: the call sits in `check_and_verify` before `push_ci_branch`, the early pull request and `verification_stage`. The test drives `Athena::go`, observes the `failed` UI line and `finished.reason` naming D02 and the governed paths, and a verifier call count of 0. A second test with `recorded_checks` set (a resume at the verifier stage) and a third for a nested run show the check is skipped.",
+      "fails_without": "A call placed after `verification_stage`, or no call, leaves the verifier called at least once, which the test asserts is 0.",
+      "seam": "Same as criterion 3: `Athena::go` via `athena_with` and a counting script (exist); the resume case reuses the existing resume-mark fixture in run/tests.rs, extended in step 7."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs on the result, over the whole workspace; the new code is the thing under check.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The test run includes the decisions.md pin test, the backtest condition (a) equality `hits.len() == links.len()` on the real log and list, tests/drain.rs `drain_help_documents_the_flags_and_lists_every_stop_reason`, every existing run/tests.rs job test (whose repositories have no docs/decision-links.toml, so the new step does nothing), and `cargo test -p athena-core --test refusal_corpus`.",
+      "fails_without": "fmt fails on any unformatted new file; clippy `-D warnings` fails on any new warning, such as an unused function if the check is not wired in; test fails if D156 edits earlier bytes of decisions.md, if D156 holds a phrase the backtest parses and has no link, if the help text lost a stop-reason label, or if the governed_* tests run against a missing check.",
+      "seam": "The entry points are the three cargo commands themselves, run by the verifier in the producer's working tree with the repository's own docs, tests and the `--locked` Cargo.lock as the fixture; no double is injected. The seam exists today (these are the commands Athena runs, listed under Checks Athena will run on the result); step 11 runs them before handing over."
+    },
+    {
+      "criterion": 7,
+      "method": "A test that the check refuses only governed-path changes, plus the unchanged reading replay.",
+      "command": "cargo test -p athena-core run::tests::produce_and_verify_order_tests::ungoverned && cargo test -p athena-data decision_links && cargo test -p athena-core --test refusal_corpus",
+      "observes": "Production entry points: `Athena::go` and `unreconciled`. A job whose producer edits README.md in a repo whose list governs only another path closes on the normal path (verifier invoked). Pure tests show that deletes and renames of a governed path are refused, while a sibling path and a prefix of a directory are not. No reading rule changes, so the replay of accepted readings stays at 0 newly refused readings, under the 5% line; the refusal corpus run shows the reading gate is untouched. The extra refusals are only changes to governed paths, as the criterion intends.",
+      "fails_without": "A check that refused every change, or matched by substring, would close the ungoverned job Failed, and the prefix-sibling pure test would fail.",
+      "seam": "Same `athena_with`/`commit_file`/counting script as criterion 3 (exist) and `unreconciled` with literal strings (added by step 1)."
+    }
+  ],
+  "open_questions": [
+    "User: D08 is the only decision mapped in the real list. Name any other decision (for example D148 to crates/athena-core/tests/refusal_corpus.rs) to map in this change; each added mapping raises refusals on past changes to those paths."
+  ],
+  "producer_section_sha256": "1883dd3e2d44ad03d577b2ce3de3e3175564ab4657ac639821876370d37ea012"
+}
