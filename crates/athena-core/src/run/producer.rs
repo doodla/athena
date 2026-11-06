@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::capability::ToolGrant;
+use crate::mirrors::{self, Drift};
 use athena_context::Composed;
 use std::collections::BTreeMap;
 
@@ -64,6 +65,23 @@ fn replay_problem(replay: &LoopReplay) -> String {
         replay.limit,
         ids.join(", ")
     )
+}
+
+/// The hand-kept files that disagree with their source in the producer's work tree (`crate::mirrors`), for the
+/// entries the changed paths can affect. The base text of a file is read from the snapshot's base commit; with no
+/// base commit the append-only rule is skipped. Empty unless the work tree is Athena's own source: the registry
+/// holds Athena's conventions, which another repository need not follow.
+fn mirror_drift_in(snapshot: &Snapshot, changed: &[String]) -> Vec<Drift> {
+    if !mirrors::is_athena_source(snapshot.dir()) {
+        return Vec::new();
+    }
+    let git = snapshot.git();
+    let base = snapshot.base().map(str::to_string);
+    let read = move |path: &str| {
+        base.as_deref()
+            .and_then(|b| git.show_file(b, path).ok().flatten())
+    };
+    mirrors::check_all(snapshot.dir(), &read, Some(changed))
 }
 
 impl Athena {
@@ -165,6 +183,13 @@ impl Athena {
     /// shared one ([`SCOPE_SEND_BACKS`]), so a change made outside the list after the first send-back is still
     /// sent back. A change still outside afterwards leaves the loop, and the check at the candidate closes the
     /// job before the verifier runs. A job with no allowed paths, and a nested run, are not checked.
+    ///
+    /// Hand-kept files that disagree with their source ([`crate::mirrors`]: shard timings, the decision log, the
+    /// CI cache key, the ontology) are sent back the same way, for the registry entries the changed paths can
+    /// affect, in Athena's own source tree only. The root cause: such a file was tested for its shape, so
+    /// content that contradicted the source was found only at the final verdict. The send-back is shared with
+    /// the unmet criteria. Drift left at the limit does not stop the job here: the repo test `mirrors`, run by
+    /// the configured test check, fails on it at verification.
     pub(super) fn producer_loop(
         &self,
         ctx: &RunContext<'_>,
@@ -304,6 +329,13 @@ impl Athena {
             } else {
                 None
             };
+            // Hand-kept files the producer's change can leave disagreeing with their source (shard timings, the
+            // decision log, the CI cache key, the ontology). Empty in a nested run and outside Athena's source.
+            let mirror_drift = if self.nested.is_none() && !changes.is_empty() {
+                mirror_drift_in(&snapshot, &changed)
+            } else {
+                Vec::new()
+            };
             left_criteria = left_to_athena(&raw, accepted);
             let report = self.redact_report(raw, ctx.redactor)?;
             // The replay of accepted readings through the base and the work as it stands. A measured share
@@ -315,6 +347,7 @@ impl Athena {
                 && held.is_none()
                 && gate.is_none()
                 && outside.is_empty()
+                && mirror_drift.is_empty()
             {
                 break Some(report);
             }
@@ -343,6 +376,18 @@ impl Athena {
             let report_problems = problems.clone();
             if gate.is_some() {
                 problems.push("decisions not reconciled".to_string());
+            }
+            // Like the gate's finding, hand-kept files that disagree with their source are not part of what the
+            // verifier is told the report lacked: the configured test check fails on them at verification.
+            if !mirror_drift.is_empty() {
+                problems.push(format!(
+                    "files kept by hand disagree with their source: {}",
+                    mirror_drift
+                        .iter()
+                        .map(|d| d.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ));
             }
             // Like the gate's finding, files outside the allowed paths are not part of what the verifier is
             // told the report lacked: the job ends before the verifier when they remain.
@@ -388,6 +433,16 @@ impl Athena {
                         "producer   decisions still not reconciled after the send-back; the job ends at the decision gate",
                     );
                 }
+                if !mirror_drift.is_empty() {
+                    ctx.ui.line(&format!(
+                        "producer   hand-kept files still disagree with their source after the send-back: {}",
+                        mirror_drift
+                            .iter()
+                            .map(|d| d.mirror.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
                 if !outside.is_empty() {
                     // The job ends before the verifier, at the check on the candidate.
                     ctx.ui.line(
@@ -404,7 +459,7 @@ impl Athena {
             ctx.ui
                 .line(&format!("producer   sent back: {}", problems.join("; ")));
             let replay = held.map(|replay| (&replay.view, replay.limit));
-            attempt_brief = match (&gate, replay, scope.filter(|_| !outside.is_empty())) {
+            let next_brief = match (&gate, replay, scope.filter(|_| !outside.is_empty())) {
                 (gate, replay, Some((_, criterion))) => send_back_text_scoped(
                     brief,
                     &unmet,
@@ -421,6 +476,7 @@ impl Athena {
                 }
                 (None, None, None) => send_back_text(brief, &unmet, &unchanged),
             };
+            attempt_brief = append_mirror_drift(next_brief, &mirror_drift);
         };
         Ok(Flow::Go(Reported {
             report,

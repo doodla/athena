@@ -6,6 +6,8 @@ use athena_context::briefs::{
 };
 use athena_context::outputs::{CriterionCheckOutput, CriterionStatusOutput, ProducerOutput};
 
+use crate::mirrors::Drift;
+
 /// The accepted criteria the report does not show as met: marked unmet, or missing from `criteria_check`.
 /// A criterion matches an entry by its text with numbering, kind tag, case, spacing and trailing
 /// punctuation ignored (see [`criterion_key`]); any other difference in words is a different criterion.
@@ -214,6 +216,35 @@ pub(crate) fn send_back_text_scoped(
     text
 }
 
+/// The leading sentence of a send-back that lists hand-kept files disagreeing with their source.
+const MIRROR_DRIFT_SENTENCE: &str = "Files that are kept by hand disagree with the source they summarize; \
+     this is a reason for this send-back whether or not criteria are listed. ";
+
+/// `text`, a send-back brief, with the hand-kept files that disagree with their source (`athena_core::mirrors`).
+/// With no drift the text is returned unchanged. Otherwise one leading sentence goes in front of the intro,
+/// because the intro speaks of criteria, and a section after the lists names each drift: the file and the fix.
+pub(crate) fn append_mirror_drift(text: String, drift: &[Drift]) -> String {
+    if drift.is_empty() {
+        return text;
+    }
+    const HEADING: &str = "## Sent back\n\n";
+    let mut text = match text.rfind(HEADING) {
+        Some(at) => {
+            let end = at + HEADING.len();
+            format!("{}{MIRROR_DRIFT_SENTENCE}{}", &text[..end], &text[end..])
+        }
+        None => text,
+    };
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("\nHand-kept files that disagree with their source (fix each):\n\n");
+    for d in drift {
+        text.push_str(&format!("- {d}\n"));
+    }
+    text
+}
+
 /// A criterion's text reduced for comparison: no leading number (`1.`, `2)`, `3:`), no leading `[kind]`
 /// tag, lowercase, single spaces, no trailing punctuation.
 fn criterion_key(text: &str) -> String {
@@ -235,6 +266,46 @@ fn criterion_key(text: &str) -> String {
         .trim_end_matches(|c: char| c.is_ascii_punctuation() && c != '`' && c != ')')
         .trim_end()
         .to_lowercase()
+}
+
+#[cfg(test)]
+mod mirror_drift_tests {
+    use super::*;
+
+    fn drift(message: &str) -> Drift {
+        Drift {
+            mirror: "xtask/shard-timings.txt".into(),
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn no_drift_leaves_the_text_unchanged() {
+        let text = send_back_text("brief", &["c".to_string()], &[]);
+        assert_eq!(append_mirror_drift(text.clone(), &[]), text);
+    }
+
+    #[test]
+    fn drift_adds_a_leading_sentence_and_a_section_naming_each_item() {
+        let text = send_back_text("brief", &[], &[]);
+        let out = append_mirror_drift(
+            text,
+            &[
+                drift("xtask/shard-timings.txt: add the line `a --test b 5.00`"),
+                drift("docs/decisions.md is append-only"),
+            ],
+        );
+        let sent = out.split("## Sent back\n\n").nth(1).unwrap();
+        assert!(sent.starts_with(MIRROR_DRIFT_SENTENCE), "{out}");
+        assert!(sent.contains("Your previous report did not show every acceptance criterion"));
+        assert!(out.contains(
+            "(fix each):\n\n- xtask/shard-timings.txt: add the line `a --test b 5.00`\n"
+        ));
+        assert!(
+            out.ends_with("- docs/decisions.md is append-only\n"),
+            "{out}"
+        );
+    }
 }
 
 #[cfg(test)]

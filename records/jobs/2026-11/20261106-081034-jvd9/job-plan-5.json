@@ -1,0 +1,562 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261106-081034-jvd9",
+  "round": 5,
+  "at": "2026-11-06T12:53:25.685426325Z",
+  "invocation_seq": 11,
+  "approach": "Root cause: a file kept by hand as a mirror of a governing source (xtask/shard-timings.txt, docs/decisions.md, status::BUILD_PATHS against the CI athena-bin key, docs/ontology.toml against the docs it scans) is tested for its shape only, or checked late, so content that contradicts the source passes until the final verdict. Fix at the origin with one registry, crates/athena-core/src/mirrors.rs. Each entry names a mirror file, its source and a comparison rule, and pure rule functions compare content. Four rules: (a) shard-timings `--test` and `--lib` lines equal the units on disk; (b) docs/decisions.md starts with the exact bytes of its base version; (c) the CI athena-bin hashFiles globs and the BUILD_PATHS list parsed out of the work tree's crates/athena-core/src/status.rs cover each other both ways (real drift today, so BUILD_PATHS gains four roots); (d) docs/ontology.toml, which exists in the base, is checked for identifying lines in BRIEF.md and the term sources that no sense or excuse covers, through one shared walk moved out of crates/athena-cli/tests/ontology.rs. Revision changes: (1) rule (d) is live, not skipped. The dependents entry is corrected, Source::Docs gets a defined watch set (docs/ontology.toml, BRIEF.md, and every file source listed in the parsed ontology, using the shared scanned_files), with a unit test and a loop test where a producer adds an uncovered '- Hermes: ...' line to BRIEF.md and is sent back. (2) The 'never charged with base drift' claim is withdrawn: the filter works per entry, so a producer who touches a watched file can be charged with drift already at the base. This is stated, tested with a named expected result, and justified: the unfiltered repo test would fail `cargo test` on that drift in any case, so an early send-back costs nothing extra. The before-handover call site is the producer loop's self-check in run/producer.rs, which runs after every producer report and before verification. A repo-level athena-cli test target runs the registry over the real files (all entries, no filter) and over a drifted fixture per entry, so a new entry is covered with no other edit. checks.rs stays unchanged (decision 9).",
+  "decisions": [
+    {
+      "choice": "1. One registry REGISTRY: &[Mirror] with Mirror { name, mirror, source: Source, rule: Rule }. Source is Path | Globs | GitHead | Docs; Rule is TimingUnits | AppendOnly | HashFilesCover | OntologyTerms (no rule carries data copied from the running binary). check_entry(entry, root, base) wraps every inner finding in a Drift { mirror, message }. check_all(root, base, touched: Option<&[String]>) runs every entry whose mirror file exists; with Some(paths) it runs only entries where Mirror::watches(root, paths) is true. watches by Source: Path(p) = mirror or p in paths; Globs = mirror or any path matching a pattern (segment-wise matcher); GitHead = mirror only; Docs = docs/ontology.toml, BRIEF.md, or any file source of a term in the parsed ontology at root (decision ids skipped, same test as scanned_files); a file that does not parse watches only itself and BRIEF.md. is_athena_source(root) (setup.sh, xtask/shard-timings.txt and crates/athena-core/Cargo.toml all exist) gates the producer-loop use. Filter limit, stated: the filter is per entry, not per finding. A producer who touches any file an entry watches is charged with every finding of that entry, including drift already in the base. This is accepted because athena-cli --test mirrors runs the same entry unfiltered under the configured `cargo test --locked`, so drift in the base fails the job at verification anyway; the early send-back names the file and fix a stage sooner and costs no extra failure.",
+      "reason": "The cause is that nothing makes a mirror declare how it is compared to its source. A registry makes the declaration the unit and the repo test iterates it. The gate keeps jobs on other repositories, which may have their own docs/decisions.md, from being forced to append-only. The touch filter keeps a producer that touched none of an entry's files from being charged with it. Critic finding 12: the 'never' claim was stronger than the design, so it is softened to the per-entry statement above and a loop test fixes the expected result (sent back once, message names the missing b.rs line).",
+      "rejected": [
+        {
+          "option": "One more one-off test per mirror, as the five jobs did",
+          "why": "Fixes one instance and leaves the class."
+        },
+        {
+          "option": "Put the registry in xtask",
+          "why": "xtask does not depend on athena-core, so it cannot reach the other mirrors' code, and xtask tests run in a heavy shard outside the producer loop."
+        },
+        {
+          "option": "Run the registry on every repository the producer works in",
+          "why": "docs/decisions.md append-only is Athena's own convention, so other repositories would get false send-backs."
+        },
+        {
+          "option": "Run touched entries on the base tree too and report only new findings (critic finding 12 first option)",
+          "why": "Needs a materialized base tree for the disk-scanning rules (units on disk, ontology scans); the snapshot git can read single files but not a tree walk, and the benefit is small because base drift also fails the unfiltered repo test. Softening the claim is the smaller design."
+        },
+        {
+          "option": "No touch filter at all",
+          "why": "A producer that changed none of a mirror's files could be charged with an unrelated entry's drift."
+        }
+      ]
+    },
+    {
+      "choice": "2. Rule (c) reads BUILD_PATHS from the mirror file it names: status_build_paths(status_rs_text) finds `pub const BUILD_PATHS`, starts after the `=` (so the `[&str; 9]` type is skipped), reads to the next `;` and collects the quoted strings. hash_glob_problems(ci_text, roots) takes those roots. Mirror = crates/athena-core/src/status.rs, Source::Path(.github/workflows/ci.yml). (i) Each hashFiles glob on an `athena-bin-` key line must be covered by a root (a root ending `/` covers a glob starting with it, a file root its exact name); else the message says add the path to BUILD_PATHS in crates/athena-core/src/status.rs. (ii) Each root must be covered by a glob (a dir root needs a glob that starts with it and ends `**`); else it says add the glob to every athena-bin key. A ci.yml with no such key line, or a status.rs whose array cannot be parsed, is a drift. The athena-cli repo test asserts the parsed list equals the compiled status::BUILD_PATHS. BUILD_PATHS becomes nine roots: crates/, xtask/, rust-toolchain.toml, Cargo.toml, Cargo.lock, athena.toml, defaults.toml, setup.sh, docs/system-facts.md; stale_build_line prints the list from the constant.",
+      "reason": "The rule must judge the files in the work tree, not the compiled constant of an installed binary that can be older than the tree. The drift is real: xtask/tests/policy.rs (lines 783, 897-1000) forces the key to equal xtask BUILD_INPUT_GLOBS (xtask/src/main.rs 267-277), the true input set; athena.toml is compiled in (athena-gate lib.rs 33 BUILTIN_CONFIG), docs/system-facts.md too (athena-context briefs.rs 1671 SYSTEM_FACTS) and rust-toolchain.toml changes the compiler, yet touches_build (status.rs 23-29) and stale_build_line (35-58) ignore them, so a landing that changes them leaves a stale binary. defaults.toml is an xtask build input; adding it costs at most an extra rebuild and keeps one rule with no excusal list.",
+      "rejected": [
+        {
+          "option": "Rule::HashFilesCover(&status::BUILD_PATHS), the compiled constant",
+          "why": "Judges the work tree by the binary's older build; false and missed send-backs."
+        },
+        {
+          "option": "Mark rule (c) repo-test-only and skip it in the producer loop",
+          "why": "Leaves the producer's own edit of BUILD_PATHS or the key unchecked before handover; the parse is small and the repo test pins it to the constant."
+        },
+        {
+          "option": "Use syn to parse status.rs",
+          "why": "A full parse for one array; the narrow parse plus the equality assertion is enough."
+        },
+        {
+          "option": "Excuse the four extra globs with reasons and leave BUILD_PATHS alone",
+          "why": "The files are compiled in, so the installed binary really is stale after a change to them."
+        },
+        {
+          "option": "Edit ci.yml",
+          "why": "Governance, out of scope, and the key is already the true input set."
+        }
+      ]
+    },
+    {
+      "choice": "3. Rule (d) shares the whole walk with the ontology test, and runs live on the real docs/ontology.toml. mirrors.rs gets plain-data types OntologyTerm { name, aliases, sources, senses (in_file, marker), excused } and pub fns is_word_char, phrase_in, names_term, is_identifying, Hit, scan, is_decision_id, names_of, scanned_files, term_hits, excuse_ok, uncovered_lines, parse_ontology(toml_text) (toml_edit, already an athena-core dependency) and ontology_problems(toml_text, read_file). The inner uncovered-line text from ontology.rs 413-430 ('{name}: {path}:{n} names the term as a definition or role and no sense or excuse covers it: {line}') is unchanged. check_entry wraps it in a Drift whose message starts with `docs/ontology.toml:` and ends with the fix `add a senses entry or an excuse for that term in docs/ontology.toml`. ontology.rs keeps its serde types and its sense/says and excuse-shape checks, converts each serde Term with plain() and calls the shared fns; a new test both_parsers_read_the_same_terms asserts plain(serde term) == parse_ontology(text) on the real file.",
+      "reason": "Criterion 3 needs a mirrors unit test for 'term found in a governing doc but sense unlisted'; the logic cannot be tested in mirrors.rs without living there, and a second copy would be a new hand-kept mirror of the ontology logic. The file exists in the base (Glob: docs/ontology.toml; claim_problems at ontology.rs 312-433 already checks it under cargo test), so the entry runs for real in the repo test and in the producer loop; the registry adds the early, producer-side signal for the same check. The inner message names neither mirror nor fix, so the Drift wrapper supplies both.",
+      "rejected": [
+        {
+          "option": "Re-implement the walk beside the original",
+          "why": "A new hand-kept mirror of the ontology logic."
+        },
+        {
+          "option": "Add the toml crate to athena-core",
+          "why": "Changes Cargo.toml and Cargo.lock for one parser; --locked builds make it a larger change."
+        },
+        {
+          "option": "Move all of claim_problems and the serde types into athena-core",
+          "why": "Large refactor of a working test; the sense/says and excuse-shape checks are not part of the uncovered-line drift."
+        },
+        {
+          "option": "Drop rule (d) because the ontology test already exists",
+          "why": "Criterion 3 lists it as a rule with a unit test, and the producer loop would not see it before handover."
+        }
+      ]
+    },
+    {
+      "choice": "4. Rule (a) derives `--test` and `--lib` units from disk: crates/*/tests/*.rs, crates/*/tests/*/main.rs and xtask/tests (unit `<dir name> --test <stem>`), and crates/*/src/lib.rs (unit `<dir name> --lib`). missing_timing_lines(units, timings_text) reports a unit missing from the file and a `--test` or `--lib` line with no unit; `--doc` and `--bin` lines are never reported. The entry's Source::Globs lists those patterns. derived_units_agree_with_cargo_metadata runs `cargo metadata --no-deps --format-version 1 --locked` (as xtask/tests/ci_shards.rs does around line 120) and asserts the `--test` and `--lib` units of targets with test=true equal the derived set. `--doc` and `--bin` stay with the heavier oracle in ci_shards.rs (around line 420).",
+      "reason": "A new crate's lib is as likely to be missed as a test file, and both are cheap facts on disk. The agreement test compares the derived copy with cargo's own answer. `--bin` names can be renamed (athena-cli's bin is `athena`) and `--doc` depends on the doctest flag, so deriving them would be a guess; the limit is stated.",
+      "rejected": [
+        {
+          "option": "Derive `--bin` and `--doc` units too",
+          "why": "Needs Cargo.toml parsing; it re-creates cargo metadata."
+        },
+        {
+          "option": "Name the ci_shards test as the rule and only run it",
+          "why": "Criterion 3 needs a unit test that fails on literal text; ci_shards runs in the heavy xtask lane."
+        },
+        {
+          "option": "Make xtask depend on athena-core",
+          "why": "Changes xtask/Cargo.toml and Cargo.lock and pulls a heavy crate into a CI-support crate."
+        }
+      ]
+    },
+    {
+      "choice": "5. Rule (b) append_only_problem(base: &[u8], new: &[u8]) fails unless base is a byte prefix of new, and names docs/decisions.md, the first changed line and the fix (append, do not edit). The base comes from an injected closure `&dyn Fn(&str) -> Option<Vec<u8>>`. The producer loop builds it only when `snapshot.base()` is Some(base) (Option<&str>, crates/athena-git/src/snapshot.rs line 131): `move |p| snapshot.git().show_file(base, p).ok().flatten()`; when base() is None the closure returns None, which skips rule (b). Git::show_file (athena-git lib.rs 453) takes &str and returns Result<Option<Vec<u8>>>. The repo test uses git_base(root) with HEAD; a None base skips the rule. crates/athena-cli/src/decisions.rs keeps its PINNED_LEN/PINNED_SHA256 test for committed history.",
+      "reason": "This is the rag3 prevention. The producer's snapshot is a git repository whose base commit is the dispatch base, so the base text is readable while it edits.",
+      "rejected": [
+        {
+          "option": "Replace the pinned-hash test",
+          "why": "It guards committed history, which a base comparison cannot."
+        },
+        {
+          "option": "Compare with origin/main",
+          "why": "The snapshot has no remote."
+        }
+      ]
+    },
+    {
+      "choice": "6. The before-handover call site is the producer loop's existing self-check in crates/athena-core/src/run/producer.rs (after unmet/unchanged/gate/outside, lines 285-320). Add `let mirrors = if self.nested.is_none() && !changes.is_empty() { mirror_drift_in(&snapshot, &changed) } else { Vec::new() };` after the gate (line 306), add `&& mirrors.is_empty()` to the break condition (lines 313-318), push `files kept by hand disagree with their source: ...` into `problems` after the `report_problems` clone (line 343, as the gate does), print a ui line when a drift remains at the limit (near line 385) and break as the gate does. Apply `append_mirror_drift(text, &mirrors)` to the result of the `attempt_brief = match` (lines 407-423). In run/send_back.rs append_mirror_drift returns the text unchanged for an empty list; otherwise it puts one leading sentence before the text ('Files that are kept by hand disagree with the source they summarize; this is a reason for this send-back whether or not criteria are listed.') and appends a section listing each Drift message. mirror_drift_in returns an empty list unless mirrors::is_athena_source(snapshot.dir()), and calls check_all(dir, base, Some(&changed)). It shares the single PRODUCER_SEND_BACKS slot (line 374). A nested run is judged by the outer job.",
+      "reason": "The mechanism the 'mechanism' default and criterion 5 ask for is an invocation, not a sentence. The loop runs before verification on the one-commit snapshot, so the base is readable. With drift alone the match falls to send_back_text, whose intro speaks only of unmet criteria, so the wrapper adds the leading sentence.",
+      "rejected": [
+        {
+          "option": "A producer-brief instruction only",
+          "why": "Prose a producer can skip."
+        },
+        {
+          "option": "A hook in checks.rs run_check or a new CheckKind",
+          "why": "Runs after handover in the verifier's snapshot, can be masked by the pre-existing excuse (verify.rs line 203), and a CheckKind changes the governance config schema."
+        },
+        {
+          "option": "Add a new argument to every send_back_text_* variant",
+          "why": "Touches four functions and their tests for one list; a wrapper leaves them unchanged."
+        }
+      ]
+    },
+    {
+      "choice": "7. Keep a short producer-brief note, MIRROR_CHECK_INSTRUCTION, in crates/athena-context/src/briefs.rs, built like BOUNDARY_SCAN_INSTRUCTION (line 787): run `cargo test -p athena-cli --test mirrors` before finishing. Pushed in producer_brief_with_evidence between the banned-words section and `## Checks Athena will run`; D158 marks it a helper, not the mechanism.",
+      "reason": "Lets the producer fix drift in its own loop instead of spending the single send-back. Briefs sit outside the budget sets (system-facts 'Prompt sets and budgets'), so no budget line changes.",
+      "rejected": [
+        {
+          "option": "Drop the brief note",
+          "why": "Costs the producer its one send-back for an avoidable drift."
+        }
+      ]
+    },
+    {
+      "choice": "8. Add `athena-cli --test mirrors 6.00` to xtask/shard-timings.txt between `athena-cli --test live` and `athena-cli --test ontology`. Reword the stale five-path copies in step with the BUILD_PATHS change: crates/athena-cli/src/main.rs line 261 (drain help text), the doc line in crates/athena-cli/src/drain.rs line 137, and README.md line 193 now name the constant BUILD_PATHS in crates/athena-core/src/status.rs. Historical text is not edited: CHANGELOG.md lines 129 and 1652 and docs/decisions.md line 3645 list five paths; D158 says the earlier list is outdated.",
+      "reason": "The timings line is forced by the new test target: xtask/tests/ci_shards.rs (around line 420) asserts timed == oracle and rule (a) fails on it too; the seconds are an estimate, as the file header says. The prose copies are the same kind of hand-kept mirror the change exists to stop.",
+      "rejected": [
+        {
+          "option": "Omit the timings line",
+          "why": "Fails criterion 6 and the new real-repo test."
+        },
+        {
+          "option": "Leave the help text, doc comment and README listing five paths",
+          "why": "Stale copies of the list this change corrects."
+        },
+        {
+          "option": "Edit the old CHANGELOG and decision text",
+          "why": "History; decisions.md is append-only and is itself a mirror under rule (b)."
+        }
+      ]
+    },
+    {
+      "choice": "9. checks.rs is left unchanged. The producer's report explains it under 'Planned files left unchanged'.",
+      "reason": "The deliverable list names it for a run_check hook. A hook there runs after handover (run/checks.rs, verifier snapshot) and can be excused as pre-existing, so the producer-loop seam replaces it.",
+      "rejected": [
+        {
+          "option": "Edit checks.rs to match the deliverable list",
+          "why": "Adds a wrong-stage hook only to keep a list whole."
+        }
+      ]
+    },
+    {
+      "choice": "10. Answer to review findings 1-10 (files outside the reading's seven deliverables): all are kept, each for one named reason, each flagged 'not a listed deliverable' in `files`. ontology.rs (finding 1): single source for rule (d), so the walk is not copied. run/producer.rs, run/send_back.rs, run/tests.rs (findings 2-4): the before-handover call site that replaces the checks.rs hook, its wrapper and its tests; without them criterion 5 has no real call site. tests/drain.rs (5): the touches_build and stale-line tests must follow the BUILD_PATHS value. main.rs, drain.rs, README.md (6-8): comment and help-text copies of the changed list; no logic. briefs.rs (9): helper note only. xtask/shard-timings.txt (10): plain data forced by the new test target. No governance file (athena.toml, defaults.toml, workflow, tool or lint config) is edited. If the user wants a narrower change, the first cut is README.md, main.rs, drain.rs and briefs.rs (prose only); the others are load-bearing.",
+      "reason": "Each is needed to make the listed deliverables work or to keep a changed value from leaving stale copies.",
+      "rejected": [
+        {
+          "option": "Limit the change to the seven listed files",
+          "why": "Criterion 5 needs a real call site before handover; checks.rs only runs after it. The new test target also fails ci_shards without the timings line, and ontology logic would be copied."
+        }
+      ]
+    },
+    {
+      "choice": "11. Answer to critic finding 11: docs/ontology.toml exists in the base (Glob finds it; it defines planning, job, Athena, Hermes, landed and others, sourced from BRIEF.md and docs/design/*.md and docs/records.md). Rule (d) therefore runs live: in the_real_repo_has_no_mirror_drift and in the producer loop. The dependents entry is corrected. Source::Docs watches (decision 1) are docs/ontology.toml, BRIEF.md and every file source in the parsed ontology, reusing scanned_files, so editing any scanned doc triggers the entry. The live entry is added to the false-send-back risk. If docs/ontology.toml is absent or does not parse, a missing file skips the entry and a parse failure is reported as a Drift ('docs/ontology.toml: does not parse: ...').",
+      "reason": "The files the ontology scans are BRIEF.md plus each term's file sources (ontology.rs 249-257); only the ontology's own data can say which, so the watch set must be derived, not a static list.",
+      "rejected": [
+        {
+          "option": "A static list of watched docs",
+          "why": "Would miss sources added later or catch unrelated files."
+        },
+        {
+          "option": "Treat the entry as skipped",
+          "why": "The file exists; skipping it would leave rule (d) untested in the loop."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/mirrors.rs",
+      "action": "create",
+      "purpose": "Registry of hand-kept mirrors (Mirror, Source, Rule, Drift, REGISTRY with four entries), pure rule fns, status_build_paths, the shared ontology walk and plain-data types, parse_ontology, test_units, is_athena_source, Mirror::watches (all four Source forms), check_entry, check_all, git_base, unit tests. The `//!` doc names the root cause. Listed deliverable.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod mirrors;` and its doc line. Listed deliverable.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/mirrors.rs",
+      "action": "create",
+      "purpose": "Real-repo test target: no drift over the real files, every registry entry catches a drifted fixture, derived units agree with cargo metadata, CI key and parsed BUILD_PATHS cover each other and equal the constant. Listed deliverable.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "BUILD_PATHS gains rust-toolchain.toml, athena.toml, defaults.toml and docs/system-facts.md (type [&str; 9]) with a doc comment saying the CI athena-bin key mirrors it and the registry enforces that; stale_build_line prints the list from the constant. Listed deliverable.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet under [Unreleased] / Added naming the root cause, the registry and the BUILD_PATHS correction. Listed deliverable.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D158 after D157 (append only): Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance. Listed deliverable.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "purpose": "NOT edited. Listed as a deliverable by the reading, but the producer report must say it is unchanged by design (decision 9). Left out of the change set on purpose.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/ontology.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 1). Use the shared walk and matchers from athena_core::mirrors instead of local copies, keep message text, add plain() and both_parsers_read_the_same_terms. Gives rule (d) one source of truth.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 2). Add mirror_drift_in and call it in the producer loop's self-check; extend the break condition, problems, ui line at the limit and attempt_brief. The before-handover call site that replaces the checks.rs hook.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 3). Add append_mirror_drift(text, drift): unchanged for an empty list, else a leading sentence plus a section naming each drift. Needed by the call site.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 4). Loop tests (prefix `mirrors_`) in the fake-agent harness with a new script fixing_timings_on_send_back: send-back, fix on send-back, clean, base drift touched, untouched, ontology BRIEF.md, non-Athena repository.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 5). Extend the touches_build and stale-line tests to the four new roots.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 6). Drain help text at line 261: name BUILD_PATHS instead of repeating five paths. Text only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 7). Doc comment near line 137: name the constant instead of repeating the list. Comment only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 8). Line 193: reword the five-path list to name BUILD_PATHS in crates/athena-core/src/status.rs.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 9). Add MIRROR_CHECK_INSTRUCTION and mirror_check_section() before `## Checks Athena will run`, plus the test. A helper note, not the mechanism.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "purpose": "Not a listed deliverable (finding 10). Add `athena-cli --test mirrors 6.00` between the `live` and `ontology` lines. Plain data, not governance; forced by the new test target.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Edit crates/athena-core/src/status.rs: BUILD_PATHS becomes [&str; 9] (crates/, xtask/, rust-toolchain.toml, Cargo.toml, Cargo.lock, athena.toml, defaults.toml, setup.sh, docs/system-facts.md) with a doc comment (the CI athena-bin key mirrors this; the mirrors registry enforces it); build the stale_build_line text from the constant. Edit crates/athena-cli/src/main.rs line 261, the comment at drain.rs line 137 and README.md line 193 to name the constant. Extend crates/athena-cli/tests/drain.rs (the `yes` list near line 1917 and the loop near line 2036) with the four new roots.",
+    "Create crates/athena-core/src/mirrors.rs with the `//!` doc naming the root cause. Define Source, Rule, Mirror, Drift and REGISTRY (four entries: xtask/shard-timings.txt with Globs and TimingUnits; docs/decisions.md with GitHead and AppendOnly; crates/athena-core/src/status.rs with Path(.github/workflows/ci.yml) and HashFilesCover; docs/ontology.toml with Docs and OntologyTerms). Add `pub mod mirrors;` and its doc line to lib.rs.",
+    "In mirrors.rs move in the shared ontology code from crates/athena-cli/tests/ontology.rs (is_word_char, phrase_in, names_term, is_identifying, Hit, scan, is_decision_id, names_of, scanned_files, term_hits, excuse_ok, uncovered_lines with the inner message text unchanged) over OntologyTerm and a `read_file: &dyn Fn(&str) -> Option<String>`. Add parse_ontology (toml_edit) and ontology_problems. Edit ontology.rs to import them, delete its copies, add plain(&Term) -> OntologyTerm and the test both_parsers_read_the_same_terms.",
+    "In mirrors.rs add the pure rules missing_timing_lines (`--test` and `--lib` only), append_only_problem, status_build_paths and hash_glob_problems (two-way), then test_units(root), is_athena_source(root), Mirror::watches (Path, Globs with a segment-wise glob matcher, GitHead, Docs via parse_ontology and scanned_files), check_entry (wraps each inner finding in a Drift naming the mirror file and the fix), check_all(root, base, touched) and git_base(root) (athena_git::Git::at(root).show_file(\"HEAD\", path), None on any error). Write the mirrors::tests unit tests of demonstration 3, including the watches tests and the BRIEF.md ontology touch. Run git only through athena_git and use no word the external-calls guard forbids.",
+    "Create crates/athena-cli/tests/mirrors.rs with the four tests of demonstration 4 (the fixture builder uses an exhaustive `match entry.rule`). Add `athena-cli --test mirrors 6.00` to xtask/shard-timings.txt between `athena-cli --test live 30.00` and `athena-cli --test ontology 6.00`. Run `cargo test -p athena-cli --test mirrors`. If the real-repo test reports drift, fix the rule if it is a false positive and the mirror only for true drift. Never edit ci.yml, athena.toml or docs/ontology.toml.",
+    "Edit crates/athena-core/src/run/send_back.rs: add append_mirror_drift (leading sentence plus section; unchanged for an empty list) and a unit test. Edit run/producer.rs: add mirror_drift_in(&Snapshot, &[String]) (is_athena_source gate; base closure only when snapshot.base() is Some, else a closure returning None; check_all with Some(&changed)), compute `mirrors` after the gate, extend the break condition and `problems` (after the report_problems clone), add the ui line for a drift still present at the limit, apply append_mirror_drift to the attempt_brief match result, and update the producer_loop doc comment. Add the seven `mirrors_` loop tests of demonstration 3 to run/tests.rs using repo(), commit_file, governed_job_with, editing and a new fixing_timings_on_send_back script modelled on reconciling_on_send_back; the fixture repo commits setup.sh, crates/athena-core/Cargo.toml, xtask/shard-timings.txt, crates/demo/tests/a.rs, b.rs, BRIEF.md and a small docs/ontology.toml. Then run `cargo test -p athena-core run` and `cargo test -p athena-core mirrors`.",
+    "Edit crates/athena-context/src/briefs.rs: add MIRROR_CHECK_INSTRUCTION, mirror_check_section(), the writeln! in producer_brief_with_evidence between the banned-words section and `## Checks Athena will run`, and the test producer_briefs_tell_the_producer_to_run_the_mirror_check. Run `cargo test -p athena-context`.",
+    "Add the CHANGELOG.md bullet under [Unreleased] / Added. Append D158 to docs/decisions.md after D157 in the existing form: the root cause, the four rules, the reversed BUILD_PATHS rule and the change to nine roots (and that the text at decisions.md line 3645 listing five paths is outdated), the producer-loop call site with the per-entry touch filter and its stated limit, the live ontology entry, the other limits (HEAD comparison, `--doc` and `--bin` left to ci_shards, one shared send-back slot, decisions.rs PINNED_* and xtask BUILD_INPUT_GLOBS stay separate pins), what is prose-only, the shard-timings justification and the checks.rs omission. Touch no earlier line and use no supersession wording. Reread every new file against the banned-word list.",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Also run `cargo test -p athena-cli --test drain`, `cargo test -p athena-cli --test ontology`, `cargo test -p xtask --test ci_shards`, `cargo test -p xtask --test policy` and `cargo test -p athena-core --test external_calls_guard` as regressions. In the report, say checks.rs is unchanged by design (no run_check hook) and name each file outside the reading's deliverables with its reason."
+  ],
+  "risks": [
+    {
+      "risk": "Changing BUILD_PATHS makes a landing that touches athena.toml, defaults.toml, rust-toolchain.toml or docs/system-facts.md trigger a rebuild in the drain, and a drain test that landed athena.toml (tests/drain.rs line 3117) may assert no rebuild.",
+      "mitigation": "This is the intended fix. The producer runs `cargo test -p athena-cli --test drain` and changes only an expectation that asserted no rebuild, saying so in the report."
+    },
+    {
+      "risk": "The loop hook sends back on drift already in the base: the filter is per entry, so a producer who edits any watched file (for example a lib.rs or a doc the ontology scans) is charged with that entry's pre-existing findings.",
+      "mitigation": "Stated in D158 and tested (loop test 4: base lacks the b.rs timing line, producer edits a.rs, sent back once with b.rs named). The same entry runs unfiltered in athena-cli --test mirrors under `cargo test --locked`, so base drift would fail the job at verification anyway. The real-repo test is run at base in step 5 and any drift there is fixed (true drift) or the rule corrected (false positive) first. The loop sends back once, then leaves with a ui line."
+    },
+    {
+      "risk": "The live ontology entry sends back a producer who edits BRIEF.md or a term source doc and adds an identifying line (bullet, heading, table row) that names a term such as Hermes with no covering sense or excuse.",
+      "mitigation": "That is a true drift, the same one the ontology test reports under cargo test; the early message names the term, file, line and the fix (add a senses entry or an excuse in docs/ontology.toml). Matching is the moved, unchanged code, and the ontology tests (hermes_with_only_the_tool_sense_is_flagged_until_both_senses_are_listed and others) pin it. Base drift in the ontology is excluded by running the real-repo test at base first."
+    },
+    {
+      "risk": "The touch filter is too narrow (a producer changes a source in a way Mirror::watches misses) so drift passes the loop.",
+      "mitigation": "The loop is the early signal only; the same registry runs unfiltered in athena-cli --test mirrors under the configured test check. Unit tests cover watches for each Source form, Docs included."
+    },
+    {
+      "risk": "The registry runs on a repository that is not Athena's source and fails it.",
+      "mitigation": "is_athena_source gate, plus skip when a mirror file is absent; loop test 7 uses a repository without those files and asserts no send-back."
+    },
+    {
+      "risk": "Moving the ontology walk changes ontology test behavior, or the two parsers (toml in the test, toml_edit in athena-core) diverge.",
+      "mitigation": "Functions move verbatim with messages unchanged; the existing ontology tests run; both_parsers_read_the_same_terms compares plain data of both parsers on the real file."
+    },
+    {
+      "risk": "Derived `--test` and `--lib` units diverge from cargo's target set, for example a [[test]] with a custom path.",
+      "mitigation": "derived_units_agree_with_cargo_metadata on the real repo; on disagreement the producer fixes the derivation, not the timings file."
+    },
+    {
+      "risk": "The narrow parse of BUILD_PATHS breaks if status.rs is reformatted.",
+      "mitigation": "Parse failure is itself a drift with a message, and the repo test asserts parsed == compiled constant."
+    },
+    {
+      "risk": "The append-only rule compares with the base, so it is trivially true once committed and skipped with no git.",
+      "mitigation": "It bites on uncommitted edits, which is the producer's loop. The decisions.rs pin still guards committed history. D158 states the limit."
+    },
+    {
+      "risk": "The drift shares the single send-back slot, so a producer already sent back for unmet criteria gets no second chance for drift.",
+      "mitigation": "Same as the gate today. The drift then stays and the configured `cargo test --locked` fails on athena-cli --test mirrors. D158 states this."
+    },
+    {
+      "risk": "A future mirror is added but never registered, so the class returns.",
+      "mitigation": "The module doc and D158 say the registry is where a mirror is declared and mark registration prose-only. A new Rule variant without a fixture fails to compile in the repo test."
+    },
+    {
+      "risk": "The producer's 'Planned files left unchanged' check flags checks.rs, which the reading lists.",
+      "mitigation": "The report explains it is unchanged because the hook moved to the producer loop (decision 9)."
+    },
+    {
+      "risk": "The shard-timings value for the new target is a guess.",
+      "mitigation": "The file header says values are estimates and the cover test checks names only; use 6.00, near the ontology target."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "BUILD_PATHS value (five roots to nine)",
+      "dependent": "crates/athena-core/src/status.rs touches_build (lines 23-29) and BUILD_PATHS (line 20); used by crates/athena-cli/src/drain.rs line 1756 (land sets rebuild_due), re-exported at drain.rs line 260",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/drain.rs only_changes_to_code_and_the_files_that_build_it_touch_the_build: add athena.toml, defaults.toml, rust-toolchain.toml and docs/system-facts.md to the `yes` list, keep docs/decisions.md and CHANGELOG.md in the `no` list. Run cargo test -p athena-cli --test drain and cargo test -p athena-core status.",
+      "reason": null
+    },
+    {
+      "name": "stale_build_line pathspec and message",
+      "dependent": "crates/athena-core/src/status.rs stale_build_line (lines 35-58); callers status.rs lines 1729 and 1959 and drain.rs line 3913 (restart guard)",
+      "kind": "code",
+      "test": "crates/athena-cli/tests/drain.rs status_prints_the_stale_build_line_after_a_crates_change_and_none_after_docs_or_records_changes: extend the loop (lines 2036-2042) with the four new roots. drain.rs line 5198 builds its own stale string as an input. No test asserts the old text (searched `file(s) under`).",
+      "reason": null
+    },
+    {
+      "name": "a landing that changes athena.toml now counts as touching the build",
+      "dependent": "crates/athena-cli/tests/drain.rs line 3117 (a landing whose changed list is [\"athena.toml\"]) and the drain land path that sets rebuild_due",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain; the producer updates an expectation only if it asserted no rebuild, because the rebuild is the intended behavior, and says so in the report.",
+      "reason": null
+    },
+    {
+      "name": "prose copies of the BUILD_PATHS list",
+      "dependent": "crates/athena-cli/src/main.rs line 261 (drain help text), crates/athena-cli/src/drain.rs line 137 (doc comment), README.md line 193; history lines CHANGELOG.md 129 and 1652 and docs/decisions.md 3645",
+      "kind": "code",
+      "test": "cargo test -p athena-cli compiles and runs any help-text test; no test reads README.md line 193 (searched *.rs for the phrase). History lines stay and D158 marks them outdated.",
+      "reason": null
+    },
+    {
+      "name": "declaration format of BUILD_PATHS in status.rs",
+      "dependent": "crates/athena-core/src/mirrors.rs status_build_paths reads the `pub const BUILD_PATHS` array text of crates/athena-core/src/status.rs",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test mirrors the_ci_key_and_build_paths_cover_each_other asserts the parsed list equals the compiled status::BUILD_PATHS.",
+      "reason": null
+    },
+    {
+      "name": "CI athena-bin hashFiles list (read only)",
+      "dependent": ".github/workflows/ci.yml athena-bin keys (nine, lines 175, 231, 278, 334, 387, 445, 583, 659, 701); xtask/tests/policy.rs lines 783 and 897-1000; xtask/src/main.rs BUILD_INPUT_GLOBS line 267",
+      "kind": "host_setting",
+      "test": "cargo test -p athena-cli --test mirrors (rule c against the real file) and cargo test -p xtask --test policy. Not edited; the key already lists all nine globs, so only status.rs changes.",
+      "reason": null
+    },
+    {
+      "name": "producer self-check and send-back (function producer_loop and every mode that reaches it)",
+      "dependent": "crates/athena-core/src/run/producer.rs producer_loop; callers: the go path in run/mod.rs; modes: first producer run, retry resume, nested run with self.nested set; states read: unmet, unchanged, gate, outside, loop_replay, snapshot.change_list(), snapshot.base(), the snapshot work tree; no records or job state are read by the new term",
+      "kind": "code",
+      "test": "New run::tests loop tests (prefix mirrors_) plus existing governed_edit_is_sent_back_once_and_the_second_candidate_reaches_the_verifier (run/tests.rs line 2351), governed_edit_still_unreconciled_after_the_send_back_ends_with_the_gate_message (line 2394) and the scope tests near lines 2634-2763. The new term is empty outside Athena's source tree, in a nested run and when the producer touches no file an entry watches, so existing tests see no change. Run cargo test -p athena-core run.",
+      "reason": null
+    },
+    {
+      "name": "send-back brief text",
+      "dependent": "crates/athena-core/src/run/send_back.rs send_back_text* and their tests (run_pin_tests.rs lines 1142, 1283, 1405)",
+      "kind": "code",
+      "test": "cargo test -p athena-core run_pin and cargo test -p athena-core mirrors_",
+      "reason": "append_mirror_drift is a new wrapper that returns its input unchanged for an empty list, so the four existing builders and the phrases pinned in their tests are unchanged."
+    },
+    {
+      "name": "ontology matching and term-walk helpers (moved to mirrors.rs)",
+      "dependent": "crates/athena-cli/tests/ontology.rs (names_term, is_identifying, phrase_in, scan, Hit, is_word_char, scanned_files, names_of, term_hits, excuse_ok, is_decision_id and the uncovered-line loop of claim_problems)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test ontology (the_ontology_file_is_sound, the unit tests of names_term and is_identifying, hermes_with_only_the_tool_sense_is_flagged_until_both_senses_are_listed, new both_parsers_read_the_same_terms) and cargo test -p athena-core mirrors",
+      "reason": null
+    },
+    {
+      "name": "ontology content mirror (corrected: the file exists in the base)",
+      "dependent": "docs/ontology.toml (read by rule (d) and by crates/athena-cli/tests/ontology.rs line 436); scanned docs BRIEF.md, docs/design/job-planning.md, docs/records.md, docs/design/roadmap.md, docs/design/strategy-view.md, docs/design/native-pr-landing.md",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test mirrors the_real_repo_has_no_mirror_drift runs rule (d) on the real file; every_registry_entry_catches_its_drifted_fixture proves it on a temp tree; run::tests mirrors_ BRIEF.md loop test proves the producer-side send-back; Mirror::watches Docs unit test.",
+      "reason": null
+    },
+    {
+      "name": "shard timings file (one added line)",
+      "dependent": "xtask/tests/ci_shards.rs checked_in_timings_cover_every_workspace_test_unit (lines 411-421) and xtask/src/shard.rs parse_timings",
+      "kind": "code",
+      "test": "cargo test -p xtask --test ci_shards",
+      "reason": null
+    },
+    {
+      "name": "decision log (append-only D158)",
+      "dependent": "crates/athena-cli/src/decisions.rs the_decision_log_is_well_formed_and_only_appended_to (PINNED_LEN/PINNED_SHA256); crates/athena-cli/src/backtest.rs parse_supersessions; docs/decision-links.toml (only D08 has a [[governs]] entry, for snapshot.rs and candidate.rs, which this change does not touch)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli decisions and cargo test -p athena-cli --test backtest; D158 uses no supersession wording.",
+      "reason": null
+    },
+    {
+      "name": "producer brief sections",
+      "dependent": "crates/athena-context/src/briefs.rs tests (producer_briefs_list_the_boundary_words_before_the_checks near line 3005, producer_briefs_tell_the_producer_to_run_the_boundary_scan near line 3028, the replay brief length cap test near line 4137)",
+      "kind": "code",
+      "test": "cargo test -p athena-context",
+      "reason": null
+    },
+    {
+      "name": "always-loaded prompt-set budgets",
+      "dependent": "crates/athena-cli/tests/budgets.rs and the docs/system-facts.md budget lines (system_facts_budgets_match_computed)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The budget sets are the role prompt sets; briefs, system-facts included, sit outside them (system-facts 'Prompt sets and budgets'). No set file changes, so no budget line changes."
+    },
+    {
+      "name": "check execution and the pre-existing excuse",
+      "dependent": "crates/athena-core/src/checks.rs run_check, run/checks.rs and verify.rs is_pre_existing (line 203)",
+      "kind": "code",
+      "test": null,
+      "reason": "Not edited and no hook added. The mirrors target runs inside the existing configured Test check as a normal named test."
+    },
+    {
+      "name": "scan of crates/ for forbidden call and client words",
+      "dependent": "crates/athena-core/tests/external_calls_guard.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test external_calls_guard; mirrors.rs runs git only through athena_git; the cargo-metadata call is in the athena-cli test file, as in xtask/tests/ci_shards.rs.",
+      "reason": null
+    },
+    {
+      "name": "CHANGELOG.md [Unreleased] entry",
+      "dependent": "crates/athena-cli/src/main.rs test reading CHANGELOG.md (around line 1966), crates/athena-core/tests/refusal_corpus.rs, reading.rs tests (include_str CHANGELOG.md)",
+      "kind": "code",
+      "test": "cargo test -p athena-cli and cargo test -p athena-core; one plain bullet in the existing style, those tests only read the text.",
+      "reason": null
+    },
+    {
+      "name": "new public module and dependencies",
+      "dependent": "crates/athena-core/src/lib.rs module list; Cargo.lock and manifests",
+      "kind": "code",
+      "test": null,
+      "reason": "One module and one doc line are added. No dependency is added: athena-core has athena-git, toml_edit and tempfile; athena-cli has athena-core, serde_json and tempfile. Cargo.lock does not change, as --locked requires."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the change description in its three homes: the `//!` doc of mirrors.rs, the CHANGELOG.md bullet under [Unreleased] / Added, and the appended D158. Each names the root cause in the same words: hand-kept mirrors of a governing source are tested for structure only, not content against the source, and the registry is the fix.",
+      "command": "git diff -- CHANGELOG.md docs/decisions.md README.md crates/athena-core/src/status.rs",
+      "observes": "CHANGELOG.md and docs/decisions.md show only added lines; D158 follows D157 with Case, Decision, Alternatives, Tradeoff, Reversal cost and Provenance, and names the root cause, the four rules, the BUILD_PATHS correction (and that the five-path text at decisions.md line 3645 is outdated), the producer-loop call site, the per-entry touch filter and its limit (base drift is charged to a producer who touches a watched file; the unfiltered repo test would fail it anyway), the single shared send-back slot, the prose-only parts (brief note, registering a new mirror), the HEAD-comparison limit, `--doc` and `--bin` left to ci_shards, the shard-timings justification and the checks.rs omission. status.rs shows nine BUILD_PATHS roots; README.md line 193 names the constant.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Read mirrors.rs and lib.rs: REGISTRY holds four entries, each with a mirror path, a Source and a Rule; `pub mod mirrors;` and its module-list line are in lib.rs. Grep for `REGISTRY` and `pub mod mirrors`.",
+      "command": "git status --short",
+      "observes": "crates/athena-core/src/mirrors.rs is new; lib.rs, ontology.rs, run/producer.rs, run/send_back.rs, run/tests.rs, status.rs, tests/drain.rs, tests/mirrors.rs, briefs.rs, main.rs, drain.rs, README.md, shard-timings.txt, CHANGELOG.md and decisions.md appear; checks.rs does not.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in mirrors::tests and loop tests in run::tests (names beginning `mirrors_`). Pure tests call the rule functions with literal text, each with a failing and a passing case. missing_timing_lines: a test file absent from the timings fails and the message names xtask/shard-timings.txt and the line to add; a stale `--test` line fails; `--doc`, `--bin` and other-package lines are not reported. append_only_problem: a rewritten decision line fails and names docs/decisions.md and the first changed line; added text passes. hash_glob_problems with roots from status_build_paths on a literal status.rs text: a ci key hashing `athena.toml` while the roots lack it fails with `add ... to BUILD_PATHS in crates/athena-core/src/status.rs`; a root missing from the key fails with `add the glob`; a dir root with only `crates/` and no `**` fails; no athena-bin key fails; an unparsable array fails; a matching pair passes. Ontology: a governing-doc line `- Hermes: a role ...` for a term with only a tool sense yields a Drift whose message starts with `docs/ontology.toml:`, contains the unchanged inner text and ends with `add a senses entry or an excuse`; a covering sense or a valid excuse passes. Mirror::watches: one test per Source form, including Docs (docs/ontology.toml, BRIEF.md and a term's file source watched; an unlisted doc and a decision id not watched). check_all over a tempfile tree with a fixed base closure: the clean tree gives none; a None base skips rule (b); a non-Athena tree gives none via is_athena_source; with touched=Some(&[\"README.md\"]) a timings drift already in the tree is not reported; with touched=Some(&[\"crates/demo/tests/b.rs\"]) it is; with touched=Some(&[\"BRIEF.md\"]) an uncovered ontology line is reported; a tree whose status.rs and ci.yml were both edited consistently gives none, and one with only status.rs edited gives a Drift. Loop tests (fake-agent harness): (1) the producer adds crates/demo/tests/b.rs and no timings line: the second producer prompt carries `## Sent back`, the leading sentence, `xtask/shard-timings.txt` and the fix; producer runs 2. (2) script fixing_timings_on_send_back adds the line only when its prompt contains '## Sent back' and reaches the verifier: producer runs 2, verifier runs 1. (3) a clean producer is not sent back. (4) base drift: b.rs is committed in the base with no timings line and the producer edits only crates/demo/tests/a.rs; expected result per decision 1: sent back once, the message names b.rs and the timings file; the producer that fixes the line on send-back reaches the verifier. (5) a producer touching none of the entry's files (edits README.md only) with the same base drift is not sent back. (6) ontology: the fixture commits BRIEF.md, a docs/ontology.toml with a Hermes tool sense, and the producer appends `- Hermes: a named role` to BRIEF.md; it is sent back once with the ontology Drift message; a producer that adds a covering sense or excuse on the send-back reaches the verifier. (7) a repository that is not Athena's source is not sent back.",
+      "command": "cargo test -p athena-core mirrors",
+      "observes": "All pass. Each negative case returns a non-empty Vec whose text names the offending file and the fix. Fixed-on-send-back and fixing cases count producer runs 2 and verifier runs 1; clean, untouched and non-Athena cases count producer runs 1 with no `## Sent back` in any prompt.",
+      "fails_without": "Before the change the module does not exist, so nothing matches. Without a rule, its pure test gets an empty Vec and the non-empty assertion fails. Without the touch filter the README-only test (5) fails. Without Docs watches, the BRIEF.md test (6) and the watches unit test fail. Without parsing the snapshot's status.rs, the consistently-edited tree test fails. Without the producer-loop call, the second producer prompt has no `## Sent back` and the verifier runs with the drift in place, so tests (1), (4) and (6) fail. Without the leading sentence the prompt assertion fails. Without the is_athena_source gate test (7) fails.",
+      "seam": "Production entry points: mirrors::missing_timing_lines, append_only_problem, status_build_paths, hash_glob_problems, uncovered_lines, ontology_problems, Mirror::watches, check_entry, check_all (touched filter) and Athena::go through producer_loop in run/producer.rs. Doubles: literal strings; a tempfile tree (tempfile is an athena-core dependency); a base closure returning fixed bytes with no comparison logic; the fake agent script. The harness helpers repo(), commit_file(), governed_job_with(repo, script) and editing(counts, prompts, extra_edits) exist (run/tests.rs lines 2234-2284); reconciling_on_send_back (line 2288) is the pattern for the new script. The fixture repo commits setup.sh, crates/athena-core/Cargo.toml, xtask/shard-timings.txt, crates/demo/tests/a.rs, crates/demo/tests/b.rs (for test 4), BRIEF.md and a small docs/ontology.toml (for test 6). The module and pure fns are added by plan steps 2-4; the loop call, append_mirror_drift and the fixtures by step 6."
+    },
+    {
+      "criterion": 4,
+      "method": "New test target crates/athena-cli/tests/mirrors.rs with four tests. (1) the_real_repo_has_no_mirror_drift calls check_all(repo_root, git_base(repo_root), None) over the real files, including the live docs/ontology.toml, and prints every Drift. (2) every_registry_entry_catches_its_drifted_fixture iterates REGISTRY; for each entry a tempdir fixture is built with an exhaustive `match entry.rule` (a new Rule variant without a fixture fails to compile), drifted one way, and check_entry must return a Drift naming entry.mirror and the fix; a clean fixture gives none. A new entry with an existing Rule is covered with no other edit. (3) derived_units_agree_with_cargo_metadata compares mirrors::test_units(root) with the `--test` and `--lib` units from `cargo metadata --no-deps --format-version 1 --locked` (serde_json is an athena-cli dependency). (4) the_ci_key_and_build_paths_cover_each_other runs hash_glob_problems on the real ci.yml with roots parsed from the real status.rs and asserts the parsed list equals status::BUILD_PATHS. The ontology target is run too: both_parsers_read_the_same_terms and the_ontology_file_is_sound.",
+      "command": "cargo test -p athena-cli --test mirrors",
+      "observes": "All pass; then `cargo test -p athena-cli --test ontology` passes. A producer who adds a test file without a timings line, rewrites an old decision, edits ci.yml or BUILD_PATHS in one place only, or leaves an uncovered ontology line sees test (1) fail with the file and the fix.",
+      "fails_without": "Without the registry the target does not compile. With a stubbed rule, test (2) fails for that entry. Without the xtask/shard-timings.txt line `athena-cli --test mirrors`, test (1) names that file. With BUILD_PATHS left at five roots, tests (1) and (4) fail on `athena.toml`. If the narrow parse and the compiled constant differ, test (4) fails. If derivation diverges from cargo metadata, test (3) fails. If the ontology parsers differ, both_parsers_read_the_same_terms fails.",
+      "seam": "Production entry points: mirrors::check_all, check_entry, git_base, REGISTRY, test_units, status_build_paths, hash_glob_problems, parse_ontology. Root is Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../..\") (pattern at ontology.rs line 90). Fixtures: tempfile trees; check_entry takes a fixed base closure. athena-cli already has athena-core, tempfile and serde_json; Cargo.lock does not change. The target and fixtures are added by plan step 5, the functions by steps 2-4."
+    },
+    {
+      "criterion": 5,
+      "method": "Grep shows the call sites: `mirror_drift_in` and `append_mirror_drift` in crates/athena-core/src/run/producer.rs (the producer loop, before verification) and `MIRROR_CHECK_INSTRUCTION` in crates/athena-context/src/briefs.rs. The loop tests of criterion 3 run the call. The briefs test producer_briefs_tell_the_producer_to_run_the_mirror_check builds a producer brief as the neighbour test near briefs.rs line 3028 does and asserts the text, that it sits after `## Words you must not write` and before `## Checks Athena will run`, and that crates/athena-cli/tests/mirrors.rs exists. git diff shows the CHANGELOG.md bullet and the append-only D158.",
+      "command": "cargo test -p athena-context producer_briefs_tell_the_producer_to_run_the_mirror_check",
+      "observes": "The briefs test passes. Grep of `mirror_drift_in` in producer.rs shows the call between the gate and the break condition. The CHANGELOG.md hunk is one bullet under [Unreleased] / Added; the decisions.md hunk only adds lines after D157.",
+      "fails_without": "Without the section the brief lacks the instruction and the assertion fails. If the target file is renamed the existence assertion fails. Without the producer.rs call, the loop tests of criterion 3 fail.",
+      "seam": "Production entry point: briefs::producer_brief with a ProducerInputs literal, as in the neighbour test (exists, briefs.rs near line 3028). No double. mirror_check_section and the constant are added by step 7; the producer.rs call by step 6."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs, each as its own command, plus regressions on everything the change touches: `cargo test -p athena-cli --test drain` (touches_build and stale-line tests extended to the four new roots; the landing of athena.toml at tests/drain.rs line 3117), `cargo test -p athena-cli --test ontology`, `cargo test -p xtask --test ci_shards`, `cargo test -p xtask --test policy`, `cargo test -p athena-core --test external_calls_guard`. No reading parser, stem list or reading check changes, so no refusal_corpus case is added; I did not read its case ids and did not run it, and `cargo test --locked` runs it anyway.",
+      "command": "cargo test --locked",
+      "observes": "The whole workspace passes. `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` are clean when run as separate commands.",
+      "fails_without": "Without the shard-timings line, xtask's cover test and the mirrors real-repo test fail. If a moved ontology helper changes behavior, the ontology tests fail. If a drain test expected no rebuild for athena.toml, the changed BUILD_PATHS shows it. A banned word or unformatted code fails policy, fmt or clippy.",
+      "seam": "The cargo commands over the real tree. No double. The oracles are athena-cli --test mirrors (step 5), xtask ci_shards (exists, around lines 411-421), tests/drain.rs (exists)."
+    }
+  ],
+  "open_questions": [
+    "Host: Does the verifier's snapshot keep a git repository whose base commit is readable? If not, rule (b) is skipped there and only the producer loop and the committed pin in decisions.rs cover it."
+  ],
+  "producer_section_sha256": "b128a091822fd8ee4b0c7100907227a606f003ef83da3c6b99badf3e85a8afa4"
+}

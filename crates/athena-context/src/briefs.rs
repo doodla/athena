@@ -589,6 +589,7 @@ pub fn producer_brief_with_evidence(inputs: &ProducerInputs, evidence: Option<&s
     pin_section(&mut out, inputs.pin.as_ref());
     failure_classes_section(&mut out, &inputs.failure_classes);
     let _ = writeln!(out, "{}", banned_words_section());
+    let _ = writeln!(out, "{}", mirror_check_section());
     let _ = writeln!(out, "## Checks Athena will run\n");
     for check in &inputs.checks {
         let _ = writeln!(out, "- {}: `{}`", check.name, check.command);
@@ -788,6 +789,20 @@ pub const BOUNDARY_SCAN_INSTRUCTION: &str = "Before you finish, run `cargo test 
 It is the same scan Athena runs, and it names each file, line and word it rejects. Reword any banned word it \
 finds, then run it again until it passes. It reads only tracked files, so it does not see a file you created: \
 reread each new file against the words above.";
+
+/// The producer brief's note on files kept by hand. A helper only: the mechanism is the registry
+/// (`athena_core::mirrors`) that Athena runs on the producer's work before verification and the `athena-cli`
+/// test target `mirrors`. The note lets the producer find a drift in its own loop and spend no send-back on it.
+pub const MIRROR_CHECK_INSTRUCTION: &str = "If `crates/athena-cli/tests/mirrors.rs` exists in your working directory, run \
+`cargo test -p athena-cli --test mirrors` before you finish. A file kept by hand as a mirror of a source (the test \
+timings, the decision log, the CI cache key against the build paths, the ontology) is compared with that source by \
+content, and a failure names the file and the fix. A new test file needs its line in xtask/shard-timings.txt, and \
+docs/decisions.md only gains text after its last line.";
+
+/// The "Files kept by hand" section of the producer brief, placed after the banned words and before the checks.
+fn mirror_check_section() -> String {
+    format!("## Files kept by hand\n\n{MIRROR_CHECK_INSTRUCTION}\n")
+}
 
 /// One boundary hit in a text: the 1-based line and the banned word or fragment found there. The word is
 /// lowercase for fragments, as the policy scan reports it.
@@ -3043,6 +3058,33 @@ mod tests {
         let at = brief.find("cargo test -p xtask --test policy").unwrap();
         assert!(at > brief.find("## Words you must not write").unwrap());
         assert!(at < brief.find("## Checks Athena will run").unwrap());
+    }
+
+    #[test]
+    fn producer_briefs_tell_the_producer_to_run_the_mirror_check() {
+        let brief = producer_brief(&ProducerInputs {
+            job: "20261010-153012-k7q2".into(),
+            request: "add a test".into(),
+            reading: AcceptedReading::new(&reading(), &defaults(), |_| false),
+            checks: vec![],
+            commands: vec![],
+            pin: None,
+            retry_from: None,
+            retry_findings: None,
+            failure_classes: Vec::new(),
+        });
+        assert!(brief.contains("run `cargo test -p athena-cli --test mirrors` before you finish"));
+        assert!(brief.contains("needs its line in xtask/shard-timings.txt"));
+        // After the banned words and before the checks.
+        let at = brief
+            .find("cargo test -p athena-cli --test mirrors")
+            .unwrap();
+        assert!(at > brief.find("## Words you must not write").unwrap());
+        assert!(at < brief.find("## Checks Athena will run").unwrap());
+        // The test target the note names is there.
+        let target =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../athena-cli/tests/mirrors.rs");
+        assert!(target.is_file(), "{}", target.display());
     }
 
     #[test]

@@ -1921,6 +1921,10 @@ fn only_changes_to_code_and_the_files_that_build_it_touch_the_build() {
         "Cargo.toml",
         "Cargo.lock",
         "setup.sh",
+        "rust-toolchain.toml",
+        "athena.toml",
+        "defaults.toml",
+        "docs/system-facts.md",
     ] {
         assert!(drain::touches_build(&paths(&["README.md", yes])), "{yes}");
     }
@@ -2033,7 +2037,16 @@ fn status_prints_the_stale_build_line_after_a_crates_change_and_none_after_docs_
     assert_eq!(athena.stale_build(), Some(line));
 
     // Each other watched path counts too.
-    for path in ["xtask/src/main.rs", "Cargo.toml", "Cargo.lock", "setup.sh"] {
+    for path in [
+        "xtask/src/main.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "setup.sh",
+        "rust-toolchain.toml",
+        "docs/system-facts.md",
+        "defaults.toml",
+        "athena.toml",
+    ] {
         let mut athena = fx.athena(Scenario::default().script());
         athena.build.source_commit = fx.head();
         assert!(athena.stale_build().is_none(), "{path}: built from HEAD");

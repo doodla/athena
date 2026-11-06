@@ -77,8 +77,8 @@ use verification::Checked;
 pub use checks::demo_seam::{Guard as DemoRunnerGuard, install as install_demo_runner};
 pub use close::{build_text, closing_subject};
 pub(crate) use send_back::{
-    left_to_athena, send_back_text, send_back_text_full, send_back_text_scoped,
-    send_back_text_with_replay, unmet_criteria,
+    append_mirror_drift, left_to_athena, send_back_text, send_back_text_full,
+    send_back_text_scoped, send_back_text_with_replay, unmet_criteria,
 };
 
 /// How `go` ended.

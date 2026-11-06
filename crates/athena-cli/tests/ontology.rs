@@ -22,6 +22,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use athena_core::mirrors::{
+    self, Hit, OntologyExcuse, OntologySense, OntologyTerm, is_decision_id, is_identifying,
+    names_term, phrase_in,
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -88,10 +92,6 @@ struct NotPartOf {
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn is_decision_id(source: &str) -> bool {
-    source.len() > 1 && source.starts_with('D') && source[1..].chars().all(|c| c.is_ascii_digit())
 }
 
 fn source_exists(root: &Path, source: &str) -> bool {
@@ -162,120 +162,39 @@ fn problems(text: &str, root: &Path) -> Vec<String> {
 /// The most identifying lines one excuse may cover.
 const MAX_EXCUSED_LINES: usize = 2;
 
-fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric()
-}
-
-/// True when `text` holds `phrase` with a word boundary at each end that is a letter or digit. A phrase that
-/// starts or ends with punctuation (`(jobs)`, `Athena:`) needs no boundary at that end.
-fn phrase_in(text: &str, phrase: &str) -> bool {
-    let (Some(first), Some(last)) = (phrase.chars().next(), phrase.chars().next_back()) else {
-        return false;
-    };
-    text.match_indices(phrase).any(|(at, m)| {
-        let before = text[..at].chars().next_back();
-        let after = text[at + m.len()..].chars().next();
-        (!is_word_char(first) || before.is_none_or(|c| !is_word_char(c)))
-            && (!is_word_char(last) || after.is_none_or(|c| !is_word_char(c)))
-    })
-}
-
-/// True when `line` names `name` as a whole word, with an optional trailing `s` or `'s`.
-fn names_term(line: &str, name: &str) -> bool {
-    let (Some(first), Some(last)) = (name.chars().next(), name.chars().next_back()) else {
-        return false;
-    };
-    line.match_indices(name).any(|(at, m)| {
-        let before = line[..at].chars().next_back();
-        if is_word_char(first) && before.is_some_and(is_word_char) {
-            return false;
-        }
-        if !is_word_char(last) {
-            return true;
-        }
-        let rest = &line[at + m.len()..];
-        [Some(rest), rest.strip_prefix("'s"), rest.strip_prefix('s')]
-            .into_iter()
-            .flatten()
-            .any(|r| r.chars().next().is_none_or(|c| !is_word_char(c)))
-    })
-}
-
-/// True when the term or an alias opens a bullet, heading or table row and is followed by `:` or `|`.
-fn is_identifying(line: &str, name: &str) -> bool {
-    let start = line.trim_start_matches(|c: char| {
-        matches!(c, '*' | '#' | '>' | '-' | '|' | '.' | ')')
-            || c.is_ascii_digit()
-            || c.is_whitespace()
-    });
-    let Some(rest) = start.strip_prefix(name) else {
-        return false;
-    };
-    let rest = rest.trim_start_matches('*').trim_start();
-    rest.starts_with(':') || rest.starts_with('|')
-}
-
-/// One line of a scanned file that names the term.
-struct Hit {
-    number: usize,
-    line: String,
-    /// The line, plus the next one when the line ends with `:`.
-    context: String,
-    identifying: bool,
-}
-
-fn scan(text: &str, names: &[&str]) -> Vec<Hit> {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut hits = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if !names.iter().any(|n| names_term(line, n)) {
-            continue;
-        }
-        let context = match lines.get(i + 1) {
-            Some(next) if line.trim_end().ends_with(':') => format!("{line}\n{next}"),
-            _ => (*line).to_string(),
-        };
-        hits.push(Hit {
-            number: i + 1,
-            line: line.trim().to_string(),
-            context,
-            identifying: names.iter().any(|n| is_identifying(line, n)),
-        });
+/// The shared walk (`athena_core::mirrors`) reads plain data; this is the plain form of a parsed term.
+fn plain(term: &Term) -> OntologyTerm {
+    OntologyTerm {
+        name: term.name.clone(),
+        aliases: term.aliases.clone(),
+        sources: term.sources.clone(),
+        senses: term
+            .senses
+            .iter()
+            .map(|s| OntologySense {
+                in_file: s.in_file.clone(),
+                marker: s.marker.clone(),
+            })
+            .collect(),
+        excused: term.excused.iter().map(plain_excuse).collect(),
     }
-    hits
 }
 
-/// `BRIEF.md` plus the term's sources that are files. Decision ids are not scanned.
-fn scanned_files(term: &Term, root: &Path) -> Vec<String> {
-    let mut files = vec!["BRIEF.md".to_string()];
-    for source in &term.sources {
-        if !is_decision_id(source) && root.join(source).is_file() && !files.contains(source) {
-            files.push(source.clone());
-        }
+fn plain_excuse(excuse: &Excuse) -> OntologyExcuse {
+    OntologyExcuse {
+        files: excuse.files.clone(),
+        marker: excuse.marker.clone(),
+        reason: excuse.reason.clone(),
     }
-    files
 }
 
 fn names_of(term: &Term) -> Vec<&str> {
-    std::iter::once(term.name.as_str())
-        .chain(term.aliases.iter().map(String::as_str))
-        .collect()
+    mirrors::names_of(&term.name, &term.aliases)
 }
 
 /// The hits of `term` in each scanned file, and the problems met reading them.
 fn term_hits(term: &Term, root: &Path) -> (BTreeMap<String, Vec<Hit>>, Vec<String>) {
-    let names = names_of(term);
-    let mut hits = BTreeMap::new();
-    let mut found = Vec::new();
-    for file in scanned_files(term, root) {
-        match std::fs::read_to_string(root.join(&file)) {
-            Ok(text) => {
-                hits.insert(file, scan(&text, &names));
-            }
-            Err(e) => found.push(format!("{}: cannot read {file}: {e}", term.name)),
-        }
-    }
-    (hits, found)
+    mirrors::term_hits(&plain(term), root)
 }
 
 /// True when the definition holds `says`, ignoring where its lines break.
@@ -359,13 +278,7 @@ fn claim_problems(file: &File, root: &Path) -> Vec<String> {
             ));
         }
 
-        let excuse_ok = |e: &Excuse| {
-            let marker = e.marker.trim();
-            e.files.len() == 1
-                && !marker.is_empty()
-                && !names.contains(&marker)
-                && !e.reason.trim().is_empty()
-        };
+        let excuse_ok = |e: &Excuse| mirrors::excuse_ok(&plain_excuse(e), &names);
         for excuse in &term.excused {
             let marker = excuse.marker.trim();
             if excuse.files.len() != 1 {
@@ -410,24 +323,7 @@ fn claim_problems(file: &File, root: &Path) -> Vec<String> {
             }
         }
 
-        for (path, file_hits) in &hits {
-            for hit in file_hits.iter().filter(|h| h.identifying) {
-                let by_sense = term.senses.iter().any(|s| {
-                    s.in_file == *path
-                        && !s.marker.trim().is_empty()
-                        && phrase_in(&hit.context, s.marker.trim())
-                });
-                let by_excuse = term.excused.iter().any(|e| {
-                    excuse_ok(e) && e.files[0] == *path && phrase_in(&hit.context, e.marker.trim())
-                });
-                if !by_sense && !by_excuse {
-                    found.push(format!(
-                        "{name}: {path}:{} names the term as a definition or role and no sense or excuse covers it: {}",
-                        hit.number, hit.line
-                    ));
-                }
-            }
-        }
+        found.extend(mirrors::uncovered_lines(&plain(term), &hits));
     }
     found
 }
@@ -453,6 +349,22 @@ fn the_ontology_file_is_sound() {
 
 fn parse_real() -> File {
     toml::from_str(&real_text()).expect("docs/ontology.toml parses")
+}
+
+/// The registry reads the ontology with `toml_edit`; this test reads it with serde. They must see the same terms,
+/// or the registry would check something other than what the ontology test checks.
+#[test]
+fn both_parsers_read_the_same_terms() {
+    let serde_terms: Vec<OntologyTerm> = parse_real().terms.iter().map(plain).collect();
+    let edit_terms = mirrors::parse_ontology(&real_text()).expect("the registry parser reads it");
+    assert_eq!(serde_terms, edit_terms);
+    assert!(serde_terms.iter().any(|t| !t.senses.is_empty()));
+    // The real file holds no excuse, so an excuse is compared on a fixture.
+    let fixture = good_with_excuse(GOOD_EXCUSE);
+    let serde_fixture: File = toml::from_str(&fixture).unwrap();
+    let serde_terms: Vec<OntologyTerm> = serde_fixture.terms.iter().map(plain).collect();
+    assert!(serde_terms.iter().any(|t| !t.excused.is_empty()));
+    assert_eq!(serde_terms, mirrors::parse_ontology(&fixture).unwrap());
 }
 
 const SEVEN: [&str; 7] = [

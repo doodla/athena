@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-081034-jvd9",
+  "round": 1,
+  "at": "2026-11-06T12:32:56.91658826Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "xtask/shard-timings.txt is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, xtask/shard-timings.txt",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The check is not run before handover. The producer does not run the workspace cargo test, and run_check runs in the verifier's stage.",
+      "evidence": "I read crates/athena-context/src/briefs.rs:694-696: \"A criterion that only Athena's own recorded checks can show (cargo fmt --check, cargo clippy, the full or workspace cargo test) is not yours to run\". I read crates/athena-core/src/run/checks.rs:1-2 and 54: run_check is \"the executor that runs one routed check in the verifier's snapshot\" (stage S7). So the athena-cli mirrors test and the hook first run after handover. This is the same late catch as the five jobs, and criterion 5's \"before handover\" goes unshown. Fix: Put the call where the producer acts. The pattern exists: BOUNDARY_SCAN_INSTRUCTION (briefs.rs:787, used at 777) already tells the producer \"Before you finish, run `cargo test -p xtask --test policy`\". Add a matching producer-brief instruction to run `cargo test -p athena-cli --test mirrors` (or `-p athena-core mirrors`) before finishing, with a briefs.rs unit test asserting the instruction is present. Add briefs.rs and the system_facts/budget readers to the dependents list. Use that instruction as the criterion 5 call site, and drop or demote the run_check hook.",
+      "location": "Approach ('The producer's loop is `cargo test`…'); Decision 5; Criterion 5 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The hook special-cases Athena's own repo inside the generic executor, and a hook failure can be silently excused as pre-existing.",
+      "evidence": "The hook sets passed=false but leaves failed_tests empty. verify.rs:203-211 is_pre_existing returns true when the baseline failed the same check and `check.failed_tests.is_empty()`. Any baseline test failure therefore masks the drift, and mark_pre_existing labels it pre-existing. The hook also repeats the failure that `cargo test` already reports through the athena-cli mirrors target. The run/checks.rs:122 path that reuses a CI result skips it entirely. Keying on the marker file crates/athena-core/src/mirrors.rs puts repo-specific behaviour into a product-wide executor. The dependents list names routing.rs, run/checks.rs and baseline_runs, but not verify::is_pre_existing, failure_split or mark_pre_existing. Fix: Drop the hook: the configured Test check already runs `athena-cli --test mirrors`, and the producer-brief instruction covers before-handover. If a hook is kept, record a synthetic failed_tests entry (for example `mirrors::<rule>`) so is_pre_existing compares it. List verify.rs as a dependent, with a test that a hook failure is not excused by an unrelated baseline failure.",
+      "location": "Decision 5 / Step 4 (run_check hook); Dependents entry 'checks::run_check behavior'",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Rules (a), (c) and (d) copy existing oracles into weaker re-implementations, which creates new hand-kept mirrors of logic.",
+      "evidence": "Rule (a) re-derives the test-unit set from file globs. xtask/tests/ci_shards.rs:411-421 already compares shard-timings with oracle(). Rule (c) re-derives the key's input set. xtask/tests/policy.rs:783-784 already asserts the athena-bin key \"must hash exactly that list\" (BUILD_INPUT_GLOBS, xtask/src/main.rs:267) and that the list covers every file found independently. Rule (c) also cannot see rust-toolchain.toml, which is in the key. Rule (d) copies names_term/is_identifying from ontology.rs:184-216 and keeps a weaker file-level floor beside claim_problems. Nothing checks that a copy stays equal to its original, so this is the job's own root cause again. Fix: Keep one source of truth per rule. Move the pure ontology helpers (names_term, is_identifying, scan; about 60 lines, not the 1000-line test) into mirrors.rs and have ontology.rs call them. For (a) and (c), either have the registry entry name the existing oracle test as its rule and run that targeted command in the producer step, or move the shared logic (the unit-set derivation, the input-glob list) into athena-core and have the xtask tests call it. If a copy must stay, add a real-repo test asserting the copy and the original agree.",
+      "location": "Decisions 2 and 4; Step 1 rules (a), (c), (d)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The stale-line check must ignore --lib, --doc and --bin units, or it flags valid lines.",
+      "evidence": "xtask/shard-timings.txt lines 6-14 and 44-59 hold `--doc`, `--lib` and `--bin` units, which are not files under tests/. The plan defines a unit only as `<dir name> --test <stem>`. Fix: Limit stale detection to `--test` lines, and add a unit test with a `--lib` line that must not be reported.",
+      "location": "Step 1, missing_timing_lines ('missing and stale lines')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Test (2) shows only that paths exist, and several sources are not paths.",
+      "evidence": "The sources are \"test files under crates/*/tests and xtask/tests\", \"its HEAD version\", \"status::BUILD_PATHS plus non-test include targets\" and \"BRIEF.md and each term's file sources\". An existence check over these passes even when a rule is a no-op. Criterion 4's \"covered with no other edit\" rests on test (1) iterating check_all. Fix: Make `source` a described kind (a path, a glob, a constant or git HEAD) rather than a path. Replace test (2) with one that runs each REGISTRY entry's rule on a drifted fixture by iterating REGISTRY, so an entry with no working rule fails.",
+      "location": "Criterion 4 demonstration, test (2) every_registry_entry_names_existing_files",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "I agree the timings line is forced by the new test target and is in scope.",
+      "evidence": "ci_shards.rs:420 runs `assert_eq!(timed, oracle())`. Without the line, `cargo test` fails. Fix: None needed beyond keeping the justification in the change description.",
+      "location": "Files: xtask/shard-timings.txt (Athena finding)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan names the root cause well. The files and functions it relies on exist: run_check at checks.rs:428, BUILD_PATHS at status.rs:20, Git::show_file at athena-git lib.rs:453, ontology.rs is_identifying at 205-216, and the athena-bin keys in ci.yml. The xtask/shard-timings.txt line is justified, since a new test target forces it. But the fix does not reach \"before handover\". The producer never runs the workspace cargo test: briefs.rs:694-696 leaves that to Athena's recorded checks. run_check is the executor in the verifier's snapshot (run/checks.rs:1-2, 54). So mirror drift would still first show at verification, which is the failure class this job must prevent. The run_check hook is also special-cased on Athena's own repo by a marker file. A failure it causes carries no failed_tests, so verify::is_pre_existing (verify.rs:203-211) excuses it whenever the baseline's test check failed. The dependents list does not name that reader. Last, rules (a), (c) and (d) re-implement checks that already exist, as weaker hand-kept copies. Those are the xtask ci_shards cover test, the policy.rs cache-key test at line 783 and ontology.rs claim_problems. Each copy is a new mirror of logic with no check that it stays equal to its original. That reproduces the cause the job is meant to remove."
+}

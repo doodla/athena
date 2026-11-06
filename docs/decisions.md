@@ -4323,3 +4323,64 @@ should replace those estimates with its figures.
 - **Tradeoff:** None for D08.
 - **Reversal cost:** Low; revert the fixture edit.
 - **Provenance:** Read: D08, D156, `crates/athena-git/src/snapshot.rs`.
+
+## D158 · Hand-kept mirrors are compared with their sources by content, through one registry
+
+- **Case:** Five jobs (20261017-173508-0wtc, 20261025-214509-y179, 20261031-172040-kq9v, 20261106-002344-jn5t and
+  20261106-062207-cbcc) failed for one cause. Root cause: a file kept by hand as a mirror of a governing source is
+  tested for its structure only, not its content against the source. The ontology was checked for its shape while
+  a term's second sense (Hermes as a role) was missing. The CI `athena-bin` cache key listed nine globs while
+  `status::BUILD_PATHS` listed five. A new test file had no line in `xtask/shard-timings.txt`. A decision was
+  rewritten in `docs/decisions.md`, which is append-only. Each was found at the final verdict, by the verifier or
+  the full suite, a stage after the producer could have fixed it.
+- **Decision:** `crates/athena-core/src/mirrors.rs` holds `REGISTRY`, one entry per hand-kept file: the mirror, its
+  source (`Path`, `Globs`, `GitHead` or `Docs`) and a comparison rule. Four rules. (a) `TimingUnits`: every
+  `--test` and `--lib` unit on disk (`crates/*/tests/*.rs`, `crates/*/tests/*/main.rs`, `crates/*/src/lib.rs`, and
+  the same under `xtask/`) has a line in `xtask/shard-timings.txt`, and every such line has a unit. (b)
+  `AppendOnly`: `docs/decisions.md` starts with the exact bytes of its base version. (c) `HashFilesCover`: the
+  `hashFiles` globs of every `athena-bin` key in `.github/workflows/ci.yml` and the `BUILD_PATHS` array parsed out
+  of the work tree's `crates/athena-core/src/status.rs` cover each other, both ways. (d) `OntologyTerms`: every
+  line of `BRIEF.md` or a term's file source that opens a bullet, heading or table row with a term's name and a
+  `:` or `|` is covered by a sense or an excuse of that term in `docs/ontology.toml`; the walk moved out of
+  `crates/athena-cli/tests/ontology.rs` into the module, which now calls it, and a new test checks that the two
+  TOML parsers read the same terms. Each message names the file and the fix. Rule (c) reversed the direction of
+  the old copy: `BUILD_PATHS` gains `rust-toolchain.toml`, `athena.toml`, `defaults.toml` and
+  `docs/system-facts.md`, so it has nine roots. Those files are compiled into the binary or change the compiler,
+  and the CI key already hashed them, so a landing that changed one left a stale binary the drain did not see.
+  The text of D140 that lists five paths is outdated; the constant is the source. The registry runs in two
+  places. In the producer loop (`run/producer.rs`), after every report and before verification, for entries
+  whose files the producer's change touches (`Mirror::watches`), in Athena's own source tree only
+  (`is_athena_source`), never in a nested run: a drift is sent back through the one shared send-back, with a
+  leading sentence and a section naming each file and fix. And the `athena-cli` test target `mirrors` runs every
+  entry unfiltered over the real files under `cargo test`, runs a drifted fixture for each entry (an exhaustive
+  `match` on the rule, so a new rule needs a fixture and a new entry with an existing rule needs none), compares
+  the derived units with `cargo metadata`, and pins the parsed `BUILD_PATHS` to the compiled constant. The line
+  `athena-cli --test mirrors 6.00` (an estimate) is added to `xtask/shard-timings.txt`, which rule (a) and
+  `xtask/tests/ci_shards.rs` both require. The drain help text, its doc comment and `README.md` now name
+  `BUILD_PATHS` instead of repeating the old list. The producer brief gains a short note to run the target.
+- **Alternatives:** (a) One more one-off test per mirror, as the five jobs did: fixes an instance and leaves the
+  class. (b) Put the registry in `xtask`: it does not depend on the core, and its tests run outside the producer's
+  loop. (c) Compare `BUILD_PATHS` as compiled into the running binary: the binary can be older than the work tree,
+  so the check would judge the tree by an old build. (d) A hook in `run_check`: it runs after handover, in the
+  verifier's snapshot, where a drift can be excused as pre-existing. (e) Run the touched entries on the base tree
+  too and report only new findings: it needs a materialized base tree for the rules that scan the disk.
+  (f) Edit `.github/workflows/ci.yml`: governance, and the key already holds the true input set.
+- **Tradeoff:** The producer-loop filter is per entry, not per finding. A producer that touches a file an entry
+  watches is charged with every finding of that entry, drift already in the base included. This is accepted
+  because the repo test runs the same entry unfiltered under the configured test check, so base drift fails the job
+  at verification anyway, and the early send-back costs no extra failure. The drift shares the one send-back
+  with the unmet criteria: a producer already sent back for those gets no second chance, the drift stays, and the
+  repo test fails it. Rule (b) compares with the base commit's text, so it bites on uncommitted edits; the pinned
+  hash in `crates/athena-cli/src/decisions.rs` still guards committed history, and `xtask`'s
+  `BUILD_INPUT_GLOBS` stays a separate pin. Rule (a) derives `--test` and `--lib` units only; `--doc` and `--bin`
+  units stay with `xtask/tests/ci_shards.rs`. A change to `athena.toml`, `defaults.toml`, `rust-toolchain.toml` or
+  `docs/system-facts.md` now triggers the drain's rebuild. Registering a new mirror, and the producer-brief note,
+  are prose-only: nothing finds a hand-kept file that has no entry. `crates/athena-core/src/checks.rs` is
+  unchanged: the check belongs in the producer loop, before handover, not in a check run after it.
+- **Reversal cost:** Low. Remove the module, its call in the producer loop, the test target and the timings line;
+  restore the five-path list. Nothing recorded depends on them.
+- **Provenance:** Stated: the five introspections' causes and the request's failure class. Read:
+  `crates/athena-core/src/status.rs`, `crates/athena-core/src/run/producer.rs`, `crates/athena-cli/tests/ontology.rs`,
+  `xtask/tests/ci_shards.rs`, `xtask/tests/policy.rs`, `.github/workflows/ci.yml`, D140, D156. Measured:
+  `cargo test -p athena-core mirrors`, `cargo test -p athena-cli --test mirrors`, `--test ontology` and
+  `--test drain`. Not measured: how many future jobs add a hand-kept file without registering it.
