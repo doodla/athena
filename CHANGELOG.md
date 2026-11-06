@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The producer's `cargo build`, `test`, `clippy` and `check` now build in the held build slot's warm target
+  directory. While the wrapper holds the slot it links the job's `CARGO_TARGET_DIR` path to
+  `<state>/build-slots/<n>/target` (made, with its `CACHEDIR.TAG`, when absent; never emptied by the wrapper) with
+  `athena_agent::env::BuildLink`, as the checks do, runs cargo, and removes the link before the slot is freed. A
+  path outside the job directory (D46) or an unusable slot directory prints a warning and cargo runs unlinked.
+  Other subcommands (`fmt`, `metadata`) take no slot and are unchanged.
 - `athena retry <job>` and `athena ask "try again on <job>"` accept a stale job (D159, which reverses
   alternative (d) of D10, because stale landings now recur with parallel jobs). The retry reads the candidate commit
   from the stale job's `candidate` record and merges it onto the branch tip with a three-way merge from the
