@@ -1,0 +1,287 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261105-232005-y3wv",
+  "round": 1,
+  "at": "2026-11-06T01:12:26.091216501Z",
+  "invocation_seq": 3,
+  "approach": "Root cause: the replay of past accepted readings (`replay_stage`, run/mod.rs:1743, called once at mod.rs:1714 inside `check_and_verify`) runs only after the producer has finished, as a verification hold. The producer loop (run/producer.rs `producer_loop`) never sees the newly refused list or the measured share, so a rule that refuses too much is found only after the work is done. The fix goes in the producer loop. After each parsed producer report, if the change list touches Rust sources under `crates/` (or the Cargo files), build a candidate commit from the snapshot with the existing `build_candidate` and run the existing replay code (`replay_cases`, `replay`, `replay_checkers`, `replay_declaration_of`) with the same limit as the hold: `REPLAY_HOLD_PERCENT` (10), or the declared share plus 5. When the replay is held, the newly refused job ids, the measured percent and the limit join the one existing send-back, which uses the existing `PRODUCER_SEND_BACKS` budget and combines with the unmet-criteria and unchanged-files problems. If the producer is still over the limit after the send-back, the problem goes into `report_gaps` so the verifier is told. The post-hoc hold in `check_and_verify`, verify.rs's blocker and the Replay record stay unchanged as the backstop. An unrunnable replay or an empty history prints `no replay: <reason>` and is never a pass and never a send-back. Mechanics: split `replay_run` into the checks gate plus an ungated `replay_history`; add `replay_limit_percent` and `touches_reading_rules` to reading.rs; add a producer-brief replay section and `replay_send_back_section` to briefs.rs; add `send_back_text_with_replay` to send_back.rs, with `send_back_text` kept as a wrapper. No new refusal or classification rule, record, config key or prompt file is added.",
+  "decisions": [
+    {
+      "choice": "Run the replay inside `producer_loop` after every parsed producer report and feed it into the one existing send-back.",
+      "reason": "The cause is that the producer never sees the measurement while it can still act on it. The send-back already returns per-pass problems to the producer in the same work directory, so one more problem kind needs no new retry mechanism and no model call beyond the existing budget.",
+      "rejected": [
+        {
+          "option": "Move the whole `replay_stage` out of check_and_verify into the loop",
+          "why": "The verification hold is the backstop when the send-back does not fix it, and for resumed jobs that skip the producer. verify.rs's blocker and the Replay record are out of scope."
+        },
+        {
+          "option": "Add a new retry loop or a second send-back for the replay",
+          "why": "It raises cost per job and changes `PRODUCER_SEND_BACKS` semantics; the brief asks for the existing retry budget."
+        },
+        {
+          "option": "Re-land job 20261105-093556-zyt3's bug-fix check",
+          "why": "That is one instance of a rule; the class is that no rule is measured while the producer works. It is out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Gate the in-loop replay on the change list touching `crates/` or Cargo.toml / Cargo.lock (`touches_reading_rules`).",
+      "reason": "The replay builds `athena` twice (mod.rs:1823-1856). Reading rules are compiled Rust, so a docs-only or README-only change cannot alter what `check-reading` says. This keeps the cost off most jobs and gives 'a job that adds no rule is not sent back' by mechanism.",
+      "rejected": [
+        {
+          "option": "Replay on every pass of every job",
+          "why": "Doubles the builds for jobs that cannot affect the rules."
+        },
+        {
+          "option": "Detect a new rule by parsing the diff for `step!(check_`",
+          "why": "Misses a tightened keyword table or a helper change, which is the failure class."
+        }
+      ]
+    },
+    {
+      "choice": "Reuse `replay_checkers` and `replay` unchanged and the test seam `replay_seam` (lib.rs:153-182). Extract `replay_history(ctx,id,base,candidate)` from `replay_run`; `replay_run` keeps its 'a check failed' gate and calls it.",
+      "reason": "One measurement path, so the in-loop number and the hold number cannot disagree on method. The seam already replaces the two cargo builds with fake checkers.",
+      "rejected": [
+        {
+          "option": "Write a second replay implementation for the loop",
+          "why": "Two implementations could drift, which is itself a root-cause class."
+        }
+      ]
+    },
+    {
+      "choice": "Put the limit in one function, `replay_limit_percent(declared) -> usize`; `replay_is_held` uses it and the send-back text prints it.",
+      "reason": "The producer is told the same limit the hold applies; exactly the limit passes (integer math `newly*100 > total*limit`).",
+      "rejected": [
+        {
+          "option": "A new config key for the in-loop limit",
+          "why": "athena.toml stays unchanged (out of scope)."
+        }
+      ]
+    },
+    {
+      "choice": "Run the replay on every gated pass including the final one; send back only while budget remains; on the final pass a still-held replay is added to `problems`, so it lands in `report_gaps`.",
+      "reason": "The loop ends on a measured share, not an exhausted counter, and the verifier hears about it before the post-hoc blocker.",
+      "rejected": [
+        {
+          "option": "Skip the replay once the budget is spent",
+          "why": "The final share would be unknown to the loop and the user would see nothing until the hold."
+        }
+      ]
+    },
+    {
+      "choice": "Add `send_back_text_with_replay` in send_back.rs and keep `send_back_text` as a wrapper passing `None`; put the replay wording and capped list in briefs.rs, reusing `ReplayView`, `REPLAY_BRIEF_MAX_LISTED` and `REPLAY_BRIEF_REASON_CHARS`.",
+      "reason": "run_pin_tests.rs calls `send_back_text` and is not a deliverable, so the signature must stay. Reusing `ReplayView` and the caps keeps the producer's list the same shape and size as the verifier's.",
+      "rejected": [
+        {
+          "option": "Change the `send_back_text` signature",
+          "why": "It would force edits in run_pin_tests.rs, outside the deliverables."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `replay_limit_percent(declared)` and make `replay_is_held` use it; add `touches_reading_rules(paths)`; unit tests for the boundary, declared share and path rule. No `check_*` function and no change to `refusing_check`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Split `replay_run` into the checks gate and an ungated `replay_history`; add `loop_replay(ctx,snapshot,id)` (gate, `build_candidate`, `replay_history`, UI line, build errors become `no replay`, disk gate); doc comments name the root cause; update imports.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "In `producer_loop`, call `loop_replay` after each parsed report; add a replay problem when held; break only when there are no problems; use `send_back_text_with_replay` while budget remains and `report_gaps` after.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add `send_back_text_with_replay`; `send_back_text` becomes a wrapper passing `None`; reword the intro to cover a replay problem; unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add a static producer-brief section about the replay while working, and `replay_send_back_section(view, limit_percent)` with capped list; tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the producer-loop replay tests: send-back with ids and share then end under the limit; boundary at exactly the limit and one over; unrunnable replay; empty history; change touching no reading rule.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Under [Unreleased]: name the root cause, the in-loop check, its gate and limit, the shared send-back, and the post-hoc hold staying as the backstop; note job 20261105-093556-zyt3's bug-fix rule is not re-landed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/architecture.md",
+      "action": "modify",
+      "purpose": "Add a short paragraph in 'The shape' describing the replay check inside the producer loop, its gate and limit, the shared send-back, and the verification hold as the backstop.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "reading.rs: add `replay_limit_percent(declared: Option<u32>) -> usize` (declared + `REPLAY_DECLARED_MARGIN_POINTS`, else `REPLAY_HOLD_PERCENT`) and make `replay_is_held` call it with the same integer math. Add `pub fn touches_reading_rules(paths: &[String]) -> bool`. Add unit tests for the boundary (default and declared) and for the path rule. Do not add a `check_*` function or touch `refusing_check`.",
+    "briefs.rs: add a static 'Replay of accepted readings while you work' section to `producer_brief_with_evidence`, after the checks section. Add `pub fn replay_send_back_section(replay: &ReplayView, limit_percent: usize) -> String` giving `N of M (P%) newly refused, limit L%`, the capped id and reason list, and an instruction to fix the cause and not to hide the cases. Add tests, including `producer_brief_tells_the_producer_the_replay_is_checked_while_it_works`.",
+    "send_back.rs: add `send_back_text_with_replay(brief, unmet, unchanged, replay: Option<(&ReplayView, usize)>)`; make `send_back_text` call it with `None`. Reword the shared intro to cover a replay problem. Add a unit test.",
+    "run/mod.rs: extract `replay_history(ctx,id,base,candidate)` from `replay_run` (records load, `replay_cases(&records, Some(id))`, `NO_HISTORY_REASON`, `replay_checkers`, `replay_declaration_of(...).effective_share()`, cleanup); `replay_run` keeps the 'a check failed' gate and calls it. Add `loop_replay(ctx, snapshot, id) -> Option<(ReplayRun, ReplayView, usize)>`: None unless `touches_reading_rules` on the change-list paths; skip with `no replay: free disk space is low` when the disk gate says so; `build_candidate(ctx, snapshot, None)`, using `ReplayRun::none(..)` on error or no commit; call `replay_history`; print one UI line (`replay     in the loop: N of M accepted readings newly refused (P%, limit L%)` or the `no replay: <reason>` text). Update the doc comments with the root cause.",
+    "producer.rs: after the parsed report and `left_criteria`, call `loop_replay`. If held and not `no_replay`, push a problem `replay of accepted readings: N of M (P%) newly refused, over the L% limit: <ids>` into `problems`. Break only when there is no unmet criterion, no unchanged file and no held replay. Build the next brief with `send_back_text_with_replay`. The existing `send_backs >= PRODUCER_SEND_BACKS` branch records the replay problem in `report_gaps`.",
+    "tests.rs: add the tests using `athena_with` with a script wrapping `base_script` that bumps an `Arc<AtomicUsize>` on `Role::Producer`, edits `crates/demo/src/lib.rs` and README.md, and records each producer `user_prompt`; `seed_accepted_jobs`, `replay_seam::install` with `real_rules()` and a counter-driven candidate closure, and the `Lines` UI. Tests: send-back then end under the limit; exactly 10% not sent back and 20% sent back; unrunnable replay (no seam, fake driver); empty history; README-only change with the marker rules showing no loop replay while the post-hoc hold still rejects.",
+    "CHANGELOG.md and docs/architecture.md: write the entries for an outside reader naming the root cause, the in-loop check, the gate on `crates/` sources, the limit (`REPLAY_HOLD_PERCENT`, or the declared share plus 5), the shared single send-back, `no replay: <reason>` never being a pass, and the unchanged post-hoc hold as the backstop. Mention that job 20261105-093556-zyt3's bug-fix rule is not re-landed.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` (including `cargo test -p athena-core --test refusal_corpus`) and fix any exact-text test the new brief section affects."
+  ],
+  "risks": [
+    {
+      "risk": "The replay builds `athena` twice per gated pass while the producer's own build directory is still on disk; this adds time and disk, and the post-hoc replay builds again.",
+      "mitigation": "Gate on `touches_reading_rules` so only jobs that change `crates/` or the Cargo files pay. Reuse `check_timeout_s`, build into `job_dir/replay` and remove it after each pass. Read `disk_gate` (mod.rs:1440) and skip with `no replay: free disk space is low` if space is short. A build error becomes `no replay` and never fails the job."
+    },
+    {
+      "risk": "A producer that cannot reduce the share wastes its one send-back, and a job that will be rejected anyway costs a second producer run.",
+      "mitigation": "The path gate keeps the common case out. The combined send-back stays within `PRODUCER_SEND_BACKS` (1). The post-hoc hold is unchanged, so an unfixable job is still rejected there."
+    },
+    {
+      "risk": "The list and reasons in the send-back could be long or quote old request text.",
+      "mitigation": "Reasons are capped by `REPLAY_BRIEF_REASON_CHARS` (200) and the list by `REPLAY_BRIEF_MAX_LISTED` (20) with an 'and N more' line. The send-back states which limit applied, including the declared-share rule from `effective_share`."
+    },
+    {
+      "risk": "`build_candidate` inside the loop writes a dangling commit and hashes blobs into the user's repository on each pass.",
+      "mitigation": "It makes only an unreferenced commit, the same kind the candidate stage makes. The final commit is still built by `candidate_stage`. A test asserts the post-hoc `replay.json` and the candidate commit are unaffected."
+    },
+    {
+      "risk": "The new producer-brief section breaks a test that compares the whole brief text or its hash.",
+      "mitigation": "One static section is added. Step 8 runs the full suite and any exact-text test is updated in briefs.rs or reading.rs."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "post-hoc replay (`replay_stage` / `replay_run`)",
+      "dependent": "crates/athena-core/src/run/mod.rs `check_and_verify` (the single caller of `replay_stage`, mod.rs:1714) and `replay_run`",
+      "kind": "code",
+      "test": "replay_holds_over_threshold_rejects_the_job_and_records_the_list (tests.rs:1488)",
+      "reason": "Behavior is kept: `replay_run` still returns `no replay: a check failed` when a check failed, then calls the extracted `replay_history`. The Replay record, its UI line, resumed jobs and `Checked.replay_record` are untouched."
+    },
+    {
+      "name": "hold threshold: `REPLAY_HOLD_PERCENT`, declared plus 5, `replay_is_held`",
+      "dependent": "crates/athena-core/src/verify.rs replay blocker (verify.rs:525) and `Replay::validate` (held and intended cannot both be true)",
+      "kind": "rule",
+      "test": "replay_limit_is_declared_share_plus_five_or_ten_and_exactly_the_limit_passes, plus replay_within_threshold_records_the_list_and_lands (tests.rs:1605)",
+      "reason": "`replay_is_held` is refactored onto `replay_limit_percent` with the same math (`newly*100 > total*limit`), so the blocker text and the hold are unchanged. verify.rs and the thresholds are not edited."
+    },
+    {
+      "name": "producer invocation count and role order for jobs run with the seam",
+      "dependent": "crates/athena-core/src/run/tests.rs tests that install `replay_seam` (tests.rs:1495, 1610, 1646) and `replay_makes_no_model_call_with_or_without_a_candidate_rule_change` (tests.rs:1667, expects roles Reader, Producer, Verifier)",
+      "kind": "code",
+      "test": "replay_makes_no_model_call_with_or_without_a_candidate_rule_change and a_job_whose_change_touches_no_reading_rule_is_not_replayed_in_the_loop",
+      "reason": "Those tests use `base_script`, whose producer edits only README.md, so `touches_reading_rules` is false and the loop never replays. Roles stay Reader, Producer, Verifier."
+    },
+    {
+      "name": "`send_back_text` signature and the one send-back",
+      "dependent": "crates/athena-core/src/run_pin_tests.rs send-back tests (lines 1134, 1282, 1336, 1365, 1378, 1502, 1509) and `send_back_text` (send_back.rs:88, re-exported at mod.rs:77)",
+      "kind": "code",
+      "test": "an_unexplained_missing_planned_file_is_sent_back_once_then_flagged_to_the_verifier (run_pin_tests.rs:1336)",
+      "reason": "`send_back_text` keeps its signature and delegates with `None`. The README-only study producers never trigger the replay, so the prompt counts those tests assert (1 or 2) stay the same."
+    },
+    {
+      "name": "producer loop flow and its state reads",
+      "dependent": "crates/athena-core/src/run/producer.rs `producer_loop`, one caller `produce_and_verify` (mod.rs:1455). Modes: fresh job, tree-seeded retry (`SnapshotRepo::BaseThenTree`), kept-directory resume (`BaseThenDir`), timed-out producer (`keep_timed_out_work`). State read: snapshot change list, `closing`, `ctx.reading`, records at head, `PRODUCER_SEND_BACKS`.",
+      "kind": "code",
+      "test": "producer_is_sent_back_with_the_newly_refused_list_and_share_then_the_loop_ends_under_the_limit, plus the existing run_pin_tests send-back tests",
+      "reason": "The replay runs only after a successful, parsed report. Timed-out, failed and invalid-report exits return before it, so those modes are unchanged. A seeded retry measures the same change list against the base as the candidate stage does. Jobs resumed from a candidate skip the producer loop and keep only the post-hoc replay."
+    },
+    {
+      "name": "producer brief text (stored verbatim as brief-producer.md)",
+      "dependent": "crates/athena-context/src/briefs.rs producer brief (`producer_brief_with_evidence`) and its tests (about 2248-2830); reading.rs:5924 calls `producer_brief`",
+      "kind": "code",
+      "test": "producer_brief_tells_the_producer_the_replay_is_checked_while_it_works and the existing producer_brief tests",
+      "reason": "One static section is added with no per-job data. Existing tests assert `contains` / `!contains` of specific strings, not the whole text; any whole-text test is found by running the suite in step 8. Briefs sit outside the prompt-set budgets (system-facts)."
+    },
+    {
+      "name": "`refusing_check` steps and the reading.rs source layout",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (`acceptance_check_names`, `every_acceptance_check_has_a_refusing_corpus_case`, `no_check_bypasses_refusing_check`) and the reading.rs source-scanning tests (reading.rs:6571, 8284, 8444)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "No refusal or classification rule is added and no `step!(check_...)` line is added. The new helpers are named `replay_limit_percent` and `touches_reading_rules`, not `check_*`, and sit in the replay section away from `refusing_check`. The extractor reads only `step!(check_` lines."
+    },
+    {
+      "name": "the replay view shared by the verifier brief and the send-back",
+      "dependent": "`ReplayView` and `replay_section` in briefs.rs (verifier brief, briefs.rs:1031-1100) and `replay_view` in run/mod.rs:232",
+      "kind": "code",
+      "test": "replay_view_carries_the_declared_share_and_reason (tests.rs:1565) and replay_summary_gives_the_count_the_total_and_the_list (briefs.rs:3783)",
+      "reason": "The struct and the verifier section are only read, not changed; the send-back section is a new function beside them."
+    },
+    {
+      "name": "build timeout and free disk for the in-loop replay builds",
+      "dependent": "athena.toml `budget.check_timeout_s` (read at mod.rs:1786) and the free-disk gate (`disk_gate`, mod.rs:1440; host setting)",
+      "kind": "host_setting",
+      "test": "an_unrunnable_replay_says_no_replay_and_is_not_a_pass_in_the_loop",
+      "reason": "The in-loop replay reuses the same timeout and `replay_checkers` build into `job_dir/replay`, removes it after each pass, and adds no config key. It skips with `no replay: free disk space is low` when the disk gate says space is short."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Read the diff for the cause statement.",
+      "command": "git diff -- CHANGELOG.md crates/athena-core/src/run/mod.rs crates/athena-core/src/run/producer.rs",
+      "observes": "The CHANGELOG entry and the doc comment on the new in-loop function both state the root cause: nothing made the producer measure a new or tightened refusal rule against past accepted readings while it worked; `replay_stage` ran once after the producer finished, as a verification hold. The code change is in `producer_loop`, not in one rule.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Behavior test `producer_is_sent_back_with_the_newly_refused_list_and_share_then_the_loop_ends_under_the_limit` in crates/athena-core/src/run/tests.rs, driven through `Athena::go`.",
+      "command": "cargo test -p athena-core producer_is_sent_back_with_the_newly_refused_list",
+      "observes": "The producer is invoked twice. The second prompt contains `## Sent back`, the three seeded ids `20200101-000002-0002`, `20200101-000001-0001`, `20200101-000000-0000`, `30%` and the `10%` limit; the first has no `## Sent back`. After the second pass the in-loop replay measures 0% and the loop ends; the job ends `OutcomeState::Landed` and the post-hoc `replay.json` has 0 newly refused.",
+      "fails_without": "On the base tree the producer is invoked once and its brief has no `## Sent back`; the post-hoc hold then rejects the job with 3 of 10 newly refused, so the prompt-count, brief-content and Landed assertions all fail.",
+      "seam": "Production entry point `Athena::go` (via `finished_job`), reaching `produce_and_verify`, `producer_loop` and the new `loop_replay`. Guards: the producer's change list must touch a path under `crates/`, and the history must be non-empty. Fixture `seed_accepted_jobs(&athena, 10, 3)` (exists, tests.rs:1417) seeds 3 marked readings of 10. Fake: `crate::replay_seam::install(real_rules(), candidate)` (exists, lib.rs:174), where the candidate closure refuses the marker title only while a shared `Arc<AtomicUsize>` producer-run counter is below 2. `athena_with` (exists, tests.rs:187) takes a script wrapping `base_script` that bumps the counter on `Role::Producer`, edits `crates/demo/src/lib.rs` and README.md, and records each `user_prompt`. The closure holds only the counter; the replay, limit and send-back text are production code. Exists; the test itself is added by plan step 6."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test on the limit function and boundary, plus two run tests through `Athena::go`.",
+      "command": "cargo test -p athena-core replay_limit_is_declared_share_plus_five && cargo test -p athena-core in_loop_replay_exactly_at_the_default_limit && cargo test -p athena-core an_unrunnable_replay_says_no_replay",
+      "observes": "`replay_limit_percent(None)` is 10 and `Some(20)` is 25. With total 50, 5 newly refused and no declared share is not held and 6 is; with declared 20 and total 20, 5 is not held and 6 is. `replay()` over fake closure checkers shows the same boundary. In the run test, 1 of 10 marked (10%) gives one producer prompt and no `## Sent back`; 2 of 10 (20%) gives a second prompt containing `20%` and the limit. In the unrunnable test (no seam; the fake driver makes `replay_checkers` return Err at mod.rs:1818) a `Lines` UI line contains `no replay: the driver is a fake`, there is a single producer prompt, and the post-hoc `replay.no_replay` is Some, so it is not recorded as a pass.",
+      "fails_without": "Without `replay_limit_percent` and the in-loop call the unit test does not compile. The 20% run test sees one producer prompt, so its second-prompt assertion fails. If an unrunnable replay were treated as held or as a pass, the `no replay` test would see a send-back or no `no replay` line.",
+      "seam": "Entry points `replay_is_held`, `replay` (reading.rs, exist) and `Athena::go`. Fakes: closure `ReadingChecker`s in the unit test, `seed_accepted_jobs`, `replay_seam::install` with `rules_refusing_the_marker` and a producer script editing a `crates/` file (all exist, tests.rs/lib.rs). The seam is deliberately not installed in the unrunnable test; the fake driver's own skip in `replay_checkers` makes it unrunnable. `replay_limit_percent` is added by plan step 1; the tests by steps 1 and 6."
+    },
+    {
+      "criterion": 4,
+      "method": "Run tests through `Athena::go` plus a pure unit test of the path gate.",
+      "command": "cargo test -p athena-core a_job_whose_change_touches_no_reading_rule && cargo test -p athena-core an_empty_history_in_the_loop && cargo test -p athena-core touches_reading_rules",
+      "observes": "(a) With the seam installed over 3 of 10 marked and the default README-only `base_script`, there is one producer prompt, no in-loop replay line, and the post-hoc hold still rejects the job. (b) With no seeded jobs and a producer editing a `crates/` file, a UI line reads `no replay: no accepted readings in the history` (`NO_HISTORY_REASON`), there is one producer prompt, and the post-hoc `replay.no_replay` equals that text, not success. The unit test: `README.md` false, `docs/x.md` false, `crates/athena-core/src/reading.rs` true, `Cargo.lock` true, empty list false.",
+      "fails_without": "If the loop replayed on every change, (a) sees a second producer prompt. If an empty corpus counted as a pass, (b)'s `no replay` line and record assertions fail. If the gate were missing or wrong, the unit test fails.",
+      "seam": "Entry point `Athena::go`; fixtures `seed_accepted_jobs`, `replay_seam::install`, the `Lines` UI (tests.rs:167) and `athena_with` (all exist). `touches_reading_rules` is a pure function added by plan step 1; the run tests are added by step 6."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the docs diff and run the briefs test that the producer brief names the replay and its limit.",
+      "command": "git diff -- docs/architecture.md CHANGELOG.md crates/athena-context/src/briefs.rs",
+      "observes": "Both docs describe the replay as a check inside the producer loop, with its limit (`REPLAY_HOLD_PERCENT`, or the declared share plus 5), the gate on `crates/` sources and the shared single send-back. Both say the post-hoc verification hold stays as the backstop. The CHANGELOG entry sits under [Unreleased]. The briefs.rs test `producer_brief_tells_the_producer_the_replay_is_checked_while_it_works` asserts the producer brief mentions it.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three required repository checks from the repository root. They exercise the whole workspace, including every new test from steps 1-6, the existing replay tests (tests.rs:1488, 1605, 1667), the run_pin_tests send-back tests, the briefs.rs tests and the refusal corpus test.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. The new tests listed under criteria 2 to 4 pass inside `cargo test --locked`. `cargo test -p athena-core --test refusal_corpus` is unaffected because no `step!(check_` line is added to `refusing_check` (the extractor at refusal_corpus.rs:749 reads only those lines); I read the test names `every_acceptance_check_has_a_refusing_corpus_case` and `no_check_bypasses_refusing_check` and cite no result.",
+      "fails_without": "`cargo test --locked` fails on the base tree plus the new tests alone (the new tests call `replay_limit_percent`, `touches_reading_rules`, the in-loop replay and `send_back_text_with_replay`, which do not exist, so the test build breaks). It also fails if the change breaks an existing test, for example one that compares the producer brief or the prompt counts. `cargo clippy -D warnings` fails if the change leaves an unused import, an unused function (for example an unused `replay_history` result or a dead wrapper) or a needless clone. `cargo fmt --check` fails on unformatted code.",
+      "seam": "Entry points are the three cargo commands themselves, run on the producer's tree at the repository root; they need no fake. The tests they run use the existing seams `Athena::go`, `athena_with`, `seed_accepted_jobs`, `replay_seam::install` and the `Lines` UI (all exist; read in tests.rs and lib.rs). The new tests are added by plan steps 1, 2, 3 and 6; step 8 runs the three commands and fixes any failure."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "d7f1d8f0203e7125afa8752461275cf0b1917556bf242ecc306360bb0b1900df"
+}

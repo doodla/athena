@@ -9,6 +9,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The replay of accepted readings now runs as a check inside the producer's loop, so the producer sees the
+  newly refused readings and the measured share while it can still fix them. Root cause: nothing made the
+  producer measure a new or tightened refusal rule against past accepted readings while it worked. The replay
+  (`replay_stage`) ran once, after the producer finished, as a hold at verification; a rule such as a bug-fix
+  check that newly refused 18% of past readings was rejected after the work was done, and the producer never
+  saw the list. After each parsed report whose change list touches `crates/`, `Cargo.toml` or `Cargo.lock`
+  (`touches_reading_rules`; a change of documents only cannot alter the compiled rules), `producer_loop` calls
+  `Athena::loop_replay`: it builds the candidate commit, takes a build slot of the producer class for the two
+  builds (into the slot's warm target directory, cleaned afterwards as the checks do) and replays the newest
+  accepted readings through the base and candidate builds. The limit is the hold's own, from the one function
+  `replay_limit_percent`: `REPLAY_HOLD_PERCENT` (10%), or the share the criteria declare plus 5 points; exactly
+  the limit passes. A share over it is sent back in the one existing send-back (`PRODUCER_SEND_BACKS`), with
+  the job ids, the reasons, the measured percent and the limit in the producer's brief; the producer brief also
+  says the replay runs while it works. No config key and no model call is added. A replay that cannot run (empty
+  history, low disk, no free slot within `build_wait_s`, an unbuildable side, a fake driver) prints
+  `replay     in the loop: no replay: <reason>`; it is never a pass and never a send-back. The hold at
+  verification, the verifier's blocker and `replay.json` are unchanged and stay as the backstop (a job resumed
+  from a kept candidate has only the hold); the hold reuses the loop's measurement only for the same candidate
+  tree and the same accepted readings, so a job that is not sent back builds nothing more than before. The
+  bug-fix rule of job 20261105-093556-zyt3 is not re-landed here; this mechanism is what would have shown its
+  false positives early.
+
 - On a docs-only change (every changed path is under `docs/` or ends in `.md`), the verdict now counts a check
   Athena skipped by the docs-only path rule (`skip_when_only`) as seen running, as it already did a check
   reused from a green GitHub run, so a criterion such as "cargo test and cargo clippy still pass" can cite it.

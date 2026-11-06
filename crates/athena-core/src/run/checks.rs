@@ -103,7 +103,7 @@ impl crate::routing::Exec for SnapExec<'_> {
 
 /// The bytes `slot_max_gb` gigabytes come to. A test build can shrink the gigabyte ([`gb_seam`]) so a test
 /// shows the deletion without writing one.
-fn slot_limit_bytes(slot_max_gb: u64) -> u64 {
+pub(super) fn slot_limit_bytes(slot_max_gb: u64) -> u64 {
     #[cfg(test)]
     let gb = gb_seam::current().unwrap_or(crate::disk::GB);
     #[cfg(not(test))]

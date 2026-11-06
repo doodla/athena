@@ -1,7 +1,9 @@
 //! The producer's send-back: which accepted criteria a report leaves unmet, which it leaves to Athena's
 //! recorded checks, and the brief for the one send-back (structure pass, R2).
 
-use athena_context::briefs::{AcceptedReading, LEFT_TO_ATHENA};
+use athena_context::briefs::{
+    AcceptedReading, LEFT_TO_ATHENA, ReplayView, replay_send_back_section,
+};
 use athena_context::outputs::{CriterionCheckOutput, CriterionStatusOutput, ProducerOutput};
 
 /// The accepted criteria the report does not show as met: marked unmet, or missing from `criteria_check`.
@@ -86,7 +88,28 @@ fn is_athena_check_criterion(text: &str) -> bool {
 /// The brief for the producer's one send-back: the original brief, then the criteria the report did not
 /// show as met, each with its exact text, and the planned files left unchanged without a reason.
 pub(crate) fn send_back_text(brief: &str, unmet: &[String], unchanged: &[String]) -> String {
+    send_back_text_with_replay(brief, unmet, unchanged, None)
+}
+
+/// [`send_back_text`], with the replay of accepted readings when the producer's change newly refuses more of
+/// them than the limit. `replay` is the measured view and the limit in whole percent that applied. With a
+/// replay the intro gains one leading sentence about it and the section follows the lists; the intro's own
+/// words are unchanged. With `None` the text is exactly [`send_back_text`]'s.
+pub(crate) fn send_back_text_with_replay(
+    brief: &str,
+    unmet: &[String],
+    unchanged: &[String],
+    replay: Option<(&ReplayView, usize)>,
+) -> String {
     let mut text = format!("{brief}\n\n## Sent back\n\n");
+    if replay.is_some() {
+        text.push_str(
+            "Your change makes the reading rules refuse accepted readings of earlier jobs that the base \
+             accepted, more than the limit allows; the replay section below lists them. When no \
+             criteria or planned files are listed below, the replay is the only reason for this \
+             send-back, and the rest of this paragraph applies to it as to any other item. ",
+        );
+    }
     text.push_str(
         "Your previous report did not show every acceptance criterion as met in criteria_check, \
          or left planned files unchanged without a reason. \
@@ -112,6 +135,12 @@ pub(crate) fn send_back_text(brief: &str, unmet: &[String], unchanged: &[String]
         for path in unchanged {
             text.push_str(&format!("- {path}\n"));
         }
+    }
+    if let Some((view, limit)) = replay {
+        if !unchanged.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&replay_send_back_section(view, limit));
     }
     text
 }
@@ -282,6 +311,48 @@ mod left_to_athena_tests {
             "{:?}",
             judgment.reasons
         );
+    }
+
+    fn view(newly: usize, total: usize) -> ReplayView {
+        ReplayView {
+            total,
+            newly_refused: (0..newly)
+                .map(|n| (format!("20201001-{n:06}-{n:04}"), "too broad".into()))
+                .collect(),
+            held: true,
+            declared: None,
+            reason: None,
+            unsupported: None,
+            no_replay: None,
+        }
+    }
+
+    #[test]
+    fn a_send_back_without_a_replay_is_the_plain_text_and_with_one_keeps_the_pinned_phrases() {
+        let unmet = vec!["a criterion".to_string()];
+        let plain = send_back_text("BRIEF", &unmet, &[]);
+        assert_eq!(
+            plain,
+            send_back_text_with_replay("BRIEF", &unmet, &[], None)
+        );
+        assert!(!plain.contains("Replay of accepted readings"));
+
+        let v = view(3, 10);
+        let with =
+            send_back_text_with_replay("BRIEF", &unmet, &["src/a.rs".into()], Some((&v, 10)));
+        assert!(with.starts_with("BRIEF\n\n## Sent back"), "{with}");
+        for phrase in [
+            "copying each line from the brief's criteria_check section",
+            "unchanged_planned_files",
+            "- a criterion",
+            "- src/a.rs",
+            "Replay of accepted readings: 3 of 10 (30%) newly refused, limit 10%",
+            "- 20201001-000002-0002: too broad",
+        ] {
+            assert!(with.contains(phrase), "omits {phrase}: {with}");
+        }
+        // The replay section comes after the lists.
+        assert!(with.find("- src/a.rs").unwrap() < with.find("Replay of accepted").unwrap());
     }
 
     #[test]

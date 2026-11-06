@@ -3984,10 +3984,27 @@ pub fn replay_declaration_of(reading: &Reading) -> ReplayDeclaration {
 /// that share plus [`REPLAY_DECLARED_MARGIN_POINTS`] points holds it; with none, more than
 /// [`REPLAY_HOLD_PERCENT`] percent does. Integer math, so exactly the limit is not held.
 pub fn replay_is_held(total: usize, newly: usize, declared: Option<u32>) -> bool {
-    let limit = declared.map_or(REPLAY_HOLD_PERCENT, |d| {
+    newly * 100 > total * replay_limit_percent(declared)
+}
+
+/// The share of newly refused readings, in whole percent, that a candidate may reach without being held:
+/// the declared share plus [`REPLAY_DECLARED_MARGIN_POINTS`] points, or [`REPLAY_HOLD_PERCENT`] when none is
+/// declared. The hold at verification and the replay inside the producer's loop both read it from here, so the
+/// producer is told the very limit the hold applies.
+pub fn replay_limit_percent(declared: Option<u32>) -> usize {
+    declared.map_or(REPLAY_HOLD_PERCENT, |d| {
         d as usize + REPLAY_DECLARED_MARGIN_POINTS
-    });
-    newly * 100 > total * limit
+    })
+}
+
+/// Whether a change list can alter the compiled reading rules: any path under `crates/`, or the workspace's
+/// `Cargo.toml` or `Cargo.lock`. A change of documents only cannot, so the replay inside the producer's loop
+/// skips it. The gate is deliberately wide: which crates `check-reading` links is not a list worth keeping in
+/// step with the code, and a missed helper change is the failure this replay exists to catch.
+pub fn touches_reading_rules(paths: &[String]) -> bool {
+    paths
+        .iter()
+        .any(|p| p.starts_with("crates/") || p == "Cargo.toml" || p == "Cargo.lock")
 }
 
 /// The result of one replay.
@@ -7735,6 +7752,47 @@ mod tests {
         ] {
             assert_eq!(replay_is_held(total, newly, None), held, "{newly}/{total}");
         }
+    }
+
+    #[test]
+    fn replay_limit_is_declared_share_plus_five_or_ten_and_exactly_the_limit_passes() {
+        assert_eq!(replay_limit_percent(None), REPLAY_HOLD_PERCENT);
+        assert_eq!(replay_limit_percent(None), 10);
+        assert_eq!(replay_limit_percent(Some(20)), 25);
+        assert_eq!(replay_limit_percent(Some(0)), 5);
+        // Exactly the limit is not held; one over is. The producer's loop sends back on `replay_is_held`.
+        assert!(!replay_is_held(50, 5, None));
+        assert!(replay_is_held(50, 6, None));
+        assert!(!replay_is_held(20, 5, Some(20)));
+        assert!(replay_is_held(20, 6, Some(20)));
+        // The same boundary through a measured replay over closure checkers.
+        for (marked, held) in [(5, false), (6, true)] {
+            let run = replay(
+                &marked_cases(50, marked),
+                &base_checker(),
+                &marker_candidate(),
+                None,
+            );
+            assert_eq!(run.held, held, "{marked} of 50");
+            assert_eq!(run.newly_refused.len(), marked);
+        }
+    }
+
+    #[test]
+    fn touches_reading_rules_is_true_only_for_code_and_cargo_files() {
+        let paths = |list: &[&str]| -> Vec<String> { list.iter().map(|p| p.to_string()).collect() };
+        assert!(!touches_reading_rules(&[]));
+        assert!(!touches_reading_rules(&paths(&["README.md"])));
+        assert!(!touches_reading_rules(&paths(&[
+            "docs/x.md",
+            "CHANGELOG.md"
+        ])));
+        assert!(!touches_reading_rules(&paths(&["docs/crates/x.md"])));
+        assert!(touches_reading_rules(&paths(&[
+            "crates/athena-core/src/reading.rs"
+        ])));
+        assert!(touches_reading_rules(&paths(&["README.md", "Cargo.lock"])));
+        assert!(touches_reading_rules(&paths(&["Cargo.toml"])));
     }
 
     /// Replays `marked` newly refused readings of `total` under what `criteria` and `out_of_scope` declare.

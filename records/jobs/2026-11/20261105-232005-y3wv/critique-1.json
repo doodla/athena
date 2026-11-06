@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261105-232005-y3wv",
+  "round": 1,
+  "at": "2026-11-06T01:14:29.244804272Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The `crates/` gate matches almost every code job in this repository, and each pass rebuilds both sides from cold, so the cost mitigation does not work.",
+      "evidence": "HISTORY.txt shows nearly every recent commit changes files under `crates/` (866 `crates/` path lines in 200 commits; for example 8a3d559, da17eda, 5bae74b, f2d168c). So a gate on any `crates/` path or Cargo file selects almost every code job in this repository, and the claim that it 'keeps the cost off most jobs' is wrong. Each replay builds `athena` twice from scratch: it materializes two trees, builds into `dir/target`, and `replay_run` deletes `dir` when it finishes (mod.rs:1796). The plan runs that on every gated pass, including the last pass after the send-back budget is spent, and then the post-hoc stage builds both sides again. A typical code job goes from 2 extra cold workspace builds to 4–6, and the base side is rebuilt every time even though the base commit never changes. Fix: Choose one or more of these and update the Risks section: (a) build the base checker once per job and reuse that binary across in-loop passes and the post-hoc `replay_stage`; (b) keep `job_dir/replay/target` warm across passes and delete it only when the post-hoc stage finishes; (c) when the final in-loop candidate tree equals the admitted candidate tree, reuse the in-loop `ReplayRun` in the post-hoc stage instead of rebuilding; (d) narrow the gate to the source files `check-reading` actually compiles (the reading-rule modules and the CLI subcommand), with a test that the module holding `refusing_check` is covered. Replace the 'most jobs' claim with a measured or labeled estimate.",
+      "location": "Decision 2 (`touches_reading_rules` gate) and Risks 1–2; crates/athena-core/src/run/mod.rs:1785-1796 and 1821-1856",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The in-loop replay builds run outside the build-slot queue while the producer's build is still on disk, and the dependents list leaves the queue out.",
+      "evidence": "The build-slot design (agent-and-build-slots.md lines 126-152, 378-393) makes every cargo command that compiles take a slot from `[drain.pipeline] max_check_slots`. That includes the producer's own cargo commands, because disk and memory are budgeted per concurrent build (line 297: two producers at 10–12 GB against 17 GB). The new in-loop replay builds run during the producer stage, while the producer's build directory is still on disk (`free_producer_build` only runs later, in `check_and_verify`, mod.rs:1554), and nothing in the plan routes them through `SlotQueue`. Fix: Add the build-slot queue (`crate::slots::SlotQueue`, `max_check_slots`) to the dependents list. Run the in-loop replay builds inside a build slot (the check class, or the producer class that slots.rs already defines), and add a test that the in-loop replay takes a slot. If you choose not to, say why and state the memory cost as an estimate.",
+      "location": "Dependents list; Step 4 `loop_replay`; docs/design/agent-and-build-slots.md (build-slot queue); crates/athena-core/src/slots.rs",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The tests for the unrunnable replay and the empty history pass on the base tree, because the post-hoc stage already prints and records the same `no replay` text.",
+      "evidence": "The post-hoc stage already runs on the base tree. `replay_stage` prints `replay     {reason}`, and `ReplayRun::none` writes `no replay: <reason>` (reading.rs:4014). With the fake driver it prints `no replay: the driver is a fake, so nothing is built` (mod.rs:1819), and with no seeded jobs it prints `no replay: no accepted readings in the history` and records it in replay.json. A producer that is not sent back gets one producer prompt. So every assertion listed (a UI line containing that text, one producer prompt, post-hoc `replay.no_replay` being Some or equal to that text) already passes on the base tree. Step 4 also leaves the format of the in-loop `no replay` line unspecified. Fix: Give every in-loop line its own prefix, for example `replay     in the loop: no replay: <reason>`. Make the criterion 3 and 4(b) tests assert that this in-loop line appears and that it comes before the `checks` line, and that no `in the loop: 0 of` pass line appears. Then rewrite each 'Fails without' statement so it names an assertion the base tree actually fails.",
+      "location": "Demonstrations for criterion 3 (unrunnable replay) and criterion 4(b) (empty history)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The unrunnable-replay test must seed history first, or it reaches the empty-history reason instead of the fake-driver one.",
+      "evidence": "`replay_run` loads the records and returns `NO_HISTORY_REASON` before it calls `replay_checkers` (mod.rs:1781-1787). Fix: State that the unrunnable test calls `seed_accepted_jobs` first.",
+      "location": "Criterion 3 demonstration (unrunnable test) and Step 4 order inside `replay_history`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Rewording the send-back intro can break exact-phrase tests in run_pin_tests.rs, which is not a deliverable.",
+      "evidence": "run_pin_tests.rs:1142-1147 and 1283-1286 assert that the text starts with `BRIEF\\n\\n## Sent back` and contains `copying each line from the brief's criteria_check section` and `unchanged_planned_files`. Fix: Keep those phrases word for word when rewording, or list run_pin_tests.rs as a file the plan may touch.",
+      "location": "Step 3 (reword the send-back intro)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "`replay_view` takes a `Replay` record, not a `ReplayRun`.",
+      "evidence": "`fn replay_view(replay: &Replay, reading: &Reading)` at mod.rs:232, so the loop has to call `run.record(id, base, candidate)` before building the view. Fix: Name that step in the plan.",
+      "location": "Step 4 `loop_replay` return type",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan fixes the right cause in the right place. It runs the existing replay inside `producer_loop` and sends the newly refused job ids and the measured share back through the one existing send-back, so the producer sees the measurement while it can still act on it. It reuses `replay_cases`, `replay`, `replay_checkers`, `build_candidate` and the per-thread `replay_seam`, and I confirmed each of these exists where the plan says. The criterion 2 test would fail on the base tree. Three things need revising. First, the soundness of the cost gate: 'touches `crates/`' matches almost every code job in this repository (per HISTORY.txt), and each pass rebuilds both sides from cold and then deletes the target directory, so most jobs gain 4–6 cold builds. The base binary and the warm target should be reused, or the gate narrowed. Second, the in-loop builds run during the producer stage, outside the build-slot queue (`max_check_slots`), while the producer's own build directory is still on disk, and the dependents list leaves that queue out. Third, the demonstrations for the unrunnable replay and the empty history assert text that the post-hoc stage already prints on the base tree, so they would pass without the change. The in-loop line needs its own prefix and the tests need to assert on it. Verdict: revise."
+}

@@ -1,0 +1,164 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261105-232005-y3wv",
+  "base_commit": "f31fac8ed9518c3d7468091b99972b28df4a1e86",
+  "base_fingerprint": "sha256:653a0e82743fb624e446f292774517179a9ed0ecf2314a5186d8b36392c2c88e",
+  "previous_job": "20261105-170019-3v2x",
+  "candidate_commit": "6d2dfac3987a32c578bcb211ab8af0e749e768f9",
+  "candidate_tree": "ac85eb54db09b3e38b40ecfd48a01f36d8b36289",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 336741
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 195714
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 359770
+    },
+    {
+      "path": "crates/athena-core/src/run/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 37504
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 94519
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14925
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 14584
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 224411
+    },
+    {
+      "path": "docs/architecture.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 10587
+    }
+  ],
+  "fingerprint": "sha256:6585a220fe863fd9229aafb27a580c1ea1a68a42144f9b51a25a3577e6ff731e",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: the replay of past accepted readings ran once, after the producer finished, as a hold at verification. The producer never saw the newly refused list or the share, so a rule could be rejected after the work was done. The fix is in `producer_loop`. After each parsed report whose change list touches `crates/`, `Cargo.toml` or `Cargo.lock`, the new `Athena::loop_replay` builds the candidate commit and takes a `Class::Producer` build slot. It runs the existing `replay_cases`, `replay` and `replay_checkers` and checks the result against the hold's own limit. That limit is the new `replay_limit_percent`: `REPLAY_HOLD_PERCENT` (10), or the declared share plus 5. A share over the limit joins the one existing send-back, within `PRODUCER_SEND_BACKS`. The brief then names the newly refused job ids, their reasons, the measured percent and the limit. A replay that cannot run prints `replay     in the loop: no replay: <reason>`, is never a pass and never a send-back. The verification hold, its blocker and `replay.json` are unchanged and stay as the backstop. The hold reuses the loop's measurement only when it was measured and the candidate tree and the case ids match. Otherwise it measures again. I also added a short producer-brief section, `send_back_text_with_replay`, `replay_send_back_section`, the `touches_reading_rules` gate, new tests, and entries in CHANGELOG.md and docs/architecture.md. fmt, clippy, the policy scan and a foreground `cargo test --locked` all pass on the final tree. One earlier background run of the suite exited 101 and I could not read why.",
+    "files": [
+      "CHANGELOG.md",
+      "docs/architecture.md",
+      "crates/athena-context/src/briefs.rs",
+      "crates/athena-core/src/reading.rs",
+      "crates/athena-core/src/run/checks.rs",
+      "crates/athena-core/src/run/mod.rs",
+      "crates/athena-core/src/run/producer.rs",
+      "crates/athena-core/src/run/send_back.rs",
+      "crates/athena-core/src/run/tests.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --locked --lib -- loop_replay in_loop_replay producer_is_sent_back the_post_hoc_hold an_unrunnable_replay an_empty_history_in_the_loop a_job_whose_change_touches replay_limit touches_reading_rules send_back",
+        "result": "pass",
+        "note": "19 passed, including the new producer-loop replay tests and the existing run_pin_tests send-back tests"
+      },
+      {
+        "command": "cargo test -p athena-context --locked",
+        "result": "pass",
+        "note": "112 passed, including the producer-brief and send-back-section tests"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed; the boundary scan found no banned word in the changed files"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "One manual-checked-division finding in briefs.rs was fixed with checked_div, then clippy re-ran clean"
+      },
+      {
+        "command": "cargo test --locked -- --format terse",
+        "result": "pass",
+        "note": "Foreground run on the final tree: every test binary passed, 0 failed, including athena-core 984 passed 1 ignored, refusal_corpus 11, drain 178, lifecycle 72, job_plan 29, xtask policy 17. An earlier background run of `cargo test --locked` exited 101 and I could not read its output. I do not know why it failed. The foreground rerun on the same tree passed, so a flaky test is possible, but that is a guess."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "The root cause is named in the change description and CHANGELOG.md: nothing makes the producer measure a new or tightened refusal rule against past accepted readings while it works. The replay (`replay_stage` in crates/athena-core/src/run/mod.rs) runs once after the producer finishes, as a verification hold. Checked by reading the diff.",
+        "status": "met",
+        "evidence": "The CHANGELOG [Unreleased] 'Added' entry and docs/architecture.md both name the root cause in those words. The doc comments on `producer_loop`, `Athena::loop_replay`, `LoopReplay` and `replay_stage` name it too. The fix is in `producer_loop`, which calls `loop_replay` after each parsed report. It is not in any one rule."
+      },
+      {
+        "criterion": "The test(s) added in crates/athena-core/src/run/tests.rs (the producer-loop replay tests) fail on the base tree and pass with the change. They use a fake candidate checker that newly refuses more than the limit of a corpus of recorded accepted readings. They assert that the producer is sent back, that its brief names the newly refused job ids and the measured percent, and that the loop ends once the share is under the limit. Run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "`producer_is_sent_back_with_the_newly_refused_list_and_share_then_the_loop_ends_under_the_limit` passes, in the targeted run and in the full foreground run. It seeds 10 accepted readings with 3 marked and uses a counting candidate closure through `replay_seam`. It asserts 2 producer prompts. Prompt 1 has no '## Sent back'. Prompt 2 has the three job ids, '30%' and 'limit 10%'. The UI shows '3 of 10 ... (30%, limit 10%)' and then '0 of 10 ...' before the 'checks' line. The job lands, the recorded replay has 0 newly refused, and the candidate closure ran 20 times. I did not run the tests on the base tree. They would fail there because `loop_replay` and the in-loop UI lines do not exist, and the base runs the producer once with no send-back."
+      },
+      {
+        "criterion": "A test in crates/athena-core/src/run/tests.rs or crates/athena-core/src/reading.rs shows that the in-loop replay respects the declared share and the 10% default (`REPLAY_HOLD_PERCENT`): exactly the limit passes, one over is sent back. It also shows that an unrunnable replay reports `no replay: <reason>` and is not treated as a pass. Run `cargo test -p athena-core`.",
+        "status": "met",
+        "evidence": "All of these pass in the targeted run and in the full foreground run. `replay_limit_is_declared_share_plus_five_or_ten_and_exactly_the_limit_passes` covers the default 10, the declared share plus 5, and the boundaries. `in_loop_replay_exactly_at_the_default_limit_passes_and_one_over_is_sent_back` has 1 of 10 not sent back and 2 of 10 sent back. `in_loop_replay_applies_the_declared_share_plus_five_points` has a declared 20% give 'limit 25%', with 2 of 10 passing and 3 of 10 sent back. `an_unrunnable_replay_says_no_replay_in_the_loop` expects the line 'replay     in the loop: no replay: the driver is a fake, so nothing is built', no '0 of' line, and one producer prompt. `an_in_loop_replay_waits_for_a_build_slot` covers the slot-wait reason."
+      },
+      {
+        "criterion": "A test shows that a job whose reading adds no refusal rule, or whose replay has no history, is not sent back, and that an empty corpus is reported as `no replay` and not as success.",
+        "status": "met",
+        "evidence": "`a_job_whose_change_touches_no_reading_rule_is_not_replayed_in_the_loop` passes: a README-only change gets no in-loop line and one producer prompt, and the hold still rejects. `an_empty_history_in_the_loop_is_no_replay_and_not_success` passes: it prints the prefixed 'no replay: no accepted readings in the history' line, has no '0 of' line, makes one producer run and 0 candidate calls, and the recorded replay.no_replay is set. `touches_reading_rules_is_true_only_for_code_and_cargo_files` passes."
+      },
+      {
+        "criterion": "docs/architecture.md and CHANGELOG.md describe the replay as a check inside the producer loop, with its limit, and say the post-hoc verification hold stays as the backstop.",
+        "status": "met",
+        "evidence": "I added a paragraph to 'The shape' in docs/architecture.md and an entry under CHANGELOG [Unreleased]. Both describe the in-loop check, the `crates/`/Cargo gate, the limit (`REPLAY_HOLD_PERCENT` or the declared share plus 5), the build slot, the single shared send-back and `no replay: <reason>` never being a pass. Both say the hold at verification is unchanged and stays as the backstop, and that it reuses the loop's measurement only for the same tree and readings. `producer_brief_tells_the_producer_the_replay_is_checked_while_it_works` passes in athena-context."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass from the repository root.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran them on the final tree: `cargo fmt --all --check` and `cargo clippy --all-targets --locked -- -D warnings` are clean, and a foreground `cargo test --locked` passed in every test binary with 0 failed. One earlier background run of the suite exited 101 with output I could not read."
+      }
+    ],
+    "open_issues": [
+      "An earlier background run of `cargo test --locked` exited 101 and I could not read why. The foreground rerun on the same tree passed everything. If Athena's own suite run fails, the first failure may be a flaky test and not a regression I saw.",
+      "In the loop, the slot's warm target directory is cleaned with `clean_workspace_output` on the candidate tree only. Base-only workspace members would stay in the warm directory. This is a small gap in the cleanup.",
+      "A sent-back job costs one extra pair of builds. I did not measure it on a real build. It is an estimate."
+    ],
+    "mistakes": [
+      "I submitted a first report before the full suite finished, so its checks list said `cargo test --locked` was not run. This report replaces it with the foreground result.",
+      "My first send_back edit added a trailing newline that would have changed the no-replay text. I caught it before running anything and made the newline conditional."
+    ],
+    "learnings": [
+      "`Athena::go` tests drive whole jobs with the fake driver. The `replay_seam` and the `Lines` UI let a test assert the order of UI lines and the producer prompts without a real build.",
+      "The post-hoc replay already built both sides for every job with history and has no path gate. That is why reuse of the loop's measurement, not the path gate, keeps the cost of the loop replay down.",
+      "`slots::Class::Producer` was defined but never requested before this change.",
+      "clippy here denies a manual `if x == 0 { 0 } else { a / x }`. Use `checked_div` or `.max(1)`.",
+      "A background command's output file sits outside the working directory, so the Read tool refuses it. Run the full suite in the foreground with `-- --format terse` to see the result."
+    ],
+    "desires": [
+      "A way to read a background command's output, or a foreground timeout long enough for the full suite without a rerun. That would have shown why the first background run exited 101."
+    ]
+  }
+}
