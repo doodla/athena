@@ -170,6 +170,46 @@ pub fn unreconciled(
     Ok(out)
 }
 
+/// A governed decision and the planned paths it governs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Governing {
+    pub decision: String,
+    /// The planned paths the decision governs, in the order given.
+    pub paths: Vec<String>,
+}
+
+/// The decisions of the base list that govern at least one of the `planned` paths, in the list's order, each
+/// once with the planned paths it governs. It reads the list only: nothing here says whether a change
+/// reconciles a decision (see [`unreconciled`]). An empty list text governs nothing; `Err` only when the base
+/// list does not parse.
+pub fn governing(base_links: &str, planned: &[String]) -> Result<Vec<Governing>, String> {
+    let mut out: Vec<Governing> = Vec::new();
+    for entry in &parse_governs(base_links)? {
+        let paths: Vec<String> = planned
+            .iter()
+            .filter(|p| entry.covers(p))
+            .cloned()
+            .collect();
+        if paths.is_empty() {
+            continue;
+        }
+        match out.iter_mut().find(|g| g.decision == entry.decision) {
+            Some(existing) => {
+                for p in paths {
+                    if !existing.paths.contains(&p) {
+                        existing.paths.push(p);
+                    }
+                }
+            }
+            None => out.push(Governing {
+                decision: entry.decision.clone(),
+                paths,
+            }),
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +421,64 @@ status = \"amended\"
         ] {
             assert!(parse_governs(bad).is_err(), "{bad}");
         }
+    }
+
+    fn planned(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn governing_names_the_decision_of_a_governed_planned_file() {
+        let found = governing(LIST, &planned(&["README.md", "docs/other.md"])).unwrap();
+        assert_eq!(
+            found,
+            [Governing {
+                decision: "D02".into(),
+                paths: planned(&["README.md"])
+            }]
+        );
+    }
+
+    #[test]
+    fn governing_matches_a_directory_prefix_and_not_a_sibling() {
+        let found = governing(LIST, &planned(&["crates/core/run/mod.rs"])).unwrap();
+        assert_eq!(found[0].decision, "D08");
+        assert_eq!(found[0].paths, ["crates/core/run/mod.rs"]);
+        assert!(
+            governing(LIST, &planned(&["crates/core/runtime.rs"]))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn governing_lists_a_decision_once_with_its_planned_paths_in_order() {
+        let found = governing(
+            LIST,
+            &planned(&[
+                "src/b.rs",
+                "README.md",
+                "crates/git/snapshot.rs",
+                "src/a.rs",
+            ]),
+        )
+        .unwrap();
+        let ids: Vec<&str> = found.iter().map(|g| g.decision.as_str()).collect();
+        // The list's order: D08, D12, D02.
+        assert_eq!(ids, ["D08", "D12", "D02"]);
+        assert_eq!(found[1].paths, ["src/b.rs", "src/a.rs"]);
+    }
+
+    #[test]
+    fn governing_is_empty_for_no_match_or_an_empty_list_and_errs_on_a_bad_one() {
+        assert!(
+            governing(LIST, &planned(&["docs/other.md"]))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(governing(LIST, &[]).unwrap().is_empty());
+        assert!(governing("", &planned(&["README.md"])).unwrap().is_empty());
+        assert!(governing("not = [toml", &planned(&["README.md"])).is_err());
     }
 
     #[test]

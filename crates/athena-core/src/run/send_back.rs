@@ -101,7 +101,29 @@ pub(crate) fn send_back_text_with_replay(
     unchanged: &[String],
     replay: Option<(&ReplayView, usize)>,
 ) -> String {
+    send_back_text_full(brief, unmet, unchanged, replay, None)
+}
+
+/// [`send_back_text_with_replay`], with the decision gate's message when the producer's change touches code a
+/// decision governs and does not reconcile it. With a message the intro gains one leading sentence about it
+/// and the message follows the lists and the replay section, word for word. With `None` the text is exactly
+/// [`send_back_text_with_replay`]'s.
+pub(crate) fn send_back_text_full(
+    brief: &str,
+    unmet: &[String],
+    unchanged: &[String],
+    replay: Option<(&ReplayView, usize)>,
+    gate: Option<&str>,
+) -> String {
     let mut text = format!("{brief}\n\n## Sent back\n\n");
+    if gate.is_some() {
+        text.push_str(
+            "Your change touches code that a logged decision governs and does not reconcile the \
+             decision; the decision gate's message below says how. When no criteria, planned files or \
+             replay are listed, that message is the only reason for this send-back, and the rest of \
+             this paragraph applies to it as to any other item. ",
+        );
+    }
     if replay.is_some() {
         text.push_str(
             "Your change makes the reading rules refuse accepted readings of earlier jobs that the base \
@@ -141,6 +163,14 @@ pub(crate) fn send_back_text_with_replay(
             text.push('\n');
         }
         text.push_str(&replay_send_back_section(view, limit));
+    }
+    if let Some(message) = gate {
+        if !unmet.is_empty() || !unchanged.is_empty() || replay.is_some() {
+            text.push_str("\n\n");
+        }
+        text.push_str("Decision gate: ");
+        text.push_str(message);
+        text.push('\n');
     }
     text
 }
@@ -353,6 +383,33 @@ mod left_to_athena_tests {
         }
         // The replay section comes after the lists.
         assert!(with.find("- src/a.rs").unwrap() < with.find("Replay of accepted").unwrap());
+    }
+
+    #[test]
+    fn the_gate_section_appears_only_when_given_and_without_it_the_text_is_unchanged() {
+        let unmet = vec!["a criterion".to_string()];
+        let unchanged = vec!["src/a.rs".to_string()];
+        assert_eq!(
+            send_back_text_full("BRIEF", &unmet, &unchanged, None, None),
+            send_back_text_with_replay("BRIEF", &unmet, &unchanged, None)
+        );
+        let message = "decisions not reconciled: D02 (README.md). Add an entry.";
+        let with = send_back_text_full("BRIEF", &unmet, &unchanged, None, Some(message));
+        assert!(with.starts_with("BRIEF\n\n## Sent back"), "{with}");
+        assert!(
+            with.contains(&format!("Decision gate: {message}")),
+            "{with}"
+        );
+        // The message follows the lists.
+        assert!(with.find("- src/a.rs").unwrap() < with.find("Decision gate:").unwrap());
+        // A gate-only send-back lists no criteria or files.
+        let only = send_back_text_full("BRIEF", &[], &[], None, Some(message));
+        assert!(!only.contains("Criteria not met"), "{only}");
+        assert!(
+            only.ends_with(&format!("Decision gate: {message}\n")),
+            "{only}"
+        );
+        assert!(!send_back_text("BRIEF", &unmet, &[]).contains("Decision gate"));
     }
 
     #[test]
