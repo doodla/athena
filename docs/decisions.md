@@ -4309,3 +4309,13 @@ should replace those estimates with its figures.
   `crates/athena-core/src/reading.rs`, `crates/athena-core/src/disk.rs`, D08. Measured: the tests named above.
   Not measured: how many future changes will touch the two D08 paths, and whether authors will add the link or
   work around it.
+
+## D157 · D08 checked against the stand-in script helper change: it stands
+
+- **Case:** A test in `crates/athena-git/src/snapshot.rs`, which D08 governs, now writes its executable fixture
+  file through the shared test helper `athena_testkit::write_executable` (a child process writes the bytes, so
+  the test process holds no write handle and cannot hit `ETXTBSY`).
+- **Decision:** Amends D08 by checking it only. D08 stands unchanged: the change touches test code in
+  `snapshot.rs`, and snapshots, their throwaway repositories and the files they show are built as before.
+- **Reversal cost:** None. No behavior of the snapshot code changed.
+- **Provenance:** Read: D08, D156, `crates/athena-git/src/snapshot.rs`.
