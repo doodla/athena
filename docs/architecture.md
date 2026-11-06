@@ -90,6 +90,7 @@ depends on another, and `athena-data` and `athena-git` are leaves.
 | `athena-cap-change` | v0's one capability: a focused, independently verified change | core, data, context |
 | `athena-cap-study` | The studying capability's reusable core: typed study records, the work-handling model, and the validation rules that gate a study. Registered in the CLI | core, data, context |
 | `athena-cli` | The `athena` binary: commands, the interactive prompt, displays, the git and tool hook entry points | core, cap-change, cap-study, data, gate, agent, git |
+| `athena-testkit` | Test-only helpers shared by other crates' tests (a dev-dependency only): writing an executable stand-in script from a child process so a fork in another thread cannot cause "Text file busy" | none |
 | `xtask` | Setup and CI tasks, and the repository-policy tests | data, git |
 
 ## Where things live

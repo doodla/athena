@@ -8138,29 +8138,16 @@ mod tests {
     /// An executable script that stands in for a build of `athena`.
     #[cfg(unix)]
     fn stub_binary(dir: &std::path::Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join("athena-stub");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        athena_testkit::write_executable(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         path
     }
 
-    /// Runs a checker, trying again while the freshly written stub is busy (a parallel test's fork can hold it).
+    /// Runs a checker against a stub written by [`stub_binary`]. The helper never holds the stub open for
+    /// writing here, so no retry for a busy file is needed.
     #[cfg(unix)]
     fn check_stub(bin: PathBuf, reading: &Reading) -> Result<ReadingCheck> {
-        let checker = BinaryChecker::new(bin);
-        let mut result = checker.check("add a greeting", reading);
-        for _ in 0..20 {
-            if !result
-                .as_ref()
-                .is_err_and(|e| format!("{e:#}").contains("Text file busy"))
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-            result = checker.check("add a greeting", reading);
-        }
-        result
+        BinaryChecker::new(bin).check("add a greeting", reading)
     }
 
     #[cfg(unix)]

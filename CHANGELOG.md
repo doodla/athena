@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A new test-only crate, `athena-testkit`, with `write_executable`, which writes an executable stand-in script
+  by starting a short-lived `sh` child that receives the bytes on stdin, writes a temporary file, sets mode 755
+  and renames it into place, so the test process never holds the script open for writing and a fork in another
+  thread cannot make running it fail with "Text file busy" (`ETXTBSY`). A stress test runs write-then-run
+  cycles while other threads fork: the helper hits `ETXTBSY` zero times, and a variant that writes in-process
+  prints its count (18 of 600 cycles in one run on the development machine). The stand-in scripts of the
+  tests in `xtask`, `athena-cli`'s `reconcile` test, `athena-agent`, `athena-core` (checks and reading) and
+  `athena-git`'s snapshot test now use it, and the retry for a busy stub in the reading test is removed. D157
+  records that D08 was checked against the change and stands.
 - The producer's prompt now has a `## Decisions that govern files you will change` section, added after the
   plan, that lists each decision of `docs/decision-links.toml` governing a file the plan or the reading's
   deliverables expect to change: the decision id, the governed paths and the rule for reconciling it (a log entry
