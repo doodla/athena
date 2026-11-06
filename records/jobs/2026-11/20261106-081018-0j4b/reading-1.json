@@ -1,0 +1,150 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-081018-0j4b",
+  "n": 1,
+  "at": "2026-11-06T11:41:41.795401501Z",
+  "invocation_seq": 1,
+  "base_commit": "25c2da910b258ade7db79525a6588d62227f8a45",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Keep the failing section of a CI log, not its cleanup tail",
+  "summary": "Root cause: `detail_from_job_logs` (crates/athena-core/src/gh/client.rs) tails the whole CI job log, which ends in runner post-job cleanup, and when no test name is parsed (e.g. a shard that did not finish, or an xtask test) the stored `output_tail` is only that noise. Fix it there: cut the post-job cleanup block before tailing and, when the tail has no failure evidence, keep the failure lines (`test result`, `FAILED`, `failures:`, `panicked at`) instead. This addresses jobs 20261106-022423-vdtn and 20261106-045349-f6x6 only as the evidence of the class; their candidate changes (config ceiling, mirrored_sources) are dropped.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "root-cause",
+      "how": "fix in detail_from_job_logs where the stored tail is built, with a test on the class"
+    },
+    {
+      "id": "tested",
+      "how": "new tests plus fmt, clippy, cargo test criterion"
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "tests assert the stored output content, not wiring"
+    },
+    {
+      "id": "rust",
+      "how": "change is Rust only"
+    },
+    {
+      "id": "small",
+      "how": "one focused change in the log-to-detail path"
+    },
+    {
+      "id": "verified",
+      "how": "verifier runs the named cargo tests"
+    },
+    {
+      "id": "outcome-check",
+      "how": "criteria check that the failure text is kept and cleanup text dropped"
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the stored check result is read by the verifier and by introspection, who must be able to see why a test check failed.",
+    "Code survey: read crates/athena-core/src/gh/client.rs (detail_from_job_logs, failing_units, plain_log_line) and crates/athena-core/src/checks.rs (tail_lines, tail, failed_test_names, with_failure_detail, FAILED_TAIL_LINES). The entry point is CiSource::failure_detail, which fetches job logs and calls detail_from_job_logs; names are parsed first, then the whole log is tailed, then the FAILING_UNITS_PREFIX header is added only when names exist. The bug is that the tail is taken of the full log including post-job steps ('Post job cleanup', 'Cleaning up orphan processes', git config lines).",
+    "No new record or data file is added under crates/, so check_record_file, AnyRecord and the round-trip test are not affected; CheckRun/FailureDetail fields stay unchanged.",
+    "Job 20261106-022423-vdtn: its candidate (max_concurrency ceiling 8 to 16 in config.rs, docs, athena.toml, CHANGELOG) is unrelated to the cause and is dropped; its CI findings were the noise tail itself plus an xtask test flake, which this change does not address except for the output they showed. Its CHANGELOG nit is moot.",
+    "Job 20261106-045349-f6x6: its candidate (mirrored_sources plan field, admission rule, prompts, docs) is unrelated and dropped; its findings concerned that work, and its drain-test CI failure showed the same cleanup tail, which this change fixes for later jobs.",
+    "Not a new refusal rule: the change does not refuse readings, so no replay-refusal percentage applies.",
+    "Tail is applied before redaction in with_failure_detail; the new trimming happens earlier, so redaction behavior is unchanged."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The CHANGELOG entry (CHANGELOG.md, under Fixed) and code comment name the root cause: the stored tail was taken of the whole CI log, which ends with post-job cleanup, and failure lines were not selected.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-core detail_from_job_logs`: a new test feeds a job log with a failing test and a trailing post-job cleanup block (Post job cleanup, git config --unset-all, Cleaning up orphan processes, a Node.js deprecation warning) and asserts output_tail contains the `FAILED`/`panicked at` lines and no cleanup text. It fails on the base commit and passes with the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core detail_from_job_logs`: a new test with a log that yields no parsed test names (a shard that did not finish, or non-cargo test output) followed by cleanup asserts output_tail keeps the lines containing `test result`, `FAILED`, `failures:` or `panicked at` rather than only cleanup text. It fails before the change and passes after, so it covers the class and not one job.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core checks`: existing tests for tail_lines, 200-line and byte caps, FAILING_UNITS_PREFIX and redaction still pass, and a log with no failure lines and no cleanup keeps its plain tail as before.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --locked`: all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "No files outside crates/athena-core (and CHANGELOG.md) change; the 20261106-022423-vdtn and 20261106-045349-f6x6 candidate files are not reintroduced.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.8
+    }
+  ],
+  "out_of_scope": [
+    "The max_concurrency ceiling change from job 20261106-022423-vdtn (config.rs, docs, athena.toml): dropped",
+    "The mirrored_sources plan field, admission rule and prompt changes from job 20261106-045349-f6x6 (records.rs, briefs.rs, admission.rs, planner/critic prompts, etc.): dropped",
+    "Fixing the flaky xtask repin test or drain tests",
+    "Editing records/, athena.toml, defaults.toml or CI workflows",
+    "Changing the local (non-CI) failed-check tail behavior beyond what the shared helper needs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.4,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1900.0,
+        "p90": 4300.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6682134570765661,
+      "p_user_intervenes": 0.08117154811715481,
+      "cost_usd": {
+        "p10": 0.5604083908971385,
+        "p50": 1.3692381520764751,
+        "p90": 4.340185349668117
+      },
+      "wall_time_s": {
+        "p10": 564.5772999060001,
+        "p50": 2037.8826497830003,
+        "p90": 4217.991541447998
+      }
+    }
+  },
+  "departures": "Slightly higher cost than the reference because tests need realistic CI log fixtures."
+}
