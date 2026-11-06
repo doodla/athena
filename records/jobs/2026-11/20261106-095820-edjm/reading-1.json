@@ -1,0 +1,256 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-095820-edjm",
+  "n": 1,
+  "at": "2026-11-06T09:58:48.34884247Z",
+  "invocation_seq": 1,
+  "base_commit": "e454bd10095866547a0c8eead3f096b2bba94742",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Finish ETXTBSY fix: all test stand-ins via shared child-process helper",
+  "summary": "Retry of job 20261106-065752-jexx for developers and CI running the Linux suite: a new test-only crate athena-testkit holds one helper writing executable stand-ins from an `sh -c 'cat > tmp && chmod 755 tmp && mv tmp final'` child. Every test site, including the missed xtask gitleaks fake, uses it, and a scan test fails on any in-process executable write in test code.",
+  "class_of_work": "tests",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Helper, stress test and scan test are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New crate has passing tests; cargo test and clippy are required clean."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo test commands the verifier runs."
+    },
+    {
+      "id": "root-cause",
+      "how": "A scan test covers every site instead of patching only the one that surfaced."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria check ETXTBSY counts and the scan failing on a planted violation."
+    },
+    {
+      "id": "strangers",
+      "how": "Helper and tests are documented for an outside reader."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule that stand-ins go through the helper is enforced by the scan test."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261106-065752-jexx findings addressed: (1) major, the xtask test a_cached_gitleaks_is_skipped_only_when_it_reports_the_pinned_version still wrote in-process via std::fs::write + set_executable, so it is converted to the helper; (2) minor, the CHANGELOG overclaim is fixed by writing the entry from the final diff; (3) minor, docs/architecture.md was changed outside the deliverables, and it is now a listed deliverable (a crate-table row for athena-testkit is kept); (4) nit, the in-process ETXTBSY count was visible only with --nocapture, so the stress test now prints it in a way that appears in recorded output (for example, it asserts nothing on the count but the test run uses println via a documented command, or the count is written into the test's passing output through a non-captured channel). The earlier candidate is the starting point: its 21 changed files are all kept as deliverables.",
+    "Code survey: grep over crates/ and xtask shows the test-side executable writes at xtask/src/main.rs:809 (set_executable helper) and :837, crates/athena-core/src/reading.rs:8144, crates/athena-core/src/checks.rs:1009, crates/athena-agent/src/claude.rs:641 and crates/athena-cli/tests/reconcile.rs:140. The other set_permissions hits in crates/athena-core/src/{toolconfig,pin,snapshot}.rs and crates/athena-git/src/snapshot.rs lines 445-516 are production code and stay. No records or data file under crates/ is added, so the records allow-list (check_record_file, AnyRecord) is not touched.",
+    "The scan test lives in the new crate athena-testkit (tests/), scans test code in the workspace, ignores production code and the helper itself, and has a unit check that a planted violation string is detected.",
+    "The helper crate is named athena-testkit as in the earlier candidate; the follow-up text's 'athena-testutil' is read as the same shared helper.",
+    "The in-process variant's ETXTBSY count depends on scheduling; the test reports it and does not assert a minimum."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Grep for `set_permissions` and `from_mode(0o755)` in xtask/src/main.rs, crates/athena-cli/tests/reconcile.rs, crates/athena-agent/src/claude.rs, crates/athena-core/src/checks.rs, crates/athena-core/src/reading.rs and crates/athena-git/src/snapshot.rs finds no test code that writes an executable; only production code matches. The xtask gitleaks-version test calls athena_testkit::write_executable.",
+      "kind": "content"
+    },
+    {
+      "text": "The helper source in crates/athena-testkit/src/lib.rs spawns sh with the script bytes on stdin running cat to a temp file, chmod 755, then mv to the final path, waits for it, and never opens the script for writing in the test process.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test --locked -p athena-testkit`: the scan test passes on the repo and a unit test shows it flags a planted in-process executable write; the stress test passes with 0 ETXTBSY for the helper, and the in-process variant's ETXTBSY count appears in the recorded output.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test --locked` across the workspace; it passes, including the converted tests in xtask, athena-cli, athena-agent, athena-core and athena-git, and the decision-link check. `cargo clippy --all-targets` is clean and `cargo fmt --check` passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "docs/decisions.md has an appended entry saying the decision covering crates/athena-git/src/snapshot.rs was checked and stands, and docs/decision-links.toml carries its link.",
+      "kind": "content"
+    },
+    {
+      "text": "xtask/shard-timings.txt lists every new test file or unit, and Cargo.toml and Cargo.lock list the new crate and its dependents.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has one entry that describes only what the final diff does. docs/architecture.md gets only the crate-table row for athena-testkit.",
+      "kind": "content"
+    },
+    {
+      "text": "The diff has no retries at run sites, no production-behavior change in claude.rs or other non-test code, no secrets or personal data, and the helper and tests are documented for an outside reader.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-testkit/src/lib.rs",
+      "action": "create",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-testkit/Cargo.toml",
+      "action": "create",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-testkit/tests/stand_in_stress.rs",
+      "action": "create",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-testkit/tests/no_in_process_exec_writes.rs",
+      "action": "create",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.1
+    },
+    {
+      "path": "Cargo.toml",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "Cargo.lock",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "xtask/Cargo.toml",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-cli/Cargo.toml",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-agent/Cargo.toml",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/Cargo.toml",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-git/Cargo.toml",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-cli/tests/reconcile.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/architecture.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    }
+  ],
+  "out_of_scope": [
+    "Retries at run sites or in production code",
+    "Changing production behavior of claude.rs or other non-test code",
+    "Non-Linux platform support",
+    "athena.toml, defaults.toml and workflow changes",
+    "Production-code set_permissions uses in crates/athena-core/src/{toolconfig,pin,snapshot}.rs and crates/athena-git/src/snapshot.rs"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.6,
+        "p90": 3.8
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2100.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7375,
+      "p_verification_passes": 0.43478260869565216,
+      "p_user_intervenes": 0.11666666666666665,
+      "cost_usd": {
+        "p10": 0.1676110353501872,
+        "p50": 0.9698844196526821,
+        "p90": 2.6305583707391715
+      },
+      "wall_time_s": {
+        "p10": 560.2719269423648,
+        "p50": 1950.9868427690008,
+        "p90": 4589.086501461751
+      }
+    }
+  },
+  "departures": "Larger than the reference: it touches about 24 files and needs a new scan test plus a cold workspace build."
+}

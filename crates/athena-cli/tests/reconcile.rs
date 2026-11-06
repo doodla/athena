@@ -14,7 +14,6 @@ use athena_git::Git;
 use athena_git::records_branch::RECORDS_REF;
 use common::*;
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 struct World {
@@ -132,12 +131,11 @@ fn world() -> World {
     let bin = hosts.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let gh = bin.join("gh");
-    std::fs::write(
+    athena_testkit::write_executable(
         &gh,
         "#!/bin/sh\necho 'gh: Not Found (HTTP 404)' >&2\nexit 1\n",
     )
     .unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
     World {
         fx,
         _hosts: hosts,

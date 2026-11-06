@@ -1,0 +1,202 @@
+{
+  "schema": "athena.verification/1",
+  "job": "20261106-065752-jexx",
+  "candidate_commit": "1d02574855c22c8ae9ffa6dd5f549b17828de324",
+  "verified_fingerprint": "sha256:24d126680a16547166445a09d4d33b4582c56ede66f676b1e99f9efe95bf3240",
+  "tool_config_from_base": [],
+  "checks": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42196696407 for 1d02574855c22c8ae9ffa6dd5f549b17828de324",
+      "reused": true
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42196696407 for 1d02574855c22c8ae9ffa6dd5f549b17828de324",
+      "reused": true
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--locked"
+      ],
+      "exit_code": null,
+      "passed": true,
+      "tests_ran": null,
+      "duration": {
+        "value": 0.0,
+        "unit": "seconds",
+        "provenance": "measured",
+        "basis": "recorded result"
+      },
+      "output_tail": "",
+      "note": "result reused from the CI run https://github.com/doodla/athena/actions/runs/42196696407 for 1d02574855c22c8ae9ffa6dd5f549b17828de324",
+      "reused": true
+    }
+  ],
+  "check_cleanup": [],
+  "verifier_invocation": 3,
+  "criteria": [
+    {
+      "criterion": "Grep for `set_permissions` and `from_mode(0o755)` in xtask/src/main.rs, crates/athena-cli/tests/reconcile.rs, crates/athena-agent/src/claude.rs, crates/athena-core/src/checks.rs, crates/athena-core/src/reading.rs and crates/athena-git/src/snapshot.rs shows no test code writing an executable stand-in itself; each such test calls the one shared helper.",
+      "kind": "content",
+      "met": false,
+      "evidence": "I grepped for set_permissions, from_mode and #!/ (Grep tool). The stand-in helpers in reconcile.rs, claude.rs, checks.rs, reading.rs, snapshot.rs and xtask's `stand_in_claude` now call `athena_testkit::write_executable`. But xtask/src/main.rs:1020-1021, in test `a_cached_gitleaks_is_skipped_only_when_it_reports_the_pinned_version`, still does `std::fs::write(&fake, \"#!/bin/sh\\necho 8.1.0\\n\")` and then `set_executable(&fake)`, which runs `set_permissions(from_mode(0o755))` at line 809. It then executes the fake through `gitleaks_present` → `found` (line 139, `Command::new(program)`). That test writes an executable stand-in itself, and the run happens in production code, the exact case the request names. The remaining set_permissions hits in snapshot.rs (438-478) and xtask (809) are production code.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "The helper's source starts a child process (sh) with the script bytes on stdin that runs cat to a temp file, chmod 755, then mv to the final path, and waits for it; it never opens the script for writing in the test process.",
+      "kind": "content",
+      "met": true,
+      "evidence": "crates/athena-testkit/src/lib.rs: WRITE_PROGRAM = `cat > \"$1\" && chmod 755 \"$1\" && mv \"$1\" \"$2\"`. It spawns `sh -c` with `Stdio::piped()` stdin, writes the bytes to the pipe, drops it and calls `child.wait()`. On failure it removes the temp file. The temp file is a per-process, per-call name in the target's directory. The process never opens the script itself.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "Run `cargo test` for the stress test: many write-then-exec cycles with other threads forking pass with the helper with zero ETXTBSY, and an in-process-write variant prints/records its ETXTBSY count on this machine in the test output (at least once, or the test documents how often it hit).",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Full run: `helper write: 600 cycles, 0 ETXTBSY` and `in-process write: 600 cycles, 8 ETXTBSY on this machine`. Run alone: the helper had 600 cycles and 0 ETXTBSY; in-process had 600 cycles and 12 ETXTBSY. The helper test asserts busy == 0. The count only shows with --nocapture, which the test's doc comment says.",
+      "commands": [
+        "cargo test -p athena-testkit --locked -- --nocapture",
+        "cargo test --locked -p athena-testkit --test stand_in_stress helper_never_hits_text_file_busy_while_other_threads_fork -- --nocapture",
+        "cargo test --locked -p athena-testkit --test stand_in_stress in_process_write_hits_text_file_busy_while_other_threads_fork -- --nocapture"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "`cargo test --locked` passes across the workspace, `cargo clippy` is clean and `cargo fmt --check` passes.",
+      "kind": "behavior",
+      "met": true,
+      "evidence": "Athena's recorded checks for 1d02574855c2, from CI run 42196696407: fmt, clippy and test all passed. I also ran targeted tests at the changed sites, and all passed: athena-agent stand_in_tests (10), athena-git snapshot (14), xtask --bin (69), athena-core reading/checks stub tests (2) and athena-cli --test reconcile (2).",
+      "commands": [
+        "cargo fmt --all --check",
+        "cargo clippy --all-targets --locked -- -D warnings",
+        "cargo test --locked"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "docs/decisions.md has an appended entry for the decision covering crates/athena-git/src/snapshot.rs saying it was checked and stands, and docs/decision-links.toml carries its link; the repo's decision-link check passes under cargo test.",
+      "kind": "content",
+      "met": true,
+      "evidence": "D157 is appended at the end of decisions.md (line 4313): 'D08 checked against the stand-in script helper change: it stands'. decision-links.toml adds a [[link]] with line 4318, older D08, newer D157, status amended. All 10 decisions tests passed, including the append-only/well-formed log test and the real-list D08 test.",
+      "commands": [
+        "cargo test --locked -p athena-cli --lib decisions"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "xtask/shard-timings.txt lists any new test file or unit added by the change (and Cargo.toml/Cargo.lock list any new crate).",
+      "kind": "content",
+      "met": true,
+      "evidence": "shard-timings.txt adds `athena-testkit --doc`, `--lib` and `--test stand_in_stress`. The root Cargo.toml adds the member and the workspace dependency. Cargo.lock adds the athena-testkit package and the dev-dependency edges. The xtask shard tests pass.",
+      "commands": [
+        "cargo test --locked -p xtask --bin xtask"
+      ],
+      "commands_verified": true
+    },
+    {
+      "criterion": "CHANGELOG.md has an entry that describes only what the diff does, no more.",
+      "kind": "content",
+      "met": false,
+      "evidence": "The entry says 'The stand-in scripts of the tests in `xtask` ... now use it'. The xtask gitleaks stand-in (main.rs:1020) does not, so the claim overstates what the diff does. The figure '18 of 600 cycles' is the producer's own run, which I could not reproduce: I measured 8 and 12. The entry labels it as one run on the development machine, which is acceptable. The rest is accurate.",
+      "commands": [],
+      "commands_verified": true
+    },
+    {
+      "criterion": "No secrets, credentials or personal data are committed; the helper and test are documented for an outside reader.",
+      "kind": "content",
+      "met": true,
+      "evidence": "I read the diff and found no secrets, credentials or personal data. The crate docs in lib.rs explain the race and the fix, and stand_in_stress.rs documents both tests and how to see the count.",
+      "commands": [],
+      "commands_verified": true
+    }
+  ],
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "One executable stand-in in a listed file still writes in-process and runs through production code, so the ETXTBSY race remains there",
+      "evidence": "`std::fs::write(&fake, \"#!/bin/sh\\necho 8.1.0\\n\")` followed by `set_executable(&fake)` (set_permissions 0o755 at line 809). The fake is then executed by `gitleaks_present` → `found` → `Command::new`. If ETXTBSY hits there, `found` returns None and the assertion fails. The request requires every such test to use the helper. Fix: `athena_testkit::write_executable(&fake, \"#!/bin/sh\\necho 8.1.0\\n\").unwrap();`.",
+      "location": "xtask/src/main.rs:1020-1021 (test a_cached_gitleaks_is_skipped_only_when_it_reports_the_pinned_version)",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "CHANGELOG claims the xtask stand-ins all use the helper",
+      "evidence": "It says 'The stand-in scripts of the tests in `xtask` ... now use it', but the gitleaks fake in xtask/src/main.rs is unchanged.",
+      "location": "CHANGELOG.md (new Added entry)",
+      "source": "verifier"
+    },
+    {
+      "severity": "minor",
+      "summary": "File changed outside the expected deliverables",
+      "evidence": "A crate-table row for athena-testkit was added. The update is reasonable, but the file is not on the expected deliverables list.",
+      "location": "docs/architecture.md",
+      "source": "verifier"
+    },
+    {
+      "severity": "nit",
+      "summary": "The in-process ETXTBSY count is only visible with --nocapture, so the recorded CI test output does not show it",
+      "evidence": "The count goes out through eprintln!, which libtest captures for passing tests. The test's doc comment says to use --nocapture. My --nocapture runs showed 8 and 12 hits in 600 cycles.",
+      "location": "crates/athena-testkit/tests/stand_in_stress.rs",
+      "source": "verifier"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "agent_verdict": "fail",
+  "final_verdict": "fail",
+  "reasons": [
+    "the verifier's verdict is fail",
+    "2 of 8 criteria unmet",
+    "1 blocker or major finding(s)"
+  ],
+  "inputs": [
+    "request",
+    "accepted reading",
+    "acceptance criteria",
+    "deliverables and out of scope",
+    "applicable defaults",
+    "candidate diff and stat",
+    "check results"
+  ],
+  "summary": "The new helper `athena_testkit::write_executable` is correct and well documented. It feeds the script's bytes on stdin to `sh -c 'cat > \"$1\" && chmod 755 \"$1\" && mv \"$1\" \"$2\"'` and waits for it, so the test process never holds a write handle to the script. I ran the stress test with `--nocapture`: the helper had 0 ETXTBSY in 600 cycles. The in-process variant hit ETXTBSY 8 of 600 times next to the helper test, and 12 of 600 times run alone. The six named sites' stand-in helpers were switched, and their tests pass when I run them. The D157/D08 entry, its link and the shard timings are in place. The decision-log tests pass, and the recorded fmt, clippy and test checks passed. However, the request says every test that writes an executable stand-in must use the helper. One stand-in in a listed file was missed: `xtask/src/main.rs` test `a_cached_gitleaks_is_skipped_only_when_it_reports_the_pinned_version` still writes a fake `gitleaks` with `std::fs::write` plus `set_executable` (which calls `set_permissions(0o755)`). It then runs it through production code (`gitleaks_present` → `found` → `Command::new`). That is exactly the ETXTBSY-prone pattern the request targets, so criterion 1 is not met. The CHANGELOG also overstates by saying the `xtask` stand-ins now use the helper. Minor: `docs/architecture.md` changed but is not on the deliverables list."
+}

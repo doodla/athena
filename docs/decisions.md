@@ -4309,3 +4309,18 @@ should replace those estimates with its figures.
   `crates/athena-core/src/reading.rs`, `crates/athena-core/src/disk.rs`, D08. Measured: the tests named above.
   Not measured: how many future changes will touch the two D08 paths, and whether authors will add the link or
   work around it.
+
+## D157 · D08 was checked against the test-only change to `crates/athena-git/src/snapshot.rs` and stands
+
+- **Case:** The job that moves every test stand-in program to `athena_testkit::write_executable` edits the test
+  module of `crates/athena-git/src/snapshot.rs`, a path D156 maps to D08. The edit changes only how one test makes
+  an executable file; nothing outside `#[cfg(test)]` changes.
+- **Decision:** Amends D08 in prose only: D08 was checked and stands. Agents still work in detached snapshots,
+  each with its own throwaway repository, and the snapshot code behaves as before. The test `user_repo` writes
+  `src/run.sh` through the helper instead of writing it and then setting its mode in-process, and still checks that
+  the executable bit survives into the snapshot.
+- **Alternatives:** Leave the test as it was: it then writes an executable in-process, which the scan test in
+  `crates/athena-testkit/tests/no_in_process_exec_writes.rs` fails.
+- **Tradeoff:** A one-line reconciliation entry for a change that reverses nothing, as D156 requires.
+- **Reversal cost:** None; remove this entry and its link with the change.
+- **Provenance:** Read: D08, D156 and the `user_repo` test. Measured: `cargo test -p athena-git snapshot`.

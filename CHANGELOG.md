@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A test-only crate, `athena-testkit`, with `write_executable(path, contents)`: it writes a stand-in program
+  through an `sh -c 'cat > tmp && chmod 755 tmp && mv tmp final'` child, so the test process never has the file
+  open for writing and running it cannot fail with `ETXTBSY` ("Text file busy") on Linux. Every test that
+  makes a stand-in (`claude`, `gh`, `gitleaks`, `cargo`, an `athena` stub, a script in a snapshot) now calls it,
+  in xtask, `athena-cli`, `athena-agent`, `athena-core` and `athena-git`, and the retry loop that one `athena-core`
+  reading test wrapped around its run is removed. A scan test (`no_in_process_exec_writes`) fails on any test code
+  that calls `set_permissions`, `Permissions::from_mode` or `set_mode`, and a stress test prints how many runs hit
+  `ETXTBSY` with the helper (0) and with an in-process write. Production code, including the busy-file retry in
+  the Claude Code driver, is unchanged. `docs/decisions.md` gains D157, which records that D08 was checked
+  against the test-only edit of `crates/athena-git/src/snapshot.rs` and stands.
 - The producer's prompt now has a `## Decisions that govern files you will change` section, added after the
   plan, that lists each decision of `docs/decision-links.toml` governing a file the plan or the reading's
   deliverables expect to change: the decision id, the governed paths and the rule for reconciling it (a log entry
