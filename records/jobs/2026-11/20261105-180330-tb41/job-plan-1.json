@@ -1,0 +1,464 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261105-180330-tb41",
+  "round": 1,
+  "at": "2026-11-05T23:49:47.792141609Z",
+  "invocation_seq": 2,
+  "approach": "A `cargo` symlink to the athena binary sits in a per-job wrapper directory that is first on the producer's PATH. When `main` finds argv[0] is `cargo`, it reads the job's slot settings and finds the real cargo further down PATH. For build, check, clippy, test, doc and run it calls the new `slot_exec::run`, the same function behind the hidden `athena build-slot -- <cmd>` subcommand. `run` takes a producer-class slot from the real `SlotQueue`, appends one JSON line (queued_s, slots held) to a per-job log, runs the command in a child tied to the wrapper's life with `procs::isolate`, and returns its exit code (128+signal if killed). The slot is a file lock, so the OS frees it on any exit, including SIGKILL. If the wait passes `build_wait_s`, it prints `no build slot free for <N> s; try again` and exits 75. Other subcommands (fmt, metadata, tree) exec the real cargo directly. A new optional `Policy.build_wrapper` makes the hook deny those slotted cargo subcommands when the wrapper is missing, which is the mechanism for \"wrapper form only\". `invoke_and_record` reads and removes the log into a new optional `Invocation.build_slots`, and the \"build wait\" line sums checks plus producer commands and prints the peak slots held. A slot's `held` count, taken when it is won, rises only at acquisitions, so its maximum over all acquisitions is the peak. Producer commands only. No unsafe code and no non-Rust files.",
+  "decisions": [
+    {
+      "choice": "The wrapper is a symlink named `cargo` to the athena binary, dispatched on argv[0] in `main` beside the existing `pre-commit`/`commit-msg` dispatch (crates/athena-cli/src/main.rs:546-553). The `build-slot -- <cmd>` subcommand is a hidden clap variant that calls the same `slot_exec::run`.",
+      "reason": "It needs no shell script (the Rust-only default). `-- <cmd>` is what the design names, and tests and the wrapper share one code path.",
+      "rejected": [
+        {
+          "option": "A `#!/bin/sh` wrapper script that execs `athena build-slot -- cargo \"$@\"`",
+          "why": "It adds a non-Rust file, and it needs its own recursion guard to find the real cargo."
+        },
+        {
+          "option": "Having the hook rewrite the command to `athena build-slot -- cargo ...`",
+          "why": "It needs new hook output (updatedInput) and changes what the record's commands_run holds. A PATH wrapper is what the design says."
+        }
+      ]
+    },
+    {
+      "choice": "The wrapper reads its queue from a settings file `{job_dir}/build-slot.json` (slots dir, slots, wait_s, promote_s), named by env `ATHENA_BUILD_SLOT`. The core writes it in `agent_spec` for the producer from `jc.config.pipeline()` and `state.slots_dir()`. The log path is env `ATHENA_BUILD_SLOT_LOG`.",
+      "reason": "The agent's `ATHENA_STATE_DIR` is the nested job state (env.rs:97-100), not the repository's, so the wrapper cannot find the shared slots directory on its own. The file also avoids adding fields to `EnvSpec`, which is built in about ten places.",
+      "rejected": [
+        {
+          "option": "Pass the limits as several env variables",
+          "why": "Six values to keep in step, and the settings file round-trips through one serde type that a test can read."
+        },
+        {
+          "option": "Add slot fields to `EnvSpec`",
+          "why": "It forces edits at every EnvSpec literal (run/mod.rs, run/checks.rs, reading.rs, introspect.rs, live.rs, env.rs tests)."
+        }
+      ]
+    },
+    {
+      "choice": "Slotted subcommands are build, check, clippy, test, doc and run, defined once in athena-agent (`lib.rs`) and used by both the policy and the wrapper. fmt, metadata and tree pass through unslotted.",
+      "reason": "Design section 4 says every cargo command that compiles. The producer may run doc and run (athena.toml:74), and leaving them out would let `cargo run` build outside a slot. The four named in the criteria are included.",
+      "rejected": [
+        {
+          "option": "Only build, test, clippy, check",
+          "why": "`cargo run` and `cargo doc` compile and would be a bypass of the limit."
+        }
+      ]
+    },
+    {
+      "choice": "The child is started with `athena_agent::procs::isolate` (own process group, parent-death SIGTERM). The wrapper does not install signal handlers. The exit code is the child's, or 128+signal.",
+      "reason": "`unsafe_code = \"deny\"` (Cargo.toml:57) and the only unsafe code is in procs.rs. If the wrapper is killed the OS drops the lock and the child gets SIGTERM, so the slot is not held by an orphan.",
+      "rejected": [
+        {
+          "option": "A signal handler through libc in athena-cli",
+          "why": "It adds unsafe code outside procs.rs."
+        },
+        {
+          "option": "Add a pub no-new-group helper to procs.rs",
+          "why": "procs.rs is not a listed deliverable and the extra group is acceptable."
+        }
+      ]
+    },
+    {
+      "choice": "Add `Policy.build_wrapper: Option<PathBuf>` (`#[serde(default, skip_serializing_if = \"Option::is_none\")]`). In `check_cargo`, when it is set and the subcommand is slotted, deny unless `<dir>/cargo` is a file. Only the producer gets it. `evaluate`'s signature does not change.",
+      "reason": "It fails closed: a missing wrapper denies cargo build and test instead of running unslotted. The hook reads only this file, and an old policy file still parses.",
+      "rejected": [
+        {
+          "option": "Have the hook read an env variable for the wrapper",
+          "why": "If the variable is absent the check silently turns off."
+        },
+        {
+          "option": "Remove slotted subcommands from the producer grant when the wrapper cannot be installed",
+          "why": "It cannot be tested in athena-agent, where criterion 4 runs, and it hides the cause."
+        }
+      ]
+    },
+    {
+      "choice": "Keep `commands_run: Vec<String>` as it is. Add a sibling `Invocation.build_slots: Vec<CommandSlot>` with `subcommand`, `queued_s` and `slots_held`, `#[serde(default, skip_serializing_if = \"Vec::is_empty\")]`. It holds a fixed word and numbers, so it needs no redaction.",
+      "reason": "`commands_run` is read as strings by display.rs, status.rs and verify.rs. A new element type would break them and old records. The sibling still gives queued_s per producer command.",
+      "rejected": [
+        {
+          "option": "Change commands_run elements to a struct or an untagged enum",
+          "why": "It changes every reader and the old-record read path."
+        }
+      ]
+    },
+    {
+      "choice": "The peak is carried per command as `slots_held`: the number of slot files locked just after the slot is won (`Slot::held()`). The status line prints the maximum over recorded commands.",
+      "reason": "The count of held slots rises only when a slot is won, so the maximum over acquisitions is the peak. It needs no new state file and `athena status --snapshot` can read it from records.",
+      "rejected": [
+        {
+          "option": "A peak file in the slots directory",
+          "why": "The snapshot status reads records, not the state directory."
+        },
+        {
+          "option": "Also store held on each check in verification.json",
+          "why": "It touches CheckRecord and the step-3 files, which are out of scope. The peak is then a lower bound that covers producer commands only."
+        }
+      ]
+    },
+    {
+      "choice": "Failure modes: missing settings for a slotted subcommand exits 1 with a message (fail closed). A wait past the limit exits 75. A kill-switch stop closure is a no-op in the wrapper, because `athena stop` kills the agent's process group.",
+      "reason": "Running cargo unslotted is the bypass. The message and the code 75 are the documented ones (design section 4).",
+      "rejected": [
+        {
+          "option": "Run cargo unslotted when settings are missing",
+          "why": "It silently defeats the limit."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-cli/src/slot_exec.rs",
+      "action": "create",
+      "purpose": "`run` (acquire a Producer-class slot, log queued_s and held, run the command isolated, free on exit, exit 75 and the message on SlotWait), `cargo_wrapper` for argv[0]=cargo (slotted subcommands take a slot, others exec the real cargo), `real_cargo` (PATH search skipping the athena binary), and unit tests for the parsing and lookup.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-cli/tests/slot_exec.rs",
+      "action": "create",
+      "purpose": "Integration tests with the real binary and a real SlotQueue: hold and free (also by signal and by wrapper kill), two producers with one slot, the 75 timeout, the peak never above the limit, and fmt passing through.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Dispatch on argv[0]==`cargo` before clap; add the hidden `build-slot` subcommand (`--settings`, trailing `-- <cmd>`) that calls slot_exec::run and returns its exit code.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/lib.rs",
+      "action": "modify",
+      "purpose": "`pub mod slot_exec;`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/lib.rs",
+      "action": "modify",
+      "purpose": "Constants and helpers shared by the policy and the wrapper: the slotted subcommand list, `takes_build_slot`, `cargo_subcommand`, and the env variable names for the settings and log files.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/env.rs",
+      "action": "modify",
+      "purpose": "For Side::Produce, put `{job_dir}/build-slot-bin` first on PATH and set the settings and log variables; add `wrapper_dir` and `install_wrapper` (create the dir and the `cargo` symlink to the athena binary); tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/policy.rs",
+      "action": "modify",
+      "purpose": "Add `Policy.build_wrapper` and the `check_cargo` rule (slotted subcommands denied when `<dir>/cargo` is missing); the `build_wrapper: None` literals in its tests; the new tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/slots.rs",
+      "action": "modify",
+      "purpose": "`Slot::held()` (slot files locked just after the win) set in `acquire` and `try_acquire`; `SlotSettings` (serde) with `SlotQueue::settings`, `from_settings` and `write`; a peak test with threads.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "`CommandSlot` and the optional `Invocation.build_slots` (default, skipped when empty); round-trip tests for old and new records.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Extend `BuildWait::of` and `Throughput::text` with producer commands' queued_s and the peak; update the Invocation test helper literal; new tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/invocation.rs",
+      "action": "modify",
+      "purpose": "`invoke_and_record` removes a stale log before the run and, after it, parses the log at `spec.env[ATHENA_BUILD_SLOT_LOG]` into `record.build_slots` and removes the file; `build_slots: Vec::new()` in both literals; a test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "In `agent_spec`, for the producer role: write the settings file, install the wrapper, remove any stale log, and set `Policy.build_wrapper`; `None` for other roles.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/admission.rs",
+      "action": "modify",
+      "purpose": "`build_wrapper: None` in three test Policy literals (688, 818, 903).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/planning.rs",
+      "action": "modify",
+      "purpose": "`build_wrapper: None` in the verifier Policy literal (219).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "`build_wrapper: None` in two verifier Policy literals (1030, 1191); no case changes.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/live.rs",
+      "action": "modify",
+      "purpose": "`build_wrapper: None` in the Policy literal (170).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/pr_check.rs",
+      "action": "modify",
+      "purpose": "`build_slots: Vec::new()` in the Invocation literal (269).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/reconcile.rs",
+      "action": "modify",
+      "purpose": "`build_slots: Vec::new()` in the test Invocation literal (245).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-gate/src/landing_tests.rs",
+      "action": "modify",
+      "purpose": "`build_slots: Vec::new()` in the Invocation literal (125).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/agent-and-build-slots.md",
+      "action": "modify",
+      "purpose": "A 'Built' note under step 4 (choices, class number, what was not measured), in the style of steps 3 and 5.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/records.md",
+      "action": "modify",
+      "purpose": "One sentence on the optional `build_slots` of `athena.invocation/1`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased entry: producer cargo commands take a build slot; `build-slot` subcommand; exit 75 message; `build_slots` field; status line.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "slots.rs: add `held: usize` to `Slot` with `held()`, computed after a win by counting slot files whose try_lock fails (the won one included), in `acquire` and `try_acquire`. Add `SlotSettings {dir, slots, wait_s, promote_s}` (serde) with `SlotQueue::settings()`, `SlotQueue::from_settings(&SlotSettings)` and a write helper. Add the thread-based peak test (limit 2, max held <= 2).",
+    "athena-agent lib.rs: add `BUILD_SLOT_SUBCOMMANDS = [\"build\",\"check\",\"clippy\",\"test\",\"doc\",\"run\"]`, `takes_build_slot(&str)`, `cargo_subcommand(&[String]) -> Option<&str>` (skip leading dash words the way `check_cargo` does), and the env names `ATHENA_BUILD_SLOT` and `ATHENA_BUILD_SLOT_LOG`. env.rs: constants for the wrapper dir (`build-slot-bin`), settings file and log file; `wrapper_dir(job_dir)`; `install_wrapper(job_dir, athena_bin)`; in `build`, for Side::Produce and after the capability env loop, prefix PATH and set the two variables. Add the PATH test.",
+    "athena-cli slot_exec.rs: `run(queue, class, cmd, log) -> Result<u8>` (acquire with a no-op stop; on a SlotWait error print `no build slot free for {limit_s} s; try again` and return 75; append the JSON log line; spawn with `procs::isolate`; wait; return the code or 128+signal; drop the slot). `cargo_wrapper(args)` (read settings from the env; for a slotted subcommand call `run` with the real cargo found by `real_cargo`; otherwise exec the real cargo; missing settings for a slotted subcommand exits 1). lib.rs: `pub mod slot_exec`. main.rs: argv[0]==`cargo` branch and the hidden `BuildSlot` variant. Unit tests for `real_cargo` and the log line.",
+    "policy.rs: add `Policy.build_wrapper` (serde default, skipped when none) and the `check_cargo` rule using `takes_build_slot`; add `build_wrapper: None` to the test literals (958 helper, 1253 steward); write the six policy tests of the criterion 4 demonstration, including the old-JSON parse.",
+    "Update the other Policy literals: admission.rs (688, 818, 903), run/planning.rs:219, tests/refusal_corpus.rs (1030, 1191), tests/live.rs:170.",
+    "records.rs: add `CommandSlot` and `Invocation.build_slots`. Add `build_slots: Vec::new()` to the literals in invocation.rs (195, 281), status.rs:2431, pr_check.rs:269, reconcile.rs:245, landing_tests.rs:125. Add the old/new round-trip tests. docs/records.md: one sentence.",
+    "invocation.rs: in `invoke_and_record`, remove the stale log named in `spec.env` before the run, and after `invocation_record` parse that file line by line into `record.build_slots` (skip unparsable lines) and remove it. Add the test with the fake driver.",
+    "reading.rs `agent_spec`: when `role == Role::Producer`, build `SlotQueue::from_config(&self.state, &jc.config.pipeline())`, write its settings to `{job_dir}/build-slot.json`, call `install_wrapper(&job_dir, &self.athena_bin)`, and set `Policy.build_wrapper = Some(wrapper_dir)`; `None` for other roles. Do this before `env::build` so the files exist.",
+    "status.rs: extend `BuildWait` with producer-command count, their waits folded into the total and longest, and `peak_held: Option<u32>`; update `Throughput::text` so the old form is unchanged without producer data, and the basis line names both sources. Add the tests.",
+    "tests/slot_exec.rs: write the integration tests for criteria 1-3 and the peak, with every test name starting `slot_exec_`. Each has bounded poll loops (10 s deadline); no sleeps are used to order events. The fake cargo is a shell script written into a temp dir at run time.",
+    "docs/design/agent-and-build-slots.md: add the 'Built' note under step 4 (choices, the class number, and what was not measured: priority-tier ordering, timed-out waits not recorded, peak over producer commands only, verifier cargo, baseline and reruns unslotted, grandchildren on wrapper death, the host PATH order). CHANGELOG.md: Unreleased entry.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`; fix anything left."
+  ],
+  "risks": [
+    {
+      "risk": "The host's Bash tool may not honour the PATH order, so `cargo` would resolve to the real cargo and run unslotted.",
+      "mitigation": "The policy denies slotted cargo when the wrapper file is missing, so a missing install is caught. The wrapper's own tests prove the dispatch. The Host question stays open and the Built note says the real host was not measured."
+    },
+    {
+      "risk": "If the wrapper is killed, cargo's children may keep running without a slot.",
+      "mitigation": "The child uses `procs::isolate`, so it gets SIGTERM when the wrapper dies; a test checks the direct child exits. Grandchildren (rustc) are not measured and the Built note says so."
+    },
+    {
+      "risk": "Counting held slots briefly locks the free slot files and can make another head request miss a slot for one poll.",
+      "mitigation": "The wrapper only records a slot's `held` after it is won, and the probe is a brief try-lock. Worst case is a poll interval (250 ms) of extra wait for another head request. Tests allow for this and the Built note mentions it."
+    },
+    {
+      "risk": "Adding fields to Policy and Invocation means edits at about a dozen struct literals in files outside the deliverable list.",
+      "mitigation": "Keep it to a mechanical `build_wrapper: None` or `build_slots: Vec::new()` line per literal; `cargo test --locked` and clippy catch any missed one."
+    },
+    {
+      "risk": "A producer that retries in a loop after exit 75 burns its own time, and timed-out waits are invisible in the record.",
+      "mitigation": "Document that the 75 exit means retry later; the policy test shows it is not a hook denial. The wrapper logs only slots that were won, so timed-out waits are not in build_slots (stated in the Built note)."
+    },
+    {
+      "risk": "Stale files from an earlier invocation of the same job (send-back passes) could be read as the new one's log.",
+      "mitigation": "The settings, wrapper and log live under the job directory, which `agent_spec` rewrites on each producer invocation. The wrapper's PATH search skips any entry that resolves to the athena binary, so there is no recursion. The test uses a fake cargo in a separate dir."
+    },
+    {
+      "risk": "The timeout test needs a real wait of at least one second, because `build_wait_s` is whole seconds.",
+      "mitigation": "The tests use `wait_s = 1` and bounded polling loops, and the settings carry whole seconds like the config. The 1-second cost is accepted."
+    },
+    {
+      "risk": "The deliverable list names crates/athena-cli/Cargo.toml but the plan has no change there.",
+      "mitigation": "Cargo.toml for athena-cli is not changed, because no new dependency is needed (athena-agent, serde_json, tempfile are already there). If the producer finds one is needed, state it in the Built note."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "policy.rs cargo rule (new Policy.build_wrapper)",
+      "dependent": "crates/athena-agent/src/policy.rs `check_cargo` and `evaluate` (callers: crates/athena-cli/src/hooks.rs:67, crates/athena-core/src/admission.rs:222)",
+      "kind": "code",
+      "test": "cargo test -p athena-agent policy (tests 1-6 in the criterion 4 demonstration). admission.rs:222 checks plan demonstration commands against a verifier Policy whose `build_wrapper` is `None`, so its behavior is unchanged (admission.rs tests at 688, 818 and 903 keep passing).",
+      "reason": null
+    },
+    {
+      "name": "Policy struct literal",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (Policy literals at 1030 and 1191)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus. Only `build_wrapper: None` is added to the fixtures; the cases there are reading and plan shapes, not tool-policy forms, so no corpus case is added.",
+      "reason": null
+    },
+    {
+      "name": "Policy struct literal",
+      "dependent": "Policy literals in crates/athena-core/src/admission.rs, crates/athena-core/src/run/planning.rs:219, crates/athena-core/src/reading.rs:361, crates/athena-cli/tests/live.rs:170, and the policy.rs tests",
+      "kind": "code",
+      "test": "cargo test --locked builds and runs all of them. Each gets `build_wrapper: None`, except reading.rs, which sets it for the producer.",
+      "reason": null
+    },
+    {
+      "name": "env::build (PATH and two variables only for Side::Produce)",
+      "dependent": "crates/athena-agent/src/env.rs `build` callers: reading.rs:370 (every role, via agent_spec), run/mod.rs:1524, run/checks.rs:556 and 826, introspect.rs:1589, crates/athena-cli/tests/live.rs:72",
+      "kind": "code",
+      "test": "cargo test -p athena-agent env. Only the producer's agent_spec passes Side::Produce (run/producer.rs:166). Checks, the verifier, the reader and introspection use Side::Verify or Side::Read, and the env test asserts their PATH is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "slots.rs SlotQueue and Slot (adds Slot::held and SlotSettings; acquire is unchanged)",
+      "dependent": "crates/athena-core/src/run/checks.rs (`SlotQueue::acquire`, `Slot::queued`) and crates/athena-cli/src/drain.rs (drain-side SlotQueue use)",
+      "kind": "code",
+      "test": "cargo test -p athena-core slots (existing order, ageing and timeout tests) and cargo test -p athena-cli --test drain.",
+      "reason": "The change only adds an accessor and a serde type. The acquire order, the timeout and the SlotWait result are unchanged."
+    },
+    {
+      "name": "Invocation.commands_run",
+      "dependent": "crates/athena-cli/src/display.rs:1656, crates/athena-core/src/status.rs:1707, crates/athena-core/src/run/producer.rs:196, crates/athena-core/src/verify.rs:366 (readers of `commands_run`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core status and cargo test -p athena-cli.",
+      "reason": "It is unchanged (still Vec<String>); build_slots is a separate optional field."
+    },
+    {
+      "name": "Invocation record (new optional build_slots)",
+      "dependent": "Invocation struct literals: crates/athena-core/src/invocation.rs:195 and 281, crates/athena-core/src/status.rs:2431, crates/athena-core/src/pr_check.rs:269, crates/athena-gate/src/reconcile.rs:245, crates/athena-gate/src/landing_tests.rs:125",
+      "kind": "code",
+      "test": "cargo test --locked. Each literal gets `build_slots: Vec::new()`; the records.rs round-trip test shows old JSON reads and an empty list is not written.",
+      "reason": null
+    },
+    {
+      "name": "athena.invocation/1 field list",
+      "dependent": "Stored records under records/ and docs/records.md (invocation row)",
+      "kind": "code",
+      "test": "cargo test -p athena-data (old-invocation round trip added in step 5).",
+      "reason": "The new field is optional with a serde default and is skipped when empty, so existing records parse and are not rewritten. docs/records.md gets one sentence."
+    },
+    {
+      "name": "The 'build wait' line",
+      "dependent": "Throughput section of `athena status` and the throughput review that is given its text (crates/athena-core/src/status.rs:1065, test at 3395)",
+      "kind": "code",
+      "test": "cargo test -p athena-core status: the existing 'over 2 check(s), longest 30.0 s' and 'no recorded wait gives no line' tests stay valid, because producer text is added only when there are producer commands or a peak.",
+      "reason": null
+    },
+    {
+      "name": "main() name dispatch (adds `cargo`) and a hidden BuildSlot subcommand",
+      "dependent": "crates/athena-cli/src/main.rs argv[0] dispatch for `pre-commit` and `commit-msg` (546-553) and the clap Command enum",
+      "kind": "code",
+      "test": "cargo test -p athena-cli (existing hook and CLI tests) and the slot_exec tests.",
+      "reason": "A new name branch and a new variant; the other branches are untouched."
+    },
+    {
+      "name": "Build-slot wait semantics (held, not failed)",
+      "dependent": "crates/athena-core/src/disk.rs `SlotWait` (documented hold text) and the check-side hold path",
+      "kind": "rule",
+      "test": "cargo test -p athena-core run (existing tests/run slot-wait tests at run/tests.rs:2760).",
+      "reason": "The producer wrapper only maps SlotWait to the exit-75 message. Nothing writes a hold marker or changes `disk.rs`, so the check-side held-not-failed path is untouched."
+    },
+    {
+      "name": "The agent PATH with the wrapper first",
+      "dependent": "Claude Code's Bash tool keeping the PATH order the agent's environment gives it",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No code or doc in the repository shows how the host builds the Bash tool's PATH (system-facts.md has no entry). The policy denies slotted cargo when the wrapper file is missing but cannot see the resolved PATH; recorded as an open question and a risk."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Integration tests in crates/athena-cli/tests/slot_exec.rs, names prefixed `slot_exec_` so the filter matches. Each runs the real athena binary and probes a real SlotQueue over the same temp directory with limit 1. (a) `athena build-slot --settings <f> -- sh -c '<touch started; wait for release file>'`: after `started` appears, `SlotQueue::try_acquire` is None; after release and exit it is Some. (b) A symlink `bin/cargo` to the athena binary and a fake real `cargo` script in another temp dir (written at run time), with PATH=bin:real. Run `cargo build`, `test`, `clippy` and `check`: the slot is held during each and free after. `cargo fmt --check` is not held, because try_acquire is Some during it. (c) A command that dies by `kill -KILL $$`: wrapper exit code 137 and the slot is free. (d) The wrapper is SIGKILLed with `Child::kill` while the command runs: the slot is free and the child's /proc entry disappears within a bounded poll.",
+      "command": "cargo test -p athena-cli slot_exec",
+      "observes": "Slot held exactly while the command runs and free afterwards; slotted subcommands take a slot and fmt does not; a signal death and a killed wrapper both free the slot.",
+      "fails_without": "Without the lock, the probe `try_acquire` during the command would return Some, and the \"held\" assertion fails. Without release at exit or signal, the probe after the command would return None, and the \"free\" assertion fails.",
+      "seam": "Production entry point: the `athena build-slot` subcommand and the argv[0]=`cargo` path, both calling `slot_exec::run` (added in step 2, wired in step 3). Fixture: a temp state dir, a settings JSON written with `SlotSettings` (added in step 1), and a fake cargo script. The real SlotQueue is the probe; the double is only the command run, never the queue or the lock."
+    },
+    {
+      "criterion": 2,
+      "method": "Test `slot_exec_second_producer_waits_for_the_first_then_runs`: settings with slots=1. Start wrapper A on `sh -c 'touch a_started; wait for release'`. After `a_started`, start wrapper B on `sh -c 'touch b_ran'`, with ATHENA_BUILD_SLOT_LOG pointing to B's own log file. Poll `SlotQueue::waiting() == 1`. Assert `b_ran` does not exist. Create `release`. Wait for both with a deadline. Assert `b_ran` exists, A exited before B started (marker mtimes or an order file), and B's log line has queued_s > 0 and slots_held == 1.",
+      "command": "cargo test -p athena-cli slot_exec",
+      "observes": "B waits behind A, then runs, with a recorded queued_s above zero.",
+      "fails_without": "Without the queue, the second command would run while the first still holds the only slot, and the test sees its `ran` marker before the release. Without the recorded wait, the second log line's queued_s is 0 and the greater-than-zero assertion fails.",
+      "seam": "Production entry point: the `athena build-slot` binary run twice. Fixture: a real SlotQueue directory in a temp dir, limit 1, and marker files. `SlotQueue::waiting()` exists (slots.rs:162). The log line and `SlotSettings` come from steps 1 and 2."
+    },
+    {
+      "criterion": 3,
+      "method": "Test `slot_exec_times_out_with_the_documented_message`: slots=1, wait_s=1. Wrapper A holds the slot. Wrapper B runs `cargo test` through the symlink. Assert B's exit code is 75 and stderr is exactly `no build slot free for 1 s; try again`, and that the fake cargo never ran. Assert stderr does not contain `Athena policy`, and the log has no line for B. Policy test `a_wrapped_cargo_test_is_allowed_by_the_hook`: with `build_wrapper` set to a dir containing `cargo`, `bash(&p, \"cargo test\")` is `NoObjection`, so a slot wait cannot be a policy denial. The producer decides after the 75; no code path changes job state, so the job is not failed.",
+      "command": "cargo test -p athena-cli slot_exec && cargo test -p athena-agent policy",
+      "observes": "Exit 75 and the documented message after the shrunk limit; no cargo run; a wrapped `cargo test` is not a denial.",
+      "fails_without": "Without the timeout path, the second wrapper would block forever (the test's deadline fails it) or run unslotted. Without exit 75 and the exact message, the assertions fail. Without the policy tests, nothing shows a wrapped `cargo test` is allowed or that the exit is not a hook denial.",
+      "seam": "Production entry point: the `athena build-slot` binary and `athena_agent::policy::evaluate`. Fixture: wait_s=1 in the settings (a whole-second field, so the test takes about 1 s), a held real slot, and a policy built with `build_wrapper: Some(tempdir)`. `evaluate` and the `bash` helper exist (policy.rs:90, 991). The new field comes from step 4."
+    },
+    {
+      "criterion": 4,
+      "method": "Env test `the_producers_path_starts_with_the_wrapper_directory`: `env::build` with Side::Produce and a lookup PATH of /usr/bin. Assert PATH is `{job_dir}/build-slot-bin:/usr/bin` and the settings and log variables are set. For Side::Verify and Side::Read, PATH is unchanged. Policy tests: (1) `cargo test`, `cargo -q build` and `cargo clippy --all-targets` with `build_wrapper: None` are NoObjection. (2) With `build_wrapper: Some(dir)` and no `cargo` file in it, the same commands are Deny, with a reason that names the wrapper. (3) With a `cargo` file in it, they are NoObjection. (4) With the wrapper present, `/usr/bin/cargo test` and `./cargo test` are Deny (\"run programs by name\", policy.rs:554), `cargo +nightly build` is Deny, and `cargo build --target-dir /tmp/t` is Deny. (5) With the wrapper missing, `cargo fmt --check` and `cargo metadata` are NoObjection. (6) An old policy JSON without the key parses with `build_wrapper == None`.",
+      "command": "cargo test -p athena-agent",
+      "observes": "PATH order for the producer; denial of slotted cargo when the wrapper is absent or bypassed; fmt --check still passes.",
+      "fails_without": "Without the PATH change, the env test finds no wrapper first. Without the policy rule, `cargo test` with a missing wrapper stays NoObjection, so the denial assertion fails. Control: the same command with `build_wrapper: None` is allowed, which shows the action succeeds without the protection.",
+      "seam": "Production entry points: `athena_agent::env::build` (exists, env.rs:65, injectable lookup) and `athena_agent::policy::evaluate` (exists). Fixture: a tempdir with an empty file named `cargo` as the wrapper. The `build_wrapper` field and the env change come from steps 3 and 4."
+    },
+    {
+      "criterion": 5,
+      "method": "Four test groups. (1) records.rs: an old Invocation JSON without `build_slots` reads with an empty list and writes without the key; one with entries round-trips. (2) status.rs: invocations carrying `build_slots` (queued 3.0 and 5.0, held 1 and 2) and checks with queued_s give a line containing `over N check(s) and M producer command(s), longest ... s` and `peak 2 slot(s) held at once`. The existing 'over 2 check(s), longest 30.0 s' test still passes unchanged, and no recorded waits still gives no line. (3) slots.rs: threads take and release slots on a real queue with limit 2, and the maximum `Slot::held()` seen is at most 2 (and at least 1). (4) invocation.rs: with the fake driver, a log file is written at the path in `spec.env[ATHENA_BUILD_SLOT_LOG]` before `invoke_and_record`; the returned record has the parsed `build_slots`, and the file is gone.",
+      "command": "cargo test -p athena-data && cargo test -p athena-core status && cargo test -p athena-core slots && cargo test -p athena-core invocation",
+      "observes": "queued_s stored per producer command, old records still read, the status line includes it and the peak, and the peak never passes the limit.",
+      "fails_without": "Without the field, an invocation JSON with build_slots fails to parse (deny_unknown_fields). Without the status change, the line has no producer-command or peak text. Without `Slot::held`, the peak test cannot hold. Without consuming the log, the record's build_slots stays empty.",
+      "seam": "Production entry points: `Throughput::compute(...).text()`, `SlotQueue::acquire`, `Athena::invoke_and_record`, `AnyRecord::parse`. All exist. Fixtures: the status test builders (`landed_job_with_waits` pattern, status.rs:3371) with the Invocation helper (status.rs:2429), and a real SlotQueue in a temp dir. The fake driver is the existing one in invocation.rs tests (`CountingPinner`/fake); the log file is written by the test, and the code that reads it is production code. New fields and functions come from steps 1, 5, 6 and 7."
+    },
+    {
+      "criterion": 6,
+      "method": "Read the diff of the design doc and CHANGELOG. Step 4 of section 8 must end with a 'Built' note stating: the choices (the symlink wrapper dispatched on argv[0]; the settings and log files; the slotted subcommand list including doc and run; the `Policy.build_wrapper` field; the sibling `build_slots` field; the peak carried per command); the class number (the code's `Class::Producer` is 2, the design counts from 1); and what was not measured: priority-tier ordering of producer requests is not done; timed-out waits are not recorded; the peak covers producer commands only; the verifier's own cargo commands, the baseline and the reruns are not slotted; cargo's grandchildren on wrapper death; the real Claude Code Bash tool keeping PATH order.",
+      "command": "git diff --stat -- CHANGELOG.md docs/design/agent-and-build-slots.md docs/records.md",
+      "observes": "A 'Built' note under step 4 and a CHANGELOG Unreleased entry.",
+      "fails_without": "No Built note and no changelog line, so the diff is empty for those files.",
+      "seam": "Not a behavior criterion; no seam."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three Athena checks on the final tree. This also runs `cargo test -p athena-core --test refusal_corpus`, which compiles with the new Policy field in its two verifier Policy literals (refusal_corpus.rs:1030, 1191) and tests reading and plan shapes the policy change does not touch.",
+      "command": "cargo test --locked && cargo clippy --all-targets --locked -- -D warnings && cargo fmt --all --check",
+      "observes": "All tests pass, no clippy warnings, formatting clean, and only Rust, markdown and changelog files changed.",
+      "fails_without": "A compile error from a missed literal (Policy or Invocation) or a lint (unused import, too many arguments) fails these.",
+      "seam": "Production entry points: the three commands. Existing."
+    }
+  ],
+  "open_questions": [
+    "Host: Does Claude Code's Bash tool keep the PATH order the agent's environment gives it, or does a shell profile snapshot put another cargo first? Nothing in the repository shows it, so the Built note records it as not measured.",
+    "User: Should producer requests be ordered by the job's priority tier (urgent, then high, then the rest) as design section 4 describes? The plan leaves this out: the queue has one producer class, ordered by time asked, and the step 4 text in section 8 does not name it. A later step could add it.",
+    "User: Should the verifier's own cargo commands also be wrapped? They run cargo outside any slot (verifier_commands in athena.toml:76), and the request says producer commands only. The plan leaves them out and says so in the Built note."
+  ],
+  "producer_section_sha256": "e53d881b5809b8c44890104fdabd1a6d1b94af41162fde040efaa5eab9a3e72f"
+}
