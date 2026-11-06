@@ -10,9 +10,9 @@ use crate::land::{Dispatched, Plan, plan};
 use crate::pin::{is_full_sha, mount};
 use crate::reading::{
     BinaryChecker, NO_HISTORY_REASON, Proposal, ReadingChecker, ReplayCheckers, ReplayRun,
-    ReserveStage, TreeRetrySeed, planning_resume_seed, replay, replay_cases, replay_declaration_of,
-    replay_limit_percent, resumable_job, retried_job, retry_findings, same_scope,
-    touches_reading_rules, tree_retry_seed,
+    ReserveStage, SCOPE_REASON_PREFIX, TreeRetrySeed, planning_resume_seed, replay, replay_cases,
+    replay_declaration_of, replay_limit_percent, resumable_job, retried_job, retry_findings,
+    same_scope, touches_reading_rules, tree_retry_seed,
 };
 use crate::scoring::{self, Happened, score, totals};
 use crate::state::{NoStages, ResumeMark, ResumeStage, Stage, StageSink};
@@ -77,7 +77,8 @@ use verification::Checked;
 pub use checks::demo_seam::{Guard as DemoRunnerGuard, install as install_demo_runner};
 pub use close::{build_text, closing_subject};
 pub(crate) use send_back::{
-    left_to_athena, send_back_text, send_back_text_full, send_back_text_with_replay, unmet_criteria,
+    left_to_athena, send_back_text, send_back_text_full, send_back_text_scoped,
+    send_back_text_with_replay, unmet_criteria,
 };
 
 /// How `go` ended.
@@ -1030,6 +1031,8 @@ impl Athena {
             pin: pinned.as_ref().map(|(record, _)| record.clone()),
             // The branch the job lands on; the empty string records a detached HEAD.
             dispatch_branch: Some(self.git.current_branch()?.unwrap_or_default()),
+            // The files an accepted criterion allows the job to change, when one limits them.
+            allowed_paths: accepted.allowed_paths(),
         };
         let files = vec![
             NewFile::record(&AnyRecord::Job(Box::new(job_record.clone()))),
@@ -1048,6 +1051,14 @@ impl Athena {
             "dispatched {id} · prediction commit {}",
             short(&prediction)
         ));
+        if let (Some(paths), Some(criterion)) =
+            (&job_record.allowed_paths, accepted.limiting_criterion())
+        {
+            ui.line(&format!(
+                "scope      allowed paths: {} (from criterion \"{criterion}\")",
+                paths.join(", ")
+            ));
+        }
 
         let mut job = job.clone();
         job.job = Some(job_record);
@@ -1365,6 +1376,45 @@ pub(crate) fn unchanged_planned_files(
         .collect()
 }
 
+/// How many extra times a candidate with files outside the job's allowed paths goes back to the producer,
+/// counted apart from [`PRODUCER_SEND_BACKS`]: a send-back for unmet criteria does not use it up, so a
+/// change made outside the list after that send-back is still sent back before the verifier runs.
+const SCOPE_SEND_BACKS: u32 = 1;
+
+/// The changed paths outside the job's allowed paths, each once, in the order of `changed`. `allowed` is the
+/// list stored on the job record (the accepted reading's deliverables) and `changed` is the snapshot's
+/// change list, which includes deleted files. Both sides are compared as [`normal_path`] writes them. An
+/// allowed entry ending in `/` is a directory and covers every path under it; any other entry covers
+/// only that path.
+///
+/// This is the check that sends a candidate with a file outside its allowed paths back to the producer
+/// before the verifier starts. It reads only paths, never file content.
+pub(crate) fn outside_allowed_paths(allowed: &[String], changed: &[String]) -> Vec<String> {
+    let allowed: Vec<String> = allowed.iter().map(|p| normal_path(p)).collect();
+    let mut outside: Vec<String> = Vec::new();
+    for path in changed.iter().map(|p| normal_path(p)) {
+        let inside = allowed
+            .iter()
+            .any(|a| *a == path || (a.ends_with('/') && path.starts_with(a.as_str())));
+        if !inside && !outside.contains(&path) {
+            outside.push(path);
+        }
+    }
+    outside
+}
+
+/// The closing reason of a job whose candidate changed `outside` files: it starts with
+/// [`SCOPE_REASON_PREFIX`], names each file and the limiting criterion, and says to revert them, so the
+/// retry's brief carries the fix (see [`crate::reading::retry_findings`]).
+fn scope_reason(outside: &[String], criterion: &str) -> String {
+    format!(
+        "{SCOPE_REASON_PREFIX} {}. The accepted criterion \"{criterion}\" limits which files may change, \
+         and the allowed paths are the deliverables the reading lists. Revert each of these files to its \
+         base content, or delete it if it was added.",
+        outside.join(", ")
+    )
+}
+
 /// A path as compared: surrounding spaces and a leading `./` removed.
 fn normal_path(path: &str) -> String {
     let path = path.trim();
@@ -1556,6 +1606,34 @@ impl Athena {
         let c = built.commit.clone();
         let recorded_checks = built.recorded_checks.take();
         let loop_replay = built.loop_replay.take();
+
+        // Files outside the job's allowed paths are found here too, before the decision gate, the pull request,
+        // the checks and the verifier cost anything. The producer loop has already sent such a change back; a
+        // change still outside, or a resumed candidate that never went through the loop, ends here. A resume at
+        // the verifier stage passed this on its first run, and a nested run is judged by the outer job, whose
+        // own check sees the combined change. The closing reason names each file and the fix, and the retry
+        // brief carries it to the next producer (`reading::retry_findings`).
+        if recorded_checks.is_none()
+            && self.nested.is_none()
+            && let (Some(allowed), Some(criterion)) = (
+                ctx.job.job.as_ref().and_then(|j| j.allowed_paths.as_ref()),
+                accepted.limiting_criterion(),
+            )
+        {
+            let changed: Vec<String> = closing
+                .candidate
+                .as_ref()
+                .map(|c| c.changes.iter().map(|e| e.path.clone()).collect())
+                .unwrap_or_default();
+            let outside = outside_allowed_paths(allowed, &changed);
+            if !outside.is_empty() {
+                let changed_paths = std::mem::take(&mut closing.happened.changed_paths);
+                closing.happened = self.failure(ctx, &scope_reason(&outside, criterion));
+                closing.happened.changed_paths = changed_paths;
+                closing.happened.verification_passed = None;
+                return Ok(closing);
+            }
+        }
 
         // Decisions the change reverses are found here, at the producer's step, before the pull request, the
         // checks and the verifier cost anything. A resume at the verifier stage passed this on its first run,

@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A job whose accepted reading limits which files may change (a criterion such as "no file outside X changed",
+  "only X may change", "test-only change" or "production unchanged") now stores that limit on its job record as
+  `allowed_paths`, the reading's deliverable paths (an entry ending in `/` covers a directory tree, so a limiting
+  reading needs a complete deliverable list). A code check compares the files the candidate changed, deleted
+  files included, with that list after each producer report and again before verification. A file outside the
+  list is sent back to the producer, with each path named and the criterion quoted, and an instruction to revert
+  it; this send-back is separate from the one for unmet criteria, so a change made outside the list after that
+  one is still sent back. A candidate still outside the list afterwards closes the job as failed before the
+  checks and the verifier run, with the paths in the reason, which `athena retry` carries to the next producer.
+  A job whose reading has no such limit, and a nested run, are not checked.
 - The producer's prompt now has a `## Decisions that govern files you will change` section, added after the
   plan, that lists each decision of `docs/decision-links.toml` governing a file the plan or the reading's
   deliverables expect to change: the decision id, the governed paths and the rule for reconciling it (a log entry

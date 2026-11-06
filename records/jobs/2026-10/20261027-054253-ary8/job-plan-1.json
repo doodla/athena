@@ -1,0 +1,389 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-054253-ary8",
+  "round": 1,
+  "at": "2026-11-06T09:33:19.131580627Z",
+  "invocation_seq": 3,
+  "approach": "Derive the limit in code at dispatch and store it on the job record. `AcceptedReading::allowed_paths()` (briefs.rs) returns the reading's deliverable paths when a criterion has a limiting phrase, and `None` otherwise. The Job gets an optional `allowed_paths` field, set where the Job is built in run/mod.rs. A path-only helper `outside_allowed_paths(allowed, changed)` sits beside `unchanged_planned_files`, with the same `normal_path` normalisation. It runs at two points. (1) After every producer report in `producer_loop` (run/producer.rs, where the loop actually lives): an outside file joins the one send-back through a new `send_back_text_scoped`, which names each path and says to revert it. If the diff is still outside after the shared send-back, it gets one extra scope-only send-back. (2) At the head of `check_and_verify`, before the decision gate, CI push and verifier: it re-reads the candidate's changes. A still-outside diff, or a resumed candidate that never went through the loop, closes the job as Failed. The reason starts with `SCOPE_REASON_PREFIX` and names the paths, and `retry_findings` carries that reason to a retry's producer. A job with no stored list is never checked. Only Rust and CHANGELOG.md change; no prompt, governance file or records/ file.",
+  "decisions": [
+    {
+      "choice": "Derive the allowed list from the accepted reading in code, in `AcceptedReading::allowed_paths(&self) -> Option<Vec<String>>` (briefs.rs). It returns the deliverable paths, with a leading `./` removed and duplicates dropped, when some criterion matches `limits_changed_files(text)`. It returns `None` when no criterion matches or when the reading has no deliverables.",
+      "reason": "The reading says the limit is derived in code from the accepted criteria and deliverables, and the reader prompt has no token headroom. A method on the existing view needs no new field on `AcceptedReading`, so none of its struct literals change (send_back.rs:214, reading.rs:5922, run_pin_tests.rs:1047). An empty list is never stored, because it would flag every file.",
+      "rejected": [
+        {
+          "option": "Add an allowed_paths output field to the reader or to Reading",
+          "why": "Out of scope: no new reader output field, and prompts are not edited."
+        },
+        {
+          "option": "Use the plan's files plus the deliverables (as `planned_paths` does)",
+          "why": "The limit is the accepted reading's, not the planner's; plan files can be broader than what the user accepted."
+        },
+        {
+          "option": "Treat any criterion containing 'only' as limiting",
+          "why": "Too many false positives ('only the new test fails without the fix'). The matcher uses a fixed phrase list."
+        }
+      ]
+    },
+    {
+      "choice": "`limits_changed_files(text)` is a pure phrase matcher. It lowercases the text and compares words with every non-alphanumeric run turned into one space. It matches these contiguous phrases: `no file outside`, `no files outside`, `no other file(s)`, `nothing outside`, `production unchanged`, `production code unchanged`, `production code is unchanged`, `production is unchanged`. It also matches the literal `test-only` or `tests-only`, and `test only change|diff|job`. Last, it matches the word `only` followed later by `may change`, `may be changed`, `is changed` or `are changed`.",
+      "reason": "It covers the request's examples ('no file outside X changed', 'test-only, production unchanged') and the reading's 'only ... may change' form while leaving this job's own criteria unmatched. The producer for this job edits producer.rs and store.rs, which are not in its deliverable list, so a false match would flag them.",
+      "rejected": [
+        {
+          "option": "A model call or reader-supplied flag to judge limiting criteria",
+          "why": "Not a code check, and it needs a new reader field or prompt change."
+        }
+      ]
+    },
+    {
+      "choice": "Store the list on the Job record as `allowed_paths: Option<Vec<String>>` with `#[serde(default, skip_serializing_if = \"Option::is_none\")]`, set in the `Job` literal at run/mod.rs:994. Read it back in the run through `ctx.job.job`, which is set at run/mod.rs:1053.",
+      "reason": "This is how `pin` and `dispatch_branch` were added, so older records still parse under `deny_unknown_fields`. The same stored list serves a fresh run, a retry and a resumed candidate, because `resume_candidate` (run/mod.rs ~650) uses the same `ctx`.",
+      "rejected": [
+        {
+          "option": "Recompute the list from `accepted` at each check",
+          "why": "The request says to store it with the job, and the stored value is what is auditable."
+        }
+      ]
+    },
+    {
+      "choice": "Check at two points. (1) `producer_loop` (run/producer.rs ~268-366): compute the changed list once from `snapshot.change_list()`, call `outside_allowed_paths`, and add the result to the break condition and to `problems`. It is not added to `report_problems`, because the job ends before the verifier. (2) The head of `check_and_verify` (run/mod.rs ~1565): if `recorded_checks.is_none()` and a list is stored, compare `closing.candidate.changes` with it. On a hit, call `self.failure` with a reason starting `SCOPE_REASON_PREFIX` that names each path, keep `changed_paths` as the decision branch does, and return before the CI push, the early PR and the verifier.",
+      "reason": "The brief asks for the check at hand-off and again before verification. Point 2 is what stops a diff that is still outside after the loop's send-backs, and a resumed candidate that never went through the loop. It follows the pattern the decision gate already uses.",
+      "rejected": [
+        {
+          "option": "Check only in the producer loop",
+          "why": "A diff still outside after the last send-back would reach the verifier, and a resumed candidate would skip the check."
+        },
+        {
+          "option": "Check only at check_and_verify",
+          "why": "The producer's working directory is already gone there, so the producer could not be sent back to fix it."
+        }
+      ]
+    },
+    {
+      "choice": "Give an out-of-scope diff its own extra send-back, constant `SCOPE_SEND_BACKS = 1`, counted apart from `send_backs` (`PRODUCER_SEND_BACKS` stays 1). The loop's limit test becomes `send_backs >= PRODUCER_SEND_BACKS && !(outside non-empty && scope_send_backs < SCOPE_SEND_BACKS)`. At most 3 producer runs happen, and only for a job with a stored list.",
+      "reason": "Criterion 4 asks that an out-of-list change made after the first send-back is sent back again before the verifier. The shared limit of 1 would make that impossible. Reverting a file is cheap, and a job with no list is unchanged.",
+      "rejected": [
+        {
+          "option": "Raise PRODUCER_SEND_BACKS to 2 for all jobs",
+          "why": "It would change unrelated behavior and the existing tests that pin one send-back (run_pin_tests.rs:1336)."
+        },
+        {
+          "option": "Loop until the diff is clean",
+          "why": "Unbounded producer cost; the second check bounds it."
+        }
+      ]
+    },
+    {
+      "choice": "Add `send_back_text_scoped(brief, unmet, unchanged, replay, gate, outside)` in send_back.rs. `send_back_text_full` delegates to it with `&[]`. With a non-empty `outside` it adds a leading sentence, and a section 'Files changed outside the job's allowed paths (revert each):' listing every path. The sentence says to restore each file to the base content, or delete it if it was added, and that a file still outside afterwards closes the job before the verifier runs. With an empty `outside` the text is byte-for-byte what `send_back_text_full` gives today.",
+      "reason": "The signatures and expected text pinned by the existing tests (send_back.rs ~363-412, run_pin_tests.rs ~1133-1287) stay unchanged.",
+      "rejected": [
+        {
+          "option": "Add an `outside` parameter to `send_back_text_full`",
+          "why": "It changes every existing caller and test."
+        }
+      ]
+    },
+    {
+      "choice": "Add `pub(crate) const SCOPE_REASON_PREFIX` in reading.rs, and make `retry_findings` (reading.rs:1784) accept a no-verification Failed outcome whose reason starts with it, as it does for `GATE_REASON_PREFIX`.",
+      "reason": "A job closed at point 2 has no verification, so without this the retry's producer would not be told which files to leave alone.",
+      "rejected": [
+        {
+          "option": "Leave the reason as free text",
+          "why": "The retry brief would not carry the scope violation."
+        }
+      ]
+    },
+    {
+      "choice": "Do not change the refusal corpus or `refusing_check`. The matcher is not a reading check: no reading is refused or accepted differently.",
+      "reason": "`every_acceptance_check_has_a_refusing_corpus_case` (refusal_corpus.rs:779) scans only `step!(check_...)` lines in `refusing_check`, and none is added.",
+      "rejected": [
+        {
+          "option": "Add a corpus case for limiting criteria",
+          "why": "There is no outcome to assert; the corpus holds the gate's Accept or Refuse outcomes."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add `pub fn limits_changed_files(text: &str) -> bool` (the phrase matcher) and `AcceptedReading::allowed_paths(&self) -> Option<Vec<String>>`. Add unit tests for the matcher's input forms, with each of this job's own criteria as a non-match.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `allowed_paths: Option<Vec<String>>` with `serde(default, skip_serializing_if)` to `Job`, with a doc comment. Set `allowed_paths: None` in the existing Job literal (~5074). Add the round-trip test and the old-shape-record test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Set `allowed_paths: accepted.allowed_paths()` in the Job literal (~994). Add `pub(crate) fn outside_allowed_paths`, `const SCOPE_SEND_BACKS`, and a helper building the point-2 reason. Add the scope gate at the head of `check_and_verify` (~1565).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "In `producer_loop`, compute the changed list once, compute `outside`, add it to the break condition and `problems`, apply the extra scope send-back allowance, print the 'still outside after the send-back' line, and build the brief with `send_back_text_scoped`. This is where the loop lives; it is not in the brief's deliverable list.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/send_back.rs",
+      "action": "modify",
+      "purpose": "Add `send_back_text_scoped` and make `send_back_text_full` delegate to it with no outside files. Name each outside path and say to revert it.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `SCOPE_REASON_PREFIX` and let `retry_findings` carry a scope-closed job's reason to the retry. Add `allowed_paths: None` to the Job stubs (5735, 6036). Add a retry_findings test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Add `allowed_paths: None` to the test fixture `dispatched()` (line 650) so it compiles. Not in the brief's deliverable list, but required by the new field.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Pure tests: an outside path is returned by name, an inside list passes (including `./` and a deleted path), `allowed_paths` derivation including unaffected readings and equality with the deliverable paths, and the scoped send-back text.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "End-to-end tests with a scoped wrapper script over `editing`/`counting`: send back once and then again, a clean diff reaching the verifier, a diff still outside closing before the verifier with the paths named, and an unscoped job unaffected.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One bullet under `## [Unreleased]` / `### Added`, written for an outside reader: the job stores allowed paths from a limiting criterion; a code check sends an outside change back to the producer naming the files, and closes the job before the verifier if it remains.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "briefs.rs: add `limits_changed_files(text)` (lowercase, words joined by single spaces, the fixed phrase list plus `test-only`/`tests-only` and the `only ... may change` form) and `AcceptedReading::allowed_paths()`. It strips a leading `./`, drops duplicates, and returns None when no criterion matches or there are no deliverables. Add unit tests for the matcher forms and for this job's 8 criteria as non-matches.",
+    "records.rs: add the optional `allowed_paths` field to `Job` with the same serde attributes as `dispatch_branch`, and a doc comment for an outside reader. Add `allowed_paths: None` to the Job literal at ~5074. Add the round-trip test (through `check_record_file` and `AnyRecord`) and the old-shape test.",
+    "run/mod.rs: add `allowed_paths: accepted.allowed_paths()` to the Job literal at ~994. Add `pub(crate) fn outside_allowed_paths(allowed: &[String], changed: &[String]) -> Vec<String>` beside `unchanged_planned_files`. It normalises both sides with `normal_path`, keeps the order of `changed`, lists a path once, and compares paths only. Add `const SCOPE_SEND_BACKS: u32 = 1` and a `scope_reason(outside)` helper that starts with `SCOPE_REASON_PREFIX` and names each path.",
+    "send_back.rs: add `send_back_text_scoped` with the extra `outside: &[String]` argument and the leading sentence and section described in decisions; make `send_back_text_full` call it with `&[]`. Re-export it where `send_back_text_full` is imported (run/mod.rs:80). Take care of the blank-line separators between sections so that empty `outside` is byte-identical to today's text.",
+    "reading.rs: add `pub(crate) const SCOPE_REASON_PREFIX`, extend the filter in `retry_findings` to accept it, and add `allowed_paths: None` to the Job stubs at 5735 and 6036. Add a retry_findings test next to the decision gate one.",
+    "store.rs: add `allowed_paths: None` to the test fixture at line 650.",
+    "producer.rs `producer_loop`: read `ctx.job.job.as_ref().and_then(|j| j.allowed_paths.clone())`. Compute the `changed` path list once, outside the `unchanged` block, and compute `outside` (empty when no list). Add `outside.is_empty()` to the break condition. After `report_problems` is cloned, push the 'files changed outside the job's allowed paths: ...' problem. Add `scope_send_backs` and apply the limit rule `send_backs >= PRODUCER_SEND_BACKS && !(outside non-empty && scope_send_backs < SCOPE_SEND_BACKS)`. Count the send-back against the shared slot first, then the scope slot. At the limit with `outside` non-empty, print 'producer   files still outside the allowed paths after the send-back; the job ends before the verifier'. Build `attempt_brief` with one `send_back_text_scoped` call.",
+    "run/mod.rs `check_and_verify`: before the decision gate, when `recorded_checks.is_none()` and a list is stored, compare `closing.candidate.changes` paths with it. On an outside path, set `closing.happened` with `self.failure(ctx, &scope_reason(..))`, keep `changed_paths` and set `verification_passed = None` exactly as the decision-gate branch does, and return `Ok(closing)` before `push_ci_branch`.",
+    "run/tests.rs: add a wrapper script over `editing` that appends a limiting criterion to the reader's output and the producer's `criteria_check`, plus per-attempt edits chosen from the prompt vector. Add tests: (a) NOTES.md outside on every attempt gives 3 producer runs, 0 verifier runs, a Failed outcome with `SCOPE_REASON_PREFIX` and NOTES.md named, and send-backs naming it; (b) outside on attempts 0 and 1 and clean on 2 gives 3 prompts where prompts[2] names the second path, and 1 verifier run; (c) an in-scope job reaches the verifier with 1 producer run; (d) an unscoped job editing README.md and NOTES.md has 1 producer run and 1 verifier run.",
+    "run_pin_tests.rs: add the pure tests for `outside_allowed_paths` (outside named; inside with `./` and a deleted path passes; order and dedupe), for `AcceptedReading::allowed_paths` (equality with the deliverables, `None` cases) and for `send_back_text_scoped`.",
+    "CHANGELOG.md: add the bullet under `## [Unreleased]` / `### Added`.",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` and `cargo test -p athena-core --test refusal_corpus`; fix failures without editing existing test expectations."
+  ],
+  "risks": [
+    {
+      "risk": "A phrase match on an innocent criterion stores a list and blocks a legitimate diff, such as the files this very job must change (producer.rs, store.rs) beyond the 8 listed deliverables.",
+      "mitigation": "The matcher uses a fixed phrase list and is tested against many input forms, including all 8 of this job's own criteria as non-matches. A limiting reading with no deliverables stores nothing."
+    },
+    {
+      "risk": "`deny_unknown_fields` means an older Athena binary cannot read a job.json that has the new key.",
+      "mitigation": "The new field is optional, skipped when None and defaulted when absent. Existing records parse (new test). It is written only for a limited job."
+    },
+    {
+      "risk": "Changing the loop's send-back limit and break condition alters behavior for jobs with no stored list.",
+      "mitigation": "Both new items are empty for a job with no stored list, so the old branches run; the existing send-back tests (run_pin_tests.rs:1336-1387, run/tests.rs:2303-2480) must pass unmodified."
+    },
+    {
+      "risk": "A job closed at the second check has no verification, so its reason might not reach the retry's producer.",
+      "mitigation": "The reason is passed through `retry_findings` with a prefix test, and the closing text names each path and the fix."
+    },
+    {
+      "risk": "The fake reader's gate may refuse the extra criterion that the end-to-end tests add.",
+      "mitigation": "The producer runs `cargo test -p athena-core scope_send_back` and adjusts the wrapper only. If the reader's gate refuses the extra criterion, the producer reports it rather than changing the gate."
+    },
+    {
+      "risk": "The brief's deliverable list omits run/producer.rs (where the loop lives, not run/mod.rs as the reading's survey said) and store.rs (a Job fixture).",
+      "mitigation": "The plan names producer.rs and store.rs as files to touch; the producer should list them in its report. The 'planned files unchanged' check only flags planned files left unchanged, not extra changes."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Job record schema gains optional `allowed_paths`",
+      "dependent": "crates/athena-data/src/records.rs: `Job` (athena.job/1), `check_record_file`, `AnyRecord::parse` and `to_json`, with `deny_unknown_fields`",
+      "kind": "code",
+      "test": "New round-trip and old-shape tests in records.rs, next to `a_job_keeps_its_dispatch_branch_through_a_round_trip` (records.rs:5137)",
+      "reason": null
+    },
+    {
+      "name": "Job record schema gains optional `allowed_paths`",
+      "dependent": "Job struct literals: crates/athena-core/src/run/mod.rs:994, store.rs:650, reading.rs:5735 and 6036, records.rs:5074",
+      "kind": "code",
+      "test": "`cargo test --locked` compiles every literal; each gets `allowed_paths: None` except run/mod.rs, which gets `accepted.allowed_paths()`",
+      "reason": null
+    },
+    {
+      "name": "Job record schema gains optional `allowed_paths`",
+      "dependent": "crates/athena-cli/tests/lifecycle.rs:1835 (`dispatch_branch_of`) and other readers of `AnyRecord::Job`",
+      "kind": "code",
+      "test": null,
+      "reason": "They read named fields (`job.dispatch_branch`) or whole records; an absent key stays None and no CLI output prints the field."
+    },
+    {
+      "name": "Job record schema gains optional `allowed_paths`",
+      "dependent": "Older job.json files on the records branch (and older Athena binaries reading a new record)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Old records lack the key and parse through `serde(default)`; the key is written only for a limited job. The older-binary direction is a risk, not a break for existing records."
+    },
+    {
+      "name": "producer_loop break condition, problems list and send-back limit",
+      "dependent": "crates/athena-core/src/run/producer.rs `producer_loop` (the only caller of `unchanged_planned_files`, line 274), reached from `produce_and_verify` (run/mod.rs:1503) for every dispatched job, retry and nested run",
+      "kind": "code",
+      "test": "Existing tests run_pin_tests.rs:1336, 1364, 1378 and run/tests.rs:2303-2480 pin the send-back count and prompts for jobs with no stored list. They must pass unmodified, because with `outside` empty both the limit test and the text are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "send-back brief text",
+      "dependent": "crates/athena-core/src/run/send_back.rs `send_back_text`, `send_back_text_with_replay`, `send_back_text_full` and their tests (~363-412) and run_pin_tests.rs:1133-1287",
+      "kind": "code",
+      "test": "`send_back_text_full` delegates to the new function with `&[]`; the existing equality tests at send_back.rs:393-412 still pass, and a new test shows the scoped text equals it when `outside` is empty",
+      "reason": null
+    },
+    {
+      "name": "new scope gate at the head of `check_and_verify`",
+      "dependent": "crates/athena-core/src/run/mod.rs `check_and_verify` callers: `produce_and_verify` (1536) and `resume_candidate` (650); resumed jobs at the verifier stage with `recorded_checks`",
+      "kind": "code",
+      "test": "Existing run/tests.rs resume and nested tests with no stored list must pass unmodified. New scope tests cover a stored list.",
+      "reason": "A resume at the verifier stage already passed on its first run and is skipped by the `recorded_checks.is_none()` guard. A job with no stored list skips the gate. A nested run uses the same gate with its own stored list."
+    },
+    {
+      "name": "Failed outcome reason with `SCOPE_REASON_PREFIX`",
+      "dependent": "crates/athena-core/src/run/mod.rs:925 and `retry_findings` (reading.rs:1784), the retry brief",
+      "kind": "code",
+      "test": "A new test beside `retry_findings_carry_the_reason_of_a_job_closed_by_the_decision_gate` (reading.rs:5988) shows a scope reason is carried, and the existing test shows the gate reason is still carried and unprefixed text is not.",
+      "reason": null
+    },
+    {
+      "name": "order of gates in `check_and_verify` and the shared send-back",
+      "dependent": "crates/athena-core/src/run/checks.rs `unreconciled_decisions` and the decision gate in the loop (`unreconciled_in_snapshot`)",
+      "kind": "code",
+      "test": null,
+      "reason": "The scope gate runs just before the decision gate and returns separately; the decision gate keeps its own message and condition. A job that trips both gets both items in one send-back."
+    },
+    {
+      "name": "scope check relative to admission",
+      "dependent": "crates/athena-core/src/admission.rs `admit` and the capability `admit`",
+      "kind": "rule",
+      "test": null,
+      "reason": "Admission runs in `candidate_stage` before `check_and_verify` and is unchanged. The scope check reads only the change list paths and adds no admission rule."
+    },
+    {
+      "name": "reading acceptance gate",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (`corpus_cases_get_the_expected_outcome`, `every_acceptance_check_has_a_refusing_corpus_case`, 779) and `refusing_check` in reading.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus, run as part of criterion 6",
+      "reason": "No `step!(check_...)` is added and no reading is accepted or refused differently. The matcher only derives a list from an accepted reading. Input forms such as dash-bullet and code-survey are unchanged, and the plan adds no corpus case."
+    },
+    {
+      "name": "prompt token budgets",
+      "dependent": "System-facts prompt budgets (`system_facts_budgets_match_computed`, crates/athena-cli/tests/budgets.rs) and the reader, producer and verifier prompts",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt or context file text is edited; only briefs.rs code gains a method and function. The producer's brief text is unchanged."
+    },
+    {
+      "name": "planned-files check",
+      "dependent": "`planned_paths` and `unchanged_planned_files` (run/mod.rs:1323, 1349) and the 'Planned files left unchanged' send-back",
+      "kind": "code",
+      "test": "Existing tests at run_pin_tests.rs:1201-1278 stay unmodified and pass.",
+      "reason": "Left untouched. The new helper is separate and reads the stored list, not the plan."
+    },
+    {
+      "name": "changelog entry",
+      "dependent": "CHANGELOG.md `## [Unreleased]` / `### Added` and BRIEF.md's changelog default",
+      "kind": "rule",
+      "test": null,
+      "reason": "One bullet is added under Added; xtask policy scans for banned words and email-like text, and the bullet uses neither."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A pure test in run_pin_tests.rs calls `crate::run::outside_allowed_paths` with a stored list and a changed list that includes one outside path, and asserts the exact outside path comes back. A second test builds the send-back from that path with `send_back_text_scoped` and asserts it names the path and says to revert it. An end-to-end test in run/tests.rs runs a whole job where the reader's reading has a limiting criterion and the producer also edits NOTES.md, and asserts the second producer prompt carries '## Sent back' and names NOTES.md while the verifier count is 0.",
+      "command": "cargo test -p athena-core outside_allowed",
+      "observes": "The pure test returns the outside path by name and the end-to-end test shows a sent-back second producer prompt naming NOTES.md with the verifier never invoked. The production entry points are `outside_allowed_paths`, `send_back_text_scoped` and `Athena::go`.",
+      "fails_without": "With no check, `outside_allowed_paths` does not exist and the end-to-end job reaches the verifier (verifier count 1) with one producer prompt. A check that returned nothing would fail the named-path assertion.",
+      "seam": "Entry points: `crate::run::outside_allowed_paths` (added by step 3, same module as `unchanged_planned_files`) and `Athena::go` through `producer_loop`. The end-to-end test uses the existing `counting`/`editing` fake script (run/tests.rs:2152, 2234), `governed_job_with` (2263), `athena_with` and `Counts`. It adds a wrapper script (plan step 9) that appends a limiting criterion to the fake reader's `acceptance_criteria`, appends the same criterion to the producer's `criteria_check`, and adds the NOTES.md edit through `turn.edits`. The fake reader, producer and verifier exist today and are injected as the `Script` argument to `athena_with`. The wrapper adds only the input; the logic under test is production code."
+    },
+    {
+      "criterion": 2,
+      "method": "A pure test in run_pin_tests.rs passes `outside_allowed_paths` a changed list made of a `./`-prefixed path, a deleted path and an allowed path, all in the list, and asserts the result is empty. An end-to-end test in run/tests.rs runs a scoped job whose producer edits only README.md and asserts one producer prompt, one verifier run and no Failed outcome.",
+      "command": "cargo test -p athena-core inside_allowed",
+      "observes": "The check returns an empty Vec and the job reaches the verifier (verifier count 1, producer count 1).",
+      "fails_without": "An implementation that compared raw strings would flag `./README.md`, and one that compared only added files would flag the deleted path, so the empty-result assertion fails. A check that always rejected would leave the verifier count at 0.",
+      "seam": "Entry points: `outside_allowed_paths` (step 3) and `Athena::go` through `producer_loop`. The end-to-end job uses the same scoped wrapper script as criterion 1 (step 9), with no extra edit. The deleted file is a plain string in the pure test's changed list, because `change_list` includes deleted files and the helper reads paths only. Both seams are the existing run/tests.rs fakes and the new helper."
+    },
+    {
+      "criterion": 3,
+      "method": "A run_pin_tests.rs test builds readings with `accepted()` and checks `AcceptedReading::allowed_paths()` for each case: a limiting criterion with deliverables `./a.rs` and `b.rs` gives `Some([\"a.rs\",\"b.rs\"])`, equal to the deliverable paths. Each of 'No file outside X changed', 'test-only, production unchanged' and 'only the docs may change' also gives a list. Each of this job's own 8 criteria, a reading with no limit, and a limiting criterion with no deliverables gives `None`. An end-to-end test in run/tests.rs runs an unscoped job whose producer edits README.md and NOTES.md and asserts one producer prompt, one verifier run and no scope reason.",
+      "command": "cargo test -p athena-core allowed_paths",
+      "observes": "The stored list equals the deliverable paths exactly for limiting readings, `None` for the rest, and the unscoped job is unchecked whatever changes.",
+      "fails_without": "A matcher that ignored criteria would return `None` for limiting readings and fail the equality; one that matched everything would flag the unscoped job's NOTES.md and fail the end-to-end assertion.",
+      "seam": "Entry point: `AcceptedReading::allowed_paths` (added by step 1) and `Athena::go`. The pure test uses the existing `accepted()` builder (run_pin_tests.rs:1046); deliverables are set on its public field. The end-to-end test uses the existing `governed_job` helper (run/tests.rs:2252), which already takes extra producer edits. No double holds any logic under test."
+    },
+    {
+      "criterion": 4,
+      "method": "End-to-end tests in run/tests.rs with the scoped wrapper script. Test A: the producer edits NOTES.md on attempt 0 and a different file EXTRA.md on attempt 1 (after the first send-back), then reverts both on attempt 2; assert three producer prompts, prompts[2] contains '## Sent back' and names EXTRA.md, one verifier run. Test B: every attempt edits NOTES.md; assert producer count 3, verifier count 0, Failed, and the reason starts with `SCOPE_REASON_PREFIX` and names NOTES.md. This is point 2 closing the job.",
+      "command": "cargo test -p athena-core scope_send_back",
+      "observes": "The second send-back names the new path before the verifier runs; a diff still outside after it fails with the paths named and the verifier count is 0.",
+      "fails_without": "With only the shared send-back (no extra allowance), Test A would have two producer prompts and the verifier would run on the EXTRA.md diff. With no check in `check_and_verify`, Test B would reach the verifier (count 1) with no scope reason.",
+      "seam": "Entry points: `Athena::go` → `producer_loop` (point 1) and `check_and_verify` (point 2). The fakes are the existing `editing`/`counting` scripts plus a per-attempt wrapper that picks edits from the prompt (it contains '## Sent back' or not) and the attempt number from the prompt vector, as `reconciling_on_send_back` does (run/tests.rs:2288). The wrapper is added by step 9; `Counts`, `athena_with` and `Lines` exist."
+    },
+    {
+      "criterion": 5,
+      "method": "Two tests in records.rs. One builds a Job with `allowed_paths: Some(vec![\"crates/a.rs\", \"README.md\"])` through `job_on`-style parsing, serialises it with `AnyRecord::to_json`, asserts the text contains `\"allowed_paths\"`, re-parses it, and passes the same bytes and `record.canonical_path()` to `check_record_file`. The other uses a Job JSON with no `allowed_paths` key and asserts `check_record_file` returns the record with `allowed_paths == None` and the serialised text does not contain the key.",
+      "command": "cargo test -p athena-data allowed_paths",
+      "observes": "The round trip equals the original record and the old-shape record still passes the records check.",
+      "fails_without": "Without the `#[serde(default)]` field, an old record parses but the new record fails `deny_unknown_fields` (parse error). Without `skip_serializing_if`, the old-shape text would gain an `allowed_paths` key and the absence assertion fails.",
+      "seam": "Entry points: `check_record_file(path, bytes)` and `AnyRecord::parse`/`to_json`. The fixture is the existing `job_on` helper (records.rs:5118), extended in step 2 to set `allowed_paths`, and the Job literal at records.rs:5074 gets `allowed_paths: None`. The seam exists today; step 2 adds the field."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs, at the repository root. Include the corpus run so the producer and verifier see that no reading-gate behavior changed.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked && cargo test -p athena-core --test refusal_corpus",
+      "observes": "All exit 0. The corpus run (cases such as the INPUT_FORMS dash-bullet and code-survey cases in refusal_corpus.rs) still gives each case its expected outcome. I read the case list and did not run it, so I report no result.",
+      "fails_without": "A compile error in a missed `Job` literal (store.rs, reading.rs, records.rs, run/mod.rs), a clippy warning, or an existing send-back or retry test broken by a changed signature or output would fail.",
+      "seam": "cargo's own test harness. There are no doubles, and the commands exist today."
+    },
+    {
+      "criterion": 7,
+      "method": "Inspect the diff. Only the listed Rust files, store.rs, run/producer.rs and CHANGELOG.md changed. Existing tests are unchanged apart from `allowed_paths: None` in `Job` literals and the new tests. No path in athena.toml, defaults.toml, workflows, prompt files or records/ appears.",
+      "command": "git status --short && git diff --stat",
+      "observes": "The path list matches the plan's files and contains no governance, prompt or records/ file. `cargo test --locked` passes, including the existing send-back and retry-finding tests.",
+      "fails_without": "An edited prompt, config or records file would show in `git status`. A changed existing test expectation would show as a modified existing test in `git diff`.",
+      "seam": "git status and diff on the working tree; they exist today."
+    },
+    {
+      "criterion": 8,
+      "method": "A run_pin_tests.rs test calls `send_back_text_scoped` with two outside paths and asserts both appear as '- path' lines under the outside-paths heading, that the text contains the revert instruction, and that with an empty `outside` the output equals `send_back_text_full`'s. The CHANGELOG entry is read from the diff.",
+      "command": "cargo test -p athena-core scoped_send_back && git diff -- CHANGELOG.md",
+      "observes": "Each offending path is named and the text says to revert it. CHANGELOG.md shows a new bullet under `## [Unreleased]` / `### Added` describing the stored allowed paths and the two checks.",
+      "fails_without": "A text that did not list the paths or did not say to revert fails the assertions. No changelog bullet means an empty diff for CHANGELOG.md.",
+      "seam": "Entry point: `send_back_text_scoped` (added by step 4), called directly in a pure test. The changelog check is a diff read. No doubles."
+    }
+  ],
+  "open_questions": [
+    "User: Is the extra scope-only send-back (up to 3 producer runs for a job with a stored list) wanted? The alternative is to use the single shared send-back and close the job at the second check, which saves a producer run but cannot send a second out-of-list change back.",
+    "User: Should the stored list also cover files a build always rewrites, such as Cargo.lock, for a limited job? As planned, any changed file outside the deliverables is flagged, which is what the request says."
+  ],
+  "producer_section_sha256": "a711a4ba40512a609546d2b36a5105682adc7da647d4c7092e1a9cef2fd1b6f2"
+}

@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-054253-ary8",
+  "round": 1,
+  "at": "2026-11-06T09:35:11.888040446Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/producer.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/producer.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/store.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/store.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The phrase matcher has obvious false positives. A criterion that limits nothing would store a list, and a correct diff would be sent back and then failed before the verifier.",
+      "evidence": "Several of the planned phrases appear in this repository's own prose, where they limit nothing. I grepped and found: docs/design/records-history.md:134 'Content cannot be judged only after the merge, because by then main is changed' (matches 'only' … 'is changed'); docs/design/athena-v0.md:984 'nothing outside the commit is needed' (matches 'nothing outside'); reading.rs:6598 'cites no other file' and docs/design/context-engineer.md:153 'facts no other file states' (match 'no other file'). The `only … is/are changed` rule allows any distance between the words, which is the same broad 'only' rule the plan rejected, only narrowed a little. A false match is costly. The allowed list becomes the deliverables, which this very job shows are often incomplete (producer.rs and store.rs are missing), and point 2 then closes the job as Failed. Fix: Match only when a file or path word and a change verb appear together in one short window. For example: 'no file(s) outside … (is|are)? changed', 'no other file(s) (is|are|may be)? changed|change(s)', 'only <up to ~6 words> may change|may be changed'. Drop bare 'nothing outside', bare 'no other file(s)' and the 'only … is/are changed' form. Keep 'test-only', 'tests-only' and 'production (code)? (is)? unchanged'. Add the repository sentences quoted here as negative cases in the matcher tests, alongside this job's own 8 criteria.",
+      "location": "Decision 2 (`limits_changed_files`); plan step 1",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "docs/records.md describes the `athena.job/1` fields, and the plan does not add the new field there.",
+      "evidence": "docs/records.md:92 lists the athena.job/1 fields for outside readers. The plan adds `allowed_paths` to the record but changes only Rust files and CHANGELOG.md. The 'strangers' default asks that records be described for an outside reader. `pin` and `dispatch_branch` are not documented there either, so this repeats an existing gap rather than starting one. Fix: Add a short clause to the athena.job/1 row naming `allowed_paths`: optional, present only when a limiting criterion was accepted. If that widens scope too far, say in the plan why it is left out.",
+      "location": "Files list; docs/records.md:92",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Operators cannot see the stored list before the check acts on it.",
+      "evidence": "The list is derived silently when the job is dispatched (mod.rs:994). The first sign that a job is limited is a send-back or a Failed close. Combined with incomplete deliverable lists, this is hard to diagnose. Fix: When a list is stored, print one UI line at dispatch, for example 'scope      allowed paths: a, b (from criterion \"…\")'. Name the matching criterion in the send-back and in the point-2 reason.",
+      "location": "Approach; Decision 3",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "For criterion 4, the 'fails without the behavior' text for Test A describes the wrong outcome.",
+      "evidence": "Without the extra scope allowance, attempt 1 reaches the limit at producer.rs:336. Point 2 then closes the job, so the verifier count is 0, not 1 as the plan says. The test still fails, because it expects 3 prompts and gets 2, so the demonstration holds. Fix: Change the text to: two producer prompts, and the job closes at point 2 with verifier count 0.",
+      "location": "Demonstrations, criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The step 9 wrapper appends the criterion to the producer's `criteria_check`, which is not needed.",
+      "evidence": "The fake producer builds `criteria_check` from the brief's '## Acceptance criteria' section (athena-agent/src/fake.rs:300-310). Once the reader's output carries the criterion, the producer already reports it as met. Fix: Have the wrapper change only the reader's `acceptance_criteria` and the producer's per-attempt edits.",
+      "location": "Plan step 9; demonstration seam for criterion 1",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly, and its code claims match the snapshot. I checked each one by reading the code. `producer_loop` really lives in run/producer.rs: `unchanged_planned_files` is called at line 274 and the send-back limit is at line 336. `check_and_verify` has the decision gate at mod.rs:1565-1578, which the new gate can copy. The Job literal is at mod.rs:994, where `accepted` is in scope. A repo-wide grep finds exactly five `Job` literals (mod.rs:994, store.rs:650, records.rs:5074, reading.rs:5735 and 6036), and the plan covers all five. `retry_findings` filters on `GATE_REASON_PREFIX` at reading.rs:1799, so the plan to add a second prefix there works. Resumed jobs are dispatched through the same path, so they get the stored list too. The fake producer takes `(path, Option<content>)` edits, so the end-to-end tests can delete a file to revert it. The two-point check, the separate scope send-back counter and the delegation through `send_back_text_scoped` keep today's behavior for jobs with no stored list. The demonstrations would fail without the feature. One major soundness problem remains: the phrase matcher that decides whether a job is limited. Several of its phrases are common in this project's own prose, so a criterion that limits nothing can turn on a check that fails legitimate jobs. Fix the matcher and the plan is ready to accept."
+}

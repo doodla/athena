@@ -98,6 +98,127 @@ impl AcceptedReading {
                 .collect(),
         }
     }
+
+    /// The first criterion that limits which files may change (see [`limits_changed_files`]), if any.
+    pub fn limiting_criterion(&self) -> Option<&str> {
+        self.criteria
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .find(|text| limits_changed_files(text))
+    }
+
+    /// The files the job may change, when an accepted criterion limits which files may change: the
+    /// reading's deliverable paths, each once, with a leading `./` removed. An entry that ends in `/`
+    /// is a directory and covers every path under it. `None` when no criterion limits the files, or the
+    /// reading lists no deliverable (an empty list would flag every file). The limit is the deliverable
+    /// list, so a reading whose criterion limits scope needs a complete deliverable list.
+    pub fn allowed_paths(&self) -> Option<Vec<String>> {
+        self.limiting_criterion()?;
+        let mut paths: Vec<String> = Vec::new();
+        for (path, _, _) in &self.deliverables {
+            let path = path.trim();
+            let path = path.strip_prefix("./").unwrap_or(path).to_string();
+            if !path.is_empty() && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        (!paths.is_empty()).then_some(paths)
+    }
+}
+
+/// How many words after "no file" the word "outside" may come.
+const OUTSIDE_WINDOW: usize = 8;
+/// How many words after "outside" the word "changed" (or "modified", "touched") may come.
+const CHANGED_WINDOW: usize = 8;
+/// How many words after "no other file" a change word may come.
+const OTHER_FILE_WINDOW: usize = 3;
+/// How many words after "only" the words "may change" may start.
+const ONLY_WINDOW: usize = 6;
+/// How many words after "test-only" a change, diff, job or pull request word may come.
+const TEST_ONLY_WINDOW: usize = 2;
+
+/// Whether a criterion limits which files may change: "no file outside X changed", "no other file
+/// changed", "only X may change", "test-only change", "production unchanged". Case, punctuation at the
+/// ends of words and hyphens are ignored. Each form needs a path or job word and a change word close together, so the
+/// bare adjective "test-only" and sentences that merely mention files do not match. A miss only means
+/// the job is not checked against a list of allowed paths; a false match would reject a correct diff,
+/// so the matcher errs toward not matching.
+pub fn limits_changed_files(text: &str) -> bool {
+    // A word is a run of non-space characters with punctuation trimmed from its ends, so a path such as
+    // `crates/a.rs` counts as one word; a hyphen separates words, so "test-only" is "test only".
+    let lower = text.to_lowercase().replace('-', " ");
+    let words: Vec<&str> = lower
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let is_change =
+        |w: &str| matches!(w, "changed" | "change" | "changes" | "modified" | "touched");
+    // The index of the first word in `words[from..from + window]` that `test` accepts.
+    let within = |from: usize, window: usize, test: &dyn Fn(&str) -> bool| -> Option<usize> {
+        (from..words.len().min(from + window)).find(|&j| test(words[j]))
+    };
+    for (i, word) in words.iter().enumerate() {
+        match *word {
+            "no" => {
+                let next = words.get(i + 1).copied();
+                if matches!(next, Some("file" | "files")) {
+                    // "no file outside X changed"
+                    if let Some(o) = within(i + 2, OUTSIDE_WINDOW, &|w| w == "outside")
+                        && within(o + 1, CHANGED_WINDOW, &is_change).is_some()
+                    {
+                        return true;
+                    }
+                } else if next == Some("other")
+                    && matches!(words.get(i + 2).copied(), Some("file" | "files"))
+                    && within(i + 3, OTHER_FILE_WINDOW, &|w| {
+                        is_change(w) && w != "changes"
+                    })
+                    .is_some()
+                {
+                    // "no other file changed"
+                    return true;
+                }
+            }
+            "only" => {
+                // "only X may change", "only X may be changed"
+                if let Some(m) = within(i + 1, ONLY_WINDOW, &|w| w == "may") {
+                    let rest = &words[m + 1..];
+                    let may_change = matches!(rest.first().copied(), Some("change"))
+                        || (rest.first().copied() == Some("be")
+                            && matches!(rest.get(1).copied(), Some("changed" | "modified")));
+                    if may_change {
+                        return true;
+                    }
+                }
+                // "test-only change", "tests-only diff": the hyphen was flattened to a space.
+                if i > 0
+                    && matches!(words[i - 1], "test" | "tests")
+                    && within(i + 1, TEST_ONLY_WINDOW, &|w| {
+                        matches!(w, "change" | "changes" | "diff" | "job" | "pr" | "pull")
+                    })
+                    .is_some()
+                {
+                    return true;
+                }
+            }
+            "production" => {
+                // "production unchanged", "production code is unchanged"
+                let mut j = i + 1;
+                if words.get(j).copied() == Some("code") {
+                    j += 1;
+                }
+                if matches!(words.get(j).copied(), Some("is" | "are")) {
+                    j += 1;
+                }
+                if words.get(j).copied() == Some("unchanged") {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// A check Athena will run, by name and command.
@@ -4656,5 +4777,90 @@ mod tests {
             produces: "a commit.",
         }]);
         assert!(text.contains("- change: A change. Use it for edits. It produces a commit."));
+    }
+
+    #[test]
+    fn criteria_that_limit_which_files_change_are_recognised() {
+        for text in [
+            "No file outside crates/athena-core/ changed",
+            "no files outside the two directories are modified in the diff",
+            "No file outside X changed.",
+            "No other file is changed",
+            "no other files touched",
+            "Only the docs may change",
+            "Only crates/a.rs and README.md may be changed",
+            "only tests may be modified",
+            "test-only, production unchanged",
+            "Production code is unchanged",
+            "production code unchanged",
+            "This is a test-only change",
+            "a tests-only diff",
+            "The job is test-only PR",
+        ] {
+            assert!(limits_changed_files(text), "should limit: {text}");
+        }
+    }
+
+    #[test]
+    fn sentences_that_only_mention_files_or_tests_do_not_limit() {
+        for text in [
+            // This job's own criteria.
+            "A new test passes a diff touching a path outside the allowed list to the new check.",
+            "No unrelated behavior changes: existing tests pass unmodified apart from the new field in Job constructors, and no governance file, prompt file or file under records/ is changed.",
+            "cargo fmt --check, cargo clippy --all-targets and cargo test pass at the repository root.",
+            "The send-back text for an out-of-scope diff names each offending path and says to revert it.",
+            // Plain uses of the same words elsewhere.
+            "Do one change and touch no other file.",
+            "It cites no other file.",
+            "facts no other file states",
+            "the check reads the file outside the repository",
+            // The adjective, not a limit on the diff.
+            "the helper is reached through a test-only seam",
+            "the helper is test-only",
+            "test-only edits in the helper",
+            "Only the verifier decides the verdict",
+            "the production build is unchanged by the flag",
+            "",
+        ] {
+            assert!(!limits_changed_files(text), "should not limit: {text}");
+        }
+    }
+
+    fn view_with(criteria: &[&str], deliverables: &[&str]) -> AcceptedReading {
+        let mut accepted = AcceptedReading::new(&reading(), &defaults(), |_| false);
+        accepted.criteria = criteria
+            .iter()
+            .map(|c| (c.to_string(), CriterionKind::Behavior))
+            .collect();
+        accepted.deliverables = deliverables
+            .iter()
+            .map(|p| (p.to_string(), DeliverableAction::Modify, false))
+            .collect();
+        accepted
+    }
+
+    #[test]
+    fn a_limiting_criterion_stores_the_deliverable_paths_and_others_store_none() {
+        let limited = view_with(
+            &["cargo test passes", "No file outside X changed"],
+            &["./a.rs", "b.rs", "a.rs", "docs/"],
+        );
+        assert_eq!(
+            limited.limiting_criterion(),
+            Some("No file outside X changed")
+        );
+        assert_eq!(
+            limited.allowed_paths(),
+            Some(vec!["a.rs".to_string(), "b.rs".into(), "docs/".into()])
+        );
+        // No limiting criterion: no list, whatever the deliverables.
+        let open = view_with(&["cargo test passes"], &["a.rs"]);
+        assert_eq!(open.limiting_criterion(), None);
+        assert_eq!(open.allowed_paths(), None);
+        // A limit with no deliverable stores nothing, since an empty list would flag every file.
+        assert_eq!(
+            view_with(&["No file outside X changed"], &[]).allowed_paths(),
+            None
+        );
     }
 }
