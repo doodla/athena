@@ -1,0 +1,147 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-202436-ch54",
+  "n": 1,
+  "at": "2026-11-06T21:52:12.623663117Z",
+  "invocation_seq": 1,
+  "base_commit": "566d3689ddfe3562ecc2626467ad9e11da84cf55",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Link producer CARGO_TARGET_DIR to the held slot's target in cargo",
+  "summary": "In the producer's cargo wrapper, while a slot is held, create an athena_agent::env::BuildLink from the job's CARGO_TARGET_DIR path to the slot's warm target directory, run cargo, then drop the link; unslotted subcommands behave as today. Audience: the operator whose disk fills with two concurrent jobs; the verifier checks via tests.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "Change and tests are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus cargo test and clippy clean are criteria."
+    },
+    {
+      "id": "verified",
+      "how": "Behavior criteria name cargo test commands."
+    },
+    {
+      "id": "small",
+      "how": "One file plus CHANGELOG."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuses existing BuildLink and slot helpers; nothing new built."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Tests observe the link during and after the command."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and CHANGELOG written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-cli/src/slot_exec.rs (run: CargoShim::from_env, find real cargo, cargo_subcommand, SlotQueue::acquire(Class::Producer), then Command::status), crates/athena-agent/src/env.rs (BuildLink::create(job_dir, link, slot_target) runs check_build_dirs, replaces what is at the link, Drop removes only the symlink; CargoShim holds slots_dir, dir = job_dir/shim), crates/athena-core/src/run/checks.rs (link_slot_target uses state.prepare_slot_target(slot.index(), limit) and BuildLink::create) and crates/athena-core/src/state.rs (slot_target(n) = build_slots_dir/n/target, make_target_dir, prepare_slot_target). No record or data file is added, so no records validation is touched.",
+    "The slot's target path is derived as <slots_dir>/<slot.index()>/target, assuming ATHENA_SLOTS_DIR is the state's build-slots directory (the one slot_target uses); the producer verifies this in code and, if not, derives the path from slots_dir the same way. The directory is created (with CACHEDIR.TAG as make_target_dir does) if absent; reuse StateDir helpers from athena_core where reachable, no new crate.",
+    "The job directory is the parent of the shim dir (CargoShim.dir = job_dir/shim), and the path to link is CARGO_TARGET_DIR read via the wrapper's lookup; if CARGO_TARGET_DIR is unset or the link fails, the wrapper warns on stderr and runs cargo unlinked (as checks.rs does), still holding the slot.",
+    "The link is dropped after the child exits and before the slot is released; the early-return paths (wait, settings errors) never create a link.",
+    "Size-limit deletion (prepare_slot_target's over-limit removal) is not required in the wrapper because the wrapper lacks the limit setting; changing env.rs or config is out of scope. If the shim needs new env settings, the producer keeps them minimal and says so in CHANGELOG.",
+    "Tests use fake cargo scripts (like the existing script helper) that record whether $CARGO_TARGET_DIR is a symlink and where it resolves, plus a temp slots dir and job dir."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "A test in crates/athena-cli/src/slot_exec.rs: a slotted `build` run with a fake cargo observes the job's CARGO_TARGET_DIR path as a symlink resolving to <slots_dir>/<n>/target during the command, and the path no longer exists as a link after run returns. Check: cargo test -p athena-cli slot_exec.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test: two slotted runs one after the other in different job directories resolve to the same slot target directory, and a file written by the first run is still there in the second. Check: cargo test -p athena-cli slot_exec.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test: unslotted subcommands (fmt, metadata) create no link, leave the slot directory untouched, and CARGO_TARGET_DIR is left as it was. Check: cargo test -p athena-cli slot_exec.",
+      "kind": "behavior"
+    },
+    {
+      "text": "The linked path passes the D46 rule: BuildLink::create is called with the job directory, and a test shows a CARGO_TARGET_DIR outside the job directory is refused by check_build_dirs (warning, cargo runs unlinked) while an inside path is linked. Check: cargo test -p athena-cli and cargo test -p athena-agent.",
+      "kind": "behavior"
+    },
+    {
+      "text": "cargo test (workspace) passes and cargo clippy --all-targets is clean and cargo fmt --check passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md gains an entry describing only what the diff does: the producer's slotted cargo commands build in the slot's target directory via a temporary link, unslotted commands unchanged.",
+      "kind": "content"
+    },
+    {
+      "text": "Only crates/athena-cli/src/slot_exec.rs and CHANGELOG.md change (tests live in the former); the diff via git diff shows no change to athena.toml, defaults.toml or workflows.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/slot_exec.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-agent/src/env.rs",
+      "action": "modify",
+      "p": 0.12
+    }
+  ],
+  "out_of_scope": [
+    "Changing checks.rs link_slot_target or the checks' behaviour",
+    "Slot size-limit deletion in the wrapper",
+    "Changes to athena.toml, defaults.toml or workflows",
+    "Removing the producer's private build directory in the drain"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.2,
+        "p90": 3.5
+      },
+      "wall_time_s": {
+        "p10": 450.0,
+        "p50": 1800.0,
+        "p90": 4000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6704805491990846,
+      "p_user_intervenes": 0.08016528925619834,
+      "cost_usd": {
+        "p10": 0.5594588369790886,
+        "p50": 1.383289616067662,
+        "p90": 4.4331531246342095
+      },
+      "wall_time_s": {
+        "p10": 564.9196939436684,
+        "p50": 2039.3932710680006,
+        "p90": 4255.945279813461
+      }
+    }
+  },
+  "departures": null
+}
