@@ -1,0 +1,215 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-121449-49rw",
+  "n": 1,
+  "at": "2026-11-06T12:15:29.283865189Z",
+  "invocation_seq": 1,
+  "base_commit": "ca2bbab141b34e53a2eb39c4ca7844f777f8a42a",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Retry stale jobs on the new tip; append the decision at log end",
+  "summary": "Retry of job 20261106-062207-cbcc: redo the stale-job retry (`athena retry` merges the kept candidate onto the tip, re-verifies and lands with no producer call on a clean merge, producer retry on conflict), this time appending the reversal of D10's alternative (d) as a new decision after D156's last bullet, and pinning the log guard so a mid-file insert fails. Audience: users running parallel jobs, and the verifier.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust plus docs."
+    },
+    {
+      "id": "tested",
+      "how": "New tests for clean-merge, conflict, and log guard; cargo test and clippy must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "The guard is fixed so misplaced decision entries fail in cargo test, not only at verification."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run cargo test and git diff on the behavior."
+    },
+    {
+      "id": "verified",
+      "how": "Independent verifier exercises the tests."
+    },
+    {
+      "id": "mechanism",
+      "how": "Append-only rule enforced by the pinned-prefix test."
+    },
+    {
+      "id": "strangers",
+      "how": "Docs and changelog written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Job 20261106-062207-cbcc is addressed as follows. Its candidate was discarded, so the producer redoes the whole behavior (all 13 files it changed are deliverables below, work kept in intent, not on disk). Major finding (D157 inserted inside D156's last Provenance bullet): fixed by appending the new decision after the final line of the base file and adding a guard that fails such inserts. Minor finding (reader brief always says the candidate will be merged although stale_seed can fall back to a retry from the base): fixed by wording the brief to say the candidate is merged when it is still usable and otherwise the retry starts from the base, with the test updated. Nit (stale shared CARGO_TARGET_DIR artifact): an environment artifact, not a candidate defect; no change.",
+    "Code survey: the guard lives in crates/athena-cli/src/decisions.rs. check_log pins the first PINNED_LEN bytes (through D121) by SHA-256, so the insert inside D156 passed. The fix raises PINNED_LEN and PINNED_SHA256 to cover the base log through D156's last byte, changes the failure message to say 'append at end of file', and adds a check that a new entry's id is exactly one greater than the previous highest. The producer measures the base length and hash from docs/decisions.md as it stands, before appending. Stale-retry code: crates/athena-core/src/reading.rs (earlier_attempt_with, which refuses stale jobs today), crates/athena-core/src/run/mod.rs (stale_seed), run/close.rs, crates/athena-core/src/land.rs (Plan::Stale), crates/athena-git/src/lib.rs (merge_tree_conflicts), crates/athena-cli/src/main.rs, crates/athena-context/src/briefs.rs (reader_brief). No new record or data file is added, so no records allow-list change is needed.",
+    "The decisions guard is a test-time check in decisions.rs; 'the producer's local checks' means cargo test, which already runs it, so no athena.toml change is made. No new refusal rule is added for readings, so no refusal-rate criterion applies.",
+    "The new decision gets the next id after the highest existing one, with a Provenance bullet, and cites D10 by id."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test`: a test shows `athena retry` on a stale job returns a proposal instead of an error.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test where the kept candidate merges cleanly onto a moved branch tip shows checks, replay and verification run on the merged tree, the job lands, and no planner or producer call is recorded for the retry.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test where the candidate conflicts with the moved tip shows the retry goes to a producer run seeded from the merged conflict, and nothing lands without a new verification.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a test shows the landed content's fingerprint equals the fingerprint verified on the merged tree, and the existing land.rs Plan::Stale tests still pass (a landing whose verified fingerprint differs is refused).",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a decisions.rs test shows the log guard fails with a message containing 'append at end of file' when an entry is inserted before the end of the pinned base (including inside D156's last bullet) or when a new entry's id is not one greater than the previous highest, and passes on the real docs/decisions.md.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test`: all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `git diff -U0 -- docs/decisions.md`: a single hunk consisting only of added lines, located after the last line of the base file (after D156's final bullet); no existing line changed. The new decision states it reverses the left-out alternative (d) 'Automatic re-verification on the new base' of D10, gives the reason that stale landings now recur with parallel jobs, and cites D10 by id.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md has an entry describing only what the diff does; README.md text saying stale jobs are refused is corrected.",
+      "kind": "content"
+    },
+    {
+      "text": "The retry help text in crates/athena-cli/src/main.rs and the stale reader brief in crates/athena-context/src/briefs.rs no longer call a stale job simply rejected, and state that the retry starts from the base when the candidate cannot be merged; the brief test covers this.",
+      "kind": "content"
+    },
+    {
+      "text": "Only the listed files change; no secrets or personal data are committed.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/run/close.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-core/src/land.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-cli/tests/lifecycle.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-cli/tests/retry.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "crates/athena-git/src/lib.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "crates/athena-cli/src/decisions.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.99
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "README.md",
+      "action": "modify",
+      "p": 0.85
+    }
+  ],
+  "out_of_scope": [
+    "Automatic (drain-triggered) re-verification of stale jobs without an explicit athena retry",
+    "Changing the staleness rules in land.rs plan() (what makes a job stale)",
+    "Retrying other non-retryable states (landed, dropped, abandoned)",
+    "Editing or annotating any existing line of docs/decisions.md or docs/decision-links.toml",
+    "Prompt files and governance configuration (athena.toml, defaults.toml, workflows)"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.75,
+      "p_verification_passes": 0.65,
+      "p_user_intervenes": 0.08,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2400.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6689814814814815,
+      "p_user_intervenes": 0.08100208768267222,
+      "cost_usd": {
+        "p10": 0.5606460310904166,
+        "p50": 1.380954,
+        "p90": 4.339658231712498
+      },
+      "wall_time_s": {
+        "p10": 564.6343511642463,
+        "p50": 2035.2939910472946,
+        "p90": 4216.323297356367
+      }
+    }
+  },
+  "departures": "Larger than the reference: a multi-crate change to the retry and landing pipeline, plus a guard change, and the earlier attempt failed only on the log placement.",
+  "hard_reason": "Changes the landing/retry pipeline (how stale jobs are re-verified and landed) and the decision-log guard, so a mistake is costly and hard to see.",
+  "producer_effort": "high"
+}
