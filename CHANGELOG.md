@@ -298,6 +298,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- Flaky "Text file busy" (`ETXTBSY`) failures in tests that write an executable stand-in and run it. Root cause:
+  executable stand-ins were written in-process, with no single helper and no mechanical enumeration of the write
+  sites, so each new test could reintroduce the race (a fork in another test thread copies the write handle) and
+  one test papered over it with a retry. Fix at the origin: the new std-only dev-dependency crate `athena-testkit`
+  holds `athena_testkit::write_executable`, which writes through an `sh` child (`cat > tmp && chmod 755 tmp &&
+  mv tmp final`) so the test process never holds the script open for writing. The helper moved there from
+  `athena_git::script_writer`, which is deleted; the last in-process writer, the fake `cargo` in
+  `crates/athena-cli/tests/slot_exec.rs`, now uses it. The integration test `no_in_process_exec_writes` scans test
+  code across the workspace and fails on `set_executable(` wrappers, `set_permissions(`, `from_mode(`,
+  `.set_mode(`, `.mode(<mode>)` and a `chmod` child, with planted-violation tests for each. The integration test
+  `stand_in_stress` runs 800 write-then-exec cycles with four forking threads: the helper variant must meet no
+  busy file, and an in-process control variant prints its busy count. The busy-file retry in the `reading.rs` test
+  helper `check_stub` is removed; the production `retry_busy` in `claude.rs` is unchanged. The `athena-agent`
+  dev-dependency on `athena-git` is replaced by `athena-testkit` (D160).
+
 - `athena retry` no longer starts the same work twice for an interrupted job. An interrupted job (dispatched,
   no live process) stays dispatched after it is retried, so `athena status` kept telling the user to run
   `athena retry <id>` and a second retry made a second "try again on <id>" job. The check is in `Athena::retry`

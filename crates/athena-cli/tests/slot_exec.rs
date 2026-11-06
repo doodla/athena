@@ -8,7 +8,6 @@
 use athena_agent::env::CargoShim;
 use athena_core::disk::{BUILD_SLOT_WAIT, SlotWait};
 use athena_core::slots::{self, Slot, SlotQueue};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -50,8 +49,7 @@ fn fixture(wait_s: u64) -> Fixture {
     let fake_dir = temp.path().join("fake");
     std::fs::create_dir_all(&fake_dir).unwrap();
     let fake = fake_dir.join("cargo");
-    std::fs::write(&fake, FAKE_CARGO).unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    athena_testkit::write_executable(&fake, FAKE_CARGO);
     let marks = temp.path().join("marks");
     std::fs::create_dir_all(&marks).unwrap();
     Fixture {

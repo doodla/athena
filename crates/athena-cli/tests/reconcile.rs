@@ -131,7 +131,7 @@ fn world() -> World {
     let bin = hosts.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let gh = bin.join("gh");
-    athena_git::script_writer::write_executable(
+    athena_testkit::write_executable(
         &gh,
         "#!/bin/sh\necho 'gh: Not Found (HTTP 404)' >&2\nexit 1\n",
     );

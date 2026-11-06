@@ -17,7 +17,6 @@
 pub mod attrs;
 pub mod index;
 pub mod records_branch;
-pub mod script_writer;
 pub mod snapshot;
 
 use std::collections::BTreeMap;
