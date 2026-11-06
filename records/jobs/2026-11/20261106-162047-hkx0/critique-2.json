@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-162047-hkx0",
+  "round": 2,
+  "at": "2026-11-06T16:37:53.835306259Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The clean-merge test cannot tell a three-way merge from the existing whole-file replay, so the 'merged tree' half of criterion 2 goes unshown.",
+      "evidence": "In run 1 the producer edits README.md and the hook edits src/lib.rs. Today's `resume_candidate` replays the candidate's whole files with `diff_tree(&mark.base_commit, &old_commit)` onto the new base `p` (run/mod.rs:546-576). On disjoint files that already gives a tree holding both edits, so checks (b) 'Hello, reader.' plus '// by hand', (c) changes == [README.md] and (f) 'HEAD holds both edits' all pass if merge mode skips `merge_tree` and replays. Decision 1 says replay is unsafe for a stale job, because it would overwrite the tip's edits to a file both sides touched. No test exercises that case. Fix: Have the tip and the candidate edit the same file in hunks far enough apart that git merges them cleanly. For example, the hook appends a line to the end of README.md and the producer edits the first line. Assert that the verifier snapshot, the retry's candidate tree and the landed HEAD hold both hunks. Whole-file replay would drop the tip's hunk and fail the test. Keep the disjoint-file case if wanted, but make the same-file case the evidence.",
+      "location": "Demonstrations, Criterion 2 (crates/athena-cli/tests/lifecycle.rs clean-merge test)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Only the hedged test (ii) shows that the producer's work tree was seeded from the conflicted merge. Test (i) checks only the brief text.",
+      "evidence": "The fake producer applies the same `self.edits` on every run of a Scenario (common/mod.rs:617, `t.edits = self.edits.clone()`), and `seen_by_producer` records only the user prompt (576-579). In (i) the retry's producer overwrites README.md with the candidate's content, so the outcome is the same whether the work tree held markers or the plain base. A brief that names the conflicts while the snapshot stays plain `SnapshotRepo::Base` would pass (i). Test (ii) shows the seed, because the guard fires on markers the producer never wrote. But the plan leaves (ii) as 'if such a script exists, else a unit test'. Fix: Make (ii) mandatory as a lifecycle test. Build the retry's Athena with a second `fx.athena(model.script(...))` whose Scenario has different edits (another file only), so the markers come from the seed. Alternatively, have the fake producer record `snapshot_text(&spec.workdir)` and assert the seeded README.md holds both sides and the markers.",
+      "location": "Demonstrations, Criterion 3 (i) and (ii); crates/athena-cli/tests/common/mod.rs:617",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Some conflicts leave no markers in the tree, and the guard lets them through.",
+      "evidence": "With `git merge-tree --write-tree`, a modify/delete or rename conflict, or a binary-file conflict, is listed by `--name-only` but writes no `<<<<<<<`/`>>>>>>>` lines; the tree keeps one side. `has_conflict_markers` would return false for those paths. The candidate then reaches the verifier with nothing mechanical to flag that one side's change was dropped. The plan's risk entry says 'Conflicts git did not report cannot hold markers' but does not cover reported conflicts without markers. Fix: State the limit in the risks and in the producer brief's conflict text: a listed path with no markers is a modify/delete or binary conflict and must be decided explicitly. Or make the guard closing message list such paths for the verifier. No new mechanism is required.",
+      "location": "Decision 3 / Risks (marker guard)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The line number for `committed_text` is wrong.",
+      "evidence": "Grep shows `fn committed_text(&self, commit: &str, path: &str) -> String` at crates/athena-core/src/run/checks.rs:487. Fix: Cite checks.rs:487. Also note that it returns a String, so the producer should check what it returns for a path missing from the commit before relying on it.",
+      "location": "Decision 3 (`self.committed_text(&c, path)` (checks.rs:426))",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code behind the plan's claims, and they hold. `earlier_attempt_with` refuses `Closed(Stale)` (reading.rs:1362-1374). `settle_resume_marks` deletes the job's own resume mark (run/mod.rs:693). `resume_candidate` replays the candidate's whole files with `diff_tree(old_base, old_commit)` onto the new base (run/mod.rs:546-576). The scope check and decision gate sit where the plan says (1616-1656). `BaseThenTree` lays a commit's files over the base (snapshot.rs:97-101). `merge_tree` returns None on a conflict (lib.rs:664). The decisions.rs parser needs ' · ' right after the id, and the D145 heading at decisions.md:3821 does not have it. `dispatch` builds `RunContext` at one site (1065), and `RetrySeed` literals exist only at the places listed. The design is sound: a three-way merge, reuse of `check_and_verify`, an unchanged `land::plan`, and a marker guard limited to the paths git reported. One demonstration gap blocks accept. In the criterion-2 test the candidate and the tip edit different files (README.md and src/lib.rs). On that test, the old whole-file replay gives the same tree as a three-way merge, so the test passes even if merge mode only replays. Yet decision 1 rests on replay being unsafe here. Smaller points: the test that best shows the conflict seed is hedged; the marker guard misses conflicts that leave no markers; one line number is off."
+}

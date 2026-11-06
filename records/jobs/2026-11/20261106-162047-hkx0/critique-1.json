@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-162047-hkx0",
+  "round": 1,
+  "at": "2026-11-06T16:33:12.141820324Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Conflict markers put into the seeded tree have no mechanical guard, and the stated reason for leaving one out is wrong.",
+      "evidence": "Decision 3 says 'Markers fail loudly if the producer leaves them in', but a grep of crates/ for '<<<<<<<' or 'conflict marker' finds nothing, so admission and the gate do not refuse them. In README.md or docs (the conflict file in the plan's own criterion 3 test), markers compile and pass cargo test, so only the verifier can catch them. The Risks section says a guard belongs in candidate.rs or producer.rs, which are D08-governed or not deliverables. But `check_and_verify`, which already holds pre-verifier refusals such as the scope check (mod.rs:1616-1636) and the decision gate (1643-1656), is in run/mod.rs, a listed deliverable. The design creates this hazard itself. Fix: For a conflict-seeded retry (`RetrySeed.conflicts` non-empty, carried on RunContext), add a check in `check_and_verify`, next to the scope and decision checks. It reads each conflict path in the candidate commit and closes the job before the verifier when a line starts with '<<<<<<< ', '=======' or '>>>>>>> ' between marker pairs. Better still, send the work back once from the producer loop's existing send-back. Add a run/tests.rs or lifecycle test in which the producer leaves the markers in README.md and the job does not land. Remove the 'fail loudly' claim.",
+      "location": "Plan Decision 3 and Risks (conflict markers); crates/athena-core/src/run/mod.rs check_and_verify (line 1594)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The demonstration does not show that the checks and the replay ran on the merged tree.",
+      "evidence": "Criterion 2 requires that 'checks, replay and verification run on the merged tree'. The demonstration checks the role list, that the UI lines contain 'checks', and that `seen_by_verifier` holds both edits. Only the last ties anything to the merged tree. A 'checks' line appears for any run, so it does not show the checks ran on this candidate, and nothing about the replay is checked. `replay_stage` (mod.rs:1864-1910) writes a replay record and a 'replay     ...' line for (p, c), and the verification record holds measured check runs. Fix: In the clean-merge lifecycle test, also assert three things. The retry job's candidate record has `candidate_commit` equal to the commit whose fingerprint was verified, and its `changes` list both the candidate's and only the candidate's paths. The retry's verification record has measured check runs (not reused: no 'they do not run again' line). The retry's replay record names that same candidate commit, or there is a 'replay ' UI line for the retry.",
+      "location": "Demonstrations, Criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new land.rs unit test would pass on today's code, so it shows nothing about this change.",
+      "evidence": "The test merges a candidate onto a moved tip with `merge_tree`, verifies it with its own fingerprint and calls the unchanged `plan`. Today's `plan` already lands a tree whose fingerprint matches and refuses one that does not (land.rs:136-141, existing test at land.rs:704). Only the lifecycle half, which compares the landed fingerprint with `verified_fingerprint` for the retry job, depends on the new behavior. Fix: Keep the lifecycle fingerprint assertion as the demonstration for criterion 4. Drop the land.rs unit test or label it a regression guard, and do not count it as evidence.",
+      "location": "Demonstrations, Criterion 4 (land.rs unit test)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The pin length is given without a source, and the step order hashes the file after D159 is appended.",
+      "evidence": "The plan calls 359622 'the base size in the brief', but this brief contains no such number. Step 8 appends D159 first and then runs `head -c 359622 docs/decisions.md | sha256sum`. If 359622 is not the exact base size, the pin either covers part of D159 or stops inside D158. The test's claim that D159 is the only entry past the pin then fails, or the new id rule never checks D159. Fix: Measure the base size with `wc -c docs/decisions.md` before appending, take the SHA-256 of the whole base file at that point, and use those numbers. Do not hard-code 359622.",
+      "location": "Decision 5 and Step 8 (PINNED_LEN 359622)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "D145 does exist; the parser just does not count its heading as an entry.",
+      "evidence": "docs/decisions.md:3821 has '## D145 (accepted, decided by ...) · The drain overlaps jobs...'. `check_log` (decisions.rs:213-216) requires ' · ' right after the digits, so this heading is skipped and the parser sees D144 followed by D146. The conclusion, to pin the whole base so the new rule applies only past it, still holds. Fix: Correct the rationale to say that D145's heading does not match the parsed entry form, so the parser sees a gap. Keep the decision.",
+      "location": "Decision 5 rationale ('The real log has no D145')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Parsing `merge-tree --name-only` output without -z can mis-read quoted or repeated paths.",
+      "evidence": "Without -z, git quotes paths that contain special characters, and the conflicted-file section can list a path more than once. The plan takes the lines up to the first blank line as paths, unchanged, and passes them into the producer brief. Fix: Use `-z` (NUL-separated output) or `--no-messages`, remove duplicate paths, and add a unit test with a path that contains a space.",
+      "location": "Step 3 (Git::merge_tree_report parsing)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Two lines shown after a stale job will disagree.",
+      "evidence": "display.rs:857 prints 'ask again to redo the work on top of it' for a stale job, while the new close.rs UI line will point to `athena retry <job>`. display.rs is not a deliverable, so raising it as an open question is right. Fix: Keep the open question, and note in the CHANGELOG entry that the `display::finished` hint is unchanged for now.",
+      "location": "Open questions; crates/athena-cli/src/display.rs:854",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the accepted reading and is built on code that exists, which I read. `earlier_attempt_with` refuses `Closed(Stale)` (reading.rs:1362-1374). `resume_candidate` already builds a candidate, runs admission and calls `check_and_verify` without a planner or producer (run/mod.rs:524-651). `settle_resume_marks` deletes a stale job's own resume mark (mod.rs:693), so reading the candidate record is the right source. `BaseThenTree` seeds the producer's work tree from any commit (snapshot.rs:97-101, producer.rs:134-143). The request is always 'try again on <id>' (reading.rs:1138), so a hook in `dispatch` will see it. Reusing `resume_candidate` with a three-way merge, and leaving `land::plan` and `merge_tree` unchanged, is sound. Two problems need a revision. First, the conflict path puts git conflict markers into the producer's work tree. The plan claims they 'fail loudly', but nothing in the crates refuses them: a grep for '<<<<<<<' and 'conflict marker' finds nothing. In Markdown or other non-code files, leftover markers pass the checks and depend only on the verifier noticing them. The plan says a guard would have to go in files it may not touch, but `check_and_verify` is in run/mod.rs, which is a listed deliverable. Second, the criterion 2 demonstration does not show that the checks and the replay ran on the merged tree. Only the verifier half is shown. Smaller issues: the land.rs unit test for criterion 4 would pass on today's code, the pin length 359622 has no source, the plan's claim that the log has no D145 is wrong, and the merge-tree output parsing is loose. The plan calls no new external service; `push_ci_branch` and `early_pr` are existing calls inside `check_and_verify`, and both only warn when they fail."
+}
