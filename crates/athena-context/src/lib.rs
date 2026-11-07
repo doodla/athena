@@ -400,8 +400,9 @@ mod tests {
             let composed = compose(&[CONTRACT.into(), frame.into()]);
             assert!(check_budget(set, &composed).is_ok(), "{}", frame.id);
             // The planner frame gained the required dependents rule and the critic frame its "what else does
-            // this break" question; each stays well inside the 1300-token budget checked above.
-            assert!(estimate_tokens(frame.text) < 700, "{} is short", frame.id);
+            // this break" question; both then gained the commit-shape rule (bound raised from 700 to 800 for
+            // it); each stays well inside the 1300-token budget checked above.
+            assert!(estimate_tokens(frame.text) < 800, "{} is short", frame.id);
         }
     }
 
@@ -477,6 +478,37 @@ mod tests {
             "calls an external service (GitHub API, CI run, deploy)",
             "without naming the state it needs",
             "how the plan checks or waits for it",
+        ] {
+            assert!(
+                CRITIC_FRAME.text.contains(wording),
+                "critic frame lacks: {wording}"
+            );
+        }
+    }
+
+    #[test]
+    fn landing_rules_need_a_commit_shape_table_and_a_realistic_fixture() {
+        // Guidance only: the frames make the planner derive history rules from every commit shape and the
+        // critic raise a major finding when the plan does not.
+        for wording in [
+            "commit-shape table",
+            "every shape the real branch holds",
+            "retry-after-block landing",
+            "realistic-branch fixture",
+            "an intervention commit, a records-only commit and the job landing",
+            "say where it differs from the real repository",
+            "run the tests of every crate that calls the changed classification functions",
+        ] {
+            assert!(
+                PLANNER_FRAME.text.contains(wording),
+                "planner frame lacks: {wording}"
+            );
+        }
+        for wording in [
+            "Raise a major finding when a landing, history or attribution plan",
+            "lacks the commit-shape table",
+            "lacks the realistic-branch fixture",
+            "omits the tests of every crate that calls the changed classification functions",
         ] {
             assert!(
                 CRITIC_FRAME.text.contains(wording),
