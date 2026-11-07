@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-061508-8w51",
+  "round": 4,
+  "at": "2026-11-07T13:51:29.036684747Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Trigger C cannot tell a reading that uses records as its own evidence apart from product code that reads records at runtime, and its required repair (quote a counted figure or name a .md/.json file) makes no sense for the second case.",
+      "evidence": "In this repository, reading records is the ordinary behaviour of the product. Grep of crates/ for '(reads|from|uses|counts|scans|replays|parses) (the )?(job )?(records|history)' finds 47 doc lines in 28 files, for example status.rs:734 'computed from the job records alone', scoring.rs:152 'Scores a job from its records', reconcile.rs:59 'reads the records', labeled.rs:29 'reads records'. Take a normal code reading whose behavior criterion is 'Run `athena status`: rounds per landed job are computed from the job records'. Under the plan it triggers C (single word `records`, source verb 'from' within 3 words before). It can only pass if an `Environment:` assumption quotes something like '3 jobs' or names an unrelated doc file. That is filler and does not answer the real question for runtime reads: where the code runs and whether that place has `records/`. The producer snapshot has none (system facts). The single-word `records`/`history` rule added this round makes the match wider. Fix: Split trigger C into two cases. (1) Runtime reads, meaning a source phrase in a Behavior criterion: require only the `Environment:` site, permission and data statement (for example 'tests use fixture records; the producer snapshot has no records/'). (2) The reading's own evidence: require quoted figures or a reachable file only when a figure the reading states rests on the source, for example a number or percent within a few words of the source phrase, or a source phrase in the summary or an assumption. Or drop the single-word `records` form after plain read verbs (read/reads/from/uses). Add accept and refuse fixtures copied from the status.rs and scoring.rs doc wording.",
+      "location": "Plan Decision 4 and Step 3 (`names_records_source`); Step 4 trigger C repair (figure or reachable file)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The replay-hold entry says the hold does not depend on this check because the tests use fake checkers. But the live replay at verification runs the real candidate checker over stored accepted readings, so this job can be sent back if the new triggers fire too often.",
+      "evidence": "run/send_back.rs:96-106 and :153-157: `send_back_text_with_replay` sends a job back when 'the producer's change newly refuses more of them than the limit', using a measured `ReplayView`. reading.rs:4124-4139: `check_reading_text` runs the full `check_reading_acceptance` on stored readings. The declared share is an unmeasured 8%, and the hold limit is the declared share plus 5 points. Given the first finding, product-behavior criteria that say 'from the records' in Athena's own accepted readings could push the real share past the limit. The dependents entry names only unit tests, and they cannot catch this. Fix: List the live replay at verification (run/send_back.rs, `ReplayView`, `replay_cases`) as a dependent and say what it will measure. Narrow the triggers so the 8% estimate is defensible: the fix in the first finding, plus a short estimate of how many accepted readings say 'from/reads the records', based on the shape of the cited doc lines. In the risks, state what the producer should expect if the hold fires.",
+      "location": "Plan Dependents: 'replay hold on the share of newly refused readings'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan requires an `Environment:` assumption with site, permission and data words and also figures. The reading allows quoting the figures inline in an assumption as an alternative.",
+      "evidence": "The reading says the check 'is satisfied by an `Environment:` assumption ...; case (b) alternatively by quoting the figures inline in an assumption'. Criterion 4 says the reading is 'refused unless the figures are quoted inline or an `Environment:` assumption lists a reachable file'. Plan Step 4: 'for C also a source word plus a counted figure or reachable file in the same assumption' on top of the site, permission and data words. Fix: Either accept counted figures quoted in any assumption, as the reading says, or state the stricter rule as a deliberate deviation in the doc comment and the CHANGELOG, with the reason (data reach is part of the root cause).",
+      "location": "Plan Step 4 (trigger C requirement) versus the reading's Trigger design and criterion 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "'commit' and 'commits' are usually nouns after CI, so the CI-write rule refuses CI reads.",
+      "evidence": "'CI checks each commit' and 'CI tests the commits' fall inside the 3-word window and count as a CI write, yet they describe CI reading a commit, the read-only case the class says is fine. Fix: Drop 'commit' and 'commits', or require the verb form ('CI commits', 'CI writes', 'CI pushes') directly after `CI` or after 'job'/'workflow'. Add 'CI checks each commit' as an accept fixture.",
+      "location": "Plan Decision 1 / Step 3: `exact_ci` followed within 3 words by commit/commits",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The PR verb list is missing common forms.",
+      "evidence": "The list has open/opens/opened/create/creates/created/raise/merge/reuse/reuses/push/pushes, so 'the early PR is reused', 'opening a PR' and 'merged PR' do not trigger. Fix: Add reused, opening, merged, merges and raised, or match on word stems.",
+      "location": "Plan Step 3 PR verb list",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan's claims against the snapshot by reading the code and test files; I ran nothing. The structure holds. `refusing_check` has the `step!` lines at 3240-3250. The ordering test at 7725 only pins outcome_state directly after governance, so a step after outcome_state is safe. `check_reading_text` calls `check_reading_acceptance`. `READING_RULES` is `[&str; 6]`, and its test at 4400 has the 2400-byte bound. `INPUT_FORMS` has 23 entries, and the corpus anchor is at 1083. The reader budget set is contract, READER_FRAME, defaults and catalog, so `READING_RULES` is outside it. No fake reader output in crates/ has a workflow deliverable or a behavior criterion that would trip the new triggers. A lexical gate matches the existing checks (`check_outcome_state`, `check_code_survey`). Two problems need a revision. First, trigger C, the records source, cannot tell the reading's own evidence apart from product behavior. In this repository, 'computed from the job records' is how status, scoring and reconcile code is ordinarily described, and the new single-word `records` rule widens the match. So ordinary code readings would be refused, and the repair would force filler figures. Second, the replay-hold dependent wrongly says only fake-checker tests are involved. The live replay at verification runs the real checker over accepted readings and can send this job back. The other findings are minor: the figures-inline alternative is narrowed against the reading, and `CI` followed by 'commit' catches CI reads."
+}

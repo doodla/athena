@@ -3190,7 +3190,8 @@ pub fn check_reading_references(
 /// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
 /// rests on ([`check_code_survey`]), then the governance files the outcome needs
 /// ([`check_governance_coverage`]), then the observable state a delivery request needs
-/// ([`check_outcome_state`]), then the deliverable paths and `content` criteria against the boundary
+/// ([`check_outcome_state`]), then the place, permissions and data reach of each action or source the reading
+/// assigns ([`check_environment_reach`]), then the deliverable paths and `content` criteria against the boundary
 /// words and the deliverables against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
 /// there is no repository to compare with), then the repo paths its text relies on against the same files
 /// ([`check_reading_references`]). It applies to a first attempt as well as a retry. It runs
@@ -3246,6 +3247,7 @@ pub fn refusing_check(
     step!(check_design_existing_code(reading));
     step!(check_governance_coverage(reading, request));
     step!(check_outcome_state(reading, request));
+    step!(check_environment_reach(reading));
     step!(check_boundary_and_repo_files(reading, repo_files));
     step!(check_reading_references(reading, repo_files));
     None
@@ -3947,6 +3949,498 @@ pub fn check_code_survey(reading: &Reading) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The `Environment:` assumptions of a reading: those whose trimmed text starts with that label, in any case.
+fn environment_assumptions(reading: &Reading) -> Vec<&str> {
+    reading
+        .assumptions
+        .iter()
+        .map(|a| a.trim())
+        .filter(|a| a.to_lowercase().starts_with("environment:"))
+        .collect()
+}
+
+/// One word of a scanned text: lowercase, with whether it was written exactly `PR`/`PRs` or `CI`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EnvWord {
+    lower: String,
+    pr: bool,
+    ci: bool,
+}
+
+/// Commands whose backticked form names a host action (`git push`, `gh pr create`).
+const ENV_GIT_COMMANDS: [&str; 5] = ["push", "fetch", "clone", "pull", "remote"];
+const ENV_GH_COMMANDS: [&str; 7] = ["pr", "api", "run", "auth", "workflow", "release", "issue"];
+/// Word stems of the verbs that act on a pull request.
+const ENV_PR_VERB_STEMS: [&str; 7] = ["open", "creat", "rais", "merg", "reus", "push", "submit"];
+/// Verbs of using the GitHub API.
+const ENV_API_VERBS: [&str; 10] = [
+    "call", "calls", "called", "calling", "query", "queries", "queried", "use", "uses", "using",
+];
+/// Verbs that read a source: the phrase that names the source must follow one within 6 words.
+const ENV_SOURCE_VERBS: [&str; 12] = [
+    "from", "use", "uses", "using", "read", "reads", "counts", "measures", "replays", "queries",
+    "parses", "scans",
+];
+
+/// Splits `text` into runs of words. A run ends at a break: a backticked span that is not a command, and a
+/// bare token with `/`, `_`, `::` or an interior `.` (a path, an identifier or a file name). Apostrophes are
+/// removed. `git push|fetch|clone|pull|remote`, `gh pr|api|run|auth|workflow|release|issue` and
+/// `athena/records` in backticks, and bare `athena/records` and `api.github.com`, are kept as words.
+fn scan_segments(text: &str) -> Vec<Vec<EnvWord>> {
+    fn word(segments: &mut [Vec<EnvWord>], piece: &str) {
+        if let Some(last) = segments.last_mut() {
+            last.push(EnvWord {
+                lower: piece.to_lowercase(),
+                pr: piece == "PR" || piece == "PRs",
+                ci: piece == "CI",
+            });
+        }
+    }
+    fn split(segments: &mut Vec<Vec<EnvWord>>) {
+        if segments.last().is_some_and(|s| !s.is_empty()) {
+            segments.push(Vec::new());
+        }
+    }
+    let text = text.replace(['\'', '\u{2019}'], "");
+    let mut segments: Vec<Vec<EnvWord>> = vec![Vec::new()];
+    for (i, part) in text.split('`').enumerate() {
+        if i % 2 == 1 {
+            let span = part.trim();
+            let mut words = span.split_whitespace();
+            let first = words.next().unwrap_or("");
+            let second = words.next().unwrap_or("");
+            if span.starts_with("athena/records") {
+                word(&mut segments, "athena/records");
+            } else if (first == "git" && ENV_GIT_COMMANDS.contains(&second))
+                || (first == "gh" && ENV_GH_COMMANDS.contains(&second))
+            {
+                word(&mut segments, first);
+                word(&mut segments, second);
+            } else {
+                split(&mut segments);
+            }
+            continue;
+        }
+        for token in part.split_whitespace() {
+            let token = token.trim_matches(|c: char| !c.is_alphanumeric());
+            if token.is_empty() {
+                continue;
+            }
+            let lower = token.to_lowercase();
+            if lower == "athena/records" || lower == "api.github.com" {
+                word(&mut segments, &lower);
+            } else if token.contains(['/', '_', '.']) || token.contains("::") {
+                split(&mut segments);
+            } else {
+                for piece in token
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|p| !p.is_empty())
+                {
+                    word(&mut segments, piece);
+                }
+            }
+        }
+    }
+    segments
+}
+
+/// Whether any word in `seg` from `before` words ahead of `at` to `after` words behind it (not `at` itself)
+/// satisfies `test`.
+fn env_near(
+    seg: &[EnvWord],
+    at: usize,
+    before: usize,
+    after: usize,
+    test: impl Fn(&str) -> bool,
+) -> bool {
+    let from = at.saturating_sub(before);
+    let to = seg.len().min(at + after + 1);
+    (from..to).any(|j| j != at && test(&seg[j].lower))
+}
+
+/// Whether one run of words holds a host action: a git or gh command, a push with its target, a fetch, clone or
+/// pull from a remote, a pull request or `PR` with an acting verb, a GitHub API call, or a CI write.
+fn segment_has_host_action(seg: &[EnvWord]) -> bool {
+    let at = |i: usize| seg.get(i).map_or("", |w| w.lower.as_str());
+    let target = |w: &str| {
+        matches!(
+            w,
+            "origin" | "remote" | "upstream" | "branch" | "branches" | "ref" | "refs"
+        )
+    };
+    let remote = |w: &str| matches!(w, "origin" | "remote" | "upstream");
+    let pr_verb = |w: &str| ENV_PR_VERB_STEMS.iter().any(|stem| w.starts_with(stem));
+    let api_verb = |w: &str| ENV_API_VERBS.contains(&w) || matches!(w, "fetch" | "fetches");
+    let ci_write = |w: &str| matches!(w, "write" | "writes" | "written" | "push" | "pushes");
+    let commit = |w: &str| matches!(w, "commit" | "commits");
+    (0..seg.len()).any(|i| {
+        let w = at(i);
+        (w == "git" && ENV_GIT_COMMANDS.contains(&at(i + 1)))
+            || (w == "gh" && ENV_GH_COMMANDS.contains(&at(i + 1)))
+            || (matches!(w, "push" | "pushes" | "pushed" | "pushing")
+                && env_near(seg, i, 4, 4, target))
+            || (matches!(
+                w,
+                "fetch"
+                    | "fetches"
+                    | "fetched"
+                    | "clone"
+                    | "clones"
+                    | "cloned"
+                    | "pull"
+                    | "pulls"
+                    | "pulled"
+            ) && !matches!(at(i + 1), "request" | "requests")
+                && env_near(seg, i, 0, 3, remote))
+            || (w == "pull"
+                && matches!(at(i + 1), "request" | "requests")
+                && env_near(seg, i, 3, 4, pr_verb))
+            || (seg[i].pr && env_near(seg, i, 4, 4, pr_verb))
+            || (matches!((w, at(i + 1)), ("github" | "host", "api"))
+                && env_near(seg, i, 3, 4, api_verb))
+            || (w == "api.github.com" && env_near(seg, i, 3, 3, api_verb))
+            || (seg[i].ci
+                && (env_near(seg, i, 0, 3, ci_write)
+                    || commit(at(i + 1))
+                    || (matches!(at(i + 1), "job" | "workflow") && commit(at(i + 2)))))
+    })
+}
+
+/// Whether any run of words in `segments` holds a host action ([`segment_has_host_action`]).
+fn has_host_action(segments: &[Vec<EnvWord>]) -> bool {
+    segments.iter().any(|seg| segment_has_host_action(seg))
+}
+
+/// Whether `segments` name one of `phrases` (or, with `bare_history`, the single word `history` not followed by
+/// `of`) with a source verb ([`ENV_SOURCE_VERBS`]) within 6 words before it, in the same run of words.
+fn names_source(segments: &[Vec<EnvWord>], phrases: &[&[&str]], bare_history: bool) -> bool {
+    segments.iter().any(|seg| {
+        (0..seg.len()).any(|i| {
+            let phrase = phrases.iter().any(|p| {
+                seg.get(i..i + p.len())
+                    .is_some_and(|s| s.iter().zip(p.iter()).all(|(w, x)| w.lower == *x))
+            });
+            let history = bare_history
+                && seg[i].lower == "history"
+                && !seg.get(i + 1).is_some_and(|n| n.lower == "of");
+            (phrase || history)
+                && seg[i.saturating_sub(6)..i]
+                    .iter()
+                    .any(|w| ENV_SOURCE_VERBS.contains(&w.lower.as_str()))
+        })
+    })
+}
+
+/// Place-naming sources a criterion reads at runtime: the records branch, `athena/records`, git history or log.
+const ENV_LOCATED_SOURCES: [&[&str]; 5] = [
+    &["records", "branch"],
+    &["athena/records"],
+    &["git", "history"],
+    &["git", "log"],
+    &["commit", "history"],
+];
+
+/// Sources a reading's own evidence can rest on: the located ones, job records and job history.
+const ENV_EVIDENCE_SOURCES: [&[&str]; 7] = [
+    &["records", "branch"],
+    &["athena/records"],
+    &["git", "history"],
+    &["git", "log"],
+    &["commit", "history"],
+    &["job", "records"],
+    &["job", "history"],
+];
+
+/// Whether `text` quotes a counted figure: 1 to 5 digits directly before a counted noun (job, reading, commit,
+/// record, run, plan, introspection, attempt, case, percent) or before `%`. A year or a bare number is not one.
+fn quotes_counted_figure(text: &str) -> bool {
+    const NOUNS: [&str; 20] = [
+        "job",
+        "jobs",
+        "reading",
+        "readings",
+        "commit",
+        "commits",
+        "record",
+        "records",
+        "run",
+        "runs",
+        "plan",
+        "plans",
+        "introspection",
+        "introspections",
+        "attempt",
+        "attempts",
+        "case",
+        "cases",
+        "percent",
+        "percentage",
+    ];
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    tokens.iter().enumerate().any(|(i, raw)| {
+        let token = raw.trim_matches(|c: char| !c.is_alphanumeric() && c != '%');
+        let (digits, percent) = match token.strip_suffix('%') {
+            Some(d) => (d, true),
+            None => (token, false),
+        };
+        if digits.is_empty() || digits.len() > 5 || !digits.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        percent
+            || tokens.get(i + 1).is_some_and(|next| {
+                let next = next
+                    .trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase();
+                NOUNS.contains(&next.as_str())
+            })
+    })
+}
+
+/// Whether `text` names a reachable data or doc file: a token with `/` that ends `.md`, `.json`, `.jsonl`,
+/// `.csv` or `.txt` and is not under `records/` or `athena/records`. Whether the file exists is left to
+/// [`check_reading_references`].
+fn names_reachable_file(text: &str) -> bool {
+    text.split(|c: char| {
+        c.is_whitespace() || matches!(c, ',' | ';' | '\'' | '"' | '(' | ')' | '[' | ']' | '`')
+    })
+    .map(|token| token.trim_end_matches(['.', ':']))
+    .any(|token| {
+        token.contains('/')
+            && !token.starts_with("records/")
+            && !token.starts_with("athena/records")
+            && token
+                .rsplit_once('.')
+                .is_some_and(|(_, ext)| ["md", "json", "jsonl", "csv", "txt"].contains(&ext))
+    })
+}
+
+/// The words of `text`, lowercase, apostrophes removed, split on anything that is not a letter or digit.
+fn plain_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .replace(['\'', '\u{2019}'], "")
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Words that name a place an action runs.
+const ENV_SITE_WORDS: [&str; 12] = [
+    "ci", "runner", "workflow", "producer", "snapshot", "local", "host", "github", "reader",
+    "planner", "verifier", "critic",
+];
+/// Words that name a permission.
+const ENV_PERMISSION_WORDS: [&str; 8] = [
+    "read",
+    "reads",
+    "write",
+    "writes",
+    "writable",
+    "readonly",
+    "permission",
+    "permissions",
+];
+/// Words that name the data or refs a place reaches.
+const ENV_DATA_WORDS: [&str; 18] = [
+    "refs",
+    "ref",
+    "branch",
+    "branches",
+    "records",
+    "history",
+    "files",
+    "repo",
+    "repository",
+    "checkout",
+    "data",
+    "commits",
+    "logs",
+    "figures",
+    "origin",
+    "remote",
+    "api",
+    "prs",
+];
+/// Sites that run on one machine with a working copy: for these the case with no origin must be stated.
+const ENV_LOCAL_SITE_WORDS: [&str; 5] = ["local", "producer", "snapshot", "checkout", "copy"];
+/// Words that say a thing is missing.
+const ENV_ABSENT_WORDS: [&str; 8] = [
+    "no", "without", "missing", "absent", "none", "non", "always", "lacks",
+];
+
+/// Refuses a reading that assigns an action or a measurement to a place without saying who performs it, where,
+/// with what permissions and what data it can reach.
+///
+/// Root cause this check removes: the reading stage had no step asking who performs each action, where, with
+/// what permissions, and what data it reaches. It worked from the request text and the local repository view,
+/// so a plan assumed that CI can write, that a GitHub origin exists, or that the job records are reachable from
+/// the place that needs them. Job 20261024-220048-engm stopped in planning on records the plan could not reach
+/// from a read-only CI job; job 20261025-070538-8ra0 was refused because its early push and pull request met a
+/// working copy with no origin or a non-GitHub origin; job 20261025-034247-nm0k cited job records and history
+/// as its evidence without quoting the figures or listing a file that holds them. Introspections
+/// 20261024-220314-yjtg, 20261025-070613-4vfa and 20261026-011842-889s traced all three to the same missing
+/// step.
+///
+/// It applies when the reading has a capability and no question. It reads four things and nothing else (not the
+/// request, a content criterion, an assumption or `out_of_scope`, so the repair text cannot trigger it):
+/// (A) a created or modified deliverable under `.github/workflows/`; (B) a behavior criterion with a host
+/// action: a `git` or `gh` command, a push with a ref, branch or origin, a fetch, clone or pull from a remote,
+/// a pull request or `PR` (written exactly so) with an opening, creating, raising, merging, reusing, pushing or
+/// submitting verb, a GitHub API call, or a `CI` (written exactly so) write or commit; (C1) a behavior
+/// criterion that reads the records branch, `athena/records`, git history or the git log, with a read verb
+/// (from, use, read, counts, measures, replays, queries, parses, scans) within 6 words before it; (C2) a summary
+/// that cites job records, job history, commit history, git history, the git log, the records branch or the
+/// single word `history` (not `history of`) as a source, with such a verb within 6 words before it.
+///
+/// A, B and C1 are met by one assumption that starts `Environment:` and names a site (CI, runner, workflow,
+/// producer, snapshot, local, host, github, reader, planner, verifier, critic), a permission (read, write,
+/// readonly, permission) and the data or refs it reaches (refs, branch, records, history, files, repo, origin,
+/// and the like). For B, when the site is a working copy (local, producer, snapshot, checkout, copy), the
+/// assumption must also say the case with no origin or a non-GitHub origin (`origin` with no, without,
+/// missing, absent, none, non, always or lacks). C2 is met by a counted figure quoted in any assumption (1 to 5
+/// digits before jobs, readings, commits, records, runs, plans, introspections, attempts, cases, percent or
+/// `%`; a year is not one) or by an `Environment:` assumption that lists a reachable data or doc file (a path
+/// ending `.md`, `.json`, `.jsonl`, `.csv` or `.txt`, not under `records/`).
+///
+/// C1 and C2 differ from a plain reading of "figures or a reachable file" on purpose. Code that reads the
+/// records branch at runtime needs to know where it runs and what that place can see; quoted figures say
+/// nothing about that, so C1 asks for the `Environment:` statement. Figures matter when the reading's own
+/// claims rest on the records, which is C2. Ordinary product wording such as "computed from the job records" in
+/// a behavior criterion names no place and is not a trigger.
+///
+/// Limits: the check is lexical. It reads behavior criteria, the deliverables and the summary only. Paths,
+/// identifiers and backticked text that is not a command are skipped, so `pr.rs`, `gh/early.rs` and
+/// `parse_remote` trigger nothing. A source more than 6 words from its verb is missed, as are "counts readings
+/// in records" and a lowercase `pr`. A sentence can meet the word lists without being true; the check makes the
+/// reader state the three facts, as `Code survey:` makes it name a path. Whether a listed file exists is left
+/// to [`check_reading_references`], which does not verify paths under an unknown top directory.
+///
+/// This check refuses more readings; the higher refusal rate is intended. A replay of accepted readings
+/// (`replay`) holds a job that newly refuses more than 10% unless the job's criteria declare a share, as
+/// "expected N% of newly refused readings". The declared share for this change, expected 8% of newly refused
+/// readings, is an estimate that was not measured: the records are not in the producer's working copy, and the
+/// basis is that few stored readings carry a workflow deliverable, a push or pull request action, or records
+/// cited in the summary. The replay at verification measures it.
+///
+/// The error says which trigger fired and which part is missing, and tells the reader what to write.
+pub fn check_environment_reach(reading: &Reading) -> Result<()> {
+    if reading.capability.is_none() || reading.question.is_some() {
+        return Ok(());
+    }
+    let workflows: Vec<&str> = reading
+        .deliverables
+        .iter()
+        .filter(|d| {
+            d.action != DeliverableAction::Delete && d.path.starts_with(".github/workflows/")
+        })
+        .map(|d| d.path.as_str())
+        .collect();
+    let behavior: Vec<Vec<Vec<EnvWord>>> = reading
+        .acceptance_criteria
+        .iter()
+        .filter(|c| c.kind == CriterionKind::Behavior)
+        .map(|c| scan_segments(&c.text))
+        .collect();
+    let host_action = behavior.iter().any(|s| has_host_action(s));
+    let located_read = behavior
+        .iter()
+        .any(|s| names_source(s, &ENV_LOCATED_SOURCES, false));
+    let evidence = names_source(
+        &scan_segments(&reading.summary),
+        &ENV_EVIDENCE_SOURCES,
+        true,
+    );
+    if workflows.is_empty() && !host_action && !located_read && !evidence {
+        return Ok(());
+    }
+    let environments = environment_assumptions(reading);
+    let mut triggers: Vec<String> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
+    if !workflows.is_empty() || host_action || located_read {
+        if !workflows.is_empty() {
+            triggers.push(format!(
+                "it adds a CI workflow deliverable ({})",
+                workflows.join(", ")
+            ));
+        }
+        if host_action {
+            triggers.push(
+                "a behavior criterion assigns a push, pull request, GitHub API call or CI write"
+                    .into(),
+            );
+        }
+        if located_read {
+            triggers.push(
+                "a behavior criterion reads the records branch or git history at runtime".into(),
+            );
+        }
+        let has =
+            |words: &[String], list: &[&str]| words.iter().any(|w| list.contains(&w.as_str()));
+        let complete = environments.iter().any(|text| {
+            let words = plain_words(text);
+            let local = has(&words, &ENV_LOCAL_SITE_WORDS);
+            has(&words, &ENV_SITE_WORDS)
+                && has(&words, &ENV_PERMISSION_WORDS)
+                && has(&words, &ENV_DATA_WORDS)
+                && (!(host_action && local)
+                    || (words.iter().any(|w| w == "origin") && has(&words, &ENV_ABSENT_WORDS)))
+        });
+        if !complete {
+            let words: Vec<String> = environments.iter().flat_map(|t| plain_words(t)).collect();
+            let mut missing: Vec<&str> = Vec::new();
+            if environments.is_empty() {
+                missing.push("an assumption that starts `Environment:`");
+            }
+            if !has(&words, &ENV_SITE_WORDS) {
+                missing.push(
+                    "the site that performs the action (CI job, producer working copy, local run)",
+                );
+            }
+            if !has(&words, &ENV_PERMISSION_WORDS) {
+                missing.push("its read or write permissions");
+            }
+            if !has(&words, &ENV_DATA_WORDS) {
+                missing.push("the refs or data it can reach");
+            }
+            if missing.is_empty() {
+                missing.push(
+                    "the case with no origin or a non-GitHub origin, which a local site must state",
+                );
+            }
+            problems.push(format!(
+                "it has no complete `Environment:` assumption; missing {}. Repair: add an assumption that \
+                 starts `Environment:` and says who performs the action and where, its read or write \
+                 permissions, and the refs or data it can reach; for a local working copy also say what \
+                 happens with no origin, a non-GitHub origin and a GitHub origin",
+                missing.join("; ")
+            ));
+        }
+    }
+    if evidence {
+        triggers.push("its summary cites job records or history as a source".into());
+        let figure = reading.assumptions.iter().any(|a| quotes_counted_figure(a));
+        let file = environments.iter().any(|a| names_reachable_file(a));
+        if !figure && !file {
+            problems.push(
+                "no assumption quotes the counted figures (for example `3 jobs` or `40%`) and no \
+                 `Environment:` assumption lists a reachable data or doc file; the records are not in the \
+                 producer's working copy. Repair: quote the figures inline in an assumption, or list the \
+                 file that holds them in an `Environment:` assumption"
+                    .into(),
+            );
+        }
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the reading was refused because {}, and nothing in the reading says who performs it, where, with \
+         what permissions and what data it reaches: {}",
+        triggers.join("; and "),
+        problems.join("; and ")
+    )
 }
 
 /// The `Existing code:` assumptions of a reading: those whose trimmed text starts with that label, in any case.
@@ -7454,6 +7948,7 @@ mod tests {
                 &["the logo"],
             );
             add_behavior(&mut named, SERVED_STATE);
+            named.assumptions.push(CI_ENVIRONMENT.into());
             check_reading_acceptance(&named, request, None, &[], None)
                 .unwrap_or_else(|e| panic!("{request}: {e}"));
             // Put out of scope by name: accepted without the file.
@@ -7495,8 +7990,13 @@ mod tests {
             &[],
         );
         add_behavior(&mut with_workflow, SERVED_STATE);
+        with_workflow.assumptions.push(CI_ENVIRONMENT.into());
         check_reading_acceptance(&with_workflow, request, None, &[], None).unwrap();
     }
+
+    /// A complete `Environment:` assumption for a CI site.
+    const CI_ENVIRONMENT: &str =
+        "Environment: the CI job has write permission to refs on the GitHub origin";
 
     /// A behavior criterion that names an observable state.
     const SERVED_STATE: &str = "the site is served at a reachable URL";
@@ -7815,6 +8315,471 @@ mod tests {
             "estimate",
         ] {
             assert!(changelog.contains(needle), "the changelog lacks {needle:?}");
+        }
+    }
+
+    /// A complete `Environment:` assumption for a local working copy.
+    const LOCAL_ENVIRONMENT: &str = "Environment: the local Athena working copy has write access to the repo; \
+         with no origin or a non-GitHub origin it skips the push; with a GitHub origin it can push refs";
+
+    /// The reading with this `Environment:`-style assumption added.
+    fn with_environment(mut reading: Reading, text: &str) -> Reading {
+        reading.assumptions.push(text.into());
+        reading
+    }
+
+    /// A docs reading with these behavior criteria.
+    fn behavior_reading(texts: &[&str]) -> Reading {
+        let mut reading = governed_reading(&["docs/guide.md"], &["docs/guide.md exists"], &[]);
+        for text in texts {
+            add_behavior(&mut reading, text);
+        }
+        reading
+    }
+
+    /// A docs reading whose summary is this text.
+    fn summary_reading(summary: &str) -> Reading {
+        let mut reading = behavior_reading(&[]);
+        reading.summary = summary.into();
+        reading
+    }
+
+    /// A docs reading with a workflow deliverable of this action.
+    fn workflow_reading(action: DeliverableAction) -> Reading {
+        let mut reading = governed_reading(
+            &["docs/guide.md", ".github/workflows/lint.yml"],
+            &[
+                "docs/guide.md exists",
+                ".github/workflows/lint.yml runs lint",
+            ],
+            &[],
+        );
+        reading.deliverables[1].action = action;
+        reading
+    }
+
+    /// The name of the check that refuses the reading, or `None`.
+    fn refuser(reading: &Reading) -> Option<&'static str> {
+        refusing_check(reading, "Review the guide", None, &[], None).map(|(name, _)| name)
+    }
+
+    #[test]
+    fn environment_reach_refuses_a_workflow_deliverable_without_an_environment() {
+        for action in [DeliverableAction::Create, DeliverableAction::Modify] {
+            let reading = workflow_reading(action);
+            assert_eq!(refuser(&reading), Some("check_environment_reach"));
+            let error = check_environment_reach(&reading).unwrap_err().to_string();
+            assert!(
+                error.starts_with("the reading was refused because"),
+                "{error}"
+            );
+            assert!(error.contains("`Environment:`"), "{error}");
+            assert!(error.contains(".github/workflows/lint.yml"), "{error}");
+            let fixed = with_environment(reading, CI_ENVIRONMENT);
+            assert_eq!(refuser(&fixed), None);
+        }
+        // Deleting a workflow assigns no action.
+        assert_eq!(refuser(&workflow_reading(DeliverableAction::Delete)), None);
+    }
+
+    #[test]
+    fn environment_reach_refuses_each_host_action_without_an_environment() {
+        for text in [
+            "Athena pushes the job branch to origin",
+            "The job branch is pushed to the remote",
+            "A pull request is opened on the remote",
+            "The pull request is opened with `gh pr create`",
+            "Run `git push`: the branch is published",
+            "Athena opens the job's PR at verification start",
+            "Open the job's PR early at verification start",
+            "The early PR is reused by land",
+            "The PR was merged by land",
+            "Land is opening a pull request",
+            "A pull request is raised for the job",
+            "land calls the GitHub API to reuse the early PR",
+            "The check calls the GitHub API for the run status",
+            "The CI job writes the records",
+            "CI commits the records",
+        ] {
+            let reading = behavior_reading(&[text]);
+            assert_eq!(refuser(&reading), Some("check_environment_reach"), "{text}");
+            let error = check_environment_reach(&reading).unwrap_err().to_string();
+            assert!(
+                error.starts_with("the reading was refused because"),
+                "{error}"
+            );
+            assert!(error.contains("`Environment:`"), "{text}: {error}");
+            let fixed = with_environment(reading, CI_ENVIRONMENT);
+            assert_eq!(refuser(&fixed), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn environment_reach_needs_a_site_a_permission_and_the_data() {
+        let reading = behavior_reading(&["Athena pushes the job branch to origin"]);
+        // No permission word: refused, and the error names the permissions.
+        let no_permission = with_environment(
+            reading.clone(),
+            "Environment: the CI job reaches refs on the GitHub origin",
+        );
+        let error = check_environment_reach(&no_permission)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("permissions"), "{error}");
+        // No site word.
+        let no_site = with_environment(
+            reading.clone(),
+            "Environment: it has write access to refs on the origin",
+        );
+        let error = check_environment_reach(&no_site).unwrap_err().to_string();
+        assert!(error.contains("the site"), "{error}");
+        // No data word.
+        let no_data = with_environment(reading.clone(), "Environment: the CI job may write");
+        let error = check_environment_reach(&no_data).unwrap_err().to_string();
+        assert!(error.contains("refs or data"), "{error}");
+        // A local site must also state the case with no origin.
+        let local_only = with_environment(
+            reading.clone(),
+            "Environment: the local working copy has write access to the repo",
+        );
+        let error = check_environment_reach(&local_only)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no origin"), "{error}");
+        assert_eq!(
+            refuser(&with_environment(reading.clone(), LOCAL_ENVIRONMENT)),
+            None
+        );
+        // A CI site always has an origin, so it needs no such case.
+        assert_eq!(
+            refuser(&with_environment(reading.clone(), CI_ENVIRONMENT)),
+            None
+        );
+        // The label matches after trimming, in any case; the word alone does not count.
+        let spaced = with_environment(
+            reading.clone(),
+            "  ENVIRONMENT: the CI job has write permission to refs on the GitHub origin",
+        );
+        assert_eq!(refuser(&spaced), None);
+        let not_a_label = with_environment(
+            reading,
+            "The environment is a CI job with write permission to refs on the GitHub origin",
+        );
+        assert_eq!(refuser(&not_a_label), Some("check_environment_reach"));
+    }
+
+    #[test]
+    fn environment_reach_is_skipped_for_a_decline_and_a_question() {
+        let mut declined = behavior_reading(&["Athena pushes the job branch to origin"]);
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        check_environment_reach(&declined).unwrap();
+        let mut asking = behavior_reading(&["Athena pushes the job branch to origin"]);
+        asking.question = Some("Which remote?".into());
+        check_environment_reach(&asking).unwrap();
+    }
+
+    /// The Behavior criterion of the shape of job 20261024-220048-engm: code that reads the records branch.
+    const ENGM_CRITERION: &str = "The history check reads the job records on the records branch";
+
+    #[test]
+    fn environment_reach_source_refuses_a_records_branch_read_in_the_engm_shape() {
+        let mut reading = code_reading(&[SURVEY], &[MODIFY_READING]);
+        add_behavior(&mut reading, ENGM_CRITERION);
+        assert_eq!(refuser(&reading), Some("check_environment_reach"));
+        // Quoted figures say nothing about where the code runs: an assumption missing the permission fails.
+        let no_permission = with_environment(
+            reading.clone(),
+            "Environment: the CI job reaches the records branch",
+        );
+        assert_eq!(refuser(&no_permission), Some("check_environment_reach"));
+        let figures = with_environment(reading.clone(), "Based on 3 jobs and 40% of readings");
+        assert_eq!(refuser(&figures), Some("check_environment_reach"));
+        let fixed = with_environment(
+            reading,
+            "Environment: the CI job has read-only access to contents and cannot write the records branch; \
+             the producer snapshot has no records/",
+        );
+        assert_eq!(refuser(&fixed), None);
+    }
+
+    #[test]
+    fn environment_reach_source_refuses_the_push_and_pull_request_shape_of_8ra0() {
+        let reading = behavior_reading(&[
+            "Athena opens the job's PR early at verification start",
+            "Run `cargo test -p athena-core`: with no origin the push is skipped",
+        ]);
+        assert_eq!(refuser(&reading), Some("check_environment_reach"));
+        let local_only = with_environment(
+            reading.clone(),
+            "Environment: the producer working copy has write access to the repo",
+        );
+        assert_eq!(refuser(&local_only), Some("check_environment_reach"));
+        assert_eq!(refuser(&with_environment(reading, LOCAL_ENVIRONMENT)), None);
+    }
+
+    #[test]
+    fn environment_reach_source_refuses_records_cited_in_the_summary_in_the_nm0k_shape() {
+        let reading = summary_reading("Use the figures from job records and history");
+        assert_eq!(refuser(&reading), Some("check_environment_reach"));
+        let error = check_environment_reach(&reading).unwrap_err().to_string();
+        assert!(
+            error.starts_with("the reading was refused because"),
+            "{error}"
+        );
+        assert!(error.contains("counted figures"), "{error}");
+        // A records path, a code file and a year are not a reachable file or a figure.
+        for env in [
+            "Environment: records/foo.json holds them",
+            "Environment: athena/records/x.json holds them",
+            "Environment: crates/athena-core/src/reading.rs holds them",
+            "Environment: they date from 2026",
+            "Environment: the CI job reads 12345678 refs",
+        ] {
+            let reading = with_environment(reading.clone(), env);
+            assert_eq!(refuser(&reading), Some("check_environment_reach"), "{env}");
+        }
+        // A counted figure in any assumption, or a reachable file in an Environment assumption, repairs it.
+        for text in [
+            "The figures cover 3 jobs",
+            "About 40% of readings are affected",
+            "Environment: docs/design/roadmap.md lists them",
+            "Environment: see `docs/design/roadmap.md`.",
+        ] {
+            let fixed = with_environment(reading.clone(), text);
+            assert_eq!(refuser(&fixed), None, "{text}");
+        }
+        // A file named outside an Environment assumption does not count.
+        let outside = with_environment(reading.clone(), "See docs/design/roadmap.md");
+        assert_eq!(refuser(&outside), Some("check_environment_reach"));
+        assert_eq!(
+            refuser(&summary_reading("Use the figures from history")),
+            Some("check_environment_reach")
+        );
+        assert_eq!(
+            refuser(&summary_reading("Fix the history of the page")),
+            None
+        );
+    }
+
+    #[test]
+    fn environment_reach_source_covers_every_located_source_phrase() {
+        for phrase in [
+            "the records branch",
+            "athena/records",
+            "`athena/records`",
+            "git history",
+            "the git log",
+            "commit history",
+        ] {
+            let reading = behavior_reading(&[&format!("The tool reads {phrase}")]);
+            assert_eq!(
+                refuser(&reading),
+                Some("check_environment_reach"),
+                "{phrase}"
+            );
+            let fixed = with_environment(reading, CI_ENVIRONMENT);
+            assert_eq!(refuser(&fixed), None, "{phrase}");
+        }
+        for phrase in [
+            "job records",
+            "job history",
+            "commit history",
+            "git history",
+            "the git log",
+            "the records branch",
+            "athena/records",
+            "`athena/records`",
+            "history",
+        ] {
+            let reading = summary_reading(&format!("Use the figures from {phrase}"));
+            assert_eq!(
+                refuser(&reading),
+                Some("check_environment_reach"),
+                "{phrase}"
+            );
+            let fixed = with_environment(reading, "Counts cover 3 jobs");
+            assert_eq!(refuser(&fixed), None, "{phrase}");
+        }
+    }
+
+    #[test]
+    fn environment_reach_accepts_ordinary_wording_about_records() {
+        // The wording of the status and scoring code: no place is named, so nothing is assigned to one.
+        for text in [
+            "Run `athena status`: rounds per landed job are computed from the job records",
+            "Scores a job from its records",
+            "The tool reads the records",
+            "The audit reads records",
+            "The record is written in the records branch",
+            "A test shows a reading citing job records is refused",
+        ] {
+            let reading = behavior_reading(&[text]);
+            check_environment_reach(&reading).unwrap_or_else(|e| panic!("{text}: {e}"));
+        }
+        let summary = summary_reading("The audit counts readings in records");
+        check_environment_reach(&summary).unwrap();
+    }
+
+    #[test]
+    fn environment_reach_accepts_docs_readings_and_words_inside_other_words() {
+        let plain = governed_reading(&["docs/x.md"], &["docs/x.md exists"], &[]);
+        check_environment_reach(&plain).unwrap();
+        assert_eq!(refuser(&plain), None);
+        // Content criteria, assumptions and out_of_scope are never read.
+        let mut content = governed_reading(
+            &["docs/guide.md"],
+            &[
+                "Athena pushes the job branch to origin",
+                "The PR is opened by land and uses the GitHub API",
+                "the history of the page",
+                "gh/early.rs calls parse_remote",
+            ],
+            &["Opening a PR from CI"],
+        );
+        content.assumptions = vec!["The CI job writes the records branch via git push".into()];
+        check_environment_reach(&content).unwrap();
+        // Behavior criteria with the words only inside other words, paths and identifiers.
+        for text in [
+            "Fixed where it originates",
+            "The ghost entry is removed",
+            "The pushdown rule applies",
+            "It runs remotely",
+            "A Vec push appends the entry",
+            "Entries are pushed onto the list",
+            "Run `cargo test`: pr.rs parses the list",
+            "gh/early.rs is not changed",
+            "`parse_remote` returns None for a local path",
+            "The pr is opened in lowercase prose",
+            "An express route",
+            "The CIty map renders",
+            "CI checks each commit",
+            "CI tests the commits",
+            "The push/pull-request/gh wording is kept",
+        ] {
+            let reading = behavior_reading(&[text]);
+            check_environment_reach(&reading).unwrap_or_else(|e| panic!("{text}: {e}"));
+        }
+    }
+
+    #[test]
+    fn environment_reach_accepts_the_criteria_and_summary_of_its_own_job() {
+        let mut reading = summary_reading(
+            "Root cause (jobs 20261024-220048-engm, 20261025-070538-8ra0, 20261025-034247-nm0k): the reading \
+             stage never asks who performs an action or measurement, where, with what permissions and what \
+             data it can reach, so plans assumed CI writes, a missing GitHub origin, or unreachable records. \
+             Fix it at the reading gate with a new `check_environment_reach` step in refusing_check \
+             (reading.rs) that refuses readings that need an external site or unreachable source but lack \
+             an `Environment:` assumption.",
+        );
+        for text in [
+            "Run `cargo test -p athena-core`: unit tests show a reading that adds a CI workflow deliverable, \
+             or a push/pull-request/gh action, without an `Environment:` assumption naming site, permissions \
+             and reachable data is refused by `check_environment_reach`, and the same reading with such an \
+             assumption is accepted. These tests fail when the new step is removed.",
+            "Run `cargo test -p athena-core`: a test shows a reading citing job records, history or the \
+             records branch as a source is refused unless the figures are quoted inline or an \
+             `Environment:` assumption lists a reachable file, and that it is accepted when they are. Tests \
+             cover the class (separate readings shaped like each of the three jobs), not one job.",
+            "Run `cargo test -p athena-core --test refusal_corpus`: the corpus has a refuse case and an \
+             accept case for `check_environment_reach`, and the test that every `step!` has a refusing \
+             corpus case passes.",
+            "Docs-only readings and readings without these triggers are still accepted: a test with a plain \
+             docs reading passes `check_environment_reach`; the change refuses more readings and the higher \
+             refusal rate is intended, expected 8% of newly refused readings.",
+            "Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets` and `cargo test \
+             --workspace`: all pass.",
+        ] {
+            add_behavior(&mut reading, text);
+        }
+        check_environment_reach(&reading).unwrap();
+        let declared = replay_declaration_of(&reading);
+        assert_eq!(declared.share, Some(8));
+    }
+
+    #[test]
+    fn environment_reach_has_one_step_line() {
+        let source = include_str!("reading.rs");
+        let body = source
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        let steps: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("step!(check_"))
+            .collect();
+        let line = "step!(check_environment_reach(reading));";
+        assert_eq!(steps.iter().filter(|l| **l == line).count(), 1, "{steps:?}");
+        let outcome = steps
+            .iter()
+            .position(|l| *l == "step!(check_outcome_state(reading, request));")
+            .unwrap();
+        assert_eq!(steps[outcome + 1], line);
+        let acceptance_doc = source
+            .split("pub fn check_reading_acceptance(")
+            .next()
+            .unwrap();
+        assert!(acceptance_doc.contains("[`check_environment_reach`]"));
+    }
+
+    #[test]
+    fn environment_reach_doc_and_changelog_name_the_cause() {
+        fn collapse(text: &str) -> String {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        const CAUSE: &str = "no step asking who performs each action, where, with what permissions, and what \
+                             data it reaches";
+        let source = include_str!("reading.rs");
+        let before = source
+            .split("pub fn check_environment_reach(")
+            .next()
+            .unwrap();
+        let mut doc_lines: Vec<&str> = before
+            .lines()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("///"))
+            .map(|l| l.trim_start().trim_start_matches('/'))
+            .collect();
+        doc_lines.reverse();
+        let doc = collapse(&doc_lines.join(" "));
+        let changelog = include_str!("../../../CHANGELOG.md");
+        let unreleased = changelog
+            .split("## [Unreleased]")
+            .nth(1)
+            .unwrap()
+            .split("\n## [")
+            .next()
+            .unwrap();
+        let mut items: Vec<String> = Vec::new();
+        for line in unreleased.lines() {
+            if line.starts_with("- ") {
+                items.push(line.to_string());
+            } else if let Some(last) = items.last_mut() {
+                last.push(' ');
+                last.push_str(line);
+            }
+        }
+        let items: Vec<String> = items.iter().map(|i| collapse(i)).collect();
+        let item = items
+            .iter()
+            .find(|i| i.contains(CAUSE))
+            .expect("a changelog item names the cause");
+        for (label, text) in [("doc comment", &doc), ("changelog item", item)] {
+            for needle in [
+                CAUSE,
+                "20261024-220048-engm",
+                "20261025-070538-8ra0",
+                "20261025-034247-nm0k",
+                "higher refusal rate is intended",
+                "expected 8% of newly refused readings",
+                "estimate",
+                "not measured",
+                "`Environment:`",
+            ] {
+                assert!(text.contains(needle), "the {label} lacks {needle:?}");
+            }
         }
     }
 

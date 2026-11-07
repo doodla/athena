@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261101-061508-8w51",
+  "round": 1,
+  "at": "2026-11-07T13:37:46.819532128Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Trigger A matches common words and code tokens wherever they are mentioned, not where an action is assigned. The false-positive rate is likely high in this repo, and the 8% share has no basis.",
+      "evidence": "Trigger A splits every criterion into alphanumeric tokens and fires on push, pushes, pushed, pushing, origin, remote, remotes, gh, or pull+request(s). It fires in content criteria too. Paths and identifiers are split as well. A criterion naming `crates/athena-core/src/gh/early.rs` gives the token `gh`, `parse_remote` (gh.rs, cited in system facts) gives `remote`, and 'entries are pushed onto the list' gives `pushed`. The crate has a whole `gh/` module (client.rs, early.rs, landing.rs, records.rs, remote.rs and others). HISTORY.txt has 68 path matches for src/gh, gh.rs, pr.rs or land.rs in its 200 commits. This job's own accepted criterion 3 ('push/pull-request/gh action') and criterion 4 ('job records … records branch') would trip the new check. For every host-action hit the reading must also write a 'no origin' sentence, which makes no sense for a docs or refactor reading that only mentions the word. The 8% comes from the reading and was not measured; the snapshot has no records to measure it from. `replay_limit_percent` holds at declared + `REPLAY_DECLARED_MARGIN_POINTS` (5), so 13%. Accepted readings that mention these words have no `Environment:` assumption, so every one of them would be newly refused. Fix: Narrow the triggers to an action or measurement being assigned. (1) Scan only Behavior criteria, plus deliverable paths for workflows. A content criterion that names a word assigns no action. (2) Before tokenizing, drop backticked spans and path-like or identifier tokens, so `gh/`, `parse_remote` and `remote.rs` do not count. (3) Match action phrases rather than bare words: git push, push to origin, pushes the branch, open(s) a pull request, gh pr, gh api, the remote's refs. Add corpus accept cases for a gh-module path, a `parse_remote` identifier and a Vec push. Label the 8% as an estimate in the doc and changelog, and say what it rests on.",
+      "location": "Plan Decision 2 and Step 1 (trigger A tokenizer and word list); Decision 5 / criterion 6 (8% share)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A CI-workflow corpus case cannot change only one field: `check_governance_coverage` runs first and refuses a workflow deliverable that no criterion names.",
+      "evidence": "reading.rs:3326-3331: `is_governance(&d.path) && !governance_change_is_listed` refuses with 'it is listed as a deliverable but no criterion names it'. The test at 7835 confirms this for `.github/workflows/ci.yml`. `base_reading` (refusal_corpus.rs:117) has criteria that never name a workflow. Fix: For the workflow cases, add both the `.github/workflows/…` Create deliverable and a criterion that names it. Assert that the refuse case is refused by `check_environment_reach` and not by `check_governance_coverage`.",
+      "location": "Plan Step 4 and Risks ('Each case changes one field of base_reading')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The test says a reading with no deliverables passes 'even with a push criterion', but Step 2's gating returns Ok only when there is no capability, a question is set, or no trigger fires.",
+      "evidence": "Step 2: 'It returns Ok when the capability is None, a question is set, or no trigger fires.' Trigger A also fires on criterion words, so a no-deliverable reading with a push criterion would be refused, and the planned accept test would fail. Fix: Either add `reading.deliverables.is_empty()` to the gating, as `check_governance_coverage` does at reading.rs:3316, or drop that case from the criterion 6 test.",
+      "location": "Demonstration for criterion 6 versus Step 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The changelog half of the test checks 'higher refusal rate is intended' against the whole CHANGELOG. That phrase already appears in earlier entries, so this needle does not tie the declaration to the new entry.",
+      "evidence": "Several earlier checks declare the same sentence in their CHANGELOG entries (see the doc of `check_code_survey` at reading.rs:3905, and the CHANGELOG entry for the sixth rule line at CHANGELOG.md:875). The plan asserts the needles over the full CHANGELOG text. Fix: Cut out the new entry (the paragraph or bullet that holds 'no step asking who performs each action') and assert every needle, the share included, inside that entry only.",
+      "location": "Demonstration for criterion 1 (CHANGELOG needles)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 'figure quoted inline' rule accepts any number of 1 to 5 digits in the Environment assumption, such as a year or '2 refs'. That is barely evidence that the cited figures were quoted.",
+      "evidence": "Step 1: 'a purely numeric token of 1–5 digits'. 'Environment: CI job, read-only, sees main as of 2026' would satisfy case B with no figure from the records. Fix: Require the number to sit next to a counted noun (for example '3 jobs', '12 readings', '40%'), or require the cited source and the figure in the same assumption. Add a refuse case where the only number is a bare year.",
+      "location": "Plan Decision 3 / Step 1 (`quotes_figures`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Two callers of `check_reading_text` are missing from the dependents list. The workspace test run covers both.",
+      "evidence": "Grep finds `check_reading_text` at steward.rs:2420 (a test) and athena-cli/tests/drain.rs:4093, as well as the call sites the plan lists. Fix: Add steward.rs:2420 and drain.rs:4093 to the dependent entry.",
+      "location": "Plan Dependents, 'Which stored readings pass the text-only check'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the fix in the right place. It adds one `step!(check_environment_reach(reading))` line to `refusing_check` (reading.rs:3226–3252), modelled on `check_code_survey` (reading.rs:3910). It brings a refusal-corpus pair, one `READING_RULES` line (briefs.rs:2225) and a CHANGELOG entry. Every function, test and line the plan cites exists as described: `governed_reading` 7364, `add_behavior` 7505, `code_reading` 8936, the order pin at 7725, the corpus anchor at 1083, `INPUT_FORMS` [23], and the briefs test at 4400 with its 6-line count and 2400-byte bound. Putting the step after `check_outcome_state` keeps the order pin passing. I grepped the fake reader, the CLI common helper, the corpus and the criteria literals in the test fixtures. No fixture criterion holds a trigger word, which agrees with the plan's claim. The approach is not yet sound, though. Trigger A matches bare tokens (push, remote, origin, gh, pull request) in every criterion, content criteria included, and after splitting paths and identifiers. That turns mentions into \"actions\". `crates/athena-core/src/gh/…` paths, `parse_remote`, a Vec push, and this job's own criteria 3 and 4 would all trip it. Each would then be told to state a \"no origin\" case. This repository's work is mostly about gh, pull requests, pushes and the records branch: HISTORY.txt has 68 path matches for src/gh, gh.rs, pr.rs or land.rs in its 200 commits. So the declared 8%, which is an unmeasured estimate, could exceed the replay limit of 8 + 5 points, and the candidate would be held. The triggers should look for an action being assigned, not a word being mentioned. The other findings are minor: one corpus fixture needs two fields changed, not one; one test contradicts the check's gating; and one CHANGELOG needle is not unique to the new entry."
+}
