@@ -3188,7 +3188,8 @@ pub fn check_reading_references(
 /// Every check a built reading must pass before it is accepted: the previous result and change scope of a
 /// retried or followed-up job ([`check_prior_result_and_scope`]), then the evidence each criterion rests on
 /// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
-/// rests on ([`check_code_survey`]), then the governance files the outcome needs
+/// rests on ([`check_code_survey`]), then the realistic-branch fixture a commit classification, history or
+/// attribution rule is tested on ([`check_history_fixture`]), then the governance files the outcome needs
 /// ([`check_governance_coverage`]), then the observable state a delivery request needs
 /// ([`check_outcome_state`]), then the place, permissions and data reach of each action or source the reading
 /// assigns ([`check_environment_reach`]), then the deliverable paths and `content` criteria against the boundary
@@ -3244,6 +3245,7 @@ pub fn refusing_check(
     ));
     step!(check_criteria_evidence(reading));
     step!(check_code_survey(reading));
+    step!(check_history_fixture(reading));
     step!(check_design_existing_code(reading));
     step!(check_governance_coverage(reading, request));
     step!(check_outcome_state(reading, request));
@@ -3910,14 +3912,7 @@ fn names_record_evidence(survey: &str) -> bool {
 ///
 /// The error names the missing survey or the missing evidence and tells the reader what to write.
 pub fn check_code_survey(reading: &Reading) -> Result<()> {
-    if reading.capability.is_none()
-        || reading.question.is_some()
-        || !matches!(reading.class_of_work.as_str(), "code" | "tests")
-        || !reading
-            .acceptance_criteria
-            .iter()
-            .any(|c| c.kind == CriterionKind::Behavior)
-    {
+    if !changes_code_with_behavior_criterion(reading) {
         return Ok(());
     }
     let surveys: Vec<&str> = code_surveys(reading)
@@ -3949,6 +3944,144 @@ pub fn check_code_survey(reading: &Reading) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Whether the reading is a change reading the code checks apply to: it has a capability and no question, its
+/// class of work is `code` or `tests`, and at least one criterion is a behavior criterion. One definition for
+/// [`check_code_survey`] and [`check_history_fixture`], so the two gates cannot drift.
+fn changes_code_with_behavior_criterion(reading: &Reading) -> bool {
+    reading.capability.is_some()
+        && reading.question.is_none()
+        && matches!(reading.class_of_work.as_str(), "code" | "tests")
+        && reading
+            .acceptance_criteria
+            .iter()
+            .any(|c| c.kind == CriterionKind::Behavior)
+}
+
+/// Phrases and function names that mark a criterion as a rule on how commits are classified, or on what the
+/// history or attribution check accepts. Matched with [`has_phrase`] on lowercase text, so a hyphen or an
+/// underscore next to a phrase counts as a word boundary (`trailer-x` and `trailer_x` match, `trailing` does
+/// not). No file path is in the list and neither is the bare word `landing`: a change to the landing queue, to
+/// the timing of a landing or to the CI wait names neither a commit shape nor a classification.
+const HISTORY_RULE_PHRASES: [&str; 15] = [
+    "commit shape",
+    "commit shapes",
+    "commit-shape",
+    "pr_commits",
+    "classify_commit",
+    "classify_pre_merge",
+    "history check",
+    "attribution check",
+    "records-only commit",
+    "records only commit",
+    "trailer",
+    "trailers",
+    "--history",
+    "--attribution",
+    "--pr-head",
+];
+
+/// The shapes a criterion must name together to count as a realistic-branch fixture, each with the spellings
+/// accepted. A criterion names the shape when it holds any one spelling as whole words.
+const HISTORY_FIXTURE_SHAPES: [&[&str]; 5] = [
+    &["realistic"],
+    &["fixture", "fixtures"],
+    &["intervention commit", "intervention commits"],
+    &[
+        "records-only commit",
+        "records-only commits",
+        "records only commit",
+        "records only commits",
+    ],
+    &["job landing", "job landings", "job's landing"],
+];
+
+/// Lowercase text with curly apostrophes made straight and runs of white space made single spaces.
+fn straight_lowercase(text: &str) -> String {
+    text.to_lowercase()
+        .replace(['\u{2019}', '\u{2018}'], "'")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Refuses a code or tests reading with a behavior criterion that states a rule on commit classification, the
+/// history check or the attribution check, unless a behavior criterion also names a realistic-branch fixture
+/// that holds an intervention commit, a records-only commit and the job landing.
+///
+/// Root cause this check removes: landing, history and attribution rules are derived from the happy-path
+/// commit shape, the job's own commits, and not from every shape the real branch holds. The only guard was
+/// prose in the planner and critic prompts, so a reading could fix criteria that never required a branch with
+/// more than the job's commits. Jobs 20261024-153908-1rve, 20261024-154552-e65v and 20261025-012657-hac3 each
+/// began that way: a classification or trailer rule was demonstrated on job commits only, and the missing
+/// shapes (an intervention commit, a records-only commit, the retry-after-block landing) surfaced as
+/// findings in verification or after landing. Introspections 20261024-154443-51wt, 20261024-161503-q0pp and
+/// 20261025-012736-2q6w traced all three to it. The fix is not another change to `pr_commits` or to the trailer
+/// cutover, which are the instances: those would leave the next landing rule free to be tested on job commits
+/// only. It sits where readings are accepted, the one seam every reading passes, so the property is enforced
+/// by mechanism and not by prose.
+///
+/// It reads the [`Reading`] only: no model call, no repository, no records and no network. It applies under
+/// the gate of [`check_code_survey`] (a capability, no question, class `code` or `tests`, a behavior
+/// criterion). It then looks for a trigger in the text of any criterion: one of the [`HISTORY_RULE_PHRASES`]
+/// (`commit shape`, `pr_commits`, `classify_commit`, `history check`, `trailer`, `--history` and the like),
+/// matched as whole words on lowercase text with `has_phrase`. File paths do not trigger it, so a job on
+/// `land.rs` about the queue or the CI baseline is not refused, and neither is a survey assumption that only
+/// names a function the change reads. The reading is accepted when one behavior criterion names `realistic`,
+/// `fixture`, an `intervention commit`, a `records-only commit` and the `job landing`, in any of the
+/// spellings of [`HISTORY_FIXTURE_SHAPES`].
+///
+/// Limits: the match is lexical, with no reading of negation, so a criterion that says a trailer is not
+/// written still triggers it. The check enforces those three shapes. The retry-after-block landing and any
+/// other shape the branch produces is not enforced; the planner's commit-shape table and the critic remain
+/// the guard for them, and the refusal text asks the reader to name them. There is no reader rule line for
+/// this check: this reading decided not to grow reader-facing text, and the rule list lives in `briefs.rs`,
+/// which it does not change. The reader gets the refusal text, with an example criterion, on its immediate
+/// second read.
+///
+/// This check refuses more readings; the higher refusal rate is intended. A replay of accepted readings
+/// (`replay`) holds a job that newly refuses more than 10% unless the job's criteria declare a share. Declared
+/// here: expected 4% of newly refused readings. That is an estimate, not measured: about 8 of the last 200
+/// commits changed classification, history or attribution behavior, and the replay at verification measures
+/// the real share.
+///
+/// The error names the matched phrase and tells the reader what to add.
+pub fn check_history_fixture(reading: &Reading) -> Result<()> {
+    if !changes_code_with_behavior_criterion(reading) {
+        return Ok(());
+    }
+    let texts: Vec<(CriterionKind, String)> = reading
+        .acceptance_criteria
+        .iter()
+        .map(|c| (c.kind, straight_lowercase(&c.text)))
+        .collect();
+    let Some(matched) = texts.iter().find_map(|(_, text)| {
+        HISTORY_RULE_PHRASES
+            .iter()
+            .find(|phrase| has_phrase(text, phrase))
+    }) else {
+        return Ok(());
+    };
+    let names_fixture = texts.iter().any(|(kind, text)| {
+        *kind == CriterionKind::Behavior
+            && HISTORY_FIXTURE_SHAPES
+                .iter()
+                .all(|spellings| spellings.iter().any(|s| has_phrase(text, s)))
+    });
+    if names_fixture {
+        return Ok(());
+    }
+    bail!(
+        "the reading was refused because a criterion states a rule on commit classification, the history \
+         check or the attribution check (it names \"{matched}\") but no behavior criterion names a \
+         realistic-branch fixture; a rule tested only on the job's own commits misses the other commit shapes \
+         the real branch holds. Add a behavior criterion that runs a test on a realistic-branch fixture with \
+         at least one intervention commit, one records-only commit and the job landing, for example: \"Run \
+         `cargo test -p <crate> <filter>`: on a realistic-branch fixture with an intervention commit, a \
+         records-only commit and the job landing, the rule classifies each as intended\". Also name every \
+         other shape the branch produces that the rule touches, such as a retry-after-block landing"
+    )
 }
 
 /// The `Environment:` assumptions of a reading: those whose trimmed text starts with that label, in any case.
@@ -8486,6 +8619,10 @@ mod tests {
     fn environment_reach_source_refuses_a_records_branch_read_in_the_engm_shape() {
         let mut reading = code_reading(&[SURVEY], &[MODIFY_READING]);
         add_behavior(&mut reading, ENGM_CRITERION);
+        // The criterion names the history check, so it also needs the realistic-branch fixture; with that
+        // criterion added the environment check is the one that refuses it.
+        assert_eq!(refuser(&reading), Some("check_history_fixture"));
+        add_behavior(&mut reading, HISTORY_FIXTURE_CRITERION);
         assert_eq!(refuser(&reading), Some("check_environment_reach"));
         // Quoted figures say nothing about where the code runs: an assumption missing the permission fails.
         let no_permission = with_environment(
@@ -10120,6 +10257,395 @@ mod tests {
             .join(" ");
         assert!(changelog.contains("refuses more readings"));
         assert!(changelog.contains("higher refusal rate is intended"));
+    }
+
+    /// A behavior criterion that names a realistic-branch fixture with the three shapes the check requires.
+    const HISTORY_FIXTURE_CRITERION: &str = "Run `cargo test -p athena-cli --test reconcile`: on a \
+         realistic-branch fixture with an intervention commit, a records-only commit and the job landing, the \
+         rule classifies each as intended";
+
+    /// A code reading with the survey, these deliverables and one more behavior criterion.
+    fn history_reading(paths: &[&str], criterion: &str) -> Reading {
+        let deliverables: Vec<(&str, DeliverableAction)> = paths
+            .iter()
+            .map(|p| (*p, DeliverableAction::Modify))
+            .collect();
+        let mut reading = code_reading(&[SURVEY], &deliverables);
+        add_behavior(&mut reading, criterion);
+        reading
+    }
+
+    /// The first refusing check of the reading, as the gate runs them.
+    fn gate_refuser(reading: &Reading) -> Option<&'static str> {
+        refusing_check(reading, "change the reading rules", None, &[], None).map(|(name, _)| name)
+    }
+
+    /// Asserts the reading is refused by the history fixture check, then accepted once the fixture criterion
+    /// is added, and returns the refusal text.
+    fn refused_then_accepted(reading: Reading) -> String {
+        assert_eq!(gate_refuser(&reading), Some("check_history_fixture"));
+        let error = accept(&reading).unwrap_err().to_string();
+        let mut fixed = reading;
+        add_behavior(&mut fixed, HISTORY_FIXTURE_CRITERION);
+        assert_eq!(gate_refuser(&fixed), None);
+        accept(&fixed).unwrap();
+        error
+    }
+
+    #[test]
+    fn history_fixture_refuses_a_rule_tested_only_on_job_commits() {
+        let reading = history_reading(
+            &["crates/athena-core/src/land.rs"],
+            "Run `cargo test -p athena-core land::`: pr_commits accepts the job commits",
+        );
+        let error = refused_then_accepted(reading.clone());
+        for needle in [
+            "was refused",
+            "\"pr_commits\"",
+            "realistic-branch fixture",
+            "intervention commit",
+            "records-only commit",
+            "job landing",
+            "retry-after-block",
+        ] {
+            assert!(error.contains(needle), "{needle}: {error}");
+        }
+        // The check refuses it on its own, with the same text.
+        assert_eq!(
+            check_history_fixture(&reading).unwrap_err().to_string(),
+            error
+        );
+        // Spellings of the fixture shapes that are accepted.
+        for criterion in [
+            "Run `cargo test`: a realistic fixture holds an intervention commit, a records only commit and \
+             the job's landing",
+            "Run `cargo test`: a realistic fixture holds an intervention commit, a records-only commit and \
+             the job\u{2019}s landing",
+            "Run `cargo test`: the  realistic\n fixtures hold intervention commits, records-only commits and \
+             the job landing",
+        ] {
+            let mut spelled = reading.clone();
+            add_behavior(&mut spelled, criterion);
+            assert_eq!(gate_refuser(&spelled), None, "{criterion}");
+        }
+        // Near misses stay refused: a content criterion, a missing shape, a missing word.
+        let mut content = reading.clone();
+        add_content(&mut content, HISTORY_FIXTURE_CRITERION);
+        assert_eq!(gate_refuser(&content), Some("check_history_fixture"));
+        for criterion in [
+            "Run `cargo test`: a realistic fixture holds a records-only commit and the job landing",
+            "Run `cargo test`: a realistic fixture holds an intervention commit and the job landing",
+            "Run `cargo test`: a realistic fixture holds an intervention commit and a records-only commit",
+            "Run `cargo test`: an intervention commit, a records-only commit and the job landing are tested",
+            "Run `cargo test`: a fixture holds an intervention commit, a records-only commit and the job \
+             landing",
+            "Run `cargo test`: a realistic branch holds an intervention commit, a records-only commit and \
+             the job landing",
+        ] {
+            let mut near = reading.clone();
+            add_behavior(&mut near, criterion);
+            assert_eq!(
+                gate_refuser(&near),
+                Some("check_history_fixture"),
+                "{criterion}"
+            );
+        }
+        // Every trigger phrase refuses, and its own text is named in the error.
+        for phrase in HISTORY_RULE_PHRASES {
+            let reading = history_reading(
+                &["crates/athena-core/src/land.rs"],
+                &format!("Run `cargo test`: the {phrase} is covered"),
+            );
+            let error = check_history_fixture(&reading).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("\"{phrase}\"")),
+                "{phrase}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_fixture_job_1rve_shape() {
+        // Job 20261024-153908-1rve changed the pr_commits content classification in land.rs, gh.rs and
+        // invariant.rs, with a note in the records-history design doc and the changelog. Rebuilt from the
+        // job's deliverables.
+        let reading = history_reading(
+            &[
+                "crates/athena-core/src/land.rs",
+                "crates/athena-core/src/gh.rs",
+                "crates/athena-gate/src/invariant.rs",
+                "docs/design/records-history.md",
+                "CHANGELOG.md",
+            ],
+            "Run `cargo test -p athena-core land::`: pr_commits classifies each pull request commit by its \
+             content",
+        );
+        refused_then_accepted(reading);
+    }
+
+    #[test]
+    fn history_fixture_job_e65v_shape() {
+        // Job 20261024-154552-e65v made the reconcile merge method follow the commit shape.
+        let reading = history_reading(
+            &[
+                "crates/athena-core/src/land.rs",
+                "crates/athena-gate/src/invariant.rs",
+            ],
+            "Run `cargo test -p athena-core land::`: the merge method follows the commit shape of the branch",
+        );
+        refused_then_accepted(reading);
+    }
+
+    #[test]
+    fn history_fixture_job_hac3_shape() {
+        // Job 20261025-012657-hac3 stopped writing Athena trailers after the cutover commit.
+        let reading = history_reading(
+            &[
+                "crates/athena-core/src/commits.rs",
+                "crates/athena-core/src/manage.rs",
+                "crates/athena-git/src/attrs.rs",
+                "crates/athena-core/src/status.rs",
+                "crates/athena-core/src/auditor.rs",
+            ],
+            "Run `cargo test -p athena-cli --test lifecycle`: no Athena trailers are written after C0",
+        );
+        refused_then_accepted(reading);
+        // A trigger in a criterion alone is enough, whatever files the job lists.
+        let criterion_only = history_reading(
+            &[
+                "crates/athena-core/src/manage.rs",
+                "crates/athena-core/src/status.rs",
+            ],
+            "Run `cargo test`: status prints the trailer of the last landing",
+        );
+        refused_then_accepted(criterion_only);
+        // A content criterion can trigger it too.
+        let mut content_trigger = code_reading(&[SURVEY], &[MODIFY_READING]);
+        add_content(&mut content_trigger, "The doc names the history check");
+        assert_eq!(
+            gate_refuser(&content_trigger),
+            Some("check_history_fixture")
+        );
+    }
+
+    #[test]
+    fn history_fixture_leaves_unrelated_readings_alone() {
+        let neutral = "Run `cargo test`: the new unit test passes";
+        let mut cases: Vec<(&str, Reading)> = Vec::new();
+        // A docs reading that mentions the history check.
+        let mut docs = history_reading(
+            &["docs/guide.md"],
+            "The history check reads the job records on the records branch",
+        );
+        docs.class_of_work = "docs".into();
+        cases.push(("docs", docs));
+        cases.push((
+            "code touching none of it",
+            history_reading(&["crates/athena-core/src/reading.rs"], neutral),
+        ));
+        // Job fe1df4f: a green CI result is reused as the baseline when the fingerprint matches.
+        cases.push((
+            "ci baseline",
+            history_reading(
+                &[
+                    "crates/athena-core/src/reconcile.rs",
+                    "crates/athena-core/src/checks.rs",
+                ],
+                "Run `cargo test -p athena-core`: a green CI result is reused as the job baseline when the \
+                 fingerprint matches",
+            ),
+        ));
+        // Job 1bc7736: a job lands only on the branch it was dispatched from.
+        cases.push((
+            "dispatch branch",
+            history_reading(
+                &["crates/athena-core/src/land.rs"],
+                "Run `cargo test -p athena-core land::`: a job lands only on the branch it was dispatched from",
+            ),
+        ));
+        cases.push((
+            "landing queue",
+            history_reading(
+                &["crates/athena-core/src/gh.rs", "crates/athena-core/src/gh/landing.rs"],
+                "Run `cargo test -p athena-core gh::`: landing is first in, first out; a job waits for the \
+                 early CI run and the landing time is recorded",
+            ),
+        ));
+        cases.push((
+            "listed path alone",
+            history_reading(&["crates/athena-core/src/land.rs"], neutral),
+        ));
+        cases.push((
+            "athena-data history",
+            history_reading(&["crates/athena-data/src/history.rs"], neutral),
+        ));
+        cases.push(("tests class", {
+            let mut tests = history_reading(&["crates/athena-core/tests/reconcile.rs"], neutral);
+            tests.class_of_work = "tests".into();
+            tests
+        }));
+        // A decline, a question, and content criteria only.
+        let mut declined =
+            history_reading(&["crates/athena-core/src/land.rs"], "pr_commits is fixed");
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        cases.push(("decline", declined));
+        let mut asking =
+            history_reading(&["crates/athena-core/src/land.rs"], "pr_commits is fixed");
+        asking.question = Some("which file?".into());
+        cases.push(("question", asking));
+        let mut content = code_reading(&[SURVEY], &[MODIFY_READING]);
+        content.acceptance_criteria = vec![Criterion {
+            text: "The doc names the history check".into(),
+            kind: CriterionKind::Content,
+        }];
+        cases.push(("content only", content));
+        // The survey assumption is not searched: it may name a function the change only reads.
+        cases.push(("survey names classify_commit", {
+            let mut surveyed = history_reading(&["crates/athena-core/src/land.rs"], neutral);
+            surveyed.assumptions = vec![format!("{SURVEY}; classify_commit in land.rs was read")];
+            surveyed
+        }));
+        for (label, reading) in &cases {
+            check_history_fixture(reading).unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert_ne!(
+                gate_refuser(reading),
+                Some("check_history_fixture"),
+                "{label}"
+            );
+        }
+        // The word boundaries are those of `has_phrase`: an underscore or a hyphen is a boundary.
+        assert!(!has_phrase("the trailing newline", "trailer"));
+        assert!(!has_phrase("a trailered job", "trailer"));
+        assert!(has_phrase("a trailer_x field", "trailer"));
+        assert!(has_phrase("a trailer-x field", "trailer"));
+    }
+
+    #[test]
+    fn history_fixture_has_one_step_line() {
+        let source = include_str!("reading.rs");
+        let body = source
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        let steps: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("step!(check_"))
+            .collect();
+        let line = "step!(check_history_fixture(reading));";
+        assert_eq!(steps.iter().filter(|l| **l == line).count(), 1, "{steps:?}");
+        let survey = steps
+            .iter()
+            .position(|l| *l == "step!(check_code_survey(reading));")
+            .unwrap();
+        assert_eq!(steps[survey + 1], line);
+        let acceptance_doc = source
+            .split("pub fn check_reading_acceptance(")
+            .next()
+            .unwrap();
+        assert!(acceptance_doc.contains("[`check_history_fixture`]"));
+    }
+
+    #[test]
+    fn history_fixture_refusal_needs_the_step_line() {
+        // The refusal comes from the gate and not from a direct call: a reading the check refuses is refused
+        // by `refusing_check` under the check's own name, and the step line is in its body.
+        let reading = history_reading(
+            &["crates/athena-core/src/land.rs"],
+            "Run `cargo test`: pr_commits accepts the job commits",
+        );
+        assert_eq!(gate_refuser(&reading), Some("check_history_fixture"));
+        assert!(accept(&reading).is_err());
+        let body = include_str!("reading.rs")
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        assert!(body.contains("step!(check_history_fixture(reading));"));
+    }
+
+    #[test]
+    fn history_fixture_doc_and_changelog_name_the_cause() {
+        fn collapse(text: &str) -> String {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        const CAUSE: &str = "derived from the happy-path commit shape";
+        let source = include_str!("reading.rs");
+        assert!(source.contains("pub fn check_history_fixture(reading: &Reading) -> Result<()>"));
+        let before = source
+            .split("pub fn check_history_fixture(")
+            .next()
+            .unwrap();
+        let mut doc_lines: Vec<&str> = before
+            .lines()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("///"))
+            .map(|l| l.trim_start().trim_start_matches('/'))
+            .collect();
+        doc_lines.reverse();
+        let doc = collapse(&doc_lines.join(" "));
+        let changelog = include_str!("../../../CHANGELOG.md");
+        let unreleased = changelog
+            .split("## [Unreleased]")
+            .nth(1)
+            .unwrap()
+            .split("\n## [")
+            .next()
+            .unwrap();
+        let mut items: Vec<String> = Vec::new();
+        for line in unreleased.lines() {
+            if line.starts_with("- ") {
+                items.push(line.to_string());
+            } else if let Some(last) = items.last_mut() {
+                last.push(' ');
+                last.push_str(line);
+            }
+        }
+        let items: Vec<String> = items.iter().map(|i| collapse(i)).collect();
+        let item = items
+            .iter()
+            .find(|i| i.contains("reading::check_history_fixture"))
+            .expect("a changelog item names the check");
+        for (label, text) in [("doc comment", &doc), ("changelog item", item)] {
+            for needle in [
+                CAUSE,
+                "20261024-153908-1rve",
+                "20261024-154552-e65v",
+                "20261025-012657-hac3",
+                "where readings are accepted",
+                "retry-after-block",
+                "is not enforced",
+                "no reader rule line",
+                "higher refusal rate is intended",
+                "expected 4% of newly refused readings",
+                "estimate",
+            ] {
+                assert!(text.contains(needle), "the {label} lacks {needle:?}");
+            }
+        }
+        let declared = replay_declaration(
+            &[Criterion {
+                text: "This check refuses more readings; expected 4% of newly refused readings."
+                    .into(),
+                kind: CriterionKind::Content,
+            }],
+            &[],
+        );
+        assert_eq!(declared.share, Some(4));
+        // The doc's own declaration parses to the same share.
+        assert_eq!(
+            replay_declaration(
+                &[Criterion {
+                    text: doc.clone(),
+                    kind: CriterionKind::Content
+                }],
+                &[]
+            )
+            .share,
+            Some(4)
+        );
     }
 
     const EXISTING: &str =
