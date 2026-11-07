@@ -43,13 +43,17 @@
 //! The throughput review (`docs/design/hestia.md`, "Throughput review") asks a different question: not what
 //! failed but what the pipeline waits on. It runs in [`Athena::review_passes`] when [`throughput_due`] says so:
 //! every [`crate::code_health::REVIEW_EVERY`] landings, or when the median minutes per landed job grew by more
-//! than 20% since the previous review. A strong model is given the status throughput section
-//! ([`crate::status::Throughput`]) and `docs/design`, and names the biggest bottleneck and the architectural
-//! change that removes it, with the minutes it expects that change to save per landed job. The top proposal is
-//! queued as a design request through [`StewardRequest`], at a priority set by those minutes
-//! ([`priority_for_minutes`]), and the prediction is kept in an `athena.throughput-review/1` record. A later
-//! review compares the minutes measured after a change that cites the review with the prediction
-//! ([`throughput_followups`]).
+//! than 20% since the previous review, or when wasted work rose by more than 20% against the figures the
+//! previous review stored: attempts per landed change, money spent on attempts that did not land, or the share
+//! of changes that landed on the first attempt ([`waste_rises`]). A strong model is given the status
+//! throughput section ([`crate::status::Throughput`]) and `docs/design`, and names the biggest bottleneck and
+//! the architectural change that removes it, with the minutes it expects that change to save per landed job.
+//! An open earlier design request does not stop the review: the review notes it and tells the model about it.
+//! The proposal is queued as a design request through [`StewardRequest`], at a priority set by those minutes
+//! ([`priority_for_minutes`]), only when a measure got worse by more than the noise between recent windows
+//! ([`request_gate`]); otherwise it is recorded without a request and the note says why. The prediction is
+//! kept in an `athena.throughput-review/1` record. A later review compares the minutes measured after a
+//! change that cites the review with the prediction ([`throughput_followups`]).
 //!
 //! Every throughput review run also compares the latest median minutes per landed job with the previous
 //! review's, and does so even while a design request is open. The previous per-stage medians are rebuilt from
@@ -59,7 +63,8 @@
 //! high-priority request that names the stage that grew most with its measured minutes
 //! ([`slowdown_request`]). Its title starts with [`SLOWDOWN_MARKER`], and an open request with that marker
 //! holds back another. A rise between 20% and 25% still runs a review and names the stages, but queues no
-//! slowdown request.
+//! slowdown request. With 60 or more landings the slowdown request is also queued only when the rise over the
+//! previous review's median is more than the noise between recent windows ([`slowdown_beyond_noise`]).
 //!
 //! The sweep also measures the build. [`Athena::hestia_sweep_with`] runs [`Athena::measure_build_pass`], which
 //! calls [`Athena::measure_build`] (two cold workspace builds in separate worktrees, committed as an
@@ -74,8 +79,8 @@ use crate::disk::{CargoBuild, CargoBuilder, GB, cargo_lock_blob};
 use crate::plan::{Improvement, Priority};
 use crate::state::format_bytes;
 use crate::status::{
-    LandedJob, StageMinutes, THROUGHPUT_WINDOW, Throughput, landed_jobs, landed_jobs_among_first,
-    median,
+    Bar, LandedJob, Measure, StageMinutes, THROUGHPUT_WINDOW, Throughput, landed_jobs,
+    landed_jobs_among_first, median,
 };
 use crate::steward::StewardRequest;
 use crate::store::{JobRecords, JobState, Records};
@@ -87,7 +92,7 @@ use athena_context::{CONTRACT, Component, Composed, compose};
 use athena_data::records::{
     AnyRecord, BuildMeasurement, HestiaCheckResult, IntrospectionRecord, IntrospectionStatus,
     Invocation, InvocationOutcome, OutcomeState, Role, ThroughputFollowup, ThroughputProposal,
-    ThroughputReview, ThroughputTrigger,
+    ThroughputReview, ThroughputTrigger, WasteFigures,
 };
 use athena_data::{JobId, RecordId};
 use jiff::Timestamp;
@@ -1294,7 +1299,8 @@ fn plan_backfill(records: &Records, disabled: &[Stage]) -> Vec<Planned> {
 pub const WORSEN_RATIO: f64 = 1.2;
 
 /// The title of a throughput design request starts with this. An open request with a line that starts so
-/// means the last proposal is still being worked, and the review queues no second one.
+/// means the last proposal is still being worked; a review still runs and names it, and queues another only
+/// when the gate ([`request_gate`]) finds a change beyond the noise.
 pub const THROUGHPUT_MARKER: &str = "Throughput design: ";
 
 /// The median minutes per landed job must be more than this times the previous review's for the review to
@@ -1303,7 +1309,7 @@ pub const THROUGHPUT_MARKER: &str = "Throughput design: ";
 pub const SLOWDOWN_RATIO: f64 = 1.25;
 
 /// The title of a slowdown request starts with this. An open request with a line that starts so means the
-/// last slowdown is still being worked, and the review queues no second one. It shares no prefix with
+/// last slowdown is still being worked, and no second slowdown request is queued. It shares no prefix with
 /// [`THROUGHPUT_MARKER`], so an open design request never holds back a slowdown request, nor the reverse.
 pub const SLOWDOWN_MARKER: &str = "Throughput slowdown: ";
 
@@ -1335,12 +1341,15 @@ the design documents. Do not propose changes to the error review or the code-hea
 
 /// Why a throughput review is due, or None. A review is due when [`crate::code_health::REVIEW_EVERY`]
 /// landings stand beyond the previous review (the first ten landings when there is none), or when at least
-/// one job landed since the previous review and the median minutes per landed job is more than
-/// [`WORSEN_RATIO`] times the one that review recorded. `landed` and `median` are the status throughput
-/// section's `landed_total` and `median_minutes`.
+/// one job landed since the previous review and either the median minutes per landed job is more than
+/// [`WORSEN_RATIO`] times the one that review recorded ([`ThroughputTrigger::Worsened`]) or wasted work
+/// rose by more than that ratio against the figures that review stored ([`waste_rises`],
+/// [`ThroughputTrigger::Wasted`]). `landed` and `median` are the status throughput section's
+/// `landed_total` and `median_minutes`; `waste` is the figures over its newest window.
 pub fn throughput_due(
     landed: usize,
     median: f64,
+    waste: Option<WasteFigures>,
     latest: Option<&ThroughputReview>,
 ) -> Option<ThroughputTrigger> {
     let every = crate::code_health::REVIEW_EVERY as usize;
@@ -1351,9 +1360,193 @@ pub fn throughput_due(
     if landed >= before + every {
         return Some(ThroughputTrigger::Cadence);
     }
+    if landed <= before {
+        return None;
+    }
     let worse = previous.window_median_minutes > 0.0
         && median / previous.window_median_minutes > WORSEN_RATIO;
-    (landed > before && worse).then_some(ThroughputTrigger::Worsened)
+    if worse {
+        return Some(ThroughputTrigger::Worsened);
+    }
+    let rises = previous
+        .waste
+        .zip(waste)
+        .is_some_and(|(before, now)| !waste_rises(&before, &now).is_empty());
+    rises.then_some(ThroughputTrigger::Wasted)
+}
+
+/// The measures of wasted work that rose by more than [`WORSEN_RATIO`] from `previous` to `now`, by name:
+/// attempts per landed change and money spent on attempts that did not land rising by more than 20%, and the
+/// first-attempt share falling by more than 20% (below `2 - WORSEN_RATIO` times the previous share). When
+/// nothing was spent on attempts that did not land before, a spend above zero counts only if attempts per
+/// landed change also rose by more than 20%, so that one failed run after a clean window starts no review.
+pub fn waste_rises(previous: &WasteFigures, now: &WasteFigures) -> Vec<&'static str> {
+    let mut rises = Vec::new();
+    let attempts = now.attempts_per_landing > previous.attempts_per_landing * WORSEN_RATIO;
+    if attempts {
+        rises.push("attempts per landed change");
+    }
+    let spend = if previous.wasted_usd > 0.0 {
+        now.wasted_usd > previous.wasted_usd * WORSEN_RATIO
+    } else {
+        now.wasted_usd > 0.0 && attempts
+    };
+    if spend {
+        rises.push("spent on attempts that did not land");
+    }
+    if now.first_attempt_share < previous.first_attempt_share * (2.0 - WORSEN_RATIO) {
+        rises.push("share landed on the first attempt (fell)");
+    }
+    rises
+}
+
+/// The landings the design-request gate needs to estimate noise: the newest three windows.
+const GATE_LANDINGS: usize = 3 * THROUGHPUT_WINDOW;
+
+/// A change must exceed its bar by more than this to count, so that a change of exactly one job (such as
+/// 21/20 - 20/20) is not made larger than the one-job floor by rounding.
+const NOISE_EPSILON: f64 = 1e-9;
+
+/// Whether a design request is queued, and the sentence for the review's note. See [`request_gate`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gate {
+    pub queue: bool,
+    /// Starts with `design request:`.
+    pub note: String,
+}
+
+/// Decides whether the throughput review queues a design request. It never decides whether the model is
+/// asked: a due review always asks, and records the proposal.
+///
+/// With the newest three windows full (60 landings) a measure is judged: its change is the newest window
+/// against the one before it, in the bad direction, and it counts only if the change is more than the larger
+/// of the noise between the older windows and the smallest change one job can make ([`Bar`]). A request is
+/// queued when at least one measure is beyond that bar. The noise is taken from adjacent differences, so a
+/// steady worsening of equal steps (say spend 2, 4, 6, then 8) is within it; the 20% trigger still runs the
+/// review. With fewer landings the noise cannot be estimated: nothing is queued, except that the very first
+/// review (`first_review`) queues one when no throughput design request is open (`request_open`).
+pub fn request_gate(
+    measures: &[Measure],
+    landed: usize,
+    first_review: bool,
+    request_open: bool,
+) -> Gate {
+    let judged: Vec<&Measure> = measures
+        .iter()
+        .filter(|m| m.bar.bar().is_some() && m.before.is_some())
+        .collect();
+    if judged.is_empty() {
+        if first_review && !request_open {
+            return Gate {
+                queue: true,
+                note: format!(
+                    "design request: the first review has no earlier window to judge a change against ({landed} of {GATE_LANDINGS} landings)"
+                ),
+            };
+        }
+        return Gate {
+            queue: false,
+            note: format!(
+                "design request: not enough history: {landed} of {GATE_LANDINGS} landings, none queued"
+            ),
+        };
+    }
+    let describe = |m: &Measure, change: f64, bar: &Bar| {
+        format!(
+            "{} {} (noise {} from {} difference(s), one-job floor {})",
+            m.name,
+            fmt_change(m, change),
+            fmt_amount(m, bar.noise.unwrap_or(0.0)),
+            bar.differences,
+            fmt_amount(m, bar.floor),
+        )
+    };
+    let mut beyond = Vec::new();
+    let mut within = Vec::new();
+    for m in &judged {
+        let (Some(change), Some(bar)) = (m.worsening(), m.bar.bar()) else {
+            continue;
+        };
+        if change > bar + NOISE_EPSILON {
+            beyond.push(describe(m, change, &m.bar));
+        } else if change > 0.0 {
+            within.push(describe(m, change, &m.bar));
+        }
+    }
+    let left_out: Vec<&str> = measures
+        .iter()
+        .filter(|m| m.bar.bar().is_none() || m.before.is_none())
+        .map(|m| m.name)
+        .collect();
+    let left_out = if left_out.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; not judged, too few full windows: {}",
+            left_out.join(", ")
+        )
+    };
+    if !beyond.is_empty() {
+        return Gate {
+            queue: true,
+            note: format!(
+                "design request: worse by more than the noise: {}{left_out}",
+                beyond.join("; ")
+            ),
+        };
+    }
+    let note = if within.is_empty() {
+        "design request: no measure worsened, none queued".to_string()
+    } else {
+        format!(
+            "design request: within noise, none queued: worsened by {}",
+            within.join("; ")
+        )
+    };
+    Gate {
+        queue: false,
+        note: format!("{note}{left_out}"),
+    }
+}
+
+fn fmt_amount(m: &Measure, value: f64) -> String {
+    match m.unit {
+        "USD" => format!("{value:.2} USD"),
+        "min" => format!("{value:.1} min"),
+        _ if m.name.starts_with("share") => format!("{:.0} points", value * 100.0),
+        _ => format!("{value:.2}"),
+    }
+}
+
+fn fmt_change(m: &Measure, change: f64) -> String {
+    let word = if m.higher_is_worse { "up" } else { "down" };
+    format!("{word} {}", fmt_amount(m, change))
+}
+
+/// Applies the noise rule to a slowdown request. `rise` is the median minutes per landed job now minus the
+/// previous review's. `Err` holds the remark when the rise is no more than the larger of the median's noise
+/// and its one-minute floor, so no request is queued. `Ok(None)` means the rise is beyond that bar.
+/// `Ok(Some(remark))` means the noise cannot be estimated (under 60 landings), so the 25% rule alone decides
+/// and the remark says so.
+pub fn slowdown_beyond_noise(
+    rise: f64,
+    bar: &Bar,
+    landed: usize,
+) -> Result<Option<String>, String> {
+    let Some(limit) = bar.bar() else {
+        return Ok(Some(format!(
+            "noise could not be estimated ({landed} of {GATE_LANDINGS} landings); the 25% rule applied"
+        )));
+    };
+    if rise > limit + NOISE_EPSILON {
+        return Ok(None);
+    }
+    Err(format!(
+        "slowdown request: median rose {rise:.1} min over the previous review, within noise (noise {:.1} min from {} difference(s), floor {:.1} min); none queued",
+        bar.noise.unwrap_or(0.0),
+        bar.differences,
+        bar.floor
+    ))
 }
 
 /// The priority a design request gets from the minutes per landed job it is expected to save: more minutes,
@@ -1688,16 +1881,18 @@ impl Drop for Cleanup {
 
 impl Athena {
     /// The throughput review: when [`throughput_due`], asks the model for the biggest bottleneck and the
-    /// architectural change that removes it, queues one design request for the proposal (none while an earlier
-    /// one is open), and records the review with the prediction and the follow-ups it closes. Returns the
-    /// record, or None when the review is not due, the run is nested, or the kill switch is on. A model that
-    /// fails or answers badly still gives a record, without a proposal, so the cadence moves on; the invocation
-    /// is recorded either way, since it cost money.
+    /// architectural change that removes it, and records the review with the prediction, the wasted-work
+    /// figures and the follow-ups it closes. An earlier design request that is still open does not stop it:
+    /// the note and THROUGHPUT.md name that request. A design request for the proposal is queued only when
+    /// [`request_gate`] finds a change beyond the noise between recent windows; the note says whether it was.
+    /// Returns the record, or None when the review is not due, the run is nested, or the kill switch is on. A
+    /// model that fails or answers badly still gives a record, without a proposal, so the cadence moves on;
+    /// the invocation is recorded either way, since it cost money.
     ///
     /// Whether or not a design request is open, a due review also compares the latest stage medians with the
     /// previous review's, puts the stages that grew in the record's note and in a line to `ui`, and, when the
-    /// median grew by more than 25%, queues a high-priority slowdown request
-    /// (`compare_with_previous_review`).
+    /// median grew by more than 25% (and, with 60 or more landings, by more than the noise), queues a
+    /// high-priority slowdown request (`compare_with_previous_review`).
     pub fn throughput_review(&self, ui: &dyn Ui) -> Result<Option<ThroughputReview>> {
         if self.nested.is_some() || self.state.registry().stopped() {
             return Ok(None);
@@ -1708,8 +1903,13 @@ impl Athena {
             return Ok(None);
         };
         let latest = ThroughputReview::latest(&records.throughput_reviews);
-        let Some(trigger) = throughput_due(measured.landed_total, measured.median_minutes, latest)
-        else {
+        let waste = measured.waste.figures();
+        let Some(trigger) = throughput_due(
+            measured.landed_total,
+            measured.median_minutes,
+            Some(waste),
+            latest,
+        ) else {
             return Ok(None);
         };
         let now = crate::now();
@@ -1722,52 +1922,60 @@ impl Athena {
         // hide a slowdown.
         let (remark, slowdown_job) = self.compare_with_previous_review(&records, latest, &measured);
 
-        let mut note = String::new();
-        let mut proposal = None;
-        let mut invocation: Option<Invocation> = None;
-        if let Some(open) = open_throughput_request(&records) {
-            note = format!(
-                "throughput design request {} is still open; the model was not asked for another",
+        // An open design request does not stop the review: it is named in the note and in THROUGHPUT.md,
+        // and the model is asked. Whether a second request is queued is the gate's decision.
+        let open = open_throughput_request(&records);
+        let gate = request_gate(
+            &measured.measures(),
+            measured.landed_total,
+            latest.is_none(),
+            open.is_some(),
+        );
+        let mut notes: Vec<String> = Vec::new();
+        if let Some(open) = open {
+            notes.push(format!(
+                "throughput design request {} is still open; this review ran anyway",
                 open.id()
-            );
-        } else {
-            let (made, answer) = self.ask_throughput(&head, &measured, trigger, now)?;
-            invocation = made;
-            match answer {
-                Ok(answer) => {
-                    let priority = priority_for_minutes(answer.expected_minutes_saved);
-                    let request_job =
-                        match throughput_request(&id, &answer, measured.median_minutes) {
-                            Ok(text) => match self.queue(&text) {
-                                Ok((job, _)) => Some(job),
-                                Err(e) => {
-                                    note = format!("the design request could not be queued: {e:#}");
-                                    None
-                                }
-                            },
+            ));
+        }
+        notes.push(gate.note.clone());
+        let mut proposal = None;
+        let (made, answer) = self.ask_throughput(&head, &measured, trigger, now, open)?;
+        let invocation: Option<Invocation> = made;
+        match answer {
+            Ok(answer) => {
+                let priority = priority_for_minutes(answer.expected_minutes_saved);
+                let request_job = if !gate.queue {
+                    None
+                } else {
+                    match throughput_request(&id, &answer, measured.median_minutes) {
+                        Ok(text) => match self.queue(&text) {
+                            Ok((job, _)) => Some(job),
                             Err(e) => {
-                                note = format!("the design request could not be built: {e}");
+                                notes
+                                    .push(format!("the design request could not be queued: {e:#}"));
                                 None
                             }
-                        };
-                    proposal = Some(ThroughputProposal {
-                        bottleneck: one_line(&answer.bottleneck),
-                        stage: one_line(&answer.stage),
-                        change: one_line(&answer.change),
-                        expected_minutes_saved: answer.expected_minutes_saved,
-                        priority: priority.as_str().to_string(),
-                        request_job,
-                    });
-                }
-                Err(e) => note = format!("no proposal: {e:#}"),
+                        },
+                        Err(e) => {
+                            notes.push(format!("the design request could not be built: {e}"));
+                            None
+                        }
+                    }
+                };
+                proposal = Some(ThroughputProposal {
+                    bottleneck: one_line(&answer.bottleneck),
+                    stage: one_line(&answer.stage),
+                    change: one_line(&answer.change),
+                    expected_minutes_saved: answer.expected_minutes_saved,
+                    priority: priority.as_str().to_string(),
+                    request_job,
+                });
             }
+            Err(e) => notes.push(format!("no proposal: {e:#}")),
         }
-
         if !remark.is_empty() {
-            if !note.is_empty() {
-                note.push_str("; ");
-            }
-            note.push_str(&remark);
+            notes.push(remark.clone());
         }
         let review = ThroughputReview {
             id,
@@ -1776,8 +1984,9 @@ impl Athena {
             window_median_minutes: measured.median_minutes,
             trigger,
             proposal,
+            waste: Some(waste),
             followups,
-            note,
+            note: notes.join("; "),
         };
         review.validate().map_err(|e| anyhow::anyhow!(e))?;
         let record = AnyRecord::ThroughputReview(Box::new(review.clone()));
@@ -1833,9 +2042,12 @@ impl Athena {
     ///
     /// When the median minutes per landed job grew by more than 25% ([`is_slowdown`]) and a stage grew, a
     /// high-priority request naming the stage that grew most is queued ([`slowdown_request`]), unless an
-    /// open request with [`SLOWDOWN_MARKER`] already exists. The comparison is code, not the model, and it
-    /// never queues a second design request. When the median rose but no stage's median did, or the previous
-    /// window cannot be rebuilt, nothing is queued and the remark says so.
+    /// open request with [`SLOWDOWN_MARKER`] already exists, or the rise over the previous review's median is
+    /// no more than the noise between recent windows and the one-minute floor ([`slowdown_beyond_noise`];
+    /// with under 60 landings the noise cannot be estimated, the remark says so and the 25% rule alone
+    /// decides). The comparison is code, not the model, and it never queues a design request. When the
+    /// median rose but no stage's median did, or the previous window cannot be rebuilt, nothing is queued and
+    /// the remark says so.
     fn compare_with_previous_review(
         &self,
         records: &Records,
@@ -1871,28 +2083,40 @@ impl Athena {
                         .to_string(),
                 ),
                 Some(grown) => {
-                    if let Some(open) = open_request_with_marker(records, SLOWDOWN_MARKER) {
-                        parts.push(format!("slowdown request {} is still open", open.id()));
-                    } else {
-                        match slowdown_request(
-                            previous.window_median_minutes,
-                            measured.median_minutes,
-                            grown,
-                        ) {
-                            Ok(text) => match self.queue(&text) {
-                                Ok((job, _)) => {
-                                    parts.push(format!(
-                                        "slowdown request {job} queued at high priority"
-                                    ));
-                                    slowdown_job = Some(job);
+                    let rise = measured.median_minutes - previous.window_median_minutes;
+                    match slowdown_beyond_noise(
+                        rise,
+                        &measured.bars.median_minutes,
+                        measured.landed_total,
+                    ) {
+                        // The rise is no more than the noise between recent windows: no request.
+                        Err(within) => parts.push(within),
+                        Ok(remark) => {
+                            parts.extend(remark);
+                            if let Some(open) = open_request_with_marker(records, SLOWDOWN_MARKER) {
+                                parts.push(format!("slowdown request {} is still open", open.id()));
+                            } else {
+                                match slowdown_request(
+                                    previous.window_median_minutes,
+                                    measured.median_minutes,
+                                    grown,
+                                ) {
+                                    Ok(text) => match self.queue(&text) {
+                                        Ok((job, _)) => {
+                                            parts.push(format!(
+                                                "slowdown request {job} queued at high priority"
+                                            ));
+                                            slowdown_job = Some(job);
+                                        }
+                                        Err(e) => parts.push(format!(
+                                            "the slowdown request could not be queued: {e:#}"
+                                        )),
+                                    },
+                                    Err(e) => parts.push(format!(
+                                        "the slowdown request could not be built: {e}"
+                                    )),
                                 }
-                                Err(e) => parts.push(format!(
-                                    "the slowdown request could not be queued: {e:#}"
-                                )),
-                            },
-                            Err(e) => parts.push(format!(
-                                "the slowdown request could not be built: {e}"
-                            )),
+                            }
                         }
                     }
                 }
@@ -1909,6 +2133,7 @@ impl Athena {
         measured: &Throughput,
         trigger: ThroughputTrigger,
         now: Timestamp,
+        open: Option<&JobRecords>,
     ) -> Result<(Option<Invocation>, Result<ThroughputOutput>)> {
         let jc = JobConfig::at(&self.git, head)?;
         let run_job = JobId::Id(RecordId::generate(now));
@@ -1916,10 +2141,22 @@ impl Athena {
         let _cleanup = Cleanup(job_dir.clone());
         let workspace = job_dir.join("workspace");
         std::fs::create_dir_all(&workspace)?;
+        let open_note = open.map_or_else(String::new, |job| {
+            let title = job
+                .request
+                .as_ref()
+                .and_then(|r| r.text.lines().find(|l| l.starts_with(THROUGHPUT_MARKER)))
+                .unwrap_or_default();
+            format!(
+                "An earlier design request is still open: {} ({}). Propose a change that differs from it.\n\n",
+                job.id(),
+                one_line(title)
+            )
+        });
         std::fs::write(
             workspace.join(THROUGHPUT_FILE),
             format!(
-                "# Throughput\n\nThis review ran because of: {}.\n\n```\n{}\n```\n\nThe stages are minutes of the model \
+                "# Throughput\n\nThis review ran because of: {}.\n\n{open_note}```\n{}\n```\n\nThe stages are minutes of the model \
                  invocations of that role, minutes the checks took, and, for landing and rebuild, the time from the \
                  end of the last invocation (the verifier) to the later of the landing outcome and the landing \
                  record (landings/), which is written after the CI wait, push and merge. Idle time and the time on \
@@ -4225,6 +4462,7 @@ mod tests {
     // Throughput review
 
     use crate::status::planning_cost_tests::timed_job;
+    use crate::status::waste_windows;
     use athena_agent::fake::FakeTurn;
     use std::sync::{Arc, Mutex};
 
@@ -4353,6 +4591,7 @@ mod tests {
             window_median_minutes: median,
             trigger: ThroughputTrigger::Cadence,
             proposal: None,
+            waste: None,
             followups: vec![],
             note: String::new(),
         }
@@ -4362,23 +4601,91 @@ mod tests {
     fn a_throughput_review_is_due_at_ten_landings_and_on_a_rise_of_more_than_twenty_percent() {
         use ThroughputTrigger::{Cadence, Worsened};
         // No review yet: ten landings make the first one due, nine do not, however slow they were.
-        assert_eq!(throughput_due(9, 500.0, None), None);
-        assert_eq!(throughput_due(10, 5.0, None), Some(Cadence));
+        assert_eq!(throughput_due(9, 500.0, None, None), None);
+        assert_eq!(throughput_due(10, 5.0, None, None), Some(Cadence));
         // A review at 10 landings with a median of 10 minutes.
         let prior = earlier_review(10, 10.0);
-        assert_eq!(throughput_due(19, 10.0, Some(&prior)), None, "nine more");
-        assert_eq!(throughput_due(20, 10.0, Some(&prior)), Some(Cadence));
-        assert_eq!(throughput_due(15, 9.0, Some(&prior)), None, "faster");
-        // Exactly 20% worse is not more than 20% worse; a little over is, once a job has landed since.
-        assert_eq!(throughput_due(15, 12.0, Some(&prior)), None);
-        assert_eq!(throughput_due(15, 12.1, Some(&prior)), Some(Worsened));
         assert_eq!(
-            throughput_due(10, 12.1, Some(&prior)),
+            throughput_due(19, 10.0, None, Some(&prior)),
+            None,
+            "nine more"
+        );
+        assert_eq!(throughput_due(20, 10.0, None, Some(&prior)), Some(Cadence));
+        assert_eq!(throughput_due(15, 9.0, None, Some(&prior)), None, "faster");
+        // Exactly 20% worse is not more than 20% worse; a little over is, once a job has landed since.
+        assert_eq!(throughput_due(15, 12.0, None, Some(&prior)), None);
+        assert_eq!(throughput_due(15, 12.1, None, Some(&prior)), Some(Worsened));
+        assert_eq!(
+            throughput_due(10, 12.1, None, Some(&prior)),
             None,
             "no new landing"
         );
         // Ten more landings are the cadence whatever the median did.
-        assert_eq!(throughput_due(20, 12.1, Some(&prior)), Some(Cadence));
+        assert_eq!(throughput_due(20, 12.1, None, Some(&prior)), Some(Cadence));
+    }
+
+    fn figures(attempts: f64, usd: f64, share: f64) -> WasteFigures {
+        WasteFigures {
+            attempts_per_landing: attempts,
+            wasted_usd: usd,
+            first_attempt_share: share,
+        }
+    }
+
+    fn earlier_review_with_waste(
+        landings: u32,
+        median: f64,
+        waste: WasteFigures,
+    ) -> ThroughputReview {
+        ThroughputReview {
+            waste: Some(waste),
+            ..earlier_review(landings, median)
+        }
+    }
+
+    #[test]
+    fn a_rise_in_wasted_work_makes_a_review_due_when_the_median_has_not_moved() {
+        use ThroughputTrigger::Wasted;
+        let prior = earlier_review_with_waste(10, 10.0, figures(1.5, 2.0, 0.8));
+        let due = |landed, now| throughput_due(landed, 10.0, Some(now), Some(&prior));
+        // Spend up from 2.00 to 2.50 with the same median: a trigger. The same inputs without the rise: none.
+        assert_eq!(due(15, figures(1.5, 2.5, 0.8)), Some(Wasted));
+        assert_eq!(due(15, figures(1.5, 2.0, 0.8)), None);
+        // Needs a landing since the review; exactly 20% more is not more than 20%.
+        assert_eq!(due(10, figures(1.5, 2.5, 0.8)), None, "no new landing");
+        assert_eq!(due(15, figures(1.5, 2.4, 0.8)), None, "exactly 20%");
+        // Attempts per landing and a falling first-attempt share each trigger alone.
+        assert_eq!(due(15, figures(1.9, 2.0, 0.8)), Some(Wasted));
+        assert_eq!(due(15, figures(1.5, 2.0, 0.6)), Some(Wasted));
+        assert_eq!(
+            due(15, figures(1.5, 2.0, 0.7)),
+            None,
+            "a fall of less than 20%"
+        );
+        assert_eq!(
+            due(15, figures(1.2, 1.0, 0.9)),
+            None,
+            "better on every measure"
+        );
+        // A review written before the figures existed gives no waste trigger.
+        let old = earlier_review(10, 10.0);
+        assert_eq!(
+            throughput_due(15, 10.0, Some(figures(9.0, 99.0, 0.0)), Some(&old)),
+            None
+        );
+        // From a clean window a failed run alone starts nothing; with attempts per landing up it does.
+        let clean = earlier_review_with_waste(10, 10.0, figures(1.0, 0.0, 1.0));
+        let from_clean = |now| throughput_due(15, 10.0, Some(now), Some(&clean));
+        assert_eq!(from_clean(figures(1.0, 0.5, 1.0)), None);
+        assert_eq!(from_clean(figures(1.25, 0.5, 1.0)), Some(Wasted));
+        assert_eq!(
+            waste_rises(&figures(1.5, 2.0, 0.8), &figures(1.9, 2.5, 0.6)),
+            vec![
+                "attempts per landed change",
+                "spent on attempts that did not land",
+                "share landed on the first attempt (fell)"
+            ]
+        );
     }
 
     #[test]
@@ -4408,7 +4715,7 @@ mod tests {
     }
 
     #[test]
-    fn a_review_queues_one_design_request_with_the_bottleneck_change_and_saving_and_none_while_it_is_open()
+    fn a_review_queues_one_design_request_with_the_bottleneck_change_and_saving_and_notes_it_while_it_is_open()
      {
         let dir = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
@@ -4439,16 +4746,37 @@ mod tests {
         assert_eq!(known.throughput_reviews, vec![first.clone()]);
         assert_eq!(known.steward_runs.len(), 1, "the invocation is recorded");
 
-        // Ten more landings make a second review due while the request is still open: no second request,
-        // and the model is not asked again.
+        // Ten more landings make a second review due while the request is still open: the review runs, the
+        // model is asked and is told about the open request, and the note names it. Twenty landings are too
+        // few to tell a change from the noise, so the proposal is recorded and no second request is queued.
         seed_landed(dir.path(), &athena, 10, 10, 20.0);
         let second = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
-        assert_eq!(second.proposal, None);
+        let second_proposal = second.proposal.as_ref().expect("the proposal is recorded");
+        assert_eq!(second_proposal.request_job, None);
         assert!(second.note.contains("still open"), "{}", second.note);
+        assert!(
+            second
+                .note
+                .contains("design request: not enough history: 20 of 60 landings, none queued"),
+            "{}",
+            second.note
+        );
         let known = records(&athena);
         assert_eq!(open_design_requests(&known).len(), 1, "still one request");
         assert_eq!(known.throughput_reviews.len(), 2);
-        assert_eq!(seen.lock().unwrap().len(), 1, "the model was called once");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "the model was asked again");
+        assert!(seen[1].contains(open[0].id().as_str()), "{}", seen[1]);
+        assert!(
+            !seen[0].contains("An earlier design request is still open"),
+            "{}",
+            seen[0]
+        );
+        assert!(
+            seen[1].contains("An earlier design request is still open"),
+            "{}",
+            seen[1]
+        );
     }
 
     #[test]
@@ -4462,7 +4790,7 @@ mod tests {
         seed_landed(dir.path(), &athena, 0, 10, 20.0);
         let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
         assert_eq!(review.proposal, None);
-        assert!(review.note.starts_with("no proposal"), "{}", review.note);
+        assert!(review.note.contains("no proposal"), "{}", review.note);
         let known = records(&athena);
         assert!(open_design_requests(&known).is_empty());
         assert_eq!(known.throughput_reviews.len(), 1);
@@ -4641,10 +4969,19 @@ mod tests {
         let review = athena.throughput_review(&ui).unwrap().unwrap();
         assert_eq!(review.window_median_minutes, 60.0);
 
-        // The open design request is respected: no second proposal, the model is not asked.
-        assert_eq!(review.proposal, None);
+        // The open design request does not stop the review: the model is asked and the proposal is recorded,
+        // but 21 landings give no noise estimate, so no second design request is queued.
+        let proposal = review.proposal.as_ref().expect("a proposal is recorded");
+        assert_eq!(proposal.request_job, None);
         assert!(review.note.contains("still open"), "{}", review.note);
-        assert!(seen.lock().unwrap().is_empty(), "the model was not asked");
+        assert!(
+            review
+                .note
+                .contains("design request: not enough history: 21 of 60 landings"),
+            "{}",
+            review.note
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1, "the model was asked");
         let known = records(&athena);
         assert_eq!(open_design_requests(&known).len(), 1);
 
@@ -4717,7 +5054,11 @@ mod tests {
         let known = records(&athena);
         assert_eq!(open_slowdown_requests(&known).len(), 1);
         assert_eq!(open_design_requests(&known).len(), 1);
-        assert!(seen.lock().unwrap().is_empty(), "the model was not asked");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "the model was asked each time"
+        );
     }
 
     #[test]
@@ -4751,7 +5092,7 @@ mod tests {
         let open = open_slowdown_requests(&known);
         assert_eq!(open.len(), 1, "{}", review.note);
         assert_eq!(open[0].priority(), Priority::High);
-        assert!(seen.lock().unwrap().is_empty());
+        assert_eq!(seen.lock().unwrap().len(), 1, "the model was asked");
     }
 
     #[test]
@@ -4780,7 +5121,7 @@ mod tests {
         assert_eq!(known.request_jobs().len(), before, "no request was queued");
         assert!(open_slowdown_requests(&known).is_empty());
         assert_eq!(open_design_requests(&known).len(), 1);
-        assert!(seen.lock().unwrap().is_empty());
+        assert_eq!(seen.lock().unwrap().len(), 1, "the model was asked");
 
         // The same holds for equal stage medians in the pure comparison.
         assert!(stage_growth(&slow_stages(), &slow_stages()).is_empty());
@@ -4825,6 +5166,542 @@ mod tests {
         assert!(is_slowdown(20.0, 25.1));
         assert!(!is_slowdown(20.0, 12.0));
         assert!(!is_slowdown(0.0, 10.0), "no ratio to nothing");
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // Throughput review: wasted work, the open request and the noise rule
+
+    /// Commits one failed attempt, costing `usd`, after each landing in `slots` (as numbered by
+    /// [`seed_landed`]): it starts 30 minutes after that landing started and runs 5 minutes, so it closes
+    /// after the landing ends and before the next landing ends.
+    fn seed_failed(dir: &std::path::Path, athena: &Athena, slots: &[usize], usd: f64) {
+        let mut all = Vec::new();
+        for &g in slots {
+            let (day, hour) = (1 + g / 12, (g % 12) * 2);
+            let mut job = timed_job(
+                &format!("202609{day:02}-{hour:02}3000-f{g:03}"),
+                format!("2026-09-{day:02}T{hour:02}:30:00Z")
+                    .parse()
+                    .unwrap(),
+                producer_only(5.0),
+                OutcomeState::Failed,
+            );
+            // The cost is on the invocation, its per-model usage and the outcome's totals, which must agree.
+            let mut invocations = Vec::new();
+            for record in &mut job {
+                if let AnyRecord::Invocation(i) = record {
+                    i.cost = athena_data::Quantity::reported(usd, athena_data::Unit::Usd, "test");
+                    for usage in i.models_used.values_mut() {
+                        usage.cost_usd = usd;
+                    }
+                    invocations.push((**i).clone());
+                }
+            }
+            for record in &mut job {
+                if let AnyRecord::Outcome(o) = record {
+                    o.totals = Some(crate::scoring::totals(&invocations, None));
+                }
+            }
+            all.extend(job);
+        }
+        put(dir, athena, all);
+    }
+
+    /// The landings after which a failed attempt goes: `counts[w]` of them in the `w`-th oldest window of
+    /// twenty landings, each after a different landing.
+    fn failed_slots(counts: [usize; 4]) -> Vec<usize> {
+        (0..4)
+            .flat_map(|w| (0..counts[w]).map(move |j| 20 * w + j))
+            .collect()
+    }
+
+    /// Commits a review of `landings` landings and `median` minutes that stored `waste`, and, when `cites` is
+    /// given, whose proposal queued that request.
+    fn put_review(
+        dir: &std::path::Path,
+        athena: &Athena,
+        landings: u32,
+        median: f64,
+        waste: Option<WasteFigures>,
+        cites: Option<&str>,
+    ) {
+        let mut review = earlier_review(landings, median);
+        review.waste = waste;
+        review.proposal = cites.map(|job| ThroughputProposal {
+            bottleneck: "The producer waits.".into(),
+            stage: "producer".into(),
+            change: "Drain asynchronously.".into(),
+            expected_minutes_saved: 6.0,
+            priority: "high".into(),
+            request_job: Some(JobId::parse(job).unwrap()),
+        });
+        put(
+            dir,
+            athena,
+            vec![AnyRecord::ThroughputReview(Box::new(review))],
+        );
+    }
+
+    const OPEN_REQUEST: &str = "20260905-000000-d000";
+
+    #[test]
+    fn a_rise_in_wasted_spend_triggers_a_review_with_no_change_in_median_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, seen) = throughput_model(6.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        // 80 landings of 10 minutes in four windows of twenty; failed attempts of 1 USD, oldest window
+        // first: 2, 5, 2 and 10. The review at 75 landings stored 2.00 USD wasted, 1.5 attempts per
+        // landing and every change on its first attempt.
+        seed_landed(dir.path(), &athena, 0, 80, 10.0);
+        seed_failed(dir.path(), &athena, &failed_slots([2, 5, 2, 10]), 1.0);
+        put_review(
+            dir.path(),
+            &athena,
+            75,
+            10.0,
+            Some(figures(1.5, 2.0, 1.0)),
+            None,
+        );
+
+        let known = records(&athena);
+        let attempts: Vec<usize> = waste_windows(&known, THROUGHPUT_WINDOW)
+            .iter()
+            .map(|w| w.attempts)
+            .collect();
+        assert_eq!(attempts, vec![30, 22, 25, 22]);
+        let latest = ThroughputReview::latest(&known.throughput_reviews);
+        assert_eq!(
+            throughput_due(80, 10.0, None, latest),
+            None,
+            "the median is unchanged and only five landings stand beyond the review"
+        );
+
+        let review = athena
+            .throughput_review(&crate::Quiet)
+            .unwrap()
+            .expect("the rise in wasted spend makes a review due");
+        assert_eq!(review.trigger, ThroughputTrigger::Wasted);
+        assert_eq!(review.window_median_minutes, 10.0);
+        assert_eq!(review.waste.map(|w| w.wasted_usd), Some(10.0));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        // Spend rose by 8 USD against a noise of 3 USD, so one design request is queued.
+        assert!(
+            review
+                .note
+                .contains("spent on attempts that did not land up 8.00 USD (noise 3.00 USD"),
+            "{}",
+            review.note
+        );
+        assert_eq!(open_design_requests(&records(&athena)).len(), 1);
+    }
+
+    #[test]
+    fn an_open_design_request_no_longer_stops_the_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, seen) = throughput_model(6.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        seed_landed(dir.path(), &athena, 0, 10, 25.0);
+        put_review(dir.path(), &athena, 10, 25.0, None, Some(OPEN_REQUEST));
+        open_design_request_job(dir.path(), &athena);
+        seed_stages(dir.path(), &athena, 10, 11, slow_stages());
+        let before = records(&athena);
+        assert_eq!(open_design_requests(&before).len(), 1);
+
+        let review = athena
+            .throughput_review(&crate::Quiet)
+            .unwrap()
+            .expect("the review runs although a design request is open");
+        // The model was asked, and was told which request is open.
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(
+            seen[0].contains(OPEN_REQUEST) && seen[0].contains("Producer waits"),
+            "{}",
+            seen[0]
+        );
+        // The record has the proposal, and the note names the open request and says what was queued.
+        assert!(review.proposal.is_some());
+        for expected in [
+            OPEN_REQUEST,
+            "still open; this review ran anyway",
+            "design request: not enough history: 21 of 60 landings, none queued",
+            "noise could not be estimated (21 of 60 landings); the 25% rule applied",
+            "queued at high priority",
+        ] {
+            assert!(
+                review.note.contains(expected),
+                "{expected:?} not in {}",
+                review.note
+            );
+        }
+        let known = records(&athena);
+        assert_eq!(
+            open_design_requests(&known).len(),
+            1,
+            "no second design request"
+        );
+        assert_eq!(
+            open_slowdown_requests(&known).len(),
+            1,
+            "the slowdown request is queued"
+        );
+    }
+
+    /// 80 landings with failed attempts of 1 USD, `counts` oldest window first, and a review at 75 landings
+    /// citing the open request `d000`, with stored figures `stored`. The median is 10 minutes throughout.
+    fn eighty_landings(
+        counts: [usize; 4],
+        stored: WasteFigures,
+        previous_landings: u32,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Athena,
+        Arc<Mutex<Vec<String>>>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, seen) = throughput_model(6.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        seed_landed(dir.path(), &athena, 0, 80, 10.0);
+        seed_failed(dir.path(), &athena, &failed_slots(counts), 1.0);
+        open_design_request_job(dir.path(), &athena);
+        put_review(
+            dir.path(),
+            &athena,
+            previous_landings,
+            10.0,
+            Some(stored),
+            Some(OPEN_REQUEST),
+        );
+        (dir, state, athena, seen)
+    }
+
+    #[test]
+    fn a_change_within_the_noise_queues_no_request() {
+        // Older windows hold 2, 5 and 2 failed attempts, so the spend noise is 3 USD and the attempts noise
+        // 0.15. The newest holds 4: spend up 2 USD, attempts per landing up 0.1. Both are within the noise,
+        // yet the stored 2.00 USD makes the spend trigger fire.
+        let (_dir, _state, athena, seen) =
+            eighty_landings([2, 5, 2, 4], figures(1.1, 2.0, 1.0), 75);
+        let before = records(&athena).request_jobs().len();
+        let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        assert_eq!(review.trigger, ThroughputTrigger::Wasted);
+        assert_eq!(seen.lock().unwrap().len(), 1, "the model is asked");
+        let proposal = review.proposal.as_ref().expect("the proposal is recorded");
+        assert_eq!(proposal.request_job, None);
+        for expected in [
+            "still open",
+            "design request: within noise, none queued",
+            "spent on attempts that did not land up 2.00 USD (noise 3.00 USD from 2 difference(s)",
+        ] {
+            assert!(
+                review.note.contains(expected),
+                "{expected:?} not in {}",
+                review.note
+            );
+        }
+        let known = records(&athena);
+        assert_eq!(known.request_jobs().len(), before, "nothing was queued");
+        assert_eq!(open_design_requests(&known).len(), 1);
+    }
+
+    #[test]
+    fn a_change_beyond_the_noise_queues_a_request_even_while_another_is_open() {
+        // The newest window holds 10 failed attempts: spend up 8 USD against a noise of 3, attempts per
+        // landing up 0.4 against 0.15.
+        let (_dir, _state, athena, seen) =
+            eighty_landings([2, 5, 2, 10], figures(1.5, 2.0, 1.0), 75);
+        let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        assert_eq!(review.trigger, ThroughputTrigger::Wasted);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        for expected in [
+            "still open",
+            "design request: worse by more than the noise",
+            "attempts per landed change up 0.40",
+            "spent on attempts that did not land up 8.00 USD",
+        ] {
+            assert!(
+                review.note.contains(expected),
+                "{expected:?} not in {}",
+                review.note
+            );
+        }
+        let queued = review
+            .proposal
+            .as_ref()
+            .unwrap()
+            .request_job
+            .clone()
+            .expect("queued");
+        let known = records(&athena);
+        assert_eq!(open_design_requests(&known).len(), 2);
+        let listed = improvement_of(&known).items;
+        assert!(listed.contains(&OPEN_REQUEST.to_string()), "{listed:?}");
+        assert!(listed.contains(&queued.as_str().to_string()), "{listed:?}");
+    }
+
+    #[test]
+    fn one_failed_run_after_a_clean_history_is_within_the_noise() {
+        // Three clean windows and one failed attempt in the newest: spend up 1 USD and attempts per landing
+        // up 0.05 are one job's worth. The review at 70 landings is ten landings old, so Cadence fires.
+        let (_dir, _state, athena, _seen) =
+            eighty_landings([0, 0, 0, 1], figures(1.0, 0.0, 1.0), 70);
+        let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        assert_eq!(review.trigger, ThroughputTrigger::Cadence);
+        assert_eq!(review.proposal.as_ref().unwrap().request_job, None);
+        assert!(
+            review.note.contains("design request: within noise"),
+            "{}",
+            review.note
+        );
+        assert_eq!(open_design_requests(&records(&athena)).len(), 1);
+        // Two failed runs are more than one job's worth.
+        let (_dir, _state, athena, _seen) =
+            eighty_landings([0, 0, 0, 2], figures(1.0, 0.0, 1.0), 70);
+        let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        assert!(
+            review.note.contains("worse by more than the noise"),
+            "{}",
+            review.note
+        );
+        assert_eq!(open_design_requests(&records(&athena)).len(), 2);
+    }
+
+    /// 80 landings: the medians of the four windows, oldest first, are `medians`; the review at 60 landings
+    /// saw a median of 10 minutes.
+    fn windows_of_minutes(medians: [f64; 4]) -> (tempfile::TempDir, tempfile::TempDir, Athena) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, _) = throughput_model(6.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        for (w, minutes) in medians.iter().enumerate() {
+            seed_landed(dir.path(), &athena, 20 * w, 20, *minutes);
+        }
+        put_earlier_review(dir.path(), &athena, 60, 10.0);
+        (dir, state, athena)
+    }
+
+    #[test]
+    fn a_slowdown_within_the_noise_between_windows_queues_no_request() {
+        // The older windows swing between 10 and 22 minutes, a noise of 12. The newest is 14: a rise of
+        // 4 over the review's 10 minutes is more than 25%, and the producer stage grew, but it is within
+        // the noise.
+        let (_dir, _state, athena) = windows_of_minutes([10.0, 22.0, 10.0, 14.0]);
+        let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        for expected in [
+            "producer 10.0 to 14.0",
+            "slowdown request: median rose 4.0 min over the previous review, within noise (noise 12.0 min from 2 difference(s)",
+            "design request: within noise",
+        ] {
+            assert!(
+                review.note.contains(expected),
+                "{expected:?} not in {}",
+                review.note
+            );
+        }
+        let known = records(&athena);
+        assert!(open_slowdown_requests(&known).is_empty());
+        assert!(open_design_requests(&known).is_empty());
+
+        // Flat older windows: the same rise is far above the noise and the one-minute floor.
+        let (_dir, _state, athena) = windows_of_minutes([10.0, 10.0, 10.0, 14.0]);
+        let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        assert!(
+            review.note.contains("queued at high priority"),
+            "{}",
+            review.note
+        );
+        assert!(
+            !review.note.contains("slowdown request: median rose"),
+            "{}",
+            review.note
+        );
+        assert!(
+            review.note.contains("worse by more than the noise"),
+            "{}",
+            review.note
+        );
+        let known = records(&athena);
+        assert_eq!(open_slowdown_requests(&known).len(), 1);
+        assert_eq!(open_design_requests(&known).len(), 1);
+    }
+
+    fn measure(
+        name: &'static str,
+        unit: &'static str,
+        now: f64,
+        before: f64,
+        higher_is_worse: bool,
+        noise: Option<f64>,
+        floor: f64,
+    ) -> Measure {
+        Measure {
+            name,
+            unit,
+            now,
+            before: Some(before),
+            higher_is_worse,
+            bar: Bar {
+                noise,
+                differences: if noise.is_some() { 2 } else { 0 },
+                floor,
+            },
+        }
+    }
+
+    #[test]
+    fn the_gate_queues_only_a_change_larger_than_the_noise_and_the_one_job_floor() {
+        let attempts = |now: f64, noise: Option<f64>| {
+            measure(
+                "attempts per landed change",
+                "",
+                now,
+                1.0,
+                true,
+                noise,
+                0.05,
+            )
+        };
+        let gate = |m: &[Measure]| request_gate(m, 60, false, false);
+
+        let within = gate(&[attempts(1.1, Some(0.3))]);
+        assert!(!within.queue);
+        assert!(
+            within.note.starts_with("design request: within noise"),
+            "{}",
+            within.note
+        );
+        let beyond = gate(&[attempts(1.5, Some(0.3))]);
+        assert!(beyond.queue);
+        for expected in [
+            "attempts per landed change up 0.50",
+            "noise 0.30",
+            "2 difference(s)",
+            "floor 0.05",
+        ] {
+            assert!(
+                beyond.note.contains(expected),
+                "{expected:?} in {}",
+                beyond.note
+            );
+        }
+        assert!(
+            !gate(&[attempts(1.3, Some(0.3))]).queue,
+            "equal to the noise is within it"
+        );
+
+        // A falling first-attempt share is worse; a rising one, or no change, is not.
+        let share = |now: f64| {
+            measure(
+                "share landed on the first attempt",
+                "",
+                now,
+                0.8,
+                false,
+                Some(0.1),
+                0.05,
+            )
+        };
+        let fell = gate(&[share(0.5)]);
+        assert!(
+            fell.queue && fell.note.contains("down 30 points"),
+            "{}",
+            fell.note
+        );
+        let better = gate(&[share(1.0), share(0.8)]);
+        assert!(
+            !better.queue && better.note.contains("no measure worsened"),
+            "{}",
+            better.note
+        );
+
+        // Flat older windows give noise 0: one job's worth is still within, two jobs' worth is not.
+        assert!(!gate(&[attempts(1.05, Some(0.0))]).queue);
+        assert!(gate(&[attempts(1.10, Some(0.0))]).queue);
+        let spend = |now: f64| {
+            measure(
+                "spent on attempts that did not land",
+                "USD",
+                now,
+                0.0,
+                true,
+                Some(0.0),
+                1.0,
+            )
+        };
+        assert!(!gate(&[spend(1.0)]).queue);
+        assert!(gate(&[spend(2.0)]).queue);
+        let median = |now: f64| {
+            measure(
+                "median minutes per landed job",
+                "min",
+                now,
+                10.0,
+                true,
+                Some(0.0),
+                1.0,
+            )
+        };
+        assert!(!gate(&[median(10.5)]).queue);
+        assert!(gate(&[median(12.0)]).queue);
+
+        // Too few windows: nothing is queued, except by the very first review with no request open.
+        let young = [attempts(5.0, None)];
+        let none = request_gate(&young, 40, false, false);
+        assert_eq!(
+            none,
+            Gate {
+                queue: false,
+                note: "design request: not enough history: 40 of 60 landings, none queued".into()
+            }
+        );
+        assert!(request_gate(&young, 10, true, false).queue);
+        assert!(!request_gate(&young, 10, true, true).queue);
+        // A measure whose windows are not full is named as not judged beside one that is.
+        let mixed = gate(&[attempts(1.5, Some(0.3)), median(30.0).with_no_noise()]);
+        assert!(mixed.queue);
+        assert!(
+            mixed
+                .note
+                .contains("not judged, too few full windows: median minutes per landed job"),
+            "{}",
+            mixed.note
+        );
+    }
+
+    impl Measure {
+        fn with_no_noise(mut self) -> Measure {
+            self.bar.noise = None;
+            self.bar.differences = 0;
+            self
+        }
+    }
+
+    #[test]
+    fn a_slowdown_is_beyond_the_noise_only_when_the_rise_exceeds_noise_and_the_floor() {
+        let bar = |noise| Bar {
+            noise,
+            differences: 2,
+            floor: 1.0,
+        };
+        assert_eq!(slowdown_beyond_noise(5.0, &bar(Some(2.0)), 80), Ok(None));
+        let within = slowdown_beyond_noise(2.0, &bar(Some(2.0)), 80).unwrap_err();
+        assert!(
+            within.contains("within noise (noise 2.0 min from 2 difference(s), floor 1.0 min)"),
+            "{within}"
+        );
+        // The floor holds when the older windows are flat.
+        assert!(slowdown_beyond_noise(0.5, &bar(Some(0.0)), 80).is_err());
+        assert_eq!(slowdown_beyond_noise(1.5, &bar(Some(0.0)), 80), Ok(None));
+        // Without a noise estimate the 25% rule decides, and the remark says so.
+        let remark = slowdown_beyond_noise(0.5, &bar(None), 21).unwrap().unwrap();
+        assert!(
+            remark.contains("noise could not be estimated (21 of 60 landings)"),
+            "{remark}"
+        );
     }
 
     #[test]

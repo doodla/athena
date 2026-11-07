@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-031925-mrpk",
+  "round": 1,
+  "at": "2026-11-07T05:34:39.499947926Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "A reader the dependents list leaves out: the second half of the improvement_of test will fail once a second design request is queued while one is open.",
+      "evidence": "hestia.rs:5142-5150 seeds 10 jobs at 25 min, `put_earlier_review(.., 10, 25.0)`, `open_design_request_job`, then 11 jobs with `slow_stages()` (median 60). It runs the review and asserts `improvement_of(&known).items.is_empty()`. Under the plan the median rose and noise is None (fewer than 60 landings), so `request_gate` queues. The fake model is then asked and a design request is queued with `proposal.request_job` set. `improvement_of` (hestia.rs:425-432) lists every waiting `request_job` from a review's proposal, so `items` is no longer empty. The dependents list names only `throughput_followups` and the follow-up tests for `improvement_of`, and says the existing tests 'pass unchanged'. It also misses the scheduling effect: main.rs:288 says the throughput design request is guaranteed a turn, so two open design requests now both get one. Fix: Add hestia.rs:5116 (`improvement_of_lists_the_throughput_design_request_and_not_the_slowdown_request`) to the dependents and step 6. Rewrite its second half so it still isolates the slowdown request, for example by asserting that items holds only the new design request and not the slowdown job. State in the dependents that `improvement_of` and the guaranteed-turn logic (main.rs:288 help text, plan ordering) now see more than one open design request, and either test that or make it an explicit open question.",
+      "location": "Plan: Dependents (open-request behaviour / improvement_of entries); crates/athena-core/src/hestia.rs:5138-5150",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Soundness: the gate compares a change from one baseline with noise from another, so its 'larger than the noise' test compares unlike quantities.",
+      "evidence": "Decision 3 makes the baseline the figures stored on the previous review. That review can be 1 landing old (after a Worsened trigger) or 10 old (cadence), so its 20-landing window shares 10 to 19 landings with the newest window. Decision 4 measures noise as the largest difference between adjacent non-overlapping 20-landing windows. Measured across overlapping windows, a change is diluted roughly by the share of landings the windows have in common, while the noise is a full non-overlapping difference (and a maximum at that). The gate therefore says 'within noise' for real shifts. The request ties the two together: report 'the newest 20 landings and the 20 before them', and queue 'only ... when the change is larger than the noise between recent windows'. The plan already computes `waste_previous` (landings 21-40) but does not gate on it. Fix: In `request_gate`, measure the change as the newest window against the 20 before it (`waste` against `waste_previous`, and likewise for the median). Measure the noise as the adjacent differences of the older non-overlapping windows. The trigger can keep its stored-baseline rule, which stops repeated firing. Alternatively, measure noise at the same lag as the baseline. Either way, state the basis in the note and in hestia.md, and make criterion 4(b) build the fixture from windows so the 0.1 and 0.6 changes are newest against previous, not against a stored figure.",
+      "location": "Plan: Decisions 3 and 4, step 4 `request_gate(previous_review, measured)`",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The 'did not land' label is already printed today, so that assertion passes without the change.",
+      "evidence": "`text()` already prints `did not land: {} job(s), {:.1} min` (status.rs:1086). The demonstration asserts that the output contains 'did not land' 'with a USD figure', and claims that without the new lines 'the label assertions ... fail'. That holds only if the USD part is asserted as a distinct string. Fix: Give wasted spend a label of its own, for example 'spent on attempts that did not land', or assert the exact new line, for example `0.00 USD`, so the check fails on today's output.",
+      "location": "Plan: Demonstration for criterion 5; crates/athena-core/src/status.rs:1086",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Criterion 2 says the trigger fires when wasted spend rises 'beyond the previous review and noise', but the plan's trigger ignores noise and the test never exercises it.",
+      "evidence": "In the plan, `throughput_due` fires `Wasted` on a rise of more than 20% against the stored figures. Noise is applied only later, in `request_gate`. Cases A to E pass no noise. Fix: Either note that noise is applied in the gate, so criterion 2 is shown by the trigger plus criterion 4, or add a review-level case: wasted spend rises beyond noise with the median flat, and the review runs and queues.",
+      "location": "Plan: Demonstration for criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The gate also changes when the model is asked, not only when a request is queued, and the user is not asked about it.",
+      "evidence": "Today every cadence review with no open request asks the model (hestia.rs:1734). Under the plan, a cadence review where nothing worsened asks no model. The request limits only queuing ('only queues a request when...'), and it complains about runs that 'did nothing'. A run that measures but asks no model may read the same way to the user. Fix: Add an open question: should a review inside noise still ask the model and record its proposal without queuing, or skip the model as planned? Keep the plan's choice as the default.",
+      "location": "Plan: Decision 5 and Risk 1; Open questions",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A doc comment that becomes false is not in the list of docs to update.",
+      "evidence": "The THROUGHPUT_MARKER doc says 'An open request with a line that starts so means the last proposal is still being worked, and the review queues no second one.' Under the plan, a second one is queued when the change is beyond noise. The criterion 8 list names the module doc, hestia.md section 12, and records.rs:2159 and :2196, but not this comment. Fix: Add the THROUGHPUT_MARKER doc comment (and the `open_throughput_request` doc at 1467) to step 5 and the criterion 8 check.",
+      "location": "crates/athena-core/src/hestia.rs:1296-1297 (THROUGHPUT_MARKER doc), :1307; Plan: criterion 8 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A previous review with zero waste turns any later waste of 0.01 USD or more into a trigger.",
+      "evidence": "'when previous is 0, any current at or above 0.01 USD'. A single failed run after a clean window fires `Wasted`. The noise gate catches it only once 60 landings exist, and with less history noise is None and is treated as 0. Fix: Use an absolute floor tied to something measured, for example one median attempt's cost, or the same ratio applied to attempts per landing. At least, say in the note that the rise was from zero.",
+      "location": "Plan: Decision 3 (wasted USD rise when previous is 0)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The review-level noise test needs a helper that seeds unlanded attempts with a cost, and the plan does not name one.",
+      "evidence": "`seed_landed` and `seed_stages` (hestia.rs:4261-4292) write only `OutcomeState::Landed` jobs. The demonstration says 'built with `seed_landed` plus unlanded jobs'. Fix: Name a `seed_failed(dir, athena, from, count, cost)` helper in step 6, built on `timed_job` with `OutcomeState::Failed` and a set invocation cost, and place each failed job's end time inside the window it is meant to fall in.",
+      "location": "Plan: Demonstration for criterion 4(b), step 6",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I checked the plan against hestia.rs, status.rs, display.rs, snapshot.rs, status_snapshot.rs and docs/design/hestia.md. It matches the request and the accepted reading. The functions, helpers and line numbers it names exist and behave as described: `throughput_due` at 1341, the early skip at 1728-1733, the `did not land` predicate at status.rs:1015-1018, `timed_job`, `earlier_review`, `throughput_model`, and the display lines that print `text()` at 1114 and 1203. Leaving display.rs and snapshot.rs unchanged is justified, because both only print `Throughput::text()`. Most demonstrations would fail without the behaviour. Two problems need a revision. First, the plan now queues a second design request while one is open, and that breaks an existing test the dependents list leaves out: `improvement_of_lists_the_throughput_design_request_and_not_the_slowdown_request` asserts `improvement_of(..).items.is_empty()` at hestia.rs:5150. That change also gives every open design request a scheduling turn. Second, the noise gate compares a change measured against the previous review's stored figures, from windows that can overlap, with noise measured between non-overlapping 20-landing windows. The two are on different scales, so the gate leans towards \"within noise\". The plan already computes the right comparison (the newest 20 against the 20 before) and should gate on it. The minor findings cover a label assertion that already passes on today's output, a stale doc comment on THROUGHPUT_MARKER, and an unstated change to when the model is asked."
+}

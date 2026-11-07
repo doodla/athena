@@ -1,0 +1,118 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-031917-r96w",
+  "round": 1,
+  "at": "2026-11-07T04:57:28.298242315Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/diagnosis.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/diagnosis.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run_pin_tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run_pin_tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/store.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/store.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/reading.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/reading.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-agent/src/fake.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-agent/src/fake.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/src/main.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/src/main.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/drain.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/drain.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "Filing the diagnosis invocation under the line's last job, already closed, breaks the gate's check that totals match the invocation records, and it inflates that job's spend and score.",
+      "evidence": "crates/athena-gate/src/reconcile.rs:105-131 check_outcome refuses an outcome whose totals.invocations or cost_all differ from the job's invocation records ('M15 (blocks)', test at :346). invariant.rs:733-734 and jobs.rs:131 (score_records over files.invocation_records()) read every invocation of the job. scope_guard.rs:575 attempt_of falls back to job.spent_usd(), and status.rs has 24 reads of invocations or spent_usd. The steward avoids all of this: steward.rs:1165-1167 gives the run its own JobId, and store.rs:422-424 routes it to steward_runs. Fix: Make the steward pattern the design, not the fallback: generate a fresh run id, add a diagnosis_runs vector and an AnyRecord::Invocation routing arm for Role::Diagnosis in store.rs, and link the run to the line through the mark and the follow-up text. Add a dependents entry for reconcile/check_outcome and for job cost and score readers, with a test that the line's last job keeps its totals and passes check_outcome after a diagnosis.",
+      "location": "Decision 6; Risks 'Records validation may refuse an invocation record...'; diagnosis.rs step 4",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The retry-on-new-code follow-up joins the original line, so the core refuses it whenever the scope guard has paused that line; the drain-side exception does not help.",
+      "evidence": "run/mod.rs:1011-1014 refuses dispatch when line_pause returns a mark, and reading.rs:1111-1114 refuses the reading before any model call. The plan's own risk says T4 usually pauses the line at two failures with the same unmet criterion. The 'own follow-up exception' lives only in Drain::diagnosis_end, and the drain tests use a fake Stub whose read and run never consult line_pause, so they cannot show this. Fix: Decide how a retry follow-up runs on a paused line. Options: the diagnosis lifts or supersedes the pause for that follow-up through a mark the core's line_pause honours; or the retry follow-up is told and recorded as waiting for the owner's resume. Add a core end-to-end test in the watcher_tests rig: two rejections on one criterion (T4 pause), then diagnose_line with a retry follow-up, then go or read on the follow-up, asserting the chosen behaviour.",
+      "location": "Decision 8 and Risk 'The retry follow-up joins the same line...'; Demonstrations criterion 1/2",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Attempts that passed verification but failed to land (the collision category) are counted by the drain but may never reach the threshold, so such a line can end 'failed twice' with no diagnosis.",
+      "evidence": "drain.rs:1938-1941: LandStep::NotLanded (for example 'not landed: checks failed after rebase', drain.rs:1778) increments failures. scope_guard.rs:544-555 verdict_of returns None for any state that is not Closed, such as store.rs:59 Blocked ('Verified, but the landing was refused'), and attempt_of then records no attempt. The request lists 'collision with another landing' as one of the five categories. The plan never says how such an attempt reaches failed_attempts. Fix: Find out from the code what record a verified-but-not-landed attempt leaves, and count it as an attempt that did not land (for example a verified job closed or blocked without Landed). Add a drain or core test where two attempts are both NotLanded and the line is diagnosed once. If the planner keeps the narrower rule, state the exclusion in the CHANGELOG and ask the user, since the request names collisions.",
+      "location": "Decision 1 (failed_attempts counts Rejected and Failed only); Approach (1)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Every drain demonstration takes its line standing from a fake that computes the failure count itself. The real drain step, which reads real records, is never exercised.",
+      "evidence": "The plan: 'Its line_standing returns failed = prior + runs that did not land, and diagnosis: Some(..) once diagnose was called, as the real marker does.' The counting, the persistence across drain runs and the mark check all live in the double. The criterion 9 drain case reuses an_item_whose_producer_login_expired, whose Stub has the default line_standing None, so it cannot call diagnose whatever the rule is and cannot fail. Fix: Add one test through the real drain step (as the athena-cli lifecycle or drain integration tests with common/mod.rs do): two rejected attempts on one line make exactly one diagnosis invocation and one queued follow-up, and a second drain run makes none. For criterion 9, give the environment case a standing built from real AttemptRecords, or rely on the core summarize_lines test and drop the vacuous drain claim.",
+      "location": "Demonstrations criteria 1, 3, 9 (Test seam: Stub.line_standing)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The exhaustive Role match in the CLI test fake is not listed.",
+      "evidence": "crates/athena-cli/tests/common/mod.rs:621-660 matches Role::Verifier, Steward, Audience and Planner arms in the scripted fake driver. It is not in the Files list or the dependents entry for Role::Diagnosis. Fix: List crates/athena-cli/tests/common/mod.rs in Files and in the Role::Diagnosis dependents entry, with its arm.",
+      "location": "Files / Dependents (Role::Diagnosis variant)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The request says to 'queue one diagnosis job'; the plan runs it synchronously inside the drain with no job record.",
+      "evidence": "Request: 'it queues one diagnosis job for the line'. The plan rejects queuing because 'Nothing would execute it'. That is a reasonable trade, but criterion 1 says 'gets exactly one diagnosis job'. Fix: State the trade in the CHANGELOG and the drain module doc (a diagnosis run, not a queued job), and have status show the run id, so the operator can find the 'job'.",
+      "location": "Decision 5 (diagnosis runs inside the drain)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A failed diagnosis stays claimed until the operator deletes a local file by hand, and only status reveals this.",
+      "evidence": "The plan: 'the operator deletes the file to ask again, as for a pause'. Pauses have a resume command path; the plan adds none for diagnosis marks. Fix: Have status show the mark path and the error for a failed diagnosis, or reuse the existing resume-line command to clear a diagnosis mark.",
+      "location": "Decision 4 / Risk 'A role failure leaves a claimed line'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The extra files are mostly needed to compile; diagnosis.rs is a real scope addition.",
+      "evidence": "store.rs, reading.rs, run_pin_tests.rs and fake.rs need `line: None` or Role arms for the build; tests/drain.rs holds the criterion 1 and 3 tests; main.rs is help text. diagnosis.rs is new logic outside the reading's file list. Fix: Say in the plan that diagnosis.rs replaces logic the reading put in scope_guard.rs or drain.rs, and that the other files are compile-required edits.",
+      "location": "Athena findings 1-7 (files outside deliverables)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": "The request counts \"attempts that do not land\" and lists \"collision with another landing\" as a failure category. The reading narrowed \"did not land\" to records that are Rejected or Failed. An attempt that passed verification but failed to land (the drain's LandStep::NotLanded) counts only if its job closed with a non-landed outcome; if it is still blocked or open, it does not count. So a line can have two collision attempts and never be diagnosed.",
+  "summary": "The plan reuses group_lines and line_attempts properly. It keeps prompt budgets unchanged by checking the new frame against the verifier budget set, as the critic's frame is, and it bounds diagnosis spend with a create_new claim. Four design problems need fixing before code is written. (1) Filing the diagnosis invocation under the line's last job, which is already closed, breaks the landing gate's check that a closed job's totals match its invocation records (athena-gate reconcile.rs:105-131). It also adds the diagnosis cost to that job's spend and score. The steward's pattern (a fresh run id routed in store.rs) should be the design, not a fallback. (2) The retry follow-up joins the original line. When the scope guard has paused that line, which the plan's risks say is the usual case at two failures, the core refuses both the reading (reading.rs:1112) and the dispatch (run/mod.rs:1012). The drain's own-follow-up exception does not get past this, and the fake cannot show it. (3) Counting only Rejected or Failed records leaves out verified-but-not-landed attempts (collision), which the request names as a category, whenever their job is still blocked or open. (4) Every drain demonstration uses a fake whose line standing it computes itself. No test checks the real drain step reading real records, and the drain part of criterion 9 cannot fail. Athena's findings about files outside the deliverables are mostly files the change must touch to compile; I weighed them as minor."
+}

@@ -1,0 +1,480 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-031917-r96w",
+  "round": 1,
+  "at": "2026-11-07T04:54:26.402857722Z",
+  "invocation_seq": 2,
+  "approach": "Reuse the scope guard's line grouping (group_lines, line_attempts) for every part. (1) scope_guard.rs gains a pure summary of each line (attempt count, count of attempts that did not land = Rejected or Failed, Environment excluded, landed flag, state, diagnosis mark) and Athena::line_summaries / line_summary / line_of built on group_lines. The constant DIAGNOSE_AFTER = 2 is the threshold. (2) Job (athena.job/1) gains `line: Option<String>` (serde default, skipped when None, so old records load); run/mod.rs dispatch fills it from line_of. (3) A new core module diagnosis.rs holds the diagnosis mark (a file under <state>/scope/<first id>.diagnosis.json, created with create_new so a line is claimed once) and Athena::diagnose_line. diagnose_line runs the new Diagnosis role once over the line's attempts, validates the output, commits the invocation record and exactly one follow-up request on the steward channel, then completes the mark with the follow-up job id and the reasoning. A role failure or invalid output keeps the claim, marks it failed and queues nothing, so spend is bounded; the operator deletes the file to ask again, as for a pause. (4) athena-context gets prompts/diagnosis.md, DIAGNOSIS_FRAME, brief builder, DiagnosisOutput with schema and a pure check() (every failed attempt has one of five categories, exactly one follow-up of four kinds, non-empty reasoning). The frame is composed with the contract only and checked against the verifier's budget set, as the critic is, so no shared prompt changes. (5) The drain gets Steps::line_standing, diagnose and diagnose_cap (defaults: no standing, so every existing Steps impl and test is unchanged) and a helper Drain::diagnosis_end called at the top of each attempt and at the failures >= ATTEMPTS exit, before the paused and flagged checks. It returns the new ItemEnd::Diagnosed, which is passed over. A diagnosed line is never diagnosed again, and only its own follow-up item may run, and only while no attempt has failed since the diagnosis. (6) status.rs adds StatusView.open_lines and display.rs prints them. (7) Role::Diagnosis is added in athena-data, with the exhaustive fake-driver arms. CHANGELOG gets four entries.",
+  "decisions": [
+    {
+      "choice": "Count only Rejected and Failed attempts toward the threshold (new pub fn failed_attempts in scope_guard.rs, documented as excluding Environment); threshold is the constant DIAGNOSE_AFTER = 2, not configuration.",
+      "reason": "The scope guard already classifies stops through verdict_of and StopCause (scope_guard.rs:544-556) and its counted() drops Environment. The brief says the rule is code, and athena.toml is not to change.",
+      "rejected": [
+        {
+          "option": "Count the drain's in-memory `failures` counter",
+          "why": "It resets every run and counts environment failures. A later drain run would retry a line that already failed twice."
+        },
+        {
+          "option": "A [scope] threshold in athena.toml",
+          "why": "Governance file, out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Decide from the records by calling group_lines through Athena::line_summary; the drain asks it through a new Steps::line_standing, not by building its own groups.",
+      "reason": "One grouping implementation. The records survive restarts, so the rule holds when the drain runs again. The Steps default of None keeps all existing drain tests and fakes unchanged.",
+      "rejected": [
+        {
+          "option": "Read Job.line in the drain and group by that string",
+          "why": "A line recorded at dispatch can be stale: a re-ask text link can appear later. Old jobs have no value, and backfilling is out of scope. The field is for display and records."
+        },
+        {
+          "option": "Add the check to Steps::paused or flagged",
+          "why": "Those mean a scope-guard signal. Diagnosis must also run when T1 or T4 already flagged or paused the line, which is the usual case at two failures, so it runs first."
+        }
+      ]
+    },
+    {
+      "choice": "Store the line on Job (athena.job/1) as `line: Option<String>` with #[serde(default, skip_serializing_if = \"Option::is_none\")], written at dispatch in run/mod.rs from Athena::line_of (the first request id of the group containing the job).",
+      "reason": "The reading says a job record. Job is built in one production place (run/mod.rs:1201), whereas Request has about 20 struct-literal sites. Job already has a default-skipped optional field (`pin`, `dispatch_branch`) as the pattern for loading old records.",
+      "rejected": [
+        {
+          "option": "Add `line` to Request",
+          "why": "Needs a change at every Request constructor, including steward, hestia and reading, which the brief does not list. The line is also not known until retries are linked."
+        },
+        {
+          "option": "A new record type",
+          "why": "Needs new store.rs routing and an AnyRecord variant for one string."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the diagnosis claim and mark in the state directory next to the pause and flag marks (scope/<first>.diagnosis.json, create_new), with the full reasoning also carried in the committed follow-up request text and the committed invocation record.",
+      "reason": "There is precedent in scope_guard.rs (pause_path, flag_path, write_mark). create_new gives an atomic once-per-line claim even with concurrent drain workers, with no new record type. Failed diagnosis bounded to one spend.",
+      "rejected": [
+        {
+          "option": "A new committed athena.diagnosis/1 record",
+          "why": "Larger change (AnyRecord, store.rs, check_record_file, canonical path) for the same effect. Can be added later."
+        },
+        {
+          "option": "Re-run a failed diagnosis automatically on the next drain",
+          "why": "Unbounded model spend on the very lines that already wasted money."
+        }
+      ]
+    },
+    {
+      "choice": "Run the diagnosis inside the drain through Steps::diagnose, holding diagnose_cap against the budget as check_page does (drain.rs:2423-2438). If the cap does not fit, end the item as ItemEnd::Budget without claiming the line.",
+      "reason": "Matches the existing pattern for model calls made by the drain, and keeps the diagnosis within the budget the user set.",
+      "rejected": [
+        {
+          "option": "Queue the diagnosis as a request for a later pass",
+          "why": "Needs a new job kind that the reader and producer pipeline cannot run. Nothing would execute it."
+        }
+      ]
+    },
+    {
+      "choice": "Add Role::Diagnosis in athena-data. The invocation record is filed under the line's last job id, with the next free seq, and the run borrows the verifier's model and budget, as the steward does.",
+      "reason": "The invocation needs a role. Filing it under an existing job needs no new Records vector in store.rs, and the spend then shows on the line.",
+      "rejected": [
+        {
+          "option": "Reuse Role::Steward",
+          "why": "It would be counted as steward runs (store.rs:422) and confuse steward and Hestia tallies."
+        },
+        {
+          "option": "Add a diagnosis_runs vector like steward_runs",
+          "why": "Extra store.rs change not needed for the goal."
+        }
+      ]
+    },
+    {
+      "choice": "Frame composed from CONTRACT plus DIAGNOSIS_FRAME only, checked against BudgetSet::Verifier (as CRITIC_FRAME is); no new BudgetSet and no change to contract.md, reader.md or verifier.md.",
+      "reason": "The contract has 24 tokens left and system-facts budget lines are checked by system_facts_budgets_match_computed, so avoiding a new set keeps them unchanged.",
+      "rejected": [
+        {
+          "option": "New BudgetSet::Diagnosis",
+          "why": "Needs a system-facts budget line and a headroom_rows row and test updates for no benefit."
+        }
+      ]
+    },
+    {
+      "choice": "The follow-up is queued as a request on REQUEST_CHANNEL through StewardRequest::new and the same commit path as RequestQueue. For retry_on_new_code the code, not the model, sets the title to `Try again on <last job of the line>`.",
+      "reason": "StewardRequest::new already checks that the text parses for athena plan. retry_reference (reading.rs:1881) reads `try again on <job>`, so a retry follow-up joins the line through the existing link and a corrected request does not.",
+      "rejected": [
+        {
+          "option": "Let the model write the whole request text",
+          "why": "It could omit the link or acceptance and be refused by athena plan."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal, parser or matching rule is added or changed. group_lines, retry_reference and the T1-T5 thresholds are untouched.",
+      "reason": "The refusal-corpus instruction applies to input-form rules. This change adds a count over existing attempt verdicts and a schema check on model output.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "purpose": "Add DIAGNOSE_AFTER, failed_attempts (Environment excluded, documented), LineState, LineSummary, summarize_lines (group_lines + line_attempts), Athena::line_summaries / line_summary / line_of; add Role::Diagnosis arm and the diagnosis-script plumbing to the watcher_tests rig; add the core tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/diagnosis.rs",
+      "action": "create",
+      "purpose": "DiagnosisMark and its path/claim/read/write helpers, brief inputs built from a line's JobRecords, Athena::diagnose_line (claim, invoke, check, redact, commit invocation and the one follow-up request, complete mark) and its unit tests.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Declare `pub mod diagnosis;`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/mod.rs",
+      "action": "modify",
+      "purpose": "Set `Job.line` from line_of in dispatch (job_record at about line 1201).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Add the Role::Diagnosis arm to the exhaustive fake match (line about 266) and `line: None` where a Job is built.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run_pin_tests.rs",
+      "action": "modify",
+      "purpose": "Add the Role::Diagnosis arm to the exhaustive fake match (line about 219).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/store.rs",
+      "action": "modify",
+      "purpose": "Test-only: `line: None` in the dispatched() Job literal (about line 650).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Test-only: `line: None` in the Job literals at about lines 5776 and 6111.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add StatusView.open_lines (from line_summaries, landed lines dropped, lines with no finished attempt dropped) and fill it in status().",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add Job.line (default, skipped when None); Role::Diagnosis with as_str/parse; tests for old-record loading, round trip and the role.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "Add the Role::Diagnosis arm to the exhaustive fake-turn match.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/prompts/diagnosis.md",
+      "action": "create",
+      "purpose": "The diagnosis role brief for an outside reader: what a line and an attempt are, the five failure categories, the four follow-ups, one follow-up only, record the reasoning.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add DIAGNOSIS_FRAME (include_str) and tests for its content and its budget against BudgetSet::Verifier.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add DiagnosisInputs / AttemptFacts and diagnosis_brief (deterministic per-attempt facts: job, verdict, closing reason, unmet criterion, findings, cost) with a test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/outputs.rs",
+      "action": "modify",
+      "purpose": "Add FailureCategory, FollowUpKind (with ALL constants and ids), DiagnosisOutput, diagnosis_schema(), and DiagnosisOutput::check; add the unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add Steps::line_standing, diagnose, diagnose_cap; DiagnosisRun; ItemEnd::Diagnosed; Drain::diagnosis_end called at the loop top and the failures >= ATTEMPTS exit; finish arm; RealSteps impls calling Athena::line_summary and diagnose_line; module doc bullet.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "Add open_lines_section (line, attempt count, state, follow-up job) and print it in the status text beside lines_section; add the display test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Update the drain help text (about lines 258-260) to say a line with two failed attempts is diagnosed, not retried.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add Stub fields and the line_standing / diagnose / diagnose_cap impls, and the drain tests for criteria 1, 3 and 9.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Four entries under [Unreleased] / Added: line recorded on the job, stop-and-diagnose rule (environment stops excluded), diagnosis role and output check, status open lines.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "scope_guard.rs: add DIAGNOSE_AFTER = 2, failed_attempts(&[AttemptRecord]) (Rejected or Failed; doc comment says Environment stops do not count and why), LineState, LineSummary (line, jobs, attempts, failed, landed, state, diagnosis), pure summarize_lines(&[RequestRecord], read_mark) built on group_lines and line_attempts, and Athena::line_summaries / line_summary(records, job_id) / line_of(records, job_id). Add the unit tests: partition equals group_lines, environment_stops, landed line.",
+    "records.rs (athena-data): add Role::Diagnosis (as_str `diagnosis`, parse) and Job.line (`#[serde(default, skip_serializing_if = \"Option::is_none\")]`); update the role-list test; add old-record-loads and round-trip tests. Add `line: None` to every Job literal the compiler reports (store.rs, reading.rs, run/tests.rs, records.rs tests).",
+    "athena-context: write prompts/diagnosis.md; add DIAGNOSIS_FRAME in lib.rs with content and budget tests; in outputs.rs add FailureCategory, FollowUpKind, AttemptDiagnosisOutput, FollowUpOutput, DiagnosisOutput, diagnosis_schema() and DiagnosisOutput::check(&[String]) with its tests; in briefs.rs add DiagnosisInputs and diagnosis_brief.",
+    "Create core diagnosis.rs and declare it in lib.rs: DiagnosisMark (line, at, failed_at, attempts with category and evidence, follow-up kind, follow-up job, reasoning, error), path next to the other marks, claim with create_new. Athena::diagnose_line(job_id, ui): load the records, take line_summary, refuse when failed < DIAGNOSE_AFTER or a mark exists, claim, build the brief from the line's JobRecords, run the role with the verifier's model and budget (modelled on steward::consult: agent_spec, invoke_and_record, redact), parse and check the output, build the follow-up with StewardRequest::new (retry kind titled `Try again on <last job>`), commit the invocation record and the request in one records commit, complete the mark. On any failure keep the invocation record if one was made and record the error in the mark. Extend the watcher_tests rig with a Role::Diagnosis arm that replays a scripted value; add the end-to-end tests (one follow-up, second call refused, two follow-ups rejected, invalid category rejected).",
+    "Add the Role::Diagnosis arm to the exhaustive fake matches in athena-agent/src/fake.rs, run_pin_tests.rs, run/tests.rs and scope_guard.rs tests; build to find any other exhaustive match.",
+    "run/mod.rs dispatch: set `line: self.line_of(records, id.as_str())` in the Job record. Add the scope_guard test that a retry and a re-ask share the request's line and an unrelated request has its own.",
+    "status.rs: add StatusView.open_lines (line, attempts, failed, state, follow_up) from line_summaries, keeping lines that have a finished attempt and no landed attempt; fill it in status(). Add the core open_lines test, including the JSON value.",
+    "display.rs: add open_lines_section and print it with the other sections of the status text; add the display test. main.rs: update the drain help text.",
+    "drain.rs: add Steps::line_standing(&self, job) -> Option<LineSummary>, diagnose(&self, job) -> DiagnosisRun, diagnose_cap(&self) -> f64 (defaults: None, a no-op run with zero cost, zero cap); ItemEnd::Diagnosed(String) and its finish arm (pass_over with the reason); Drain::diagnosis_end (standing check, own-follow-up exception, budget hold and release around diagnose as at drain.rs:2423-2438); call it before paused_reason at the top of the loop and in the failures >= ATTEMPTS branch before paused_reason; RealSteps impls using Athena::line_summary and diagnose_line; update the module doc. Then add the Stub fields and impls and the drain tests for criteria 1, 3 and 9 in tests/drain.rs.",
+    "CHANGELOG.md: four [Unreleased] Added entries limited to what the diff does, with the environment exclusion and the local mark stated.",
+    "Run cargo fmt --all, cargo clippy --all-targets --locked -- -D warnings and cargo test --locked, and also cargo test --locked -p athena-core --test refusal_corpus as a no-regression check, since no refusal rule changes."
+  ],
+  "risks": [
+    {
+      "risk": "At two failures the scope guard usually flags (T1 needs the next attempt to be the 3rd) or pauses (T4), so the existing flagged or paused exit would win and no diagnosis would be queued.",
+      "mitigation": "Run diagnosis_end at the top of every attempt and at the failures >= ATTEMPTS exit; run it before paused_reason and flagged_reason. Tests cover a fresh line with two failures in one run, a line with a prior failure, and a second drain run."
+    },
+    {
+      "risk": "Two drain workers, or two drain runs, diagnose the same line twice.",
+      "mitigation": "Mark creation uses OpenOptions::create_new; a second caller gets an error and queues nothing. A test calls diagnose_line twice. The drain also checks standing.diagnosis before calling diagnose."
+    },
+    {
+      "risk": "A role failure leaves a claimed line with no follow-up, or an automatic re-run spends again.",
+      "mitigation": "The claim is written before the model call; failure records the error in the mark and queues nothing. Status shows `diagnosis failed`; deleting the file (path in the message) allows a new try. A test covers invalid output."
+    },
+    {
+      "risk": "The follow-up is committed but the mark is not completed (crash between the two), so the line would look undiagnosed.",
+      "mitigation": "The follow-up request is committed in the same records commit as the invocation record and the mark is completed right after. If the process dies in between, the mark reads `claimed, no follow-up`, which status shows. Documented in the diagnosis.rs doc comment."
+    },
+    {
+      "risk": "The retry follow-up joins the same line, which has 2 failures, and the drain would block it or retry it without bound.",
+      "mitigation": "The drain runs a diagnosed line's own follow-up only while no attempt has failed since the diagnosis (mark stores failed count at diagnosis), and passes everything else over. Test: follow-up item runs once and is not retried after it fails."
+    },
+    {
+      "risk": "The diagnosis mark is local, so another machine's drain would diagnose the same line again.",
+      "mitigation": "The mark file lives in the local state directory, like pause and flag marks, and the committed follow-up request and invocation record carry the result. Stated in the CHANGELOG entry and the diagnosis.rs doc."
+    },
+    {
+      "risk": "Records validation may refuse an invocation record added to a job that already has an outcome.",
+      "mitigation": "Run the end-to-end diagnose_line test through the real commit path and Records::load. If a closed job's directory rejects a new invocation record, file it under a fresh job id like the steward run instead and route it in store.rs."
+    },
+    {
+      "risk": "Adding a field to Job, which denies unknown fields, breaks old readers or struct literals.",
+      "mitigation": "Make `line` optional and default-skipped, as for `pin`, so old records load. Update the Job literals the compiler reports (store.rs, reading.rs, records.rs tests). Records written by this build are not read by an older binary because Job denies unknown fields; the same holds for earlier optional fields."
+    },
+    {
+      "risk": "The schema attribute for exactly one follow-up may not be supported by the schemars version in use, or the frame and enum ids may drift apart.",
+      "mitigation": "The frame states the output field names and ids; DiagnosisOutput::check is authoritative (the schema length bound is advisory, and the check test covers zero and two follow-ups). The test draws the ids from the enums' ALL constants."
+    },
+    {
+      "risk": "The new frame exceeds the 1300-token budget set it is checked against.",
+      "mitigation": "Keep the frame short; the lib.rs test checks the composed size against the verifier budget before any other work depends on it."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Drain::attempts retry and double-failure flow (drain.rs:1855-1957), plus the new Steps methods",
+      "dependent": "crates/athena-cli/tests/drain.rs existing tests such as an_item_that_fails_twice_on_an_unflagged_unpaused_line_is_passed_over_and_the_next_item_runs (line 1070), the flagged-line test (1135) and the expired-login test (1182), and the in-file World, Capped, Housekeeping and Lane Steps impls in drain.rs",
+      "kind": "code",
+      "test": "Those tests are unchanged and must still pass: the new Steps methods default to None and zero cost, so diagnosis_end returns None and the old paths run.",
+      "reason": null
+    },
+    {
+      "name": "scope-guard pause and flag handling after an item's last failed attempt",
+      "dependent": "RealSteps::paused / flagged and Drain::paused_reason / flagged_reason (drain.rs:1960-1975, 4138-4163); Athena::line_pause and line_flag (scope_guard.rs:784-806)",
+      "kind": "code",
+      "test": null,
+      "reason": "Unchanged. diagnosis_end runs before them and returns only when the line has two failed attempts. A line below two failures reaches the same code as today."
+    },
+    {
+      "name": "ItemEnd enum (new Diagnosed variant)",
+      "dependent": "Drain::finish and the passed-over log (drain.rs:2545-2640), Report.jobs, display::drain",
+      "kind": "code",
+      "test": "Drain tests in step 9 assert the passed-over line and the job summary text for a diagnosed item. The match in finish is exhaustive, so the compiler enforces coverage.",
+      "reason": null
+    },
+    {
+      "name": "group_lines / line_attempts / request_records",
+      "dependent": "crates/athena-core/src/scope_guard.rs group_lines callers: line_pause, line_flag, live_marks, try_watch_line (lines 784-880) and existing tests (1303-1815)",
+      "kind": "code",
+      "test": null,
+      "reason": "Read-only reuse. Their code and signatures do not change, so T1-T5 and the existing watcher tests are unaffected."
+    },
+    {
+      "name": "Job record gains `line`",
+      "dependent": "crates/athena-data/src/records.rs Job (deny_unknown_fields) and its readers: store.rs JobRecords, reading.rs, athena-gate landing_tests.rs, hestia.rs, status.rs",
+      "kind": "code",
+      "test": "athena-data test a_job_record_without_a_line_still_loads plus the existing records round-trip tests. Struct-literal sites (run/mod.rs:1201, store.rs:650, reading.rs:5776 and 6111, records.rs:5082, and any the compiler finds) get `line: None`.",
+      "reason": null
+    },
+    {
+      "name": "Role::Diagnosis variant",
+      "dependent": "Every exhaustive match on Role: athena-agent/src/fake.rs:353-405, run_pin_tests.rs:219, run/tests.rs:266, scope_guard.rs:1156, Role::parse/as_str and its test (records.rs:4423)",
+      "kind": "code",
+      "test": "cargo build and cargo test --locked compile all arms. A new athena-data test checks as_str/parse round trip. Planner/critic filters in status.rs:409, manage.rs:284 and athena-score:442 use matches!, so they stay correct.",
+      "reason": null
+    },
+    {
+      "name": "StatusView.open_lines (new field) and the lines section",
+      "dependent": "crates/athena-core/src/status.rs StatusView consumers: display.rs (status text), the JSON output of athena status, strategy.rs readers of StatusView",
+      "kind": "code",
+      "test": "status_lists_open_lines in display.rs and open_lines test in core. The existing status_lists_flagged_and_paused_lines (display.rs:2462) still passes because lines_section is untouched.",
+      "reason": null
+    },
+    {
+      "name": "New file scope/<first>.diagnosis.json in the same directory as pause and flag marks",
+      "dependent": "scope_guard.rs stored_marks / list_lines / live_marks (lines 504-537, 818)",
+      "kind": "code",
+      "test": "Core test: with a diagnosis mark present, live_marks and line_pause results are unchanged.",
+      "reason": "stored_marks reads only names ending .pause.json or .flag.json, so the new file is ignored by them. A mark file of a different name is never parsed as a pause."
+    },
+    {
+      "name": "Follow-up request queued on REQUEST_CHANNEL",
+      "dependent": "crates/athena-core/src/steward.rs improvement_requests / queued_work, plan.rs improvement turns, hestia.rs",
+      "kind": "code",
+      "test": "Core end-to-end test asserts queued_work lists exactly the follow-up. It is an ordinary steward-channel request, so the plan's guaranteed-turn rule treats it like other Athena requests.",
+      "reason": null
+    },
+    {
+      "name": "Prompt-set token budgets (contract 326/350, reader, producer, verifier)",
+      "dependent": "docs/system-facts.md budget lines, crates/athena-cli/tests/budgets.rs, system_facts_budgets_match_computed",
+      "kind": "rule",
+      "test": "cargo test --locked -p athena-cli --test budgets",
+      "reason": "No shared prompt file is edited and no BudgetSet is added, so the computed sizes of the sets in system-facts.md do not change. The diagnosis frame is checked in its own lib.rs test."
+    },
+    {
+      "name": "Description of what happens to an item that fails twice",
+      "dependent": "athena drain help text in crates/athena-cli/src/main.rs (lines near 258-260) and the module doc in drain.rs",
+      "kind": "code",
+      "test": "cargo test --locked builds the text. Step 9 updates the wording to mention the diagnosis, and the tests that assert help text, if any, are run in the full suite.",
+      "reason": null
+    },
+    {
+      "name": "Which stops count toward the two-attempt rule (environment stops excluded)",
+      "dependent": "crates/athena-core/src/disk.rs StopCause / is_environment_reason via verdict_of",
+      "kind": "rule",
+      "test": "environment_stops test in step 1 and the expired-login drain test.",
+      "reason": "Read through verdict_of; not changed."
+    },
+    {
+      "name": "Invocation record filed under the last job of a line",
+      "dependent": "records validation and the landing gate that check files under records/ (check_record_file, athena-gate) for the invocation record committed under an already-closed job",
+      "kind": "rule",
+      "test": "The end-to-end diagnose_line test commits through the real commit_records path and reloads with Records::load; a validation refusal fails the test.",
+      "reason": null
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Integration tests in crates/athena-cli/tests/drain.rs with the existing Stub. Case A: Stub says the line already has 1 failed attempt, and the first run in this drain is rejected. Case B: a fresh line whose two runs are both rejected. Case C: after A, call drain::drain again on the same Stub. Assert the exact log, that `diagnose` was called exactly once in total, that no `reread`/`run a-retry` follows the second failure, and that the item is reported as passed over with the diagnosis reason.",
+      "command": "cargo test --locked -p athena-cli --test drain a_line_with_two_failed_attempts",
+      "observes": "Log is [read a, run a, diagnose a] for A and [read a, run a, reread a, run a-retry, diagnose a] for B. After the second drain the log has no new run entries and the diagnose count is still 1.",
+      "fails_without": "Without the rule the prior-failure case logs `reread a` and `run a-retry` and diagnose is never called. A drain with the line at two failures keeps retrying or ends as plain `failed twice`. The re-run case would also call diagnose a second time if the drain ignored the standing's diagnosis.",
+      "seam": "Entry point drain::drain(&stub, limits, &ui) (exists, tests/drain.rs:1088). Fake: Stub gets fields `prior_failed: Vec<(&str, usize)>`, a `diagnosed: RefCell<Vec<String>>` and a `diagnose_cost`. Its line_standing returns failed = prior + runs that did not land, and `diagnosis: Some(..)` once diagnose was called, as the real marker does. Injected as `..Stub::default()` fields. Step 5 adds the Steps methods, step 9 adds the Stub fields. The decision to stop and to call diagnose once lives in Drain::diagnosis_end, not in the Stub."
+    },
+    {
+      "criterion": 2,
+      "method": "(a) Unit tests in outputs.rs on DiagnosisOutput::check(&expected_jobs): accepts one category for each of 5 categories and each of 4 follow-up kinds; rejects a missing attempt, a duplicate or unknown job, zero follow-ups, two follow-ups, an empty reasoning, and a category outside the five (deserialisation error). (b) End-to-end tests in scope_guard.rs watcher_tests: two rejected jobs on one line, script the diagnosis reply, call Athena::diagnose_line. Assert the mark names a category for each of the two attempt jobs, the committed records gain exactly one queued request (steward::queued_work length +1), an invocation record has role diagnosis, and a second call refuses and queues nothing. With a scripted reply holding two follow-ups: Err, zero requests queued, mark failed.",
+      "command": "cargo test --locked -p athena-context diagnosis && cargo test --locked -p athena-core diagnos",
+      "observes": "The mark's attempts list has both job ids with categories from the five. queued_work grows by exactly one, and its text parses as a request. The 2-follow-up reply queues none.",
+      "fails_without": "Without check() a missing category or two follow-ups passes through, and the end-to-end test would queue two requests or none. Without the claim, the second diagnose_line call would run the role and queue a second follow-up.",
+      "seam": "Entry points DiagnosisOutput::check (step 3) and Athena::diagnose_line (step 4). Fake: FakeAgentDriver script closure in watcher_tests rig (exists, scope_guard.rs:1094), extended in step 4 with a Role::Diagnosis arm that returns a serde_json::Value held in `Plan.diagnosis: Mutex<Option<Value>>`. The test sets that value from the job ids it read back from the records, so the double only replays the model's answer and the checking logic stays in the production code."
+    },
+    {
+      "criterion": 3,
+      "method": "Integration test in tests/drain.rs: the Stub reports the line has 0 prior failures; outcomes [Rejected, Landed]. Also a case with an environment-cause stop in the line's history (standing failed = 0) and a rejected first attempt.",
+      "command": "cargo test --locked -p athena-cli --test drain a_line_with_one_failed_attempt",
+      "observes": "Log is [read a, run a, reread a, run a-retry, land a-retry, rate], diagnose count 0, report.landed == 1; the environment case calls no diagnose.",
+      "fails_without": "If the stop fired on one failure (or on the in-drain counter alone), the retry `reread a`/`run a-retry` would be missing and diagnose would be called.",
+      "seam": "drain::drain with Stub (exists). Fields and the Steps method are added in steps 5 and 9."
+    },
+    {
+      "criterion": 4,
+      "method": "(a) Core test in scope_guard.rs watcher_tests: after two rejected jobs on a line, `Athena::status()` has open_lines with one entry, attempts 2, state awaiting_diagnosis. After diagnose_line it is `diagnosed` and names the follow-up job. A landed line is absent. serde_json::to_value(&view)[\"open_lines\"] carries the same fields (the JSON form). (b) display.rs in-file test renders open_lines_section for entries in each state and asserts a row has the line id, the count `2 attempts` and the state words; empty input gives empty text.",
+      "command": "cargo test --locked -p athena-core open_lines && cargo test --locked -p athena-cli status_lists_open_lines",
+      "observes": "Text row such as `lines       abc · 2 attempts · awaiting diagnosis`, JSON `{line, attempts, failed, state, follow_up}`.",
+      "fails_without": "Without the open_lines field and the section, the view has no entry and the rendered text has no `lines` row with count and state.",
+      "seam": "Entry points Athena::status (status.rs:1753, exists) and display::status rendering (display.rs:1220 calls lines_section; exists). Fixture: the watcher_tests rig (exists). Step 7 adds open_lines and step 8 the section."
+    },
+    {
+      "criterion": 5,
+      "method": "Core test in scope_guard.rs watcher_tests: go on request A (rejected); a retry job B ('try again on A') and a re-ask C (same words as A, A not accepted) are dispatched; an unrelated D. Read each stored Job record from the records and compare `line`. Also assert the value equals the first request id from group_lines(&request_records(&records)). athena-data test: serialise a Job, delete the `line` key, parse with AnyRecord::parse and check_record_file (loads, line None); a Job with line set round-trips and the canonical path is unchanged.",
+      "command": "cargo test --locked -p athena-core a_retry_and_a_re_ask && cargo test --locked -p athena-data a_job_record_without_a_line",
+      "observes": "A.line == B.line == C.line == A's id; D.line == D's id; old JSON loads.",
+      "fails_without": "Without line_of at dispatch the stored Job.line is None for each job, so the equality assertions fail. A grouping that ignored retry_of or same_text_as gives different values.",
+      "seam": "Entry point Athena::go -> dispatch (run/mod.rs:1001) and records via Records::load; rig exists. Step 2 adds the field, step 6 the dispatch write."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three CI commands. The named test builds RequestRecords with a retry link, a re-ask link and an id only in text, and asserts the summaries' member lists equal group_lines' partition. Review check: the single `fn group_lines` definition is in scope_guard.rs, and drain.rs and status.rs reach it only through Athena::line_summary/line_summaries.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked && cargo test --locked -p athena-core line_summaries_use_group_lines",
+      "observes": "All commands exit 0. The partition test passes.",
+      "fails_without": "A hand-rolled grouping would diverge from group_lines on the scope_guard test's input (retry link, re-ask link, unlinked id in text) and fail the partition-equality assertion.",
+      "seam": "Pure function summarize_lines(&[RequestRecord], ..) added in step 1, fed hand-built RequestRecords (type exists, scope_guard.rs:105)."
+    },
+    {
+      "criterion": 7,
+      "method": "lib.rs tests: iterate the enum's ALL constants (FailureCategory, FollowUpKind) and assert each id appears in DIAGNOSIS_FRAME.text, and that the text says to record reasoning, names the output field, and has no first-person project jargon undefined for an outside reader (it states what a line, an attempt and an environment stop are). Assert check_budget(BudgetSet::Verifier, &compose(&[CONTRACT.into(), DIAGNOSIS_FRAME.into()])) is Ok and the contract, reader, producer and verifier sets are unchanged (budgets.rs and system_facts_budgets_match_computed still pass).",
+      "command": "cargo test --locked -p athena-context diagnosis_frame && cargo test --locked -p athena-cli --test budgets",
+      "observes": "All five category ids and four follow-up ids found; composed estimate within 1300 tokens; existing budget lines unchanged.",
+      "fails_without": "Without the frame text naming every category and follow-up, or with an oversize frame, the content test or the budget check fails.",
+      "seam": "DIAGNOSIS_FRAME (step 3) and check_budget/compose (exist, lib.rs:142,222)."
+    },
+    {
+      "criterion": 8,
+      "method": "Read the diff under [Unreleased]: four entries (line recorded on the job, stop-and-diagnose rule with the environment exclusion, diagnosis role and its output check, status open lines), each describing only changes the diff makes. Compare each sentence against the step that implements it; the diff must not mention automatic execution of follow-ups, backfill, or threshold configuration.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "Four Added entries, no claim beyond the code.",
+      "fails_without": null
+    },
+    {
+      "criterion": 9,
+      "method": "Core unit test on failed_attempts and summarize_lines: [Rejected, Environment] gives failed 1 and state Trying, [Environment, Environment] gives 0. The existing expired-login drain test (tests/drain.rs:1182) keeps stopping with Stop::Environment and calls no diagnose. The doc comment on failed_attempts and the CHANGELOG entry state the exclusion (checked by reading the diff).",
+      "command": "cargo test --locked -p athena-core environment_stops && cargo test --locked -p athena-cli --test drain an_item_whose_producer_login_expired",
+      "observes": "Counts as listed, and the drain log of the environment case has no `diagnose`.",
+      "fails_without": "If environment stops were counted, a line of one rejection plus one environment stop would reach 2 and diagnose, and the test would see the diagnosis.",
+      "seam": "failed_attempts and summarize_lines (step 1) with hand-built AttemptRecord values (type exists, scope_guard.rs:85); drain via Stub (exists)."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "2659e8402b73a92ad76e7127da45e234015a675829102b1d89c61d35b0c298a9"
+}

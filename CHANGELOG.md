@@ -9,6 +9,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Wasted work in the throughput section of `athena status` and in the throughput review. The section now shows
+  attempts per landed change, money spent on attempts that did not land, and the share of changes that landed on
+  the first attempt, over the newest 20 landings and the 20 before them (`athena_core::status::waste_windows`,
+  `WasteWindow`). An attempt that did not land is a request job that ran a model and failed, was closed unlanded or
+  was stopped in planning; a job that never ran a model is not counted. The throughput review is also due, with
+  the new trigger `wasted`, when attempts per landed change or the money spent on attempts that did not land
+  rises by more than 20% against the figures the previous review stored, or the first-attempt share falls by more
+  than 20% (`hestia::throughput_due`, `waste_rises`). The `athena.throughput-review/1` record gains an optional
+  `waste` field with those figures, so earlier records still parse.
+- A noise rule for the requests the throughput review queues. A design request is queued only when one of the
+  four measures (median minutes, attempts per landed change, wasted spend, first-attempt share) got worse by more
+  than the noise between the older 20-landing windows and by more than one job's worth (`hestia::request_gate`);
+  the record's note says which measures were beyond, or that the change was within noise. The noise needs 60
+  landings: under that, no design request is queued after the first review and the note says "not enough
+  history". Noise taken from adjacent windows absorbs a steady trend, which the design note states. The slowdown
+  request follows the same rule with 60 or more landings (`hestia::slowdown_beyond_noise`); under 60 the 25% rule
+  alone decides and the note says the noise could not be estimated.
 - A guaranteed drain turn for Athena's own improvement requests, and the plan and report lines that show it.
   Root cause: the plan ordered by priority alone, and a person marks requests urgent or high freely, so a request
   from the Steward or from Hestia's reviews, which names a cause, sorted behind them and rarely ran (5 of 32
@@ -275,6 +292,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- An open earlier throughput design request no longer stops the throughput review. The review runs, asks the
+  model, records the proposal, and notes the open request in the record and in `THROUGHPUT.md`; four of seven runs
+  on 4 to 6 Nov did nothing for this reason. A proposal recorded without a design request has `request_job` unset.
 - The reader brief no longer says a stale earlier attempt "was rejected" or that its changes were discarded: it says
   the job went stale, that the retry merges its kept candidate onto the tip (a clean merge is verified again with no
   producer run, a conflict goes to a producer), and that the retry starts from the base when the candidate cannot be

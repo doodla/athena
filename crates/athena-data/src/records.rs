@@ -2131,6 +2131,9 @@ pub enum ThroughputTrigger {
     /// The median minutes per landed job grew by more than 20% against the previous review. A rise of more
     /// than 25% also gets a slowdown request; every review compares the stages, whatever the trigger.
     Worsened,
+    /// Wasted work rose by more than 20% against the previous review: attempts per landed change, money
+    /// spent on attempts that did not land, or the share of changes that landed on the first attempt fell.
+    Wasted,
 }
 
 impl ThroughputTrigger {
@@ -2138,7 +2141,32 @@ impl ThroughputTrigger {
         match self {
             ThroughputTrigger::Cadence => "cadence",
             ThroughputTrigger::Worsened => "worsened",
+            ThroughputTrigger::Wasted => "wasted",
         }
+    }
+}
+
+/// The three measures of wasted work over a window of landings, as a throughput review saw them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WasteFigures {
+    /// Attempts (landings plus attempts that did not land) per landing; at least 1.
+    pub attempts_per_landing: f64,
+    /// Money spent on attempts that did not land, in US dollars.
+    pub wasted_usd: f64,
+    /// The share of landed changes that landed on their first attempt, from 0 to 1.
+    pub first_attempt_share: f64,
+}
+
+impl WasteFigures {
+    /// Whether the figures are numbers a review can hold.
+    pub fn is_valid(&self) -> bool {
+        self.attempts_per_landing.is_finite()
+            && self.attempts_per_landing >= 1.0
+            && self.wasted_usd.is_finite()
+            && self.wasted_usd >= 0.0
+            && self.first_attempt_share.is_finite()
+            && (0.0..=1.0).contains(&self.first_attempt_share)
     }
 }
 
@@ -2156,7 +2184,8 @@ pub struct ThroughputProposal {
     pub expected_minutes_saved: f64,
     /// The request priority the prediction set (`urgent`, `high`, `normal` or `low`).
     pub priority: String,
-    /// The design request this review queued; None when an earlier one was still open.
+    /// The design request this review queued; None when the change was not beyond the noise between recent
+    /// windows or the request could not be queued (the review's note says which).
     pub request_job: Option<JobId>,
 }
 
@@ -2193,8 +2222,12 @@ pub struct ThroughputReview {
     /// The median minutes per landed job over the newest landed jobs when the review ran.
     pub window_median_minutes: f64,
     pub trigger: ThroughputTrigger,
-    /// None when the model gave no usable proposal or an earlier request was still open.
+    /// None when the model gave no usable proposal.
     pub proposal: Option<ThroughputProposal>,
+    /// The wasted-work figures over the newest window of landings when the review ran; the next review
+    /// compares with them. None on a review written before they were measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waste: Option<WasteFigures>,
     /// Predictions this review closed.
     pub followups: Vec<ThroughputFollowup>,
     /// Why there is no proposal or no request, or any other remark; empty when there is nothing to say. It also
@@ -2216,6 +2249,13 @@ impl ThroughputReview {
         let good = |v: f64| v.is_finite() && v >= 0.0;
         if !good(self.window_median_minutes) {
             return Err("a throughput review's median is a finite, non-negative number".into());
+        }
+        if self.waste.is_some_and(|w| !w.is_valid()) {
+            return Err(
+                "a throughput review's wasted-work figures are finite, with at least one attempt per landing, \
+                 non-negative spend and a first-attempt share from 0 to 1"
+                    .into(),
+            );
         }
         if let Some(p) = &self.proposal {
             if p.bottleneck.trim().is_empty() || p.change.trim().is_empty() {
@@ -4162,7 +4202,80 @@ mod tests {
                 measured_minutes_saved: 6.0,
                 jobs_measured: 4,
             }],
+            waste: None,
             note: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_throughput_review_without_waste_figures_still_parses_and_one_with_them_round_trips() {
+        // An old record has no `waste` key.
+        let old = throughput_review_with("20261026-090000-5abc");
+        let record = AnyRecord::ThroughputReview(Box::new(old.clone()));
+        let json = record.to_json();
+        assert!(!json.contains("waste"), "an absent figure is not written");
+        let parsed = AnyRecord::parse(&record.canonical_path(), json.as_bytes()).unwrap();
+        let AnyRecord::ThroughputReview(parsed) = parsed else {
+            panic!("a throughput review parses as one");
+        };
+        assert_eq!(parsed.waste, None);
+        assert!(check_record_file(&record.canonical_path(), json.as_bytes()).is_ok());
+
+        let mut new = old;
+        new.trigger = ThroughputTrigger::Wasted;
+        new.waste = Some(WasteFigures {
+            attempts_per_landing: 2.0,
+            wasted_usd: 10.5,
+            first_attempt_share: 0.5,
+        });
+        let record = AnyRecord::ThroughputReview(Box::new(new.clone()));
+        let json = record.to_json();
+        assert!(json.contains("\"wasted\""));
+        let parsed = AnyRecord::parse(&record.canonical_path(), json.as_bytes()).unwrap();
+        assert_eq!(parsed, record);
+        assert_eq!(ThroughputTrigger::Wasted.as_str(), "wasted");
+    }
+
+    #[test]
+    fn waste_figures_that_are_not_numbers_a_review_can_hold_are_refused() {
+        let good = WasteFigures {
+            attempts_per_landing: 1.5,
+            wasted_usd: 0.0,
+            first_attempt_share: 1.0,
+        };
+        let with = |f: WasteFigures| {
+            let mut r = throughput_review_with("20261026-090000-5abc");
+            r.waste = Some(f);
+            r.validate()
+        };
+        assert!(with(good).is_ok());
+        for bad in [
+            WasteFigures {
+                attempts_per_landing: f64::NAN,
+                ..good
+            },
+            WasteFigures {
+                attempts_per_landing: 0.5,
+                ..good
+            },
+            WasteFigures {
+                wasted_usd: -0.01,
+                ..good
+            },
+            WasteFigures {
+                wasted_usd: f64::INFINITY,
+                ..good
+            },
+            WasteFigures {
+                first_attempt_share: 1.01,
+                ..good
+            },
+            WasteFigures {
+                first_attempt_share: -0.1,
+                ..good
+            },
+        ] {
+            assert!(with(bad).is_err(), "{bad:?} should be refused");
         }
     }
 

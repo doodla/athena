@@ -1,0 +1,158 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261107-031925-mrpk",
+  "base_commit": "2ad155a5bbe64b939e44c45eb159715af8d46386",
+  "base_fingerprint": "sha256:ededa0b875cd295880b7f6b28adf0a46446c19c0d2af760fdc510ec89e2867d2",
+  "previous_job": "20261107-031902-ttnw",
+  "candidate_commit": "ff1397eb61fdf78936034dfd7fdd8a2bc47add7e",
+  "candidate_tree": "e79c3001023006c8073f3c7e2181d748258d4648",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 354870
+    },
+    {
+      "path": "crates/athena-cli/tests/status_snapshot.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 6648
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 253003
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 181618
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 209178
+    },
+    {
+      "path": "docs/design/hestia.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 32750
+    }
+  ],
+  "fingerprint": "sha256:f6f08c6ae366aaa735fb888e48473867571f44fba1a937eb02682fadd3700021",
+  "violations": [],
+  "producer_report": {
+    "summary": "The throughput review now measures wasted work. It reports attempts per landed change, money spent on attempts that did not land, and the first-attempt share, over the newest 20 landings and the 20 before them. All of `cargo test -p athena-core`, `-p athena-cli`, `-p athena-data` and `-p xtask` (including the policy scan), clippy and `cargo fmt --check` pass. I did not run the full `cargo test --locked`, and I did not run `cargo run -- status` against the evidence directory.\n\n- **Records:** `ThroughputReview` gains an optional `waste` field and a `wasted` trigger. Old records still parse, and a record with the new field round-trips.\n- **Status:** `athena status` prints the three measures with a basis line each. They show even with fewer than 20 landings, with the landing count printed. When a full previous window exists they print beside the newest.\n- **Trigger:** a review is also due when attempts per landed change or wasted spend rise more than 20% against the figures the previous review stored. It is also due when the first-attempt share falls more than 20%. From a clean window (nothing wasted before), spend alone does not trigger; attempts per landed change must rise too.\n- **Open design request:** it no longer skips the review. The review runs, asks the model, and records the proposal. The note and `THROUGHPUT.md` name the open request.\n- **Noise rule for design requests:**\n  - A design request is queued only when a measure got worse by more than the larger of the noise between older windows and a one-job floor. Noise is the largest difference between adjacent older 20-landing windows.\n  - Under 60 landings noise cannot be estimated, so nothing is queued and the note says \"not enough history\". The very first review is the exception.\n  - A rise within the noise is recorded with `request_job` unset, and the note says it was within noise.\n  - Noise from adjacent differences absorbs a steady equal-step worsening. That is documented in `hestia.md` and the CHANGELOG, not fixed.\n- **Slowdown request:** it also follows the noise rule when there are 60 or more landings. Below that the existing 25% rule decides, and the note says noise could not be estimated.\n- **Docs:** `hestia.md` section 12, the module and function docs in `hestia.rs`, and `CHANGELOG.md` are updated. The old \"skips the review\" wording is gone.",
+    "files": [
+      "crates/athena-data/src/records.rs",
+      "crates/athena-core/src/status.rs",
+      "crates/athena-core/src/hestia.rs",
+      "crates/athena-cli/tests/status_snapshot.rs",
+      "docs/design/hestia.md",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core -- -q",
+        "result": "pass",
+        "note": "1073 passed, 1 ignored; includes the new status and hestia tests (run after the last logic change; later edits were formatting and a doc-comment reword)"
+      },
+      {
+        "command": "cargo test -p athena-cli -p athena-data -- -q",
+        "result": "pass",
+        "note": "All pass, including status_snapshot, mirrors and the records tests (old JSON parses, new one round-trips, bad figures refused)"
+      },
+      {
+        "command": "cargo test -p xtask -- -q",
+        "result": "pass",
+        "note": "Includes the policy scan (banned words) and spec tests; 17 policy tests pass"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "No warnings"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "Clean after cargo fmt --all"
+      },
+      {
+        "command": "cargo test -p athena-core --lib -- -q <15 new test name filters>",
+        "result": "pass",
+        "note": "Re-run of the new tests after cargo fmt: 15 passed"
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core`: a new status.rs test builds sample records where half of attempts in the window did not land and asserts attempts per landing == 2.0 and first-attempt share == 0.5.",
+        "status": "met",
+        "evidence": "status.rs test `half_of_the_attempts_not_landing`: 20 landings and 20 failed attempts (40 attempts), 10 landings retry a failed job; asserts window counts (20, 20, 40), attempts_per_landing() == 2.0, first_attempt_share() == 0.5, wasted_usd == 10.0, and the same through Throughput::compute and its text. Also tests for no failures (1.0/1.0/0.0), a 7-landing partial window, an open job, and a closed job that never ran (not counted). `cargo test -p athena-core` passes."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core`: a new hestia.rs test shows `throughput_due` (or its successor) returns a trigger when wasted spend rises beyond the previous review and noise while median minutes is unchanged; the same inputs without the rise return None.",
+        "status": "met",
+        "evidence": "hestia.rs `a_rise_in_wasted_work_makes_a_review_due_when_the_median_has_not_moved` (pure: spend 2.00 to 2.50 with median 10.0 gives Some(Wasted), unchanged gives None, exactly 20% none, no new landing none, old review none) and `a_rise_in_wasted_spend_triggers_a_review_with_no_change_in_median_time` (80 landings, spend 10 vs 2 against noise 3: asserts throughput_due is None for the median, then the review runs with trigger Wasted, median 10.0, one design request). Both pass."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core`: a new hestia.rs test shows an open earlier design request no longer stops the review: the review runs, and its record note mentions the open request.",
+        "status": "met",
+        "evidence": "hestia.rs `an_open_design_request_no_longer_stops_the_review`: with d000 open, the review returns a record, the model is asked once and its THROUGHPUT.md names d000, the note contains the id, 'still open; this review ran anyway' and 'design request: not enough history: 21 of 60 landings, none queued'. The rewritten `a_review_queues_one_design_request_...notes_it_while_it_is_open` and the 25-to-60 median test assert the same. Pass."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core`: a test shows a change within the noise between recent windows queues no request and the note says it was within noise, while a larger change queues one.",
+        "status": "met",
+        "evidence": "hestia.rs `a_change_within_the_noise_queues_no_request` (80 landings, spend +2 USD against noise 3: no request, note 'design request: within noise'), `a_change_beyond_the_noise_queues_a_request_even_while_another_is_open` (spend +8: a second request queued, improvement_of lists both), `one_failed_run_after_a_clean_history_is_within_the_noise`, `a_slowdown_within_the_noise_between_windows_queues_no_request` (slowdown within and beyond), and the pure `the_gate_queues_only_a_change_larger_than_the_noise_and_the_one_job_floor` and `a_slowdown_is_beyond_the_noise_only_when_the_rise_exceeds_noise_and_the_floor`. All pass."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-cli` and `cargo run -- status` (or the status_snapshot test): the throughput output shows attempts per landed change, money spent on attempts that did not land, and first-attempt share.",
+        "status": "met",
+        "evidence": "status_snapshot.rs now asserts the printed `athena status --snapshot` text contains 'attempts per landed change: 1.00 over the last 1 landing(s)', 'spent on attempts that did not land: 0.00 USD over the last 1 landing(s)' and 'landed on the first attempt: 100% over the last 1 landing(s)'. `cargo test -p athena-cli` passes (status_snapshot: 2 passed). I did not run `cargo run -- status` by hand."
+      },
+      {
+        "criterion": "Run `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check`: all pass; an old ThroughputReview JSON without the new fields still parses via `AnyRecord::parse`, and a new one round-trips.",
+        "status": "met",
+        "evidence": "left to Athena's checks for the full `cargo test --locked`; I ran cargo test for athena-core, athena-cli, athena-data and xtask (all pass), `cargo clippy --all-targets --locked -- -D warnings` (clean) and `cargo fmt --all --check` (clean). records.rs test `a_throughput_review_without_waste_figures_still_parses_and_one_with_them_round_trips` parses a record with no `waste` key through AnyRecord::parse and check_record_file and round-trips one with figures and the `wasted` trigger; `waste_figures_that_are_not_numbers_a_review_can_hold_are_refused` covers validate."
+      },
+      {
+        "criterion": "CHANGELOG.md has entries naming only what the diff does (the three measures, new triggers, open-request note, noise rule); no unrelated claims.",
+        "status": "met",
+        "evidence": "Read the diff of CHANGELOG.md: two Added entries (measures and `wasted` trigger and optional `waste` field; noise rule for design and slowdown requests, with the 60-landing limit and the steady-trend limit) and one Changed entry (open request no longer stops the review). Each maps to a hunk in status.rs, hestia.rs or records.rs. No claim about display.rs or snapshot.rs, which are unchanged."
+      },
+      {
+        "criterion": "The doc comment of hestia.rs and the Throughput review section of docs/design/hestia.md no longer say an open design request skips the review (Grep for the old wording finds none).",
+        "status": "met",
+        "evidence": "Grep for 'queues no second one and does not ask the model', 'none while an earlier one is open', 'the model was not asked for another', 'the review queues no second one' and 'does not ask the model' outside CHANGELOG.md finds none. Updated the hestia.rs module doc, THROUGHPUT_MARKER doc, throughput_review and compare_with_previous_review docs, and hestia.md section 12 (wasted work, trigger, open-request note, noise rule, slowdown noise condition, record shape)."
+      }
+    ],
+    "open_issues": [
+      "Departure from the plan: `slowdown_beyond_noise` takes `(rise, bar, landed)` and returns `Result<Option<String>, String>` (Err = within noise remark, Ok(Some) = noise could not be estimated remark, Ok(None) = beyond) rather than `Result<(), String>`, so the not-estimable remark comes from the same function.",
+      "Departure from the plan: `request_gate` takes the four `Measure`s from `Throughput::measures()` plus landed count, first-review flag and open flag, so the pure tests build measures directly; `Measure` and `Bar` are public in status.rs.",
+      "Departure from the plan: no `Bars` per-measure `differences` split beyond 1 or 2, and `put_earlier_review_citing`/`earlier_review_with_waste` were folded into one helper `put_review` plus `earlier_review_with_waste`; `seed_failed` takes a slice of landing slots.",
+      "The model is asked on every due review, including ones that queue nothing (open question 3 of the plan); under 60 landings no design request is queued after the first review (open question 2); one minute is the median floor (open question 4). These were not put to the user.",
+      "display.rs and snapshot.rs are not edited: both print `Throughput::text()` and serialize the struct, so the new lines and fields flow through (listed under unchanged_planned_files).",
+      "The steady-trend blind spot (equal-step worsening is within noise) is documented in hestia.md and the CHANGELOG, not fixed.",
+      "I did not run `cargo run -- status` against the evidence directory; the status_snapshot test covers the printed text for a one-landing fixture."
+    ],
+    "mistakes": [
+      "The first seed_failed fixture set only the invocation's cost, so the records gate refused the commit with 'usage records reconcile'; I fixed it by also setting the per-model cost and recomputing the outcome totals.",
+      "My new 'basis' line said 'jobs still open', which made an existing-style assertion on the text 'still open' match THROUGHPUT.md; the test was reworded to look for the open-request sentence instead."
+    ],
+    "learnings": [
+      "Invocation cost fixtures must agree in three places: the invocation's `cost`, each `models_used[..].cost_usd`, and the outcome's `totals` (recompute with `crate::scoring::totals`), or the records gate refuses the commit with 'usage records reconcile'.",
+      "`RecordId::from_parts(time, bits)` gives deterministic valid ids for test jobs; ids must be YYYYMMDD-HHMMSS plus four Crockford characters.",
+      "Floating-point differences such as 21/20 - 20/20 come out a hair above 1/20, so a 'change greater than the one-job floor' test needs an epsilon (NOISE_EPSILON = 1e-9).",
+      "status.rs `landed_jobs` (measured only) and the landing count differ: landed jobs that ran no model are landings but have no measured stages, so the median windows and the waste windows are cut separately.",
+      "`Throughput` is serialized into the status JSON and the snapshot; the per-attempt cost vector in `WasteWindow` is `#[serde(skip)]` so the JSON gains only the figures."
+    ],
+    "desires": [
+      "A way to read a tool-result file that Athena's tool hook redirected outside the working directory; a long cargo test run had to be repeated with -q to see its summary.",
+      "A real-records replay of the new windows (via `athena status --snapshot` on the evidence directory) to see what the three measures read on 4 to 6 Nov; I did not run it."
+    ]
+  }
+}

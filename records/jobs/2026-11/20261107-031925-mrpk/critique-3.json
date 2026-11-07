@@ -1,0 +1,27 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-031925-mrpk",
+  "round": 3,
+  "at": "2026-11-07T05:44:44.075302828Z",
+  "invocation_seq": 8,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "A measure that was flat in the older windows gets a noise of 0, so the smallest worsening queues a design request. This is the same false positive the plan rejected for the trigger.",
+      "evidence": "Decision 4 says noise = max(|w1-w2|, |w2-w3|) and a measure is beyond noise when change > noise. First-attempt share and wasted spend are often flat: share is 1.0 in every window with no retries, and spend is 0 in clean windows. Two equal values give noise 0. One retried landing in window 0 (share 0.95, change 0.05 > 0), or one failed run costing a few cents (spend change > 0), then counts as 'beyond noise'. On the next cadence review (every 10 landings, hestia.rs:1351) the gate queues a design request. Decision 3 rejected this behaviour for the trigger: 'Any wasted spend of 0.01 USD or more after a zero baseline — Why: One failed run after a clean window would fire a review.' The gate has the same flaw and has nothing like the trigger's zero floor. The median measure has the same weakness, though it is less likely to be exactly flat. The criterion 4 fixtures do not show the problem, because share and median have change 0 there, and 0 > 0 is false. Fix: Give each measure a resolution floor, so a change must exceed max(noise, floor). For attempts per landing and first-attempt share, use one job's worth over the window (1/20). For wasted spend, use the median cost of one did-not-land attempt in the older windows, or tie it to attempts as decision 3 does. State the floor in the note and in hestia.md. Add a request_gate case to criterion 4(a): older windows flat (noise 0) and window 0 worse by one job gives queue false with 'within noise'.",
+      "location": "Plan decision 4 (request_gate noise rule); step 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The fixture timing cites '20 min' landings, but `seed_landed(.., 10.0)` jobs last 10 minutes.",
+      "evidence": "`timed_job` puts the outcome at start plus the summed stage minutes (status.rs:3269-3331). `seed_landed` passes `producer_only(minutes)` (hestia.rs:4268), so the 2(b)/4(b) landings end 10 minutes after they start. Failed jobs that start 30 minutes after their slot's start still close after that landing and before the next (2 hours later). The windows are therefore right, but the stated reason is wrong. Fix: Correct the timing statement. The plan's own check, asserting the per-window counts first, already guards against this.",
+      "location": "Plan Risks (failed-job fixtures) and Demonstration 2(b)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. I read the code it names and it is where the plan says: `throughput_due` (hestia.rs:1341), the early skip (1728-1733), `ask_throughput` (1906), `open_throughput_request` (1468), `Throughput::compute` and the did-not-land loop (status.rs:984 and 1015-1018), `landed_jobs_among_first` (963), `retried_job` (reading.rs:1522), `spent_usd` (store.rs:169), and the fixtures (`timed_job`, `seed_stages`, `open_design_request_job`, `throughput_model`, `earlier_review`). The dependents list matches what Grep finds. `throughput_due` has one production caller. Nothing else matches on `ThroughputTrigger` or builds a `Throughput` literal. The snapshot test compares JSON with the serialized struct and the printed text with `text()`. The only docs that state the skip are hestia.md:288/300 and the hestia.rs/records.rs docs the plan lists. Each demonstration uses a real seam and would fail without the change. I worked through the criterion 2(b) and 4 fixture numbers: spend noise 3, attempts noise 0.15, within +2/+0.1, beyond +8/+0.4. They hold. The remaining problem is soundness in the request gate. Noise comes from one or two differences between older windows, and a measure that did not change in those windows gets a noise of exactly 0. Then any worsening in the newest window, even one failed run or one retried landing, counts as 'beyond noise' and queues a design request. The plan rejected exactly that false positive for the trigger (decision 3) but leaves it open in the gate. The gate needs a floor at the smallest change a 20-landing window can show. With that fix the plan can be accepted."
+}

@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-031925-mrpk",
+  "round": 4,
+  "at": "2026-11-07T05:47:52.470700013Z",
+  "invocation_seq": 10,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The review still queues the slowdown request with no noise rule, against 'only queues a request when the change is larger than the noise'.",
+      "evidence": "The review also queues requests through `compare_with_previous_review` (hestia.rs:1863-1880). It queues a high-priority slowdown request whenever `is_slowdown` (a median rise over 25%) holds, and no noise rule applies. The request says the review 'only queues a request when the change is larger than the noise between recent windows, and says so'. Out of scope says not to change the 25% rule 'beyond what the noise rule needs', which expects the noise rule to apply to it. The criterion 3 test has 21 landings: the note says 'not enough history: N of 60 landings, no request queued', yet the test asserts 'the slowdown request is still queued'. The note then contradicts what the review did. Neither the decisions nor the open questions take this up. Fix: Choose one and state it in a decision. (a) Run the slowdown request through `request_gate` on the median measure: queue it only when the rise is over 25% and also beyond max(noise, floor), and add a test for a slowdown that is within noise. Or (b) keep it ungated, add an open question for the user, word the gate note so it covers design requests only (for example 'no design request queued'), and have hestia.md and CHANGELOG say the slowdown request does not follow the noise rule. Either way, make the criterion 3 note and its assertions agree.",
+      "location": "Approach / Decision 4 ('The 25% slowdown rule ... are unchanged'); Demonstration for criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 4 clean-history case triggers no review, so there is no note to assert on.",
+      "evidence": "This case has stored baseline spend 0.0 and exactly one failed run in window 0. By decision 3, a rise from zero triggers only when attempts per landing also exceeds previous × 1.2. One failure gives 21/20 = 1.05, which is under 1.2. So `Wasted` does not fire. The plan names no previous review placed for the cadence trigger (10 landings back). `throughput_review` would return Ok(None) and there would be no note to assert 'within noise' on. Fix: Put the previous review at 70 landings so the cadence trigger makes the review due, or say which trigger fires. Then assert the trigger before asserting the note.",
+      "location": "Demonstration for criterion 4(b), the clean-history case",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Noise taken from adjacent window differences absorbs a steady trend, so a steady worsening never queues a request.",
+      "evidence": "When the older windows rise in equal steps (for example spend 2, 4, 6 and then 8 in window 0), the change (2) equals the noise (2). So a steady worsening never counts as beyond noise. The noise figure absorbs the trend it should reveal. This fits the accepted reading ('spread ... across recent windows'), but it is a known blind spot. Fix: Name the blind spot in the Risks list and in hestia.md. Or take the noise from differences around the older windows' mean, removing the trend, rather than from raw adjacent differences.",
+      "location": "Decision 4, noise = the largest adjacent difference among windows 1-3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The shared did_not_land helper must keep the guard that skips jobs with no invocations.",
+      "evidence": "The current check (status.rs:1010-1018) is applied only after `if job.invocations.is_empty() { continue; }`. A helper made from lines 1015-1018 alone would count jobs with no invocations, such as a request closed before any run, as did-not-land attempts. That would inflate attempts per landing. Fix: Put the empty-invocations guard inside `did_not_land`. Add a test case: a closed unlanded job with no invocations is not counted.",
+      "location": "Decision 1 / Step 2, the shared `did_not_land(job)` helper",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code at the places the plan cites: `throughput_due` (hestia.rs:1341), `throughput_review` with the open-request skip (hestia.rs:1701-1781), `compare_with_previous_review` with the slowdown queue (hestia.rs:1839-1880), `Throughput::compute` and `text` with the did-not-land check (status.rs:984-1094), `landed_jobs_among_first` (status.rs:963), `retried_job` (reading.rs:1522), `spent_usd` (store.rs:169), and the two display.rs `text()` call sites (1114, 1203). They all exist and behave as the plan says. The design holds together: three measures built from job and invocation records, a `Wasted` trigger that compares against the figures stored on the previous review, the skip turned into a note, and a pure gate whose bar is max(noise, one-job floor). Most demonstrations would fail without the change. One gap is major. The request says the review \"only queues a request when the change is larger than the noise\". The plan still lets the review queue the high-priority slowdown request on the 25% rule alone. The out-of-scope line (\"beyond what the noise rule needs\") expects the noise rule to reach that request. And the plan's own criterion 3 test queues a slowdown request while the note says \"not enough history ... no request queued\". The minor points: one criterion 4 fixture is never triggered, the noise estimate counts a steady trend as noise, and the did-not-land check must keep its \"has invocations\" guard."
+}
