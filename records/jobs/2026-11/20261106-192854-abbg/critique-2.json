@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-192854-abbg",
+  "round": 2,
+  "at": "2026-11-07T16:17:18.709770858Z",
+  "invocation_seq": 6,
+  "agent_verdict": "accept",
+  "final_verdict": "accept",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "The jump path returns max_lines + 1 lines, and `max_lines - 20` can underflow.",
+      "evidence": "The jump path keeps `max_lines - 20` head lines, one `…` line and the last 20 lines, which is max_lines + 1 lines. Decision 4 says \"n headers plus n times the share is at most 200\". That is false whenever a shard takes the jump path: with 2 shards it is 2 × (1 + 100) = 202. Also, `max_lines - 20` on usize underflows when max_lines < 20. That panics in debug test builds. Step 4 even sets per_lines to `.max(1)`, and `failure_section` is `pub`. Fix: Make the head `max_lines.saturating_sub(21)` lines, so head + `…` + tail is at most max_lines. When max_lines is too small for a head and a 20-line tail (for example under 40), fall back to the window path. Add one assertion that the jump output has at most max_lines lines.",
+      "location": "Plan step 2(d) and Decision 4 (jump path line count and budget bound)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "with_failure_detail runs failure_section a second time on output that is already bounded, and the result can change.",
+      "evidence": "detail_from_job_logs (gh/client.rs 248-316) puts the `failing units:` line in front of an already-bounded section. For one shard that section can be 200 lines (or 201 after a jump). with_failure_detail then runs failure_section again with 199 lines. That second pass can take the jump path again: if the only marker was in the dropped first line, the last 199 lines have none. The result has a second `…` gap and loses one middle line. The sum of per-shard byte caps plus the `…` prefixes that `tail` adds can also go a few bytes past FAILED_TAIL_BYTES. The final `tail` then cuts the start of shard 1's `== name` header. Fix: Have detail_from_job_logs reserve one line and a few bytes for the `failing units:` prefix. Use FAILED_TAIL_LINES - 1 as the total line budget and subtract n × 3 bytes for the ellipses. A section that is already within the limits then passes through with_failure_detail unchanged. Add a test that applies failure_section twice to a jump-path output and gets the same text back (idempotence).",
+      "location": "Plan step 3 / Decision 5 (with_failure_detail sections text that detail_from_job_logs already sectioned)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The two-shard test as sized may not tell the per-shard split apart from a joined re-cut.",
+      "evidence": "The revision says this test catches a joined re-cut. That holds only if each panic message sits in the right place. Take sections of about 150 lines each. A joined `tail_lines(200)` after the cleanup cut keeps shard 2's header and 150 lines plus the last 49 lines of shard 1. If shard 1's message is in its last 49 lines, a re-cut keeps it too. If the message is near the top of the section, the per-shard 99-line window drops it under the plan's own design. Either way the test does not pin Decision 4. Fix: State where each message goes: inside the last 99 lines of its own section, but more than 200 − (shard 2 length + 1) lines from the end of shard 1. For example, use sections of about 190 lines with the message 60 to 90 lines from the end. Then the per-shard split keeps both messages and a joined re-cut provably drops shard 1's.",
+      "location": "Demonstration for criterion 3(b) (two_shards_each_keep_their_failing_section)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The main CI cut relies on guessed cleanup text when GitHub prints a fixed end-of-step line.",
+      "evidence": "The plan guesses the cleanup forms (`Post job cleanup`, `Post Run `, `Cleaning up orphan processes`). It admits the repository holds no real Actions log to check them against. GitHub Actions ends a failed step's output with a fixed line, `##[error]Process completed with exit code N.`. The plan already uses that line, but only as a fallback anchor when no runner marker exists. The CI test step (`.github/workflows/ci.yml:411`, `xtask test-shard`) is the step that prints it, and everything after it is post-step output. Fix: For a log that contains `##[error]Process completed with exit code`, cut just after the last such line. Keep the cleanup-line list only as a second rule for logs without it. This removes the guesswork for the CI path, and the jump path stays as the final fallback.",
+      "location": "Approach (1) / Decision 2: the cleanup-form list as the main cut for CI logs",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "No detail_from_job_logs fixture has the real CI shard shape, where later passing units push the failure out of the window.",
+      "evidence": "In CI, `xtask test-shard` (xtask/src/shard.rs 316-337) runs every unit in the shard one after another. A failing unit is usually followed by hundreds of `test … ok` lines from later units, then `Error: shard k of n: … units failed`, `##[error]Process completed …`, and the cleanup block. In that realistic shape the last-200 window holds no marker, so the jump path is what saves the record. That path is covered only by a synthetic checks.rs test with 'unrecognised trailing text', not by a detail_from_job_logs fixture. Fix: Add one gh/tests.rs case built with `stamped` that has this shape: a failing unit, 250 passing-unit lines, the shard error, `##[error]Process completed with exit code 1.`, then cleanup. Assert that the panic message and the `units failed` line are kept.",
+      "location": "Demonstrations for criteria 2-4 (fixture shape)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read checks.rs, gh/client.rs, gh/tests.rs, the CI workflow, xtask's shard runner, and every reader of `output_tail`. The plan matches the request and the accepted reading. The fault is in three places: checks.rs:533, checks.rs:361-364 and gh/client.rs:293-294. Each keeps a fixed line tail, and one shared function in checks.rs replaces all three. Each named function, helper (`run_script`, `sh_spec`, `stamped`) and test exists. The behavior demonstrations for criteria 2 and 3 call real production entry points (`failure_section`, `run_check` via `run_script`, `detail_from_job_logs`) with no test doubles. On the base commit the last 200 lines would be all cleanup, so those tests fail there as required. My grep of `output_tail`, `with_failure_detail`, `detail_from_job_logs`, `tail_lines` and `FAILED_TAIL` found no reader missing from the dependents list. The other hits (status.rs, run/close.rs, run/mod.rs, run/send_back.rs) only construct empty values. The existing 400-line `with_failure_detail` test still passes because it has no prefix line. The jump path also fixes a real gap the plan does not name. Local runs add `--no-fail-fast`, and `xtask test-shard` runs units one after another, so later passing output can push a failure out of the window even without cleanup text. The design is sound. A senior engineer would mostly ask for one change: use GitHub's fixed `##[error]Process completed with exit code` line as the main cut, not guessed cleanup forms. The other findings are minor: the jump output is one line over its budget and `max_lines - 20` can underflow, `with_failure_detail` sections the CI output a second time, and the two-shard test needs its message positions stated so it really catches a joined re-cut. None of these stops a criterion from being shown, so the verdict is accept."
+}

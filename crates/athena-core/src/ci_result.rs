@@ -96,7 +96,7 @@ pub struct FailureDetail {
     /// entry in parentheses, such as `test (shard 2) (log not read)`, says the list is incomplete. Empty
     /// when no log named a test.
     pub failed_tests: Vec<String>,
-    /// The end of the failing job's log, led by a `failing units:` line. Not yet redacted.
+    /// The failing section of the job's log (post-job cleanup text dropped), led by a `failing units:` line. Not yet redacted.
     pub output_tail: String,
 }
 

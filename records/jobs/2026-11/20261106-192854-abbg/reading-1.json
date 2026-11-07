@@ -1,0 +1,163 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-192854-abbg",
+  "n": 1,
+  "at": "2026-11-07T16:06:02.407432989Z",
+  "invocation_seq": 1,
+  "base_commit": "30e7a1b33be6ee15dad657ff17c3bed6bdadf99f",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Keep the failing test section, not the CI cleanup tail, in failed checks",
+  "summary": "Root cause: a failed check's record keeps the last 200 lines of the log (checks.rs tail_lines in the local run, with_failure_detail, and gh/client.rs detail_from_job_logs). For a CI log those lines are post-job cleanup, which pushes the test runner's failures section out of the record. Fix it once in a shared function in checks.rs that drops post-job cleanup and keeps the failing section, and use it at all three sites. This retries jobs 20261106-022423-vdtn and 20261106-045349-f6x6 for the failure class only. Their own diffs are out of scope.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "The fix is Rust in athena-core."
+    },
+    {
+      "id": "tested",
+      "how": "New tests plus fmt, clippy and test pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "One shared selector fixes every path that stores a log tail."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "The tests assert the stored output content."
+    },
+    {
+      "id": "small",
+      "how": "One focused change in the checks module and its CI-log caller."
+    },
+    {
+      "id": "verified",
+      "how": "An independent verifier runs the tests."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that the failing test text is in the stored record."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the verifier, the next producer on a retry, and the person reading a failed check record must be able to see the failing test name and assertion output.",
+    "Code survey: read crates/athena-core/src/checks.rs (tail, tail_lines, FAILED_TAIL_LINES, failed_test_names, with_failure_detail, run path around line 505-545), crates/athena-core/src/gh/client.rs (detail_from_job_logs, plain_log_line, failing_units), crates/athena-core/src/ci_result.rs (FailureDetail), and routing.rs. The entry points are the local check run in checks.rs and detail_from_job_logs, which with_failure_detail applies to a reused red CI run. Both keep a line tail and extract names only from `test ... FAILED` lines. Records validation is unchanged: no record or data file is added, so check_record_file, AnyRecord and the round-trip test are not affected. The property is measured directly on the stored output_tail of the CheckRun, not through a stand-in.",
+    "Job 20261106-022423-vdtn: its failed test check came from CI noise unrelated to its diff (the xtask repin test and the cleanup tail). Its diff (config.rs, docs, CHANGELOG.md, athena.toml) is not redone here. Those files are out of scope and are not kept or changed by this job.",
+    "Job 20261106-045349-f6x6: its mirrored_sources work (records.rs, briefs.rs, planning.rs, admission.rs, prompts and the other 17 changed files) is dropped from this job. Its findings of a stale target dir and an unreadable test log are the failure class this job fixes. Every file it changed is excluded in out_of_scope.",
+    "The cleanup marker is the GitHub Actions line `Post job cleanup.` (also `##[group]Post job cleanup`). The section starts at the earliest runner marker (`failures:`, `panicked at`, `---- ... stdout ----`, `test result: FAILED`) when one exists. It is bounded by the existing FAILED_TAIL_LINES and FAILED_TAIL_BYTES. With no marker it falls back to the current tail of the cleanup-stripped text.",
+    "Redaction still runs on the kept text; the new function only selects lines."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "The change description names the root cause: the failed-check record stores the last N lines of the log without regard to what they are, so CI post-job cleanup text displaces the test runner's failing section. It is fixed in one shared function in crates/athena-core/src/checks.rs that both the local run and the CI-log path (gh/client.rs detail_from_job_logs and with_failure_detail) call.",
+      "kind": "content"
+    },
+    {
+      "text": "A new unit test in checks.rs, run with `cargo test -p athena-core checks`, feeds a log with a `failures:` section, a `panicked at` line and a `test result: FAILED` line followed by more than 200 lines of post-job cleanup, as in the CI logs of jobs 20261106-022423-vdtn and 20261106-045349-f6x6. It asserts the kept output contains the failing test name and the assertion text and no `Post job cleanup` lines. The test fails on the base commit (verify with git stash or the fails-without run) and passes with the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A test in gh/tests.rs, run with `cargo test -p athena-core gh`, builds a CI job log whose failing output has no parseable `test ... FAILED` names (for example a panic in an xtask test) followed by cleanup text. It asserts detail_from_job_logs returns an output_tail with the panic message and not the cleanup lines. It fails on the base and passes with the change.",
+      "kind": "behavior"
+    },
+    {
+      "text": "A log with no runner marker and no cleanup text keeps the same output as today (tail of the last FAILED_TAIL_LINES lines), and a passing check's kept output is unchanged. Existing tests, including red_reused_run_records_failing_tests_and_log_tail and the run/tests.rs reuse test, still pass under `cargo test --locked`.",
+      "kind": "behavior"
+    },
+    {
+      "text": "`cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings` and `cargo test --locked` pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has one entry under Fixed or Changed stating that a failed check record now keeps the failing test section instead of the log tail. It states only what the diff does.",
+      "kind": "content"
+    },
+    {
+      "text": "Not a change to refusal rules: no check is added that refuses or holds work, so no replay refusal-rate criterion applies.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "action": "modify",
+      "p": 0.7
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.85
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "action": "modify",
+      "p": 0.15
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "p": 0.2
+    }
+  ],
+  "out_of_scope": [
+    "Job 20261106-022423-vdtn's diff: crates/athena-data/src/config.rs, docs/design/agent-and-build-slots.md, docs/design/async-drain.md, docs/design/parallel-jobs.md, athena.toml, and the max_concurrency ceiling change",
+    "Job 20261106-045349-f6x6's diff: mirrored_sources and the prompt, admission, plan and records files it changed (crates/athena-context/prompts/planner.md and critic.md, briefs.rs, outputs.rs, admission.rs, reading.rs, run/mod.rs, run/planning.rs, run_pin_tests.rs, status.rs, store.rs, refusal_corpus.rs, records.rs, job_plan.rs, docs/design/job-planning.md, docs/system-facts.md)",
+    "Fixing the flaky xtask repin test or the stale shared target dir",
+    "Changes to records/, athena.toml, defaults.toml or CI workflows",
+    "Changing the stored record schema (CheckRun fields)"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.6,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.6,
+        "p50": 1.5,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 600.0,
+        "p50": 2000.0,
+        "p90": 4500.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6704035874439462,
+      "p_user_intervenes": 0.07854251012145748,
+      "cost_usd": {
+        "p10": 0.561716925843042,
+        "p50": 1.3938792109095357,
+        "p90": 4.551211719141401
+      },
+      "wall_time_s": {
+        "p10": 567.7735364352918,
+        "p50": 2069.032643066,
+        "p90": 4311.711315565352
+      }
+    }
+  },
+  "departures": "Slightly higher cost and lower pass chance than the reference: the change touches shared check-recording code and past jobs failed on CI flakiness."
+}
