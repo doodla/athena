@@ -253,6 +253,49 @@ root-cause request; `read_records` leaves it out of the cases that default propo
 from it; and the producer's list of recurring failure classes does not count it. A producer is not invited to
 weaken the check it is judged by.
 
+### 3.9 The `bug-evidence` default
+
+**Cause.** Bug jobs were rejected at the final verdict because no criterion demanded data-backed root-cause
+evidence. The standing `root-cause` default asks for a named cause. A reader that follows it writes a criterion
+such as "the change description names the root cause", which asks for no data the job can read and does not rule
+out a guess labelled as an estimate. Jobs 20261104-054700-e6js, 20261105-051344-q9fv, 20261105-101121-qw9r and
+20261105-205835-hk09 each claimed a cause with no readable data behind it, and each was rejected for that.
+
+**Evidence required.** For bug, wrong-output, regression or slowdown work, before any fix, the change names the
+root cause, shows it from data the job can read (records, a code path or a failing case), and shows why the wrong
+output or metric change follows from it. A guess labelled as an estimate does not meet this. The default's first
+sentence, the only part the reader loads, limits it to that work: "Only for bug, wrong-output, regression or
+slowdown work: name the root cause from readable data." The criterion text that Athena adds says the same, so a
+newcomer reading either can tell what evidence is required.
+
+**The mechanism.** `ensure_bug_evidence` in `crates/athena-core/src/reading.rs` runs in `build_reading` beside
+`ensure_changelog`, before validation. For a `change` reading that has at least one criterion, it adds one content
+criterion and one `bug-evidence` entry in `defaults_applied`, each only if absent, so running it twice changes
+nothing. It refuses nothing, so it adds no refusal rule. It guarantees that the criterion exists, not that the
+producer meets it: the verifier judges that from the diff. Two tiers decide whether the work is bug work:
+
+- **Tier 1.** The reader listed `bug-evidence`. A backstop ignores a listing whose `how` says the default does not
+  fit ("not applicable", "does not apply", "does not fit", "not a bug", "not relevant", or the word `n/a`). Other
+  wordings of a refusal to apply are trusted as a listing; the default's first sentence is the main control.
+- **Tier 2.** For a reader that never lists the default, a bug word (bug, regression, slowdown, wrong-output) and
+  a fix word (fix, repair, diagnose, investigate) within two words of each other in the request, in the earlier
+  job's request on a retry, or in the reading's title. `bug-fix` and `bugfix` count alone. A compound such as
+  `bug-evidence` and the phrase "regression test" do not count, and "Fix the docs for the bug report form" is too
+  far apart.
+
+Limits. A request with no listed bug word, such as "fix the crash", is covered by tier 1 alone. A retry whose
+earlier request is itself only "try again on <job>" carries no bug word, so only tier 1 and the title cover it. A
+change reading with no criterion is left to the existing refusal, so the step never turns that refusal into an
+accepted reading. A reader-written root-cause criterion does not stop the step adding its own, because that
+criterion does not ask for readable data; the cost is one more planner demonstration on a bug reading, which is
+intended.
+
+**How the reader line was paid for.** The reader loads one line for each default, so the new line takes the reader
+set from 1997 to 2036 tokens. The reader budget rose from 2,000 to 2,050 tokens by decision D166, the smallest
+multiple of 50 at or above the measured size. This is a decided exception to the rule in `context-engineer.md`
+section 8 that budgets are not raised to make room. The reader stays above 95% (99.3%), so the next addition to the
+reader set must name what it removes or shortens.
+
 ## 4. The loop in one view
 
 ```

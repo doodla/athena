@@ -4747,3 +4747,40 @@ should replace those estimates with its figures.
   20261014-082328-g6vy, 20261014-174815-7bf8 and 20261017-173508-0wtc (g6vy by `check_outcome_state`, 7bf8 and 0wtc by
   `check_defined_terms`), and the accepted and refused `ambiguous-name-*` cases built with the real generators. Not
   measured: the share of past readings newly refused; the loop replay records it at verification.
+
+## D166 · The reader budget rises from 2,000 to 2,050 tokens for the `bug-evidence` default, a decided exception to the no-raise rule; D25 stands
+
+- **Case:** Jobs 20261104-054700-e6js, 20261105-051344-q9fv, 20261105-101121-qw9r and 20261105-205835-hk09 were
+  rejected at the final verdict because no criterion demanded data-backed root-cause evidence: the change named a
+  root cause with no readable data behind it, or a guess labelled as an estimate. The fix is a new default,
+  `bug-evidence`, in `defaults.toml`, and a step in `build_reading` that adds the matching criterion. The reader loads
+  the first sentence of every default, so the new line (about 36 tokens) takes the reader set from 1997 to 2036
+  tokens, measured by `cargo test -p athena-cli --test budgets` as ⌈bytes/3⌉. The set then passes 2,000, the budget
+  D25 records (with its later revisions), so the budget test fails until the budget moves. The line cannot be
+  shortened below the budget: it must say which work it covers (bug, wrong-output, regression or slowdown) so the
+  reader lists it only for that work.
+- **Decision:** `BudgetSet::Reader` in `crates/athena-context/src/lib.rs` goes from 2,000 to 2,050, the smallest
+  multiple of 50 at or above the measured 2,036. The reader set is then at 99.3% of its budget. This is the decided
+  exception to `docs/design/context-engineer.md` section 8, which says budgets are not raised to make room and that a
+  raise needs a decision of its own; this entry is that decision. The 95% rule is not discharged: the reader stays
+  above 95%, so the next addition to the reader set must name what it removes or shortens. D25's text is not edited
+  (the log is append-only); this entry amends its reader figure. The reader figures in `docs/system-facts.md`, in
+  `docs/design/context-engineer.md` and in the pin test `run_pin_tests.rs` follow the budget; the pin test now reads
+  `BudgetSet::Reader.budget()` instead of the literal.
+- **Alternatives:** Choose a budget that clears 95% (for example 2,150): it loosens the reader set by about 5% to hide
+  an exception that this entry can state plainly, and removes the pressure to trim on the next addition. Reword the
+  `buy-first`, `public` and `verified` defaults to save tokens: it changes three governance defaults for a different
+  job and loses meaning for the reader. Trim `reader.md`: it is a pinned prompt frame that tests match word for word.
+  Drop the new line and rely on the step alone: a reader that never lists the default would rely on the request
+  wording for the criterion; the line is what lets the reader apply the default to a paraphrased bug request.
+- **Tradeoff:** The reader prompt grows by about 36 tokens, so each reader run costs a little more, and a budget that
+  was fixed since the `behavior-evidence` raise moves again. The precedent is the same: the `behavior-evidence` default
+  was paid for by a raise recorded in D25's text. Limit: the displacement rule stays unmet for the reader until
+  something is removed; the budget guard still reports the reader above 95%.
+- **Reversal cost:** Low. Remove the `bug-evidence` default and the step, set the budget back to 2,000 and restore
+  the figures in `docs/system-facts.md` and `docs/design/context-engineer.md`.
+- **Provenance:** Read: `crates/athena-context/src/lib.rs` (`BudgetSet::budget`), `crates/athena-cli/tests/budgets.rs`,
+  `crates/athena-core/src/run_pin_tests.rs`, `docs/design/context-engineer.md` section 8, `docs/system-facts.md`, D25
+  and the `behavior-evidence` entry in `CHANGELOG.md`. Measured: the reader set at 2,036 tokens with the new line, by
+  the budget tests. Stated: the accepted reading of this job assumes the reader budget needs a raise because the new
+  default renders into the reader prompt, and says only that value changes.

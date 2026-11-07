@@ -302,6 +302,148 @@ pub(crate) fn ensure_changelog(reading: &mut Reading) {
     }
 }
 
+/// The id of the default that asks for data-backed root-cause evidence (`defaults.toml`).
+const BUG_EVIDENCE_ID: &str = "bug-evidence";
+
+/// The criterion a bug reading gains. It is a content criterion with no path and no command, so the verifier
+/// judges it from the diff and the change description.
+const ROOT_CAUSE_EVIDENCE_CRITERION: &str = "Before any fix, the change states the root cause, shows it from data the job can read (records, a code path or a failing case) and shows why the wrong output or metric change follows from it; a guess labelled as an estimate does not meet this.";
+
+/// The words that open [`ROOT_CAUSE_EVIDENCE_CRITERION`], lowercase. A criterion that starts with them is the
+/// step's own, so the step does not add it twice. A reader-written root-cause criterion does not start with them.
+const ROOT_CAUSE_EVIDENCE_LEAD: &str = "before any fix, the change states the root cause";
+
+/// Words that name bug work in a request (tier 2 of [`ensure_bug_evidence`]); matched as whole tokens.
+const BUG_TOKENS: &[&str] = &[
+    "bug",
+    "bugs",
+    "regression",
+    "regressions",
+    "slowdown",
+    "slowdowns",
+    "wrong-output",
+];
+
+/// Words that say the request asks for the bug to be dealt with.
+const FIX_TOKENS: &[&str] = &[
+    "fix",
+    "fixes",
+    "fixed",
+    "fixing",
+    "repair",
+    "repairs",
+    "repaired",
+    "diagnose",
+    "investigate",
+];
+
+/// Phrases with which a reader says it listed `bug-evidence` for work that is not bug work.
+const NEGATION_PHRASES: &[&str] = &[
+    "not applicable",
+    "does not apply",
+    "doesn't apply",
+    "does not fit",
+    "not a bug",
+    "not relevant",
+];
+
+/// True when `text` asks for bug, wrong-output, regression or slowdown work to be dealt with: a bug word and a
+/// fix word with at most two words between them, in either order. `bug-fix` and `bugfix` count alone. Tokens
+/// split on whitespace and lose punctuation at both ends, so a compound such as `bug-evidence` matches nothing,
+/// and `regression test` is a test request, not a bug. Words alone do not count: "Fix the docs for the bug
+/// report form" names a bug word and a fix word too far apart.
+fn names_bug_work(text: &str) -> bool {
+    let lowered = text.to_lowercase().replace("wrong output", "wrong-output");
+    let tokens: Vec<&str> = lowered
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.iter().any(|t| matches!(*t, "bug-fix" | "bugfix")) {
+        return true;
+    }
+    let is_bug = |i: usize| {
+        let t = tokens[i];
+        BUG_TOKENS.contains(&t)
+            && !(t.starts_with("regression")
+                && matches!(
+                    tokens.get(i + 1).copied(),
+                    Some("test" | "tests" | "testing")
+                ))
+    };
+    let is_fix = |i: usize| FIX_TOKENS.contains(&tokens[i]);
+    // Two words between them is a distance of three.
+    (0..tokens.len()).any(|i| {
+        let near = i.saturating_sub(3)..(i + 4).min(tokens.len());
+        (is_bug(i) && near.clone().any(is_fix)) || (is_fix(i) && near.into_iter().any(is_bug))
+    })
+}
+
+/// True when the reader's `how` for a `bug-evidence` entry says the default does not fit the work. A backstop
+/// only: the default's first sentence already tells the reader to list it for bug work alone. It matches whole
+/// phrases and the whole token `n/a`; other wordings are trusted as a listing.
+fn listing_is_negated(how: &str) -> bool {
+    let lowered = how.to_lowercase();
+    NEGATION_PHRASES.iter().any(|p| lowered.contains(p))
+        || lowered
+            .split_whitespace()
+            .any(|t| t.trim_matches(|c: char| !c.is_alphanumeric() && c != '/') == "n/a")
+}
+
+/// Adds the root-cause-evidence criterion and a `bug-evidence` default to a change reading about a bug, a wrong
+/// output, a regression or a slowdown. A reading for other work is left alone, and so is a change reading with
+/// no acceptance criterion, so `build_reading` still refuses it.
+///
+/// Root cause: bug jobs were rejected at the final verdict because no criterion demanded data-backed root-cause
+/// evidence: the standing `root-cause` default asks only for a named cause, and a reader's criterion from it
+/// does not ask for data the job can read or rule out a guess labelled as an estimate. A step guarantees the
+/// criterion with no model round trip; it refuses nothing. It does not decide whether the producer meets the
+/// criterion: the verifier judges that from the diff.
+///
+/// Two tiers decide whether the work is bug work. Tier 1: the reader listed `bug-evidence` and its `how` is not
+/// negated ([`listing_is_negated`]); the default's first sentence limits the listing to bug work. Tier 2, for a
+/// reader that never lists it: [`names_bug_work`] holds for one of `request_texts` (the request and, on a retry,
+/// the earlier job's request) or for the reading's title. Limit: a retry whose earlier request is itself only
+/// `try again on <id>` carries no bug word, so only tier 1 and the title cover it. A request with no listed bug
+/// word, such as "fix the crash", is covered by tier 1 alone.
+///
+/// The step is idempotent: the entry is added only when no entry has the id, and the criterion only when no
+/// criterion starts with [`ROOT_CAUSE_EVIDENCE_LEAD`].
+pub(crate) fn ensure_bug_evidence(reading: &mut Reading, request_texts: &[&str]) {
+    if reading.capability.as_deref() != Some("change") || reading.acceptance_criteria.is_empty() {
+        return;
+    }
+    let named = reading
+        .defaults_applied
+        .iter()
+        .any(|d| d.id == BUG_EVIDENCE_ID && !listing_is_negated(&d.how));
+    let triggered =
+        named || request_texts.iter().any(|t| names_bug_work(t)) || names_bug_work(&reading.title);
+    if !triggered {
+        return;
+    }
+    if !reading
+        .acceptance_criteria
+        .iter()
+        .any(|c| c.text.to_lowercase().starts_with(ROOT_CAUSE_EVIDENCE_LEAD))
+    {
+        reading.acceptance_criteria.push(Criterion {
+            text: ROOT_CAUSE_EVIDENCE_CRITERION.into(),
+            kind: CriterionKind::Content,
+        });
+    }
+    if !reading
+        .defaults_applied
+        .iter()
+        .any(|d| d.id == BUG_EVIDENCE_ID)
+    {
+        reading.defaults_applied.push(DefaultApplied {
+            id: BUG_EVIDENCE_ID.into(),
+            how: "Bug, wrong-output, regression or slowdown work: the change names the root cause, shows it from data the job can read and shows why the symptom follows, before any fix.".into(),
+        });
+    }
+}
+
 /// Refuses a reading whose own forecast median wall time is beyond the producer or verifier deadline.
 ///
 /// Root cause: reading validation never compared the reading's scope with the producer and verifier deadlines
@@ -639,6 +781,10 @@ impl Athena {
                 )),
             ));
         };
+        // The request, and on a retry the earlier job's request, tell `ensure_bug_evidence` what the work is.
+        let request_texts: Vec<&str> = std::iter::once(request.text.as_str())
+            .chain(attempt.map(|a| a.request.as_str()))
+            .collect();
         match self.build_reading(
             jc,
             records,
@@ -647,6 +793,7 @@ impl Athena {
             seq,
             structured,
             &capability_ids,
+            &request_texts,
             redactor,
         ) {
             Ok(reading) => {
@@ -691,6 +838,7 @@ impl Athena {
         seq: u32,
         structured: serde_json::Value,
         capabilities: &[String],
+        request_texts: &[&str],
         redactor: &Redactor,
     ) -> Result<Reading> {
         let out: ReadingOutput =
@@ -840,6 +988,7 @@ impl Athena {
         };
         let mut reading = reading;
         ensure_changelog(&mut reading);
+        ensure_bug_evidence(&mut reading, request_texts);
         reading.validate().map_err(anyhow::Error::msg)?;
         if reading.capability.is_some() && reading.acceptance_criteria.is_empty() {
             bail!("a reading needs at least one acceptance criterion");
@@ -5608,6 +5757,33 @@ mod tests {
         producer_timeout_s: u64,
         verifier_timeout_s: u64,
     ) -> Result<Reading> {
+        build_with(
+            reading,
+            producer_timeout_s,
+            verifier_timeout_s,
+            &[],
+            &["study".to_string()],
+        )
+    }
+
+    /// Runs the real `build_reading` on `reading` for a request (and, on a retry, an earlier request) with the
+    /// shipped configuration and the capabilities `change` and `study`.
+    fn build_for_request(
+        reading: serde_json::Value,
+        request_texts: &[&str],
+        capabilities: &[&str],
+    ) -> Result<Reading> {
+        let capabilities: Vec<String> = capabilities.iter().map(|c| c.to_string()).collect();
+        build_with(reading, 3000, 2400, request_texts, &capabilities)
+    }
+
+    fn build_with(
+        reading: serde_json::Value,
+        producer_timeout_s: u64,
+        verifier_timeout_s: u64,
+        request_texts: &[&str],
+        capabilities: &[String],
+    ) -> Result<Reading> {
         let repo = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         // `build_reading` never runs an agent, so the script is never called.
@@ -5634,7 +5810,8 @@ mod tests {
             1,
             1,
             reading,
-            &["study".to_string()],
+            capabilities,
+            request_texts,
             &Redactor::new(&athena_gate::builtin_config()).unwrap(),
         )
     }
@@ -6190,6 +6367,388 @@ mod tests {
         let before = declined.clone();
         ensure_changelog(&mut declined);
         assert_eq!(declined, before);
+    }
+
+    /// A reading of one README deliverable as the reader returns it, with the given title, summary, applied
+    /// defaults (`(id, how)`) and content criteria.
+    fn bug_json(
+        capability: Option<&str>,
+        title: &str,
+        defaults: &[(&str, &str)],
+        criteria: &[&str],
+    ) -> serde_json::Value {
+        let mut value = sized_reading(30.0, capability);
+        value["title"] = title.into();
+        value["defaults_applied"] = defaults
+            .iter()
+            .map(|(id, how)| serde_json::json!({ "id": id, "how": how }))
+            .collect();
+        value["acceptance_criteria"] = criteria
+            .iter()
+            .map(|text| serde_json::json!({ "text": text, "kind": "content" }))
+            .collect();
+        value
+    }
+
+    /// The real `build_reading` on a change reading with a neutral title and one ordinary criterion.
+    fn build_change(request_texts: &[&str], defaults: &[(&str, &str)]) -> Reading {
+        build_for_request(
+            bug_json(
+                Some("change"),
+                "Update the report page",
+                defaults,
+                &["README.md describes the report."],
+            ),
+            request_texts,
+            &["change", "study"],
+        )
+        .unwrap_or_else(|e| panic!("{request_texts:?} refused: {e:#}"))
+    }
+
+    fn root_cause_criteria(reading: &Reading) -> usize {
+        reading
+            .acceptance_criteria
+            .iter()
+            .filter(|c| c.text.to_lowercase().starts_with(ROOT_CAUSE_EVIDENCE_LEAD))
+            .count()
+    }
+
+    fn bug_entries(reading: &Reading) -> usize {
+        reading
+            .defaults_applied
+            .iter()
+            .filter(|d| d.id == "bug-evidence")
+            .count()
+    }
+
+    #[test]
+    fn bug_evidence_reading_gains_criterion_and_default() {
+        let request = "Fix the bug where the report shows the wrong output";
+        let reading = build_change(&[request], &[("strangers", "plain words")]);
+        assert_eq!(root_cause_criteria(&reading), 1);
+        assert_eq!(bug_entries(&reading), 1);
+        let added = reading.acceptance_criteria.last().unwrap();
+        assert_eq!(added.kind, CriterionKind::Content);
+        assert_eq!(added.text, ROOT_CAUSE_EVIDENCE_CRITERION);
+        // The reader's own criterion and default stay.
+        assert_eq!(reading.acceptance_criteria.len(), 2);
+        assert!(reading.defaults_applied.iter().any(|d| d.id == "strangers"));
+    }
+
+    #[test]
+    fn bug_evidence_keywords_and_non_bug_readings() {
+        for text in [
+            "Fix the regression in the parser",
+            "Investigate the slowdown in queue drain",
+            "Fix wrong-output in the status line",
+            "Fix the wrong output in the status line",
+            "Fix the regression and add a regression test",
+            "Bugfix for the parser crash",
+            "Fix the bug-fix path",
+            "The parser has a bug: repair it.",
+            "Diagnose why slowdowns appear in the drain",
+        ] {
+            assert!(names_bug_work(text), "{text}");
+            let reading = build_change(&[text], &[]);
+            assert_eq!(root_cause_criteria(&reading), 1, "{text}");
+            assert_eq!(bug_entries(&reading), 1, "{text}");
+        }
+        for text in [
+            "Add a regression test for the parser",
+            "Add bug-evidence default and enforce root-cause criterion on bug",
+            "Throughput review: flag median slowdowns and queue a request",
+            "Fix the docs for the bug report form",
+            "Fix a typo in the regression section of the README",
+            "Describe the demo in README.md",
+            "Add debug logging",
+            "",
+        ] {
+            assert!(!names_bug_work(text), "{text}");
+            let reading = build_change(&[text], &[]);
+            assert_eq!(root_cause_criteria(&reading), 0, "{text}");
+            assert_eq!(bug_entries(&reading), 0, "{text}");
+            assert_eq!(reading.acceptance_criteria.len(), 1, "{text}");
+        }
+        // The reading's own title counts too.
+        let titled = build_for_request(
+            bug_json(
+                Some("change"),
+                "Fix the regression in the parser",
+                &[],
+                &["README.md describes the report."],
+            ),
+            &["Describe the demo"],
+            &["change", "study"],
+        )
+        .unwrap();
+        assert_eq!(root_cause_criteria(&titled), 1);
+        // A study reading and a declined reading get neither, whatever the request says.
+        let request = "Fix the bug where the report shows the wrong output";
+        let study = build_for_request(
+            bug_json(
+                Some("study"),
+                "Fix the bug in the report",
+                &[],
+                &["README.md describes the report."],
+            ),
+            &[request],
+            &["change", "study"],
+        )
+        .unwrap();
+        assert_eq!(root_cause_criteria(&study), 0);
+        assert_eq!(bug_entries(&study), 0);
+        let declined = build_for_request(
+            bug_json(None, "Fix the bug in the report", &[], &[]),
+            &[request],
+            &["change", "study"],
+        )
+        .unwrap();
+        assert_eq!(root_cause_criteria(&declined), 0);
+        assert_eq!(bug_entries(&declined), 0);
+    }
+
+    #[test]
+    fn bug_evidence_reader_named_default_guarantees_criterion() {
+        // A request with no bug word, for which the reader listed the default itself (tier 1).
+        let how = "the report shows a wrong total, so the cause must be shown from data";
+        let reading = build_change(
+            &["Make the report show the right total"],
+            &[("bug-evidence", how)],
+        );
+        assert_eq!(root_cause_criteria(&reading), 1);
+        assert_eq!(bug_entries(&reading), 1);
+        let entry = reading
+            .defaults_applied
+            .iter()
+            .find(|d| d.id == "bug-evidence")
+            .unwrap();
+        assert_eq!(entry.how, how, "the reader's own words are kept");
+    }
+
+    #[test]
+    fn bug_evidence_standing_root_cause_criterion_does_not_suppress_step() {
+        // The standing `root-cause` default leads a reader to write a criterion that asks for no readable data.
+        let reading = build_for_request(
+            bug_json(
+                Some("change"),
+                "Update the report page",
+                &[("bug-evidence", "the report shows a wrong total")],
+                &["root-cause: the change description names the root cause"],
+            ),
+            &["Make the report show the right total"],
+            &["change", "study"],
+        )
+        .unwrap();
+        assert_eq!(root_cause_criteria(&reading), 1);
+        assert_eq!(reading.acceptance_criteria.len(), 2);
+    }
+
+    #[test]
+    fn bug_evidence_negated_listing_is_ignored() {
+        for how in [
+            "not applicable: this is not a bug job",
+            "Does not fit: feature work",
+            "this default does not apply",
+            "doesn't apply here",
+            "Not relevant to a feature",
+            "n/a",
+            "N/A.",
+            "(n/a) feature request",
+        ] {
+            let reading = build_change(&["Add a footer to the page"], &[("bug-evidence", how)]);
+            assert_eq!(root_cause_criteria(&reading), 0, "{how}");
+            assert_eq!(
+                reading
+                    .defaults_applied
+                    .iter()
+                    .filter(|d| d.id == "bug-evidence")
+                    .count(),
+                1
+            );
+        }
+        assert!(!listing_is_negated("the cause is shown in/a log file"));
+        let reading = build_change(
+            &["Add a footer to the page"],
+            &[("bug-evidence", "the cause is shown in/a log file")],
+        );
+        assert_eq!(root_cause_criteria(&reading), 1);
+        // A negated listing stops tier 1 only: a bug request still decides for itself.
+        let reading = build_change(
+            &["Fix the regression in the parser"],
+            &[("bug-evidence", "n/a")],
+        );
+        assert_eq!(root_cause_criteria(&reading), 1);
+        assert_eq!(bug_entries(&reading), 1);
+    }
+
+    #[test]
+    fn bug_evidence_retry_uses_earlier_request() {
+        let retry = "try again on 20261105-234147-88tw";
+        let reading = build_change(&[retry, "Fix the regression in the parser"], &[]);
+        assert_eq!(root_cause_criteria(&reading), 1);
+        assert_eq!(bug_entries(&reading), 1);
+        let reading = build_change(&[retry, "Add a footer"], &[]);
+        assert_eq!(root_cause_criteria(&reading), 0);
+        assert_eq!(bug_entries(&reading), 0);
+        // Limit: a retry of a retry carries no bug word in either text.
+        let reading = build_change(&[retry, "try again on 20261105-101121-qw9r"], &[]);
+        assert_eq!(root_cause_criteria(&reading), 0);
+    }
+
+    #[test]
+    fn bug_evidence_empty_criteria_still_refused() {
+        let error = build_for_request(
+            bug_json(Some("change"), "Update the report page", &[], &[]),
+            &["Fix the bug where the report shows the wrong output"],
+            &["change", "study"],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("needs at least one acceptance criterion"),
+            "{error}"
+        );
+        let mut reading = change_reading();
+        reading.acceptance_criteria.clear();
+        ensure_bug_evidence(&mut reading, &["Fix the bug in the parser"]);
+        assert!(reading.acceptance_criteria.is_empty());
+        assert!(reading.defaults_applied.is_empty());
+    }
+
+    #[test]
+    fn bug_evidence_step_is_idempotent() {
+        let mut reading = change_reading();
+        ensure_bug_evidence(&mut reading, &["Fix the bug in the parser"]);
+        assert_eq!(root_cause_criteria(&reading), 1);
+        assert_eq!(bug_entries(&reading), 1);
+        let once = reading.clone();
+        ensure_bug_evidence(&mut reading, &["Fix the bug in the parser"]);
+        assert_eq!(reading, once);
+
+        // After a built reading, running the step again changes nothing.
+        let mut built = build_change(&["Fix the regression in the parser"], &[]);
+        let before = built.clone();
+        ensure_bug_evidence(&mut built, &["Fix the regression in the parser"]);
+        assert_eq!(built, before);
+    }
+
+    #[test]
+    fn bug_evidence_added_text_trips_no_refusal_check() {
+        let request = "Fix the bug where the report shows the wrong output";
+        let reading = build_change(&[request], &[]);
+        assert_eq!(root_cause_criteria(&reading), 1);
+        let refused = refusing_check(&reading, request, None, &[], None);
+        assert!(
+            refused.is_none(),
+            "{:?}",
+            refused.map(|(step, error)| format!("{step}: {error:#}"))
+        );
+    }
+
+    /// The text of `build_reading`, from its signature to the next method.
+    fn build_reading_source() -> &'static str {
+        include_str!("reading.rs")
+            .split("    fn build_reading(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("/// `athena ask`").next())
+            .unwrap()
+    }
+
+    #[test]
+    fn bug_evidence_step_is_called_beside_ensure_changelog() {
+        let body = build_reading_source();
+        let changelog = body.find("ensure_changelog(&mut reading);").unwrap();
+        let bug = body
+            .find("ensure_bug_evidence(&mut reading, request_texts);")
+            .unwrap();
+        let validate = body.find("reading.validate()").unwrap();
+        assert!(changelog < bug && bug < validate, "wrong order");
+        // The step leaves other capabilities alone and leaves the empty-criteria refusal in force.
+        let step = include_str!("reading.rs")
+            .split("pub(crate) fn ensure_bug_evidence(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        assert!(step.contains("!= Some(\"change\")"));
+        assert!(step.contains("acceptance_criteria.is_empty()"));
+    }
+
+    #[test]
+    fn bug_evidence_read_once_passes_the_earlier_request() {
+        let source = include_str!("reading.rs");
+        let read_once = source
+            .split("    fn read_once(\n")
+            .nth(1)
+            .and_then(|rest| rest.split("    fn build_reading(\n").next())
+            .unwrap();
+        let texts = read_once.split("let request_texts").nth(1).unwrap();
+        assert!(texts.contains("request.text.as_str()"));
+        assert!(texts.contains("attempt.map(|a| a.request.as_str())"));
+        assert!(
+            texts.contains("&request_texts,"),
+            "the slice reaches build_reading"
+        );
+    }
+
+    #[test]
+    fn bug_evidence_criterion_and_default_state_the_same_evidence() {
+        let model =
+            athena_data::DefaultsModel::parse(include_str!("../../../defaults.toml")).unwrap();
+        let statement = model.get("bug-evidence").unwrap().statement.to_lowercase();
+        let criterion = ROOT_CAUSE_EVIDENCE_CRITERION.to_lowercase();
+        for phrase in [
+            "root cause",
+            "data the job can read",
+            "before any fix",
+            "a guess labelled as an estimate does not meet this",
+        ] {
+            assert!(statement.contains(phrase), "default lacks {phrase:?}");
+            assert!(criterion.contains(phrase), "criterion lacks {phrase:?}");
+        }
+        assert!(criterion.starts_with(ROOT_CAUSE_EVIDENCE_LEAD));
+    }
+
+    #[test]
+    fn bug_evidence_changelog_and_design_doc_name_the_cause() {
+        fn collapse(text: &str) -> String {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        let changelog = collapse(include_str!("../../../CHANGELOG.md"));
+        let unreleased = changelog.split("## [").nth(1).unwrap();
+        for phrase in [
+            "bug-evidence",
+            "bug jobs were rejected at the final verdict because no criterion demanded data-backed root-cause evidence",
+            "crates/athena-context/src/lib.rs",
+            "docs/system-facts.md",
+            "docs/decisions.md",
+            "docs/design/context-engineer.md",
+            "run_pin_tests.rs",
+        ] {
+            assert!(unreleased.contains(phrase), "CHANGELOG.md lacks {phrase:?}");
+        }
+        let decisions = collapse(include_str!("../../../docs/decisions.md"));
+        let entry = decisions.split("## D166 ·").nth(1).unwrap();
+        for phrase in [
+            "bug-evidence",
+            "D25",
+            "crates/athena-context/src/lib.rs",
+            "the reader stays above 95%",
+        ] {
+            assert!(entry.contains(phrase), "D166 lacks {phrase:?}");
+        }
+        let design = collapse(include_str!("../../../docs/design/defaults-loop.md"));
+        let section = design.split("### 3.9").nth(1).unwrap();
+        for phrase in [
+            "bug-evidence",
+            "20261104-054700-e6js",
+            "20261105-205835-hk09",
+            "no criterion demanded data-backed root-cause evidence",
+        ] {
+            assert!(
+                section.contains(phrase),
+                "defaults-loop.md lacks {phrase:?}"
+            );
+        }
     }
 
     fn correction(job: &JobRecords, text: &str, kind: CorrectionKind) -> Correction {
