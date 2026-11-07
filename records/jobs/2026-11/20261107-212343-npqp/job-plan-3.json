@@ -1,0 +1,482 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-212343-npqp",
+  "round": 3,
+  "at": "2026-11-07T21:38:50.274461172Z",
+  "invocation_seq": 7,
+  "approach": "Add `crates/athena-core/src/gate_counts.rs`, a pure function over `store::Records`. A gate is a failed check name in the verification of a `rejected` job, or `verifier` when none failed, or an admission violation rule on a rejected or failed job. A gate \"ended\" a job once. It was \"overruled\" when a later request job, whose text is \"try again on <job>\" (found with `reading::retried_job`), landed the same change. \"Same change\": if both candidates carry equal `base_fingerprint`s, the candidate `fingerprint`s must be equal; otherwise the sorted, non-empty `changes` lists (path, status, mode, bytes) must be equal. The counts go to three places. (1) The introspection prompt gets a `gate_counts` array; the schema enum gains `relax` and `remove`; the system prompt says a rule or check can be wrong. (2) `PreventionKind` gains `Relax` and `Remove` (kebab-case, old kinds byte-identical). For these the answer carries a nullable `gate` field. `apply_answer` accepts it only when that gate has ends >= 1 AND disagreements >= 1 (round-3 finding 4); the code stores a `[gate: NAME] ` prefix on `prevention`. (3) Hestia's `error_review` queues one normal-priority request per open gate (a fixed `Gate under review: NAME.` line is the marker, so a second relax for the same gate while that request is open queues nothing; round-3 finding 3). `cause_key` returns None for Relax and Remove, so they join no repeated-cause group, which also keeps them out of `improvement_of`, `plan_backfill` and the status open causes. A relax or remove introspection is a proposal about a check, not a failure case or a retry seed, so code keeps it away from default proposals (round-3 finding 1: `read_records` does not turn it into a `CaseRow`) and away from retries (finding 2: `retry_introspection` skips it). `athena status` gains a `gate_counts` field and a section, most overruled first. Nothing is relaxed or removed, and no config or workflow file is touched.",
+  "decisions": [
+    {
+      "choice": "Count from existing job records only (request, candidate, verification, outcome). 'Unchanged' is base-independent: equal Some base_fingerprints require equal candidate fingerprints; otherwise sorted non-empty `changes` lists must be equal. At most one end and one disagreement per gate per ended job, so disagreements <= ends.",
+      "reason": "The candidate fingerprint hashes the whole governed tree (attrs.rs:135-160, candidate.rs:170-171), so any job landing between a rejected try and its retry changes it. `ChangeEntry` (records.rs:718-723) and `Candidate.base_fingerprint` (records.rs:779) already hold what the base-independent comparison needs. The retry link is `reading::retried_job`. A 'rejected' outcome is exactly a failed verification verdict (run/verification.rs:434-437), so failed check names identify the gate.",
+      "rejected": [
+        {
+          "option": "Compare candidate fingerprints only",
+          "why": "Differs almost always once other jobs land between tries, so disagreements stay 0 in a busy repository."
+        },
+        {
+          "option": "Compare change lists only",
+          "why": "ChangeEntry has byte counts but no content hash; the exact fingerprint is used when the base is equal."
+        },
+        {
+          "option": "A new record kind or counter file",
+          "why": "The brief rules out backfill and new sources; the records hold every fact needed."
+        },
+        {
+          "option": "Also count a later green rerun or verifier pass as disagreement",
+          "why": "A second, fuzzier signal needing more fixtures; criterion 1 asks only for the unchanged-landing signal. Recorded as a user question."
+        }
+      ]
+    },
+    {
+      "choice": "Name the gate through a nullable answer field `gate` (`#[serde(default)]` in `Answer`); `apply_answer` stores `[gate: NAME] <prevention>` in the existing `prevention` field. `gate_of_prevention` anchors at the start, needs the closing `] `, and Hestia calls it only for Relax and Remove. The docs call the prefix a stopgap until a typed field exists.",
+      "reason": "`IntrospectionRecord` has `deny_unknown_fields`; a typed field would need edits at about 13 struct-literal sites outside the deliverables (refusal_corpus.rs:703, proposals.rs:742, evidence_labels.rs:521, labeled.rs:958, briefs.rs:3015, status.rs:2489/3462, hestia.rs:2856, introspect.rs:1355/1823, CLI tests) and would change the record shape the brief puts out of scope.",
+      "rejected": [
+        {
+          "option": "New `prevention_gate` field on IntrospectionRecord",
+          "why": "Out of scope ('changing existing introspection records') and forces edits in many unlisted files."
+        },
+        {
+          "option": "Find gate names inside the free `prevention` text",
+          "why": "Names like `test` occur in any sentence."
+        }
+      ]
+    },
+    {
+      "choice": "Round-3 finding 4: `apply_answer` accepts relax or remove only for a gate whose counts show disagreements >= 1. Otherwise the record is Failed with 'the model chose {kind} for gate {g}, which no later try overruled', and nothing is queued. The system prompt says the same. `Athena::gate_review` re-reads the counts at queue time and queues nothing for a gate with disagreements 0.",
+      "reason": "A loosening proposal with 'overruled 0' as its evidence is thin. The criterion's evidence is the overruled count, so zero cannot support a relax. Code enforces it so a model that ignores the prompt still cannot queue one. Two checks (answer time and queue time) cover a record written by another path.",
+      "rejected": [
+        {
+          "option": "Accept any gate with ends >= 1",
+          "why": "Case (b) fmt with 5 ends and 0 disagreements would be accepted and queued citing 'overruled 0'."
+        },
+        {
+          "option": "Record the answer as Recorded and only skip the queue",
+          "why": "A Recorded relax with no evidence reads as a finding; failing it matches how every other unsupported answer is handled."
+        }
+      ]
+    },
+    {
+      "choice": "Hestia queues the gate request for a single relax or remove introspection, with a branch in `error_review` before `try_error_review`. `cause_key` returns None for Relax and Remove.",
+      "reason": "Criterion 2 needs one accepted answer to queue a request; the counts are the evidence. `addressing_request` (hestia.rs:282-324) treats a group as addressed when any request text contains any id in the group, so a gate-review request for a relax introspection would hide a code-check of the same cause from the backfill. `cause_key` (hestia.rs:264-274) feeds `repeated_causes`, whose readers are `improvement_of` (hestia.rs:419), `plan_backfill` (hestia.rs:1250), `try_error_review` (hestia.rs:2375) and status open causes (status.rs:2227). With None, a relax introspection is in none of those, and a gate review does not claim to fix a root cause.",
+      "rejected": [
+        {
+          "option": "Route through `repeated_causes` and `root_cause_request`",
+          "why": "Needs two or more distinct jobs with one cause, and its text asks for a root-cause fix."
+        },
+        {
+          "option": "Keep relax and remove in cause groups",
+          "why": "The gate request would suppress root-cause requests for the group's other introspections, and would appear as an improvement item and open cause."
+        }
+      ]
+    },
+    {
+      "choice": "Round-3 finding 3: dedupe the gate request per gate, not only per introspection id. The request body holds a fixed line `Gate under review: NAME.`. `gate_review` returns None when (a) `addressing_request` finds a request citing this introspection id, or (b) an open (not Closed) request job has a line equal to that marker (helper `open_gate_request`, same shape as `open_request_with_marker` at hestia.rs:1651 but with an exact-line match, so gate `test` does not match `test-all` or `test.x`). A closed (landed, rejected, failed, dropped) gate request does not suppress a new one if new evidence arrives.",
+      "reason": "Each rejected job gets its own introspection, so an id-only check would queue one loosening request per rejection when a model keeps answering 'relax test'. A marker on an open request limits it to one review in flight per gate. The id check stays for the one-request-per-introspection case after a request closes.",
+      "rejected": [
+        {
+          "option": "Reuse `open_request_with_marker` unchanged",
+          "why": "It matches by `starts_with`, so a marker for `test` also matches `test-all`."
+        },
+        {
+          "option": "Suppress while any gate request, open or closed, exists",
+          "why": "A gate whose review landed with no change would never be reviewed again even with new counts; a person can close a request, and the id check already stops repeats of the same introspection."
+        }
+      ]
+    },
+    {
+      "choice": "Round-3 finding 1: relax and remove introspections are not cases. `PreventionKind::loosens()` (true for Relax and Remove) is added in records.rs. In `introspect::read_records` (introspect.rs:388-413), a Recorded introspection with a loosening kind is not pushed to `records.cases` and adds nothing to `case_interventions`. A test shows `proposals::generate` makes no proposal from a class whose only cases are relax/remove introspections.",
+      "reason": "`generate` (proposals.rs:265-282) groups `records.cases` by failure class and never reads the kind; so three 'this check is wrong' introspections in one class would become a proposal to add a default, the opposite direction. The filter sits where the rows are built so every reader of `cases` (generate at 274, validate at proposals.rs:187, case_interventions at 350, `narrow_cases` at introspect.rs:841, the earlier-case check at introspect.rs:1506) sees the same set. This makes the docs rule at defaults-loop.md lines 381-382 true in code. Consequence, stated in the docs: a relax record cannot be cited as an earlier case.",
+      "rejected": [
+        {
+          "option": "Document only, no code",
+          "why": "The doc would state a false rule and the dependent's test could not fail."
+        },
+        {
+          "option": "Add `prevention_kind` to `CaseRow` and filter in `generate`",
+          "why": "Adds a field and edits every CaseRow literal; the one filter at row creation reaches all readers."
+        }
+      ]
+    },
+    {
+      "choice": "Round-3 finding 2: `reading::retry_introspection` (reading.rs:1413-1428) skips an introspection whose kind is loosening; `retry_cause` also skips earlier cases with a loosening kind (defensive). So a relax record never reaches the retry seed text ('kind: prevention'), `has_retry_introspection` (reading.rs:1516, used at reading.rs:1133) is false for a job whose only introspection is relax, and an older code-check introspection of the same job is still used. Callers of `retry_introspection`: reading.rs:1133 (via has_retry_introspection), reading.rs:1441 (retry_cause), evidence_labels.rs:161 (`retry_vote`).",
+      "reason": "A seed saying 'relax: [gate: test] ...' invites the producer of an ordinary 'try again on <job>' to weaken the check; relaxing is out of scope and goes to the Hestia review request instead. Excluding at the source keeps all three callers consistent (evidence_labels then does not count the relax record as the retry's seed, which is correct: it seeded nothing).",
+      "rejected": [
+        {
+          "option": "Render it in the seed as 'proposal under review, do not act'",
+          "why": "Still puts loosening text in front of the producer; adds prompt text with no benefit."
+        },
+        {
+          "option": "Filter only in retry_cause",
+          "why": "`has_retry_introspection` and `retry_vote` would still treat the relax record as the seed."
+        }
+      ]
+    },
+    {
+      "choice": "Show gates in `athena status` as a `Vec<GateCount>` field skipped when empty, sorted by disagreements descending, then ends descending, then name.",
+      "reason": "Existing status text and JSON stay unchanged without gate ends. The most overruled gate reads first (criterion 8). The label states the rule: 'overruled = a later try landed the same change'.",
+      "rejected": [
+        {
+          "option": "Always print the section",
+          "why": "Changes every status output and may break text-matching tests."
+        }
+      ]
+    },
+    {
+      "choice": "Show criterion 6 by running fmt, clippy with -D warnings, and the full-workspace test on the final tree.",
+      "reason": "New enum variants, a new `Answer` field and a changed `user_prompt` signature can break compilation or lints in crates the diff does not edit; only a whole-workspace run proves none did.",
+      "rejected": [
+        {
+          "option": "Run only touched crates",
+          "why": "A match or struct literal in an untouched crate could fail to compile unseen."
+        }
+      ]
+    },
+    {
+      "choice": "Update every place in defaults-loop.md that names the kinds: the section 3.2 table row (line 99), line 162 ('three values' becomes five), and lines 381-382 (relax and remove join code-check and design-change as kinds that do not become default candidates, now backed by the `read_records` filter). Add one short subsection on gate counts, the same-change rule, the `[gate: NAME]` stopgap, the disagreements >= 1 condition, the per-gate request marker, and that retries are not seeded with a relax record.",
+      "reason": "The doc must not contradict the code.",
+      "rejected": [
+        {
+          "option": "Update only the section 3.2 table",
+          "why": "Leaves the 'three values' claim at line 162 and says nothing on candidates or retries."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/gate_counts.rs",
+      "action": "create",
+      "purpose": "`GateCount {gate, ends, disagreements}`, `gate_counts(&Records)` with the base-independent same-change rule, `mark_prevention`/`gate_of_prevention`, a one-line text form, and tests with a `#[cfg(test)]` fixtures module.",
+      "governance": false,
+      "exists": false
+    },
+    {
+      "path": "crates/athena-core/src/lib.rs",
+      "action": "modify",
+      "purpose": "Add `pub mod gate_counts;` in alphabetical order.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `PreventionKind::Relax` and `Remove`, extend `ALL` and `as_str`, add `loosens()`, update the doc comment; tests for old-record byte round trip and the new kinds.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/introspect.rs",
+      "action": "modify",
+      "purpose": "Schema enum gains relax and remove plus nullable required `gate`; system prompt says a rule or check can be wrong and limits relax/remove to gates with overruled >= 1; `user_prompt` emits `gate_counts`; `Answer.gate`; `apply_answer` validates the gate (ends >= 1 and disagreements >= 1) and marks `prevention`; `read_records` leaves loosening introspections out of `cases`; error text lists five kinds; unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "`retry_introspection` skips loosening introspections; `retry_cause` skips loosening earlier cases; test `retry_seed_skips_relax_and_remove_introspections`. Not on the brief's deliverable list: needed because the retry seed would otherwise carry 'relax: ...' (finding 2).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/proposals.rs",
+      "action": "modify",
+      "purpose": "Test only: `write_case` takes a kind (existing callers pass Default) and the test `relax_and_remove_introspections_make_no_default_proposal`. Not on the deliverable list: the helpers for it live in this test module.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "`cause_key` returns None for loosening kinds; `gate_request`, `open_gate_request` and `Athena::gate_review`; a relax/remove branch in `error_review`; `gate_review_*` and related tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "`StatusView.gate_counts` field and its fill; `Relax`/`Remove` arms in `mistake_report`; unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "`gate_counts_lines` prints the 'gates' section in `athena status`, with a unit test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/introspection.rs",
+      "action": "modify",
+      "purpose": "Job-chain fixture helper and tests: relax accepted and queued, remove accepted, null/unknown/zero-disagreement gate refused, one request per open gate, prompt carries counts, status shows gates in order (text and JSON).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/review.rs",
+      "action": "modify",
+      "purpose": "A relax-kind introspection is listed by `athena review` and counted as unreviewed.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Under [Unreleased] / Added: gate counters, relax and remove kinds with the `gate` field, Hestia gate request, `cause_key` exclusion, exclusion from default cases and retry seeds, status section.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/defaults-loop.md",
+      "action": "modify",
+      "purpose": "Update line 99, line 162 and lines 381-382; add a short subsection on gate counts, the same-change rule, the `[gate: NAME]` stopgap, the evidence condition, the per-gate request, and retry/default exclusions.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Create crates/athena-core/src/gate_counts.rs and register it in lib.rs. Define `GateCount` (Serialize, Clone, PartialEq, Debug) and `gate_counts(&store::Records) -> Vec<GateCount>`. For each request job with a Closed(Rejected) outcome and a verification, take the names of failed checks (not `passed`, no PRE_EXISTING_NOTE note, empty `revert_for`), else the single gate `verifier`. For each request job with outcome Rejected or Failed, add each distinct `candidate.violations[].rule`. Drop names containing ']' or a newline. Deduplicate the gate set per job. For each ended job look for a request job whose text `reading::retried_job` resolves to it, which is Closed(Landed), and which is 'unchanged': if both candidates have Some base_fingerprint and they are equal, the two candidate fingerprints must be both Some and equal; otherwise the two `changes` lists sorted by path must be equal and non-empty. If found, each gate of the ended job gets one disagreement. Sort by disagreements desc, ends desc, name. Add `mark_prevention(gate, text)` and `gate_of_prevention(text)`. Write the fixtures module and unit tests (a)-(i).",
+    "In crates/athena-data/src/records.rs add `Relax` and `Remove` to `PreventionKind`, update `ALL` (5), `as_str` ('relax', 'remove') and the doc comment, and add `pub fn loosens(self) -> bool` (true for Relax and Remove). Add tests: the three old kinds as literal JSON through `check_record_file` with a byte-identical `to_json` round trip, the new kinds round trip, `loosen` refused, `loosens()` values. 2b: In crates/athena-core/src/proposals.rs tests, give `write_case` a kind through a new `write_case_of_kind` (`write_case` calls it with Default).",
+    "In crates/athena-core/src/introspect.rs: (a) add `relax` and `remove` to the `prevention_kind` enum and a nullable required `gate` property in `answer_schema()`. (b) Extend SYSTEM_PROMPT: 'A rule or check can be wrong. When the gate counts show a gate whose ended jobs were followed by a try that landed the same change (disagreements of 1 or more), choose relax or remove and name that gate in `gate`; otherwise set `gate` to null.' (c) Add `#[serde(default)] gate: Option<String>` to `Answer`. (d) Give `user_prompt` a `gates: &[GateCount]` argument that adds `\"gate_counts\"` to the JSON. (e) In `introspect()` compute `gate_counts(&known)` once and pass it to `user_prompt` and `apply_answer`. (f) In `apply_answer`, for a kind where `loosens()`, require the trimmed `answer.gate` to equal a counted gate with disagreements >= 1, else set the failure 'the model chose {kind} for gate {g}, which no later try overruled' (or 'named no gate with counts' when null/unknown) and return; on success store `mark_prevention(gate, &text[2])` in `record.prevention`. (g) In `read_records` (~392-413), skip the `CaseRow` push and the `case_interventions` insert when `i.prevention_kind` is Some and `loosens()`. (h) Update the error text at ~1486 to list all five kinds. (i) Add unit tests and fix the `Answer` literal near line 1848.",
+    "In crates/athena-core/src/reading.rs: add `&& !i.prevention_kind.is_some_and(PreventionKind::loosens)` to the `find` in `retry_introspection` (~1417-1427); in `retry_cause`, skip an earlier case whose kind loosens (~1467); update the doc comment. Add the test `retry_seed_skips_relax_and_remove_introspections` to reading::tests using `records_with` and pushing IntrospectionRecords onto `records.introspections` (relax only: None and `has_retry_introspection` false; remove only: same; older code-check plus newer relax: the code-check one is returned).",
+    "In crates/athena-core/src/status.rs add `gate_counts: Vec<GateCount>` to `StatusView` (`skip_serializing_if = \"Vec::is_empty\"`), fill it in the constructor at ~2293 with `crate::gate_counts::gate_counts(&records)`, and add the `Relax` and `Remove` arms to `mistake_report` (~1707). Add a unit test for the new arms.",
+    "In crates/athena-cli/src/display.rs add `gate_counts_lines(&[GateCount]) -> String`: a header 'gates       ended / overruled (a later try landed the same change)' and one row per gate. Call it after the `check_durations` block (~1199) when the vec is non-empty. Add a unit test `gate_counts_lines_*` in `display::tests`.",
+    "In crates/athena-core/src/hestia.rs: (a) `cause_key` returns None when `i.prevention_kind` is Some and `loosens()`; update its doc comment. (b) Add `pub fn gate_request(gate, counts, introspection) -> Result<String, String>` via `StewardRequest::new(Some(Priority::Normal), title, body, acceptance, [\"crates/\", \"docs/\"])`; the body has the line `Gate under review: {gate}.`, states 'ended N job(s), overruled M time(s)', cites the introspection id and its prevention text, and has no bullet-like lines. (c) Add `open_gate_request(records, gate)`: an open request job (state not Closed) with a line equal to the marker. (d) Add `Athena::gate_review`: load Records at head; return None when `gate_counts` has no entry for the gate or its disagreements are 0, when `addressing_request(&records, &[id])` finds a request, or when `open_gate_request` finds one; else pass the text through `plain_boundary_text` and call `self.queue`. (e) In `error_review`, before `try_error_review`, add a branch for a loosening kind that reads the gate with `gate_of_prevention` and calls `gate_review`, printing a 'hestia     gate ...' line. Tests: `gate_review_queues_one_request_with_counts`; `gate_review_not_requeued_on_second_review`; `gate_review_one_open_request_per_gate` (two relax introspections in two jobs for `test`: one request; `test` and `test-all`: two; after the first is closed a later one queues again); `gate_review_refuses_gate_with_no_disagreements`; `gate_request_text_has_no_bullet_body_lines_and_names_gate_and_counts`; `relax_introspection_is_in_no_repeated_cause_or_improvement`; `gate_review_does_not_hide_code_check_cause_from_backfill`.",
+    "In crates/athena-core/src/proposals.rs add the test `relax_and_remove_introspections_make_no_default_proposal`: three jobs of Relax cases and, in a second class, three of Remove, written with `write_case_of_kind`, then `read_records` has no cases and `run` gives no proposal and no refusal; a control of three Default cases in a third class gives one proposal.",
+    "In crates/athena-cli/tests/introspection.rs add the chain helper (Request, Candidate2 with base_fingerprint and changes, Verification with a failed CheckRun, Outcome records, committed to the fixture repo) and tests: relax accepted and queued with counts; remove accepted; relax with a null, unknown or zero-disagreement (`fmt`) gate Failed with no request; a second relax for the same gate queues nothing while the first request is open; `prompt_carries_gate_counts`; `status_shows_gate*` for text and JSON in order (with `invalid_records` empty). In crates/athena-cli/tests/review.rs add the relax-kind review test.",
+    "Update docs/design/defaults-loop.md: line 99 table row (five kinds), line 162 ('five values'), lines 381-382 (relax and remove do not become default candidates, enforced by `read_records`), and add a short subsection: what a gate end and a disagreement are, the same-change rule and its weakness, the two new kinds, the `gate` field and the `[gate: NAME]` stopgap, the disagreements >= 1 condition, what Hestia queues and its one-open-request-per-gate limit, that retries are not seeded with a relax record, and that nothing is relaxed automatically. Add the CHANGELOG.md entries under [Unreleased] / Added in the style of the neighbouring entries, limited to what the diff does.",
+    "Run `cargo fmt --all`, then `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Check `git status` shows no change to athena.toml, defaults.toml or .github/workflows."
+  ],
+  "risks": [
+    {
+      "risk": "On a moved base the change-list comparison (path, status, mode, bytes) has no content hash, so two different edits of equal size to the same files count as 'unchanged' (false disagreement).",
+      "mitigation": "The exact fingerprint is used whenever both base fingerprints are equal. The change list is used only when the base moved or a base fingerprint is missing, and must be non-empty. The doc and status label state the rule. Tests (c), (d), (e) cover it."
+    },
+    {
+      "risk": "A retry that landed after other jobs changed the same files could match on a change list by coincidence of path and size.",
+      "mitigation": "Both tries are linked by the explicit 'try again on <job>' text and the retry must be Landed; at most one disagreement per gate per ended job."
+    },
+    {
+      "risk": "Record fixtures for the CLI tests fail `check_record_file` validation or land in `invalid_records`, so counts come out empty.",
+      "mitigation": "Build them with the same canonical_path/to_json route as review.rs and assert `invalid_records` is empty in the status test. The unit fixture uses the same builders."
+    },
+    {
+      "risk": "A model-chosen gate may contain ']' or a newline and break the prefix parse or the `Gate under review: NAME.` marker line.",
+      "mitigation": "`gate_counts` omits names containing ']' or newlines, `apply_answer` accepts only names from that list, `gate_of_prevention` is anchored and used only for Relax and Remove, and the marker is matched as a whole line."
+    },
+    {
+      "risk": "Adding a required `gate` property to the strict output schema could make a real model reject or omit it.",
+      "mitigation": "The property is nullable and `Answer.gate` has `#[serde(default)]`. Other kinds ignore it. The system prompt says to set it null otherwise."
+    },
+    {
+      "risk": "Excluding relax/remove from `cause_key`, `read_records` cases and `retry_introspection` changes behavior in existing repositories.",
+      "mitigation": "No existing record has these kinds, so no existing group, case or seed changes. Existing hestia, proposals, reading and evidence_labels tests plus the new tests cover it."
+    },
+    {
+      "risk": "Leaving relax records out of `records.cases` means the job's own failure class gets no case from that job, and a relax record cannot be cited as an earlier case.",
+      "mitigation": "This is the intended effect (a challenge to a check is not evidence for a new default). The docs state it. The failed job's other introspections still count."
+    },
+    {
+      "risk": "Hestia queues loosening requests from thin evidence.",
+      "mitigation": "The gate must have ends >= 1 and disagreements >= 1 at answer time and again at queue time; at most one open request per gate; the request is a normal-priority review that cites the counts and asks for a justified change. This job relaxes nothing."
+    },
+    {
+      "risk": "A new enum variant or struct field breaks compilation or a lint in a crate the diff does not edit.",
+      "mitigation": "Step 11 runs the full-workspace fmt, clippy and test commands. `Answer.gate` is `#[serde(default)]` and `IntrospectionRecord` gains no field."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "PreventionKind enum (new variants Relax, Remove; new method loosens())",
+      "dependent": "crates/athena-core/src/status.rs mistake_report (match on n.prevention_kind, ~line 1707)",
+      "kind": "code",
+      "test": "status.rs unit test of `mistake_report` with a relax and a remove record (step 4); the exhaustive match is also compile-checked by clippy/test over the workspace.",
+      "reason": null
+    },
+    {
+      "name": "PreventionKind::as_str output",
+      "dependent": "crates/athena-core/src/reading.rs retry_cause (~1444-1482), status.rs:1936, review.rs:200, crates/athena-cli/src/display.rs:1398 and :1463",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test review (relax record listed with 'relax: ...'); retry_cause is covered by reading::tests::retry_seed_skips_relax_and_remove_introspections, which shows it never receives a relax record.",
+      "reason": null
+    },
+    {
+      "name": "retry_introspection result (now skips relax/remove introspections)",
+      "dependent": "crates/athena-core/src/reading.rs:1133 (has_retry_introspection, retry resume note), reading.rs:1441 (retry_cause seed), crates/athena-core/src/evidence_labels.rs:161 (retry_vote)",
+      "kind": "code",
+      "test": "reading::tests::retry_seed_skips_relax_and_remove_introspections; existing evidence_labels tests (cargo test -p athena-core evidence_labels::) hold because no existing record has a loosening kind.",
+      "reason": null
+    },
+    {
+      "name": "introspect::read_records cases and case_interventions (relax/remove no longer rows)",
+      "dependent": "crates/athena-core/src/proposals.rs:187 (validate), :274 (generate), :350 (case_interventions); crates/athena-core/src/introspect.rs:841 (narrow_cases), :1506 (earlier-case check); backtest uses its own read_records (crates/athena-cli/src/backtest.rs:526) and is unaffected",
+      "kind": "code",
+      "test": "proposals::tests::relax_and_remove_introspections_make_no_default_proposal; existing proposals tests (all Default kind) must pass unchanged. Backtest has its own reader and reads no prevention_kind: cargo test -p athena-cli --test backtest.",
+      "reason": null
+    },
+    {
+      "name": "Rule: relax/remove introspections do not become default candidates (defaults-loop.md lines 381-382)",
+      "dependent": "docs/design/defaults-loop.md; enforced in code by the read_records filter",
+      "kind": "rule",
+      "test": "proposals::tests::relax_and_remove_introspections_make_no_default_proposal",
+      "reason": null
+    },
+    {
+      "name": "Existing IntrospectionRecord literals and prevention_kind JSON",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs:703, crates/athena-core/src/{proposals,evidence_labels,labeled}.rs tests, crates/athena-cli/tests/{labeled,proposals,drain,retry}.rs, crates/athena-context/src/briefs.rs:3015",
+      "kind": "code",
+      "test": "cargo test --locked; IntrospectionRecord gains no field.",
+      "reason": null
+    },
+    {
+      "name": "athena.introspection/1 record schema and on-disk records",
+      "dependent": "crates/athena-core/src/introspect.rs Records/read_records, backtest and decision code reading introspection records",
+      "kind": "code",
+      "test": "records.rs old-kind byte round trip test (cargo test -p athena-data records::)",
+      "reason": null
+    },
+    {
+      "name": "cause_key returns None for Relax and Remove",
+      "dependent": "crates/athena-core/src/hestia.rs: repeated_causes (:349), improvement_of (:419), plan_backfill (:1250), try_error_review (:2375), addressing_request (:282), the drain-start backfill and review_passes sweep (:2396); crates/athena-core/src/status.rs:2227 (open causes next lines)",
+      "kind": "code",
+      "test": "hestia::tests::relax_introspection_is_in_no_repeated_cause_or_improvement (repeated_causes empty, improvement_of has no gate request item); hestia::tests::gate_review_does_not_hide_code_check_cause_from_backfill; existing repeated-cause tests (hestia.rs:3323-3781) unchanged since no existing record has these kinds.",
+      "reason": "status.rs:2227 calls `repeated_causes` and so inherits the exclusion; no separate status fixture is needed."
+    },
+    {
+      "name": "Hestia error review (error_review) gains a relax/remove branch and per-gate marker",
+      "dependent": "Athena::error_review callers: introspect (introspect.rs) after each recorded introspection, via introspect_job and introspect_intervention; existing error-review tests in hestia.rs",
+      "kind": "code",
+      "test": "existing error-review tests in hestia::tests plus gate_review_* tests (cargo test -p athena-core hestia::)",
+      "reason": null
+    },
+    {
+      "name": "Open-request detection by marker line",
+      "dependent": "crates/athena-core/src/hestia.rs open_request_with_marker (:1651), THROUGHPUT_MARKER and SLOWDOWN_MARKER users (:1662, :2096)",
+      "kind": "code",
+      "test": "hestia::tests::gate_review_one_open_request_per_gate (two relax introspections, one gate: one request; gate `test` vs `test-all`: two requests)",
+      "reason": "The gate helper `open_gate_request` is new and separate; `open_request_with_marker` is not edited, so its users are unaffected."
+    },
+    {
+      "name": "StatusView JSON and text output",
+      "dependent": "crates/athena-core/src/status.rs StatusView (one constructor ~2293); crates/athena-cli/src/display.rs status renderer; --json consumers crates/athena-cli/tests/status_snapshot.rs, review.rs, introspection.rs",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test status_snapshot --test review --test introspection",
+      "reason": null
+    },
+    {
+      "name": "STATUS_MEASURE_LABELS and docs/spec.toml",
+      "dependent": "crates/athena-core/src/status.rs:1447 STATUS_MEASURE_LABELS and the xtask spec test",
+      "kind": "rule",
+      "test": null,
+      "reason": "The label list is not changed: no spec requirement uses a gate label, and the new section is not a measure label."
+    },
+    {
+      "name": "Request text Hestia queues for a gate",
+      "dependent": "Athena::queue (reading.rs:878, refuse_banned_input); StewardRequest::new (steward.rs:532, rejects bullet-like body lines, runs plain_boundary_text)",
+      "kind": "rule",
+      "test": "hestia::tests::gate_request_text_has_no_bullet_body_lines_and_names_gate_and_counts",
+      "reason": null
+    },
+    {
+      "name": "Candidate and ChangeEntry record fields read by the counter",
+      "dependent": "crates/athena-data/src/records.rs Candidate (base_fingerprint, fingerprint, changes), ChangeEntry; written by crates/athena-core/src/run/candidate.rs:170-171",
+      "kind": "code",
+      "test": "gate_counts:: cases (a)-(i)",
+      "reason": null
+    },
+    {
+      "name": "introspect() and apply_answer() behavior and user_prompt signature (gates argument); relax/remove need a gate with disagreements >= 1",
+      "dependent": "Callers of Athena::introspect: introspect_job and introspect_intervention; introspect is the only caller of user_prompt and apply_answer",
+      "kind": "code",
+      "test": "existing introspection.rs tests for every trigger plus the new relax/remove/zero-disagreement/prompt tests",
+      "reason": null
+    },
+    {
+      "name": "Check names fmt, clippy, test",
+      "dependent": "Checks Athena runs on the result",
+      "kind": "rule",
+      "test": "cargo fmt --all --check; cargo clippy --all-targets --locked -- -D warnings; cargo test --locked",
+      "reason": null
+    },
+    {
+      "name": "Governance files",
+      "dependent": "athena.toml, defaults.toml, .github/workflows, Cargo.toml, clippy and rustfmt configuration",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Not edited. The change adds code, tests and docs only, so no CI or branch-rule setting is affected."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in gate_counts.rs. A fixture builds AnyRecords (Request, Candidate2, Verification, Outcome) in a tempdir and loads them with `store::Records::load_dir`. Cases: (a) `test` ends 5 rejected jobs, each with a landed 'try again on <job>' retry on the same base_fingerprint and the same candidate fingerprint: ends 5 / disagreements 5. (b) `fmt` ends 5 jobs: 3 retries landed with a different fingerprint on the same base, 2 retries rejected again: disagreements 0. (c) Moved base, different tree fingerprint, identical change list: counts as a disagreement. (d) Moved base, different change list: does not count. (e) Same base, different fingerprint, identical change list: does not count. (f) A rejected job with no failed check counts under `verifier`. (g) A pre-existing-note failed check is not counted. (h) An admission rule is counted. (i) Order is most overruled first.",
+      "command": "cargo test -p athena-core gate_counts::",
+      "observes": "`gate_counts(&records)` returns `test` with ends 5 and disagreements 5 and `fmt` with ends 5 and disagreements 0; case (c) gives 1, (d) and (e) give 0; the other cases hold as listed.",
+      "fails_without": "With the counter missing, `test` would not give 5/5. Counting every landed retry regardless of change would give `fmt` 5. Whole-tree fingerprints only would give 0 for case (c).",
+      "seam": "Production entry point: `gate_counts::gate_counts(&Records)` (pure). Guards: only request jobs with a Closed(Rejected) outcome and a verification, or Rejected/Failed with violations; retry link only through `reading::retried_job`; the retry must be Closed(Landed). Fixture: a `#[cfg(test)] pub(crate) mod fixtures` in gate_counts.rs (added in step 1) that builds the AnyRecords and loads them through `Records::load_dir` (exists, store.rs:353). No double holds the logic under test."
+    },
+    {
+      "criterion": 2,
+      "method": "CLI integration tests in crates/athena-cli/tests/introspection.rs, plus Hestia, reading, proposals unit tests. A job chain is committed into the fixture repo: 5 jobs ended by `test`, each retried and landed unchanged (test overruled 5), and 2 jobs ended by `fmt` with no unchanged landing (overruled 0). The scripted `Model` answers with `prevention_kind: relax`, `gate: test`. `Athena::intervene` (category `mistake`) runs `introspect_intervention`, `introspect`, `apply_answer`, then `error_review`. Cases: relax accepted and queued; `remove` for `test` accepted; relax with `gate: null`, an unknown gate, or `fmt` (disagreements 0) gives a Failed record and queues nothing (finding 4); a second relax introspection for `test` in another job while the first gate request is open queues nothing, and after that request is closed queues one (finding 3). Hestia: `gate_review_*` (text has no bullet-like lines; second `error_review` queues nothing; `Athena::gate_review` called directly for a gate with disagreements 0 returns None; code-check A and relax B of one cause in two jobs: the backfill does not see the code-check cause as addressed by the gate request; `relax_introspection_is_in_no_repeated_cause_or_improvement`: two relax introspections of one class in two jobs give empty `repeated_causes` and no `improvement_of` item). Finding 1: proposals test `relax_and_remove_introspections_make_no_default_proposal` writes three jobs of relax cases and three of remove cases in one class through `read_records`; `generate` returns no proposal and no refusal, and a control of three Default cases still returns one. Finding 2: reading test `retry_seed_skips_relax_and_remove_introspections`: a job with a Recorded Rejection-trigger relax introspection (proposed_request, cause and prevention set) gives `retry_introspection` None and `has_retry_introspection` false; with an older code-check introspection also present the code-check one is returned; also for remove.",
+      "command": "cargo test -p athena-cli --test introspection relax && cargo test -p athena-cli --test introspection remove && cargo test -p athena-core gate_review && cargo test -p athena-core relax_and_remove_introspections_make_no_default_proposal && cargo test -p athena-core retry_seed_skips_relax_and_remove_introspections && cargo test -p athena-core relax_introspection_is_in_no_repeated_cause_or_improvement",
+      "observes": "The introspection is Recorded with `prevention_kind` Relax and a prevention starting `[gate: test] `. Exactly one new request job exists; its text has the line `Gate under review: test.`, the figures 'ended 5' and 'overruled 5', and the introspection id. A second `error_review`, or a second relax for the same gate while that request is open, queues nothing. `remove` is recorded. A null, unknown or zero-disagreement gate gives a Failed record and no request. No default proposal results from relax/remove cases; the retry seed ignores a relax record; no repeated cause or improvement item includes one.",
+      "fails_without": "Without the new kinds, `PreventionKind::parse` returns None and the record is Failed. Without the Hestia branch no request is queued (one introspection is not a repeated cause). Without the marker check, the second relax queues a second request. Without the disagreements >= 1 check, the `fmt` relax is queued citing 'overruled 0'. Without the read_records filter, three relax cases yield a default proposal. Without the retry_introspection filter, the seed holds 'relax: ...'. Without the cause_key exclusion, the backfill test finds the code-check cause addressed and queues nothing.",
+      "seam": "Production entry points: `Athena::intervene`, reaching `Athena::introspect` (introspect.rs:1322) and `Athena::error_review` (hestia.rs:2347); `read_records` (introspect.rs:320) with `proposals::generate` (proposals.rs:265); `reading::retry_introspection` (reading.rs:1413); `hestia::repeated_causes` and `improvement_of`. Fakes: the existing scripted `Model` through `fx.athena(model.script(..))` (introspection.rs:36-73) and the real git fixture repo, both existing. Unit tests use existing helpers (`write_record`/`write_case` in proposals.rs tests, which gets a kind parameter in step 2b; `records_with` in reading.rs tests). The job-chain helper is added in step 9 in the test file; the test commits AnyRecords with `canonical_path()` and `to_json()` as review.rs `commit` does. Only the model's JSON reply is scripted; counting, validation, filtering and queuing run in production code."
+    },
+    {
+      "criterion": 3,
+      "method": "Tests in records.rs: (a) a literal JSON introspection record for each of `default`, `code-check` and `design-change` goes through `check_record_file(canonical_path, bytes)` and round-trips with `AnyRecord::to_json` byte-identically. (b) `relax` and `remove` round-trip; `loosen` is refused; `loosens()` is true only for those two. (c) The existing AnyRecord round trips near records.rs:3344 and the introspection tests in introspect.rs run unchanged. (d) A review.rs test shows a `relax` record is listed and counted as unreviewed.",
+      "command": "cargo test -p athena-data records:: && cargo test -p athena-cli --test review",
+      "observes": "All old kinds parse to the same enum values and serialize to the same bytes. The new kinds round-trip. The relax record is listed by `athena review`. `refusal_corpus.rs:703` (`PreventionKind::CodeCheck`) still compiles; no refusal or matching rule is added or changed, so `cargo test -p athena-core --test refusal_corpus` is cited only to show it is unaffected (cases not read for this plan).",
+      "fails_without": "If an old kind were renamed or its serde case changed, the old-record bytes test would fail. Without the new variants, the relax/remove round trip fails.",
+      "seam": "Production entry points `check_record_file` and `AnyRecord::to_json` (records.rs:3151), which exist. Record literals are built in the test; no double. Step 2 adds the records.rs tests; step 9 adds the review.rs test."
+    },
+    {
+      "criterion": 4,
+      "method": "An integration test in introspection.rs commits the job-chain fixture: `test` ended 5 jobs and was overruled 5 times, `fmt` ended 2 and was overruled 0 (the name `fmt` sorts first by name). It runs the built binary `athena status` and `status --json` with `athena_bin(&fx)` (CARGO_BIN_EXE_athena). A display unit test renders `gate_counts_lines`.",
+      "command": "cargo test -p athena-cli --test introspection status_shows_gate && cargo test -p athena-cli gate_counts_lines",
+      "observes": "Text output has a `gates` section with `test` 'ended 5 · overruled 5' before `fmt` 'ended 2 · overruled 0'. JSON `gate_counts[0]` is {gate: test, ends: 5, disagreements: 5}; `invalid_records` is empty. A repo with no gate ends prints no section and has no `gate_counts` key.",
+      "fails_without": "Without the status field and display section the output has no 'overruled' line and the JSON has no `gate_counts`.",
+      "seam": "Production entry: the `athena status` command, reaching `Athena::status`, `StatusView` and display's status renderer. Fixture: committed AnyRecords in a real git repo (`Fixture` in tests/common, exists). `athena_bin` exists at introspection.rs:291. The `gate_counts` field (step 4) and `gate_counts_lines` (step 5) are added by this plan."
+    },
+    {
+      "criterion": 5,
+      "method": "Unit tests in the introspect.rs test module read the private `answer_schema()`, `SYSTEM_PROMPT` and `user_prompt(..)`. A CLI test reads the prompt the scripted `Model` received (`model.prompts`).",
+      "command": "cargo test -p athena-core introspect::tests:: && cargo test -p athena-cli --test introspection prompt_carries_gate_counts",
+      "observes": "The `prevention_kind` enum equals [default, code-check, design-change, relax, remove]. `gate` is a required nullable property. `SYSTEM_PROMPT` contains 'can be wrong', names relax and remove, and says to choose them only for a gate whose counts show overruled >= 1. The prompt JSON has a `gate_counts` array with `gate`, `ends` and `disagreements` for the fixture gates; the CLI test finds the same in the prompt the Model received.",
+      "fails_without": "Without the edits the enum has three values and the prompt has no `gate_counts` key.",
+      "seam": "Production entry points `answer_schema()`, `SYSTEM_PROMPT`, `user_prompt()` (introspect.rs:1006-1079), called in-module. `user_prompt` gains a `gates` parameter in step 3. The `Model.prompts` capture exists."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three required checks, each as its own command, on the final tree. They cover every workspace crate, including athena-data records, athena-context briefs, refusal_corpus, the CLI tests, and `system_facts_budgets_match_computed` (unaffected: no always-loaded prompt set changes).",
+      "command": "cargo clippy --all-targets --locked -- -D warnings",
+      "observes": "Clippy exits 0. `cargo fmt --all --check` and `cargo test --locked` also exit 0 with no failed test in any crate, including all new `gate_counts::`, `gate_review*`, `records::`, proposals, reading and CLI tests.",
+      "fails_without": "A missing `Relax`/`Remove` arm in `mistake_report` (status.rs ~1707), an `Answer` literal near introspect.rs:1848 lacking `gate`, an unregistered module, or any lint or format drift fails clippy, test (compile) or fmt.",
+      "seam": "The three Athena check commands over the whole workspace, no fixture or injection; they exist today. Step 11 runs them after `cargo fmt --all`."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the CHANGELOG.md diff and check each added line against the code diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The new lines under [Unreleased] describe only: gate counters and the same-change rule; relax and remove kinds with the `gate` field, accepted only for a gate with an overruled count of 1 or more; Hestia's per-gate request; `cause_key` excluding relax/remove; relax/remove introspections left out of default-proposal cases and retry seeds; the status section; the defaults-loop.md update. None claims a gate was relaxed.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "The status test of criterion 4 asserts the order (most overruled first even though `fmt` sorts first by name; an ends-only key would tie or reverse). Then the diff is checked for governance files.",
+      "command": "cargo test -p athena-cli --test introspection status_shows_gate && git diff --stat",
+      "observes": "`athena status` lists the most overruled gate first. `git diff --stat` lists none of athena.toml, defaults.toml or .github/workflows.",
+      "fails_without": "An unsorted list, a sort by name, or a sort by ends would fail the order assertion in the chosen fixture.",
+      "seam": "Same as criterion 4: `athena status` through `Athena::status`, committed AnyRecords in the `Fixture` repo; the order assertion is in the same test."
+    }
+  ],
+  "open_questions": [
+    "User: Should a later green rerun or the verifier passing the same change also count as a gate disagreement? The plan counts only the unchanged-landing signal, which is what criterion 1 requires. Adding the others later needs no record change.",
+    "User: Should the queued gate request name `athena.toml` in its Files line? The plan lists only `crates/` and `docs/`, because this job must not change governance files and the request is for Hestia's reviewer to decide.",
+    "User: Is it right that a gate request that has closed (landed, rejected or dropped) does not stop a new one for the same gate when a later relax answer arrives? The plan limits only one open request per gate, plus one per introspection id."
+  ],
+  "producer_section_sha256": "3ecba8159ef5b34380b24fa1451e4df2c44afe1cc4795557a1492ecaa82e112e"
+}

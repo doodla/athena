@@ -1409,7 +1409,8 @@ pub fn earlier_attempt_with(
 }
 
 /// The job's own introspection of its rejection or failure that can seed a retry: the latest recorded
-/// one with a proposed request.
+/// one with a proposed request. A proposal to relax or remove a gate never seeds a retry: it is for the
+/// review Hestia queues, and a producer must not be invited to weaken the check it is judged by.
 pub(crate) fn retry_introspection<'a>(
     records: &'a Records,
     job: &JobRecords,
@@ -1421,6 +1422,7 @@ pub(crate) fn retry_introspection<'a>(
                 IntrospectionTrigger::Rejection | IntrospectionTrigger::Failure
             )
             && i.status == IntrospectionStatus::Recorded
+            && !i.prevention_kind.is_some_and(PreventionKind::loosens)
             && i.proposed_request.is_some()
             && i.cause.is_some()
             && i.prevention.is_some()
@@ -1464,7 +1466,11 @@ fn retry_cause(
     ];
     let mut cases = Vec::new();
     for id in &record.earlier_cases {
-        let Some(case) = records.introspections.iter().find(|c| &c.id == id) else {
+        let Some(case) = records
+            .introspections
+            .iter()
+            .find(|c| &c.id == id && !c.prevention_kind.is_some_and(PreventionKind::loosens))
+        else {
             continue;
         };
         let what = case
@@ -5804,6 +5810,76 @@ mod tests {
         let mut records = Records::default();
         records.jobs.insert(job.id().as_str().to_string(), job);
         records
+    }
+
+    fn introspection_of(
+        job: &JobRecords,
+        n: u32,
+        kind: PreventionKind,
+        prevention: &str,
+    ) -> IntrospectionRecord {
+        IntrospectionRecord {
+            id: athena_data::RecordId::parse(&format!("20261012-0900{n:02}-1abc")).unwrap(),
+            at: format!("2026-10-12T09:00:{n:02}Z").parse().unwrap(),
+            trigger: IntrospectionTrigger::Rejection,
+            job: Some(job.id().clone()),
+            intervention: None,
+            class_of_work: "code".into(),
+            category: "rejected".into(),
+            what_happened: Some("The job was rejected.".into()),
+            failure_class: None,
+            new_class: false,
+            earlier_cases: Vec::new(),
+            decisions_matched: Vec::new(),
+            cause: Some("A cause.".into()),
+            prevention_kind: Some(kind),
+            prevention: Some(prevention.into()),
+            proposed_request: Some("Do the thing.".into()),
+            evidence: None,
+            status: IntrospectionStatus::Recorded,
+            failure: None,
+            flags: Vec::new(),
+            dropped_ids: Vec::new(),
+            planning_stopped: false,
+            from_jev: false,
+            jev: None,
+        }
+    }
+
+    #[test]
+    fn retry_seed_skips_relax_and_remove_introspections() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let job = job_with_checks(vec![check("test", false, "failed")]);
+        let mut records = records_with(job.clone());
+
+        // A relax or a remove record alone seeds nothing.
+        for kind in [PreventionKind::Relax, PreventionKind::Remove] {
+            records.introspections = vec![introspection_of(
+                &job,
+                1,
+                kind,
+                "[gate: test] Loosen the check.",
+            )];
+            assert!(retry_introspection(&records, &job).is_none(), "{kind:?}");
+            assert!(!has_retry_introspection(&records, &job), "{kind:?}");
+            assert!(retry_cause(&records, &job, &redactor).unwrap().is_none());
+        }
+
+        // An older code-check record still seeds, and the newer relax record is not what is carried.
+        let older = introspection_of(&job, 1, PreventionKind::CodeCheck, "Add a check.");
+        let newer = introspection_of(&job, 2, PreventionKind::Relax, "[gate: test] Loosen it.");
+        records.introspections = vec![older.clone(), newer.clone()];
+        assert_eq!(retry_introspection(&records, &job).unwrap().id, older.id);
+        let cause = retry_cause(&records, &job, &redactor).unwrap().unwrap();
+        assert_eq!(cause.introspection, older.id.to_string());
+        assert!(!cause.prevention.contains("Loosen"), "{}", cause.prevention);
+
+        // A relax record cited as an earlier case of the seed is not carried either.
+        let mut seed = older.clone();
+        seed.earlier_cases = vec![newer.id.clone()];
+        records.introspections = vec![seed, newer];
+        let cause = retry_cause(&records, &job, &redactor).unwrap().unwrap();
+        assert!(cause.earlier_cases.is_empty(), "{:?}", cause.earlier_cases);
     }
 
     fn kept_plan(job: &JobRecords, round: u32) -> athena_data::records::JobPlan {

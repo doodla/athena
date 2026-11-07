@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-212343-npqp",
+  "round": 1,
+  "at": "2026-11-07T21:32:22.079548975Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The 'same change' test compares fingerprints of the whole tree, which depend on the base. Any base movement between the ended job and its retry hides a real disagreement.",
+      "evidence": "attrs.rs:136-138 (read): 'It is the SHA-256 of the ls-tree -r -z entries of governed paths: everything except records/ and owner paths.' candidate.rs:170 computes it over the candidate commit `c`, which holds every base file. So if any job lands on main between the rejected attempt and its retry, the two fingerprints differ even when the producer's change is byte-identical. The plan's own Risks section names this case ('differ only because the base moved') but answers it only by requiring Some fingerprints and a Landed retry, which does nothing about it. Result: the counter's disagreement signal is almost always 0 in a repository that has other traffic. The unit fixture hand-sets equal fingerprints, so criterion 1 passes while the outcome in criterion 8 goes unmet in real use. Fix: Define 'unchanged' independently of the base. Fingerprint equality counts only when both candidates have the same `base_fingerprint`. Otherwise compare the change lists: the sorted `candidate.changes` entries (path, status, mode, bytes), all of which are in the record (records.rs:718-723). State the rule in the doc and in the status label. Add fixture cases: a retry on a moved base with an identical change list counts, and a retry with a different change list does not.",
+      "location": "Decision 1 / Step 1 (disagreement = equal candidate fingerprint); crates/athena-git/src/attrs.rs:135-160; crates/athena-core/src/run/candidate.rs:170-171",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A relax or remove introspection still joins repeated-cause groups. The gate request then cites its id and suppresses a root-cause request for the other introspections in that group.",
+      "evidence": "cause_key returns a key for any Recorded introspection that has a job and a cause. addressing_request treats a group as addressed when any request's text contains any id in the group. So in a group of [code-check A in job 1, relax B in job 2], the gate-review request for B makes the backfill skip the root-cause request for A. The plan presents this as a mitigation, but a gate-review request does not fix the root cause of A. Fix: Have cause_key (or repeated_causes) skip Relax and Remove introspections, so they never join root-cause groups and the gate request covers only its own introspection. Add a hestia test: one code-check and one relax introspection with the same cause in two jobs; the backfill does not treat the code-check cause as addressed by the gate request.",
+      "location": "Decision 3 / Risks ('A relax introspection that also shares a cause...'); hestia.rs cause_key (264-274) and addressing_request (282-324)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan stores a structured field inside free prose, and every reader of `prevention` then shows the marker.",
+      "evidence": "Readers of `prevention` that will show the marker: retry_cause in reading.rs:1482 (retry briefs), mistake_report at status.rs:1714, display.rs:1398/1463, and root_cause_request when a relax record ends up in a backfill group. The record struct has `deny_unknown_fields`. An optional `#[serde(default, skip_serializing_if = \"Option::is_none\")]` field would keep every existing record valid, but it would need edits to about 13 struct-literal sites (Grep: refusal_corpus.rs:703, proposals.rs:742, evidence_labels.rs:521, labeled.rs:958, briefs.rs:3015, status.rs:2489/3462, hestia.rs:2856, introspect.rs:1355/1823, plus the CLI tests). That is the cost the plan cites. Fix: The trade-off is acceptable for one producer run. Keep the parse strict: anchor it at the start of the text, and read it only for Relax and Remove. Say in defaults-loop.md that the prefix is a stopgap until a typed field is added, so a later reader does not mistake it for prose.",
+      "location": "Decision 2 (`[gate: NAME] ` prefix stored in `prevention`)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The doc names prevention_kind's 'three values' in more places than the section 3.2 table. Section 7.2 does not say how relax and remove are treated for default candidates.",
+      "evidence": "defaults-loop.md:162: 'Choosing prevention_kind among its three values is also a choice question for Jev'. Lines 381-382: 'Introspections whose prevention_kind is code-check or design-change do not become candidates'. Fix: In step 7, update line 162 to say five values. Add relax and remove to the list at line 381 of kinds that do not become default candidates.",
+      "location": "Step 7 / docs/design/defaults-loop.md:162 and :381-382",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is well grounded. The functions and line numbers it names exist: PreventionKind and its parse at records.rs:1334-1356, answer_schema and SYSTEM_PROMPT at introspect.rs:1006-1042, the Answer literal at introspect.rs:1848, the exhaustive match in mistake_report at status.rs:1707, error_review and addressing_request in hestia.rs, retried_job at reading.rs:1522, and StewardRequest::new. Its dependents list matches what Grep finds for PreventionKind and prevention_kind readers. The demonstrations use real production seams, and each would fail without the behavior. One soundness problem needs fixing before work starts. The plan treats \"landed unchanged\" as two candidates having an equal `fingerprint`. That field is the SHA-256 of the whole governed tree (athena-git attrs.rs:135-139), not of the change, so it differs whenever any other job landed between the two attempts. On a busy main, the overruled count would read almost always 0, and criterion 8 (status shows which gates are overruled most) would be met in tests and empty in real use. Two smaller design points are noted as minor findings."
+}

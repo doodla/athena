@@ -9,6 +9,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Per-gate counters, the `relax` and `remove` prevention kinds, and Hestia's review of a gate
+  (`crates/athena-core/src/gate_counts.rs`, `docs/design/defaults-loop.md` section 3.8). A gate is a failed check
+  of a rejected job, the verifier when no check failed, or an admission rule that ended a rejected or failed job.
+  `gate_counts` reads the job records alone and counts, for each gate, the jobs it ended and the times a later
+  "try again on <job>" request landed the same change (a disagreement; at most one for each ended job). The
+  same change means equal candidate fingerprints when both candidates were made on the same base fingerprint,
+  and otherwise equal, non-empty lists of changed files (path, status, mode, size); the list has no content
+  hash, so equal-size edits to the same files read as the same change when the base moved. `athena status`
+  prints each gate's counts, most overruled first (field `gate_counts` in `--json`, left out when no gate has
+  ended a job). The introspection prompt carries the counts as `gate_counts` and says that a rule or check can
+  be wrong. `prevention_kind` gains `relax` and `remove`, with a nullable `gate` answer field: code accepts
+  these only for a gate with at least one end and one disagreement, and keeps the gate as `[gate: NAME] ` at
+  the start of `prevention`; any other answer is a failed record. Records of the three earlier kinds parse and
+  serialize as before. Hestia's error review queues one normal-priority request for such a record, with the
+  line `Gate under review: NAME.` and the gate's counts, and at most one open request for each gate. A
+  `relax` or `remove` record is left out of `cause_key` (so it never joins a root-cause request), out of the
+  cases that default proposals read, out of retry seeds, and out of the producer's list of recurring failure
+  classes. Nothing relaxes or removes any gate by itself.
 - A reading check for structural request terms and ambiguous ontology names, `reading::check_defined_terms`,
   run as a `step!` in `refusing_check` right after `check_environment_reach`. Root cause: readings are not
   checked against the outcome the user observes, so structural terms stay undefined, and so do ambiguous

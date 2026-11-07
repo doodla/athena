@@ -10,7 +10,7 @@ use athena_data::JobId;
 use athena_data::records::{
     CriterionKind, DeliverableAction, Demonstration, DependentKind, FailureClass, Finding,
     FindingSource, Forecast, IntrospectionRecord, IntrospectionStatus, JobPlan, PinnedRepo,
-    Reading, Severity,
+    PreventionKind, Reading, Severity,
 };
 use std::fmt::Write;
 
@@ -345,7 +345,9 @@ pub struct ClassSummary {
     pub prevention: Option<String>,
 }
 
-/// Summarises every registry class that has a recorded case, from the introspections and the registry.
+/// Summarises every registry class that has a recorded case, from the introspections and the registry. An
+/// introspection that proposes relaxing or removing a gate is not a case: it is a challenge to a check, for
+/// the review Hestia queues, and the producer is not shown it.
 pub fn class_summaries(
     introspections: &[IntrospectionRecord],
     classes: &[FailureClass],
@@ -358,6 +360,7 @@ pub fn class_summaries(
                 .filter(|i| {
                     i.status == IntrospectionStatus::Recorded
                         && i.failure_class.as_ref() == Some(&class.id)
+                        && !i.prevention_kind.is_some_and(PreventionKind::loosens)
                 })
                 .collect();
             if cases.is_empty() {
@@ -3038,6 +3041,77 @@ mod tests {
                 jobs: 2,
                 prevention: Some("newest".into()),
             }]
+        );
+    }
+
+    #[test]
+    fn class_summaries_skip_relax_and_remove_introspections() {
+        let registry = |n: u32, name: &str| FailureClass {
+            id: RecordId::parse(&format!("20261001-000000-c{n:03}")).unwrap(),
+            at: "2026-10-01T00:00:00Z".parse().unwrap(),
+            name: name.into(),
+            description: "A description.".into(),
+            status: ClassStatus::Proposed,
+            proposed_by: RecordId::parse("20261001-000000-0001").unwrap(),
+        };
+        let (mixed, loosening_only) = (registry(1, "Mixed"), registry(2, "Loosening only"));
+        let case = |class: &FailureClass, n: u32, kind: PreventionKind, prevention: &str| {
+            IntrospectionRecord {
+                id: RecordId::parse(&format!("20261002-00{n:02}00-0001")).unwrap(),
+                at: format!("2026-10-02T00:{n:02}:00Z").parse().unwrap(),
+                trigger: IntrospectionTrigger::Rejection,
+                job: Some(JobId::parse(&format!("20261002-00{n:02}00-aaa{n}")).unwrap()),
+                intervention: None,
+                class_of_work: "code".into(),
+                category: "rejected".into(),
+                what_happened: Some("It happened.".into()),
+                failure_class: Some(class.id.clone()),
+                new_class: false,
+                earlier_cases: vec![],
+                decisions_matched: vec![],
+                cause: Some("A cause.".into()),
+                prevention_kind: Some(kind),
+                prevention: Some(prevention.into()),
+                proposed_request: Some("Do it.".into()),
+                evidence: None,
+                status: IntrospectionStatus::Recorded,
+                failure: None,
+                flags: vec![],
+                dropped_ids: vec![],
+                planning_stopped: false,
+                from_jev: false,
+                jev: None,
+            }
+        };
+        let cases = vec![
+            case(&mixed, 1, PreventionKind::CodeCheck, "first check"),
+            case(&mixed, 2, PreventionKind::CodeCheck, "second check"),
+            case(&mixed, 3, PreventionKind::CodeCheck, "newest check"),
+            case(&mixed, 4, PreventionKind::Relax, "[gate: test] loosen it"),
+            case(&mixed, 5, PreventionKind::Remove, "[gate: test] drop it"),
+            case(
+                &loosening_only,
+                6,
+                PreventionKind::Relax,
+                "[gate: fmt] loosen",
+            ),
+            case(
+                &loosening_only,
+                7,
+                PreventionKind::Remove,
+                "[gate: fmt] drop",
+            ),
+        ];
+        let summaries = class_summaries(&cases, &[mixed, loosening_only]);
+        assert_eq!(
+            summaries,
+            vec![ClassSummary {
+                title: "Mixed".into(),
+                cases: 3,
+                jobs: 3,
+                prevention: Some("newest check".into()),
+            }],
+            "relax and remove are not cases, and a class with only those has no summary"
         );
     }
 
