@@ -341,9 +341,86 @@ pub fn runs_from_record(specs: &[CheckSpec], record: &CiRecord, sha: &str) -> Ve
 /// `<binary> <test>` form can be run with `cargo test -p <package> <selector> <test>`.
 pub const FAILING_UNITS_PREFIX: &str = "failing units: ";
 
-/// `run`, a failed check reused from a CI run, with what the run's log said: the failing tests and the end
-/// of the log, redacted through `redact`. A passed run, a run that is not reused, and a detail that cannot
-/// be redacted leave `run` unchanged, so the check stays plainly failed.
+/// Whether `line` starts the CI runner's post-job cleanup (an optional `##[group]` prefix is ignored).
+fn is_cleanup_line(line: &str) -> bool {
+    let t = line.trim();
+    let t = t.strip_prefix("##[group]").unwrap_or(t);
+    t.starts_with("Post job cleanup")
+        || t.starts_with("Post Run ")
+        || t.starts_with("Cleaning up orphan processes")
+}
+
+/// Whether `line` belongs to a test runner's failing section.
+fn is_runner_marker(line: &str) -> bool {
+    let t = line.trim();
+    t == "failures:"
+        || t.contains("panicked at")
+        || (t.starts_with("---- ") && t.ends_with(" stdout ----"))
+        || t.starts_with("test result: FAILED")
+}
+
+/// How many final lines the jump case of [`failure_section`] keeps after the section.
+const SECTION_END_LINES: usize = 20;
+
+/// The part of a failed check's log worth storing, at most `max_lines` lines and about `max_bytes` bytes.
+///
+/// The old rule kept the last N lines whatever they were, so for a CI log the post-job cleanup text
+/// displaced the test runner's `failures:` and `panicked at` section. This drops the trailing cleanup
+/// block (cut at the first cleanup line at or after the last runner marker, else the last `##[error]`
+/// line, else anywhere), then keeps the end of what is left. When that end holds no runner marker but an
+/// earlier line does (a cleanup form not recognised), it keeps lines from the earliest marker, a `…` line
+/// and the final lines. A log with no marker and no cleanup keeps the plain tail.
+pub fn failure_section(text: &str, max_lines: usize, max_bytes: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let anchor = lines
+        .iter()
+        .rposition(|l| is_runner_marker(l))
+        .or_else(|| lines.iter().rposition(|l| l.starts_with("##[error]")))
+        .unwrap_or(0);
+    let cut = lines[anchor..]
+        .iter()
+        .position(|l| is_cleanup_line(l))
+        .map(|p| p + anchor)
+        .filter(|&c| c > 0);
+    let body: String = match cut {
+        Some(c) => {
+            let mut b = lines[..c].join("\n");
+            b.push('\n');
+            b
+        }
+        None => text.to_string(),
+    };
+    let body_lines: Vec<&str> = body.lines().collect();
+    if body_lines.len() <= max_lines {
+        return tail(&body, max_bytes);
+    }
+    let window_start = body_lines.len() - max_lines;
+    let first_marker = body_lines.iter().position(|l| is_runner_marker(l));
+    let window_has_marker = body_lines[window_start..]
+        .iter()
+        .any(|l| is_runner_marker(l));
+    let Some(first) = first_marker else {
+        return tail(&tail_lines(&body, max_lines), max_bytes);
+    };
+    if window_has_marker || max_lines <= SECTION_END_LINES {
+        return tail(&tail_lines(&body, max_lines), max_bytes);
+    }
+    let mut head = body_lines[first..first + max_lines - SECTION_END_LINES].join("\n");
+    let head_cap = max_bytes * 3 / 4;
+    if head.len() > head_cap {
+        let mut end = head_cap;
+        while !head.is_char_boundary(end) {
+            end -= 1;
+        }
+        head.truncate(end);
+    }
+    let end = tail(&tail_lines(&body, SECTION_END_LINES), max_bytes / 4);
+    format!("{head}\n…\n{end}")
+}
+
+/// `run`, a failed check reused from a CI run, with what the run's log said: the failing tests and the
+/// failing section of the log, redacted through `redact`. A passed run, a run that is not reused, and a
+/// detail that cannot be redacted leave `run` unchanged, so the check stays plainly failed.
 pub fn with_failure_detail(
     run: CheckRun,
     detail: &crate::ci_result::FailureDetail,
@@ -356,12 +433,20 @@ pub fn with_failure_detail(
     let (Ok(failed_tests), Ok(output_tail)) = (names, redact(&detail.output_tail)) else {
         return run;
     };
+    let (prefix, rest) = match output_tail.split_once('\n') {
+        Some((first, rest)) if first.starts_with(FAILING_UNITS_PREFIX) => (Some(first), rest),
+        _ => (None, output_tail.as_str()),
+    };
+    let kept = match prefix {
+        Some(first) => format!(
+            "{first}\n{}",
+            failure_section(rest, FAILED_TAIL_LINES - 1, FAILED_TAIL_BYTES)
+        ),
+        None => failure_section(rest, FAILED_TAIL_LINES, FAILED_TAIL_BYTES),
+    };
     CheckRun {
         failed_tests,
-        output_tail: tail(
-            &tail_lines(&output_tail, FAILED_TAIL_LINES),
-            FAILED_TAIL_BYTES,
-        ),
+        output_tail: kept,
         ..run
     }
 }
@@ -530,7 +615,7 @@ pub fn run_check(spec: &CheckSpec, ctx: &CheckContext<'_>) -> Result<CheckRun> {
     let kept = if passed {
         tail(&output, TAIL_BYTES)
     } else {
-        tail(&tail_lines(&output, FAILED_TAIL_LINES), FAILED_TAIL_BYTES)
+        failure_section(&output, FAILED_TAIL_LINES, FAILED_TAIL_BYTES)
     };
     Ok(CheckRun {
         name: spec.name.clone(),
@@ -748,6 +833,120 @@ mod tests {
             redactor: &redactor,
         };
         run_check(spec, &ctx).unwrap()
+    }
+
+    fn failing_section_text() -> String {
+        "running 1 test\nfailures:\n\n---- widget::breaks stdout ----\n\
+thread 'widget::breaks' panicked at src/lib.rs:9:5:\nassertion `left == right` failed\n\
+failures:\n    widget::breaks\n\ntest result: FAILED. 0 passed; 1 failed\n\
+##[error]Process completed with exit code 101.\n"
+            .to_string()
+    }
+
+    fn cleanup_text(n: usize) -> String {
+        (0..n)
+            .map(|i| match i % 3 {
+                0 => "Post job cleanup.\n",
+                1 => "Post Run actions/checkout@v4\n",
+                _ => "Cleaning up orphan processes\n",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn failure_section_drops_trailing_cleanup_and_keeps_the_failing_section() {
+        let text = format!("{}{}", failing_section_text(), cleanup_text(250));
+        let kept = failure_section(&text, FAILED_TAIL_LINES, FAILED_TAIL_BYTES);
+        assert!(kept.contains("widget::breaks"));
+        assert!(kept.contains("assertion `left == right` failed"));
+        assert!(kept.contains("test result: FAILED"));
+        assert!(!kept.contains("Post job cleanup"));
+    }
+
+    #[test]
+    fn a_failed_local_run_keeps_the_failing_section_not_trailing_cleanup() {
+        let script = "printf 'failures:\\n---- widget::breaks stdout ----\\n\
+thread panicked at src/lib.rs:9:5: boom\\ntest result: FAILED. 0 passed; 1 failed\\n'; \
+i=0; while [ $i -lt 250 ]; do echo 'Post job cleanup.'; i=$((i+1)); done; exit 1";
+        let run = run_script(&sh_spec("t", script));
+        assert!(!run.passed);
+        assert!(run.output_tail.contains("widget::breaks"));
+        assert!(run.output_tail.contains("panicked") || run.output_tail.contains("boom"));
+        assert!(!run.output_tail.contains("Post job cleanup"));
+    }
+
+    #[test]
+    fn a_cleanup_looking_line_before_the_failing_section_is_kept() {
+        let text = format!(
+            "start\nbuild\nPost job cleanup.\nmore\n{}{}",
+            failing_section_text(),
+            cleanup_text(250)
+        );
+        let kept = failure_section(&text, FAILED_TAIL_LINES, FAILED_TAIL_BYTES);
+        assert!(kept.contains("Post job cleanup.\nmore\n"));
+        assert!(kept.contains("widget::breaks"));
+        assert!(kept.matches("Post job cleanup").count() == 1);
+    }
+
+    #[test]
+    fn failure_section_without_marker_or_cleanup_is_the_old_tail() {
+        let text: String = (0..300).map(|i| format!("line {i}\n")).collect();
+        assert_eq!(
+            failure_section(&text, FAILED_TAIL_LINES, FAILED_TAIL_BYTES),
+            tail(&tail_lines(&text, FAILED_TAIL_LINES), FAILED_TAIL_BYTES)
+        );
+        let marked = format!("{text}test result: FAILED. 0 passed; 1 failed\n");
+        assert_eq!(
+            failure_section(&marked, FAILED_TAIL_LINES, FAILED_TAIL_BYTES),
+            tail(&tail_lines(&marked, FAILED_TAIL_LINES), FAILED_TAIL_BYTES)
+        );
+    }
+
+    #[test]
+    fn failure_section_jumps_to_the_marker_and_keeps_the_final_lines() {
+        let mut text = String::from("preamble\n");
+        text.push_str(&failing_section_text());
+        for i in 0..250 {
+            text.push_str(&format!("unrecognised tail {i}\n"));
+        }
+        text.push_str("error[E0425]: cannot find value\n");
+        let kept = failure_section(&text, FAILED_TAIL_LINES, FAILED_TAIL_BYTES);
+        assert!(kept.starts_with("failures:\n") || kept.starts_with("thread"));
+        assert!(kept.contains("\n…\n"));
+        assert!(kept.trim_end().ends_with("error[E0425]: cannot find value"));
+        assert!(!kept.contains("preamble"));
+    }
+
+    #[test]
+    fn failure_section_keeps_the_marker_when_lines_are_wide() {
+        let wide = "x".repeat(3000);
+        let mut text = String::from("failures:\n");
+        for _ in 0..40 {
+            text.push_str(&format!("{wide}\n"));
+        }
+        let kept = failure_section(&text, 30, 10_000);
+        assert!(kept.starts_with("failures:\n"));
+        assert!(kept.len() <= 10_000 + 8);
+    }
+
+    #[test]
+    fn failure_section_of_only_cleanup_is_the_whole_text() {
+        let text = cleanup_text(5);
+        assert_eq!(failure_section(&text, 200, 65536), text);
+    }
+
+    #[test]
+    fn with_failure_detail_keeps_the_units_line_first() {
+        let body: String = (0..300).map(|i| format!("line {i}\n")).collect();
+        let d = crate::ci_result::FailureDetail {
+            failed_tests: vec![],
+            output_tail: format!("{FAILING_UNITS_PREFIX}athena-core --lib\n{body}"),
+        };
+        let keep = |s: &str| -> Result<String> { Ok(s.to_string()) };
+        let got = with_failure_detail(reused_failed("test"), &d, &keep);
+        assert!(got.output_tail.starts_with(FAILING_UNITS_PREFIX));
+        assert!(got.output_tail.ends_with("line 299\n"));
+        assert_eq!(got.output_tail.lines().count(), FAILED_TAIL_LINES);
     }
 
     #[test]

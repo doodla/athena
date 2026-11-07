@@ -711,6 +711,65 @@ fn job_log_parser_strips_stamps_keeps_the_indent_and_names_the_units() {
     );
 }
 
+fn cleanup_lines(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| match i % 3 {
+            0 => "Post job cleanup.".to_string(),
+            1 => "Post Run actions/checkout@v4".to_string(),
+            _ => "Cleaning up orphan processes".to_string(),
+        })
+        .collect()
+}
+
+#[test]
+fn cleanup_after_an_xtask_panic_does_not_displace_it() {
+    let mut lines: Vec<String> = vec![
+        "thread 'repin' panicked at xtask/src/pin.rs:10:5: pin mismatch".to_string(),
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored".to_string(),
+        "##[error]Process completed with exit code 101.".to_string(),
+    ];
+    lines.extend(cleanup_lines(250));
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let jobs = vec![(
+        "test (shard 1)".to_string(),
+        "failure".to_string(),
+        Some(stamped(&refs)),
+    )];
+    let detail = detail_from_job_logs(&jobs).unwrap();
+    assert!(detail.failed_tests.is_empty());
+    assert!(detail.output_tail.contains("pin mismatch"));
+    assert!(!detail.output_tail.contains("Post job cleanup"));
+}
+
+#[test]
+fn two_shards_each_keep_their_failing_section() {
+    let shard = |msg: &str| {
+        let mut lines: Vec<String> = (0..140).map(|i| format!("output {i}")).collect();
+        lines.push(format!("thread 't' panicked at src/lib.rs:1:1: {msg}"));
+        lines.push("test result: FAILED. 0 passed; 1 failed".to_string());
+        lines.extend(cleanup_lines(250));
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        stamped(&refs)
+    };
+    let jobs = vec![
+        (
+            "test (shard 1)".to_string(),
+            "failure".to_string(),
+            Some(shard("first shard broke")),
+        ),
+        (
+            "test (shard 2)".to_string(),
+            "failure".to_string(),
+            Some(shard("second shard broke")),
+        ),
+    ];
+    let detail = detail_from_job_logs(&jobs).unwrap();
+    assert!(detail.output_tail.contains("first shard broke"));
+    assert!(detail.output_tail.contains("second shard broke"));
+    assert!(!detail.output_tail.contains("Post job cleanup"));
+    assert!(detail.output_tail.lines().count() <= 200);
+}
+
 fn one_poll() -> crate::ci_result::Wait {
     crate::ci_result::Wait {
         polls: 1,

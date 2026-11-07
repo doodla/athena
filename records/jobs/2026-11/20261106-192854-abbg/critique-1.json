@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-192854-abbg",
+  "round": 1,
+  "at": "2026-11-07T16:11:10.632464054Z",
+  "invocation_seq": 4,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The dependents list leaves out the downstream readers of output_tail: the retry and verifier brief, introspection, the carried earlier attempt, and demonstration_view.",
+      "evidence": "Grepping `output_tail` across crates/ finds four readers the plan does not list. briefs.rs renders it through clip_log_tail(.., BRIEF_TAIL_LINES=60, 6 KiB). introspect.rs uses clip_tail(.., TAIL_CAP=600 chars). reading.rs uses tail(.., CARRIED_CHECK_OUTPUT_BYTES=1024). verify.rs demonstration_view reads `output_tail.contains(\"could not compile\")`/`\"error[E\"` from a local run_check result. Each of them clips from the end. These are the paths the reading names as the audience: the verifier, the retry producer, and the person reading. In the plan's jump-to-marker case, the end of the section changes. demonstration_view could also lose a trailing compile error if markers appear earlier in the output. Fix: Add these readers to Dependents, each with a test that covers it. Examples: a briefs.rs test (around 3931) that renders a cleanup-free section, the verify.rs demonstration tests, and the reading.rs carried-output test. State what each reader shows after the change. For demonstration_view, either show that the jump case cannot drop a final `error[E` line, or keep the last few lines of the output when jumping.",
+      "location": "Plan › Dependents; crates/athena-context/src/briefs.rs:1159-1224, crates/athena-core/src/introspect.rs:997, crates/athena-core/src/reading.rs:2051, crates/athena-core/src/verify.rs:1041-1059",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Cutting at the first cleanup line anywhere in the log is broader than needed. An earlier step or a test that prints such a line truncates the whole log.",
+      "evidence": "Step 2 says to \"cut at the first cleanup line\". Cleanup only ever comes after the test step ends. The risk section admits the danger of a line printed by a test, and relies only on the specificity of the prefixes. Fix: Drop only the trailing cleanup block. Cut at the first cleanup line that comes after the last runner marker or after the step's `##[error]Process completed` line, or strip from the end while lines are cleanup. Pin this with a test where a cleanup-looking line comes before the failures section.",
+      "location": "Plan › Steps 1-2 (cut at the first cleanup line)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "After jumping to the earliest marker, the byte cap still keeps the end, so long lines can cut off the marker the jump was meant to keep.",
+      "evidence": "checks.rs:173-182 `tail` keeps the last `max` bytes. Step 2 ends every path with `tail(.., FAILED_TAIL_BYTES)`, including the path that starts at the first marker. Fix: In the jump branch, cap from the start (keep the head up to FAILED_TAIL_BYTES on a char boundary), or drop whole trailing lines until the section fits. Add a case with wide lines.",
+      "location": "Plan › Step 2 (step 5 of the approach: FAILED_TAIL_BYTES cap)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Re-capping the joined per-job sections with tail_lines(200) still lets a later shard push an earlier shard's failing section out entirely.",
+      "evidence": "Step 4 caps the joined text again with tail_lines and tail. If shard 2's section is near 200 lines, shard 1's section is dropped. The two-shard test passes only because its sections are small. Fix: Split the budget across readable jobs (FAILED_TAIL_LINES / n per job, minus the header line), or apply failure_section to the joined, cleanup-free text. Make the two-shard test use sections long enough to show this.",
+      "location": "Plan › Step 4 / Decision 3 (gh/client.rs re-cap of joined text)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan reads the request correctly and changes the right code. I read checks.rs:186-203, 347-367 and 528-534, and gh/client.rs:283-294. All three line-tail sites exist where the plan says, and one shared `failure_section` in checks.rs fixes the class at its origin. The hybrid window keeps today's output for logs with no marker. I checked the existing tests that pin exact lines: run/tests.rs:3481-3499 has no marker, the shard_log tests have markers inside the window, and checks.rs:635-640 has 400 plain lines. Those stay green. The criterion 2 and 3 demonstrations call real seams (`run_script`→`run_check` at checks.rs:736, and `detail_from_job_logs` with the `stamped` helper at gh/tests.rs:376). Both would fail on the base, because the last 200 lines would be all cleanup. The fix for the `failing units:` prefix is real: with_failure_detail cuts the client's prefix plus 200 lines down to 200 and drops the prefix. One major finding: the dependents list leaves out several readers of `output_tail` that I found by grep. These are briefs.rs clip_log_tail, introspect.rs clip_tail, reading.rs's carried tail, and verify.rs demonstration_view, which checks for `could not compile`/`error[E`. They are the paths by which the stated audience (retry producer, verifier) actually sees the record, so the plan should name them and their tests. The soundness points are minor: the cut at the first cleanup line anywhere in the log, the byte cap keeping the end after a jump to the marker, and the re-cap of the joined shards dropping earlier shards."
+}

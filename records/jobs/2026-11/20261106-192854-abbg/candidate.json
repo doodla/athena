@@ -1,0 +1,139 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261106-192854-abbg",
+  "base_commit": "55bfc6e7e2b3b917cf341d95c6ab283bc388d806",
+  "base_fingerprint": "sha256:abb4c9c777664db36039dad381495997e33221a6e462249500e3e94b4d0c1bf9",
+  "previous_job": "20261106-104229-ve4d",
+  "candidate_commit": "2a7cbfc3bd41e5f585d0fa8b9ff8727b1094584f",
+  "candidate_tree": "a6c1a16d847e332e03c5d4b8b352a136129ddc7f",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 365338
+    },
+    {
+      "path": "crates/athena-core/src/checks.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 64241
+    },
+    {
+      "path": "crates/athena-core/src/ci_result.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 19838
+    },
+    {
+      "path": "crates/athena-core/src/gh/client.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 46591
+    },
+    {
+      "path": "crates/athena-core/src/gh/tests.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 161169
+    }
+  ],
+  "fingerprint": "sha256:140d8c3a18f99c0bf6105c193e7354710948ca0ab92311d0b4ff93c528d9defd",
+  "violations": [],
+  "producer_report": {
+    "summary": "Root cause: a failed check's record kept the last 200 lines of the log whatever they were. For a CI log those lines are post-job cleanup, which pushed out the test runner's `failures:` and `panicked at` section. The rule was written three times: in the local run, in with_failure_detail and in gh/client.rs detail_from_job_logs.\n\nFix: one shared function, `checks::failure_section(text, max_lines, max_bytes)`, now selects the lines at all three sites.\n- It drops the trailing cleanup block. The cut is at the first cleanup line at or after the last runner marker, else after the last `##[error]` line.\n- If no marker lies in the last-N window but an earlier one does, it jumps to the earliest marker and keeps the final 20 lines after a `…` line.\n- A log with no marker and no cleanup keeps the plain tail, as before.\n- with_failure_detail keeps the leading `failing units:` line first.\n- detail_from_job_logs sections each job log with an equal share of the line and byte budget.\n- Redaction is unchanged.\n\nTests: 8 new unit tests in checks.rs and 2 in gh/tests.rs. Seven behavior tests failed when I temporarily reduced the function to the old tail rule, and pass with the change.\n\nAlso changed: a doc comment on FailureDetail.output_tail, and one CHANGELOG bullet under Fixed. run/tests.rs is unchanged and its reuse test is unaffected.",
+    "files": [
+      "crates/athena-core/src/checks.rs",
+      "crates/athena-core/src/gh/client.rs",
+      "crates/athena-core/src/gh/tests.rs",
+      "crates/athena-core/src/ci_result.rs",
+      "CHANGELOG.md"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core checks",
+        "result": "pass",
+        "note": "76 passed, includes the new checks.rs tests"
+      },
+      {
+        "command": "cargo test -p athena-core gh::",
+        "result": "pass",
+        "note": "125 passed, includes the two new gh tests"
+      },
+      {
+        "command": "cargo test -p athena-core --lib -- <new test filters> with failure_section temporarily reduced to the old tail rule",
+        "result": "pass",
+        "note": "7 new behavior tests failed, then the temporary change was reverted"
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": "clean"
+      },
+      {
+        "command": "cargo test -p xtask --test policy",
+        "result": "pass",
+        "note": "17 passed"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "exited 0 (no failure reported). I could not read the saved output file, so I did not count the tests."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "The change description names the root cause: the failed-check record stores the last N lines of the log without regard to what they are, so CI post-job cleanup text displaces the test runner's failing section. It is fixed in one shared function in crates/athena-core/src/checks.rs that both the local run and the CI-log path (gh/client.rs detail_from_job_logs and with_failure_detail) call.",
+        "status": "met",
+        "evidence": "The root cause is named in the failure_section doc comment, the CHANGELOG entry and the summary. checks::failure_section is called from run_check, with_failure_detail and gh/client.rs detail_from_job_logs."
+      },
+      {
+        "criterion": "A new unit test in checks.rs, run with `cargo test -p athena-core checks`, feeds a log with a `failures:` section, a `panicked at` line and a `test result: FAILED` line followed by more than 200 lines of post-job cleanup, as in the CI logs of jobs 20261106-022423-vdtn and 20261106-045349-f6x6. It asserts the kept output contains the failing test name and the assertion text and no `Post job cleanup` lines. The test fails on the base commit (verify with git stash or the fails-without run) and passes with the change.",
+        "status": "met",
+        "evidence": "The tests failure_section_drops_trailing_cleanup_and_keeps_the_failing_section and a_failed_local_run_keeps_the_failing_section_not_trailing_cleanup pass under cargo test -p athena-core checks. With failure_section temporarily reduced to the old tail rule, both failed. The temporary change is reverted."
+      },
+      {
+        "criterion": "A test in gh/tests.rs, run with `cargo test -p athena-core gh`, builds a CI job log whose failing output has no parseable `test ... FAILED` names (for example a panic in an xtask test) followed by cleanup text. It asserts detail_from_job_logs returns an output_tail with the panic message and not the cleanup lines. It fails on the base and passes with the change.",
+        "status": "met",
+        "evidence": "cleanup_after_an_xtask_panic_does_not_displace_it and two_shards_each_keep_their_failing_section pass. Both failed with failure_section reduced to the old tail rule."
+      },
+      {
+        "criterion": "A log with no runner marker and no cleanup text keeps the same output as today (tail of the last FAILED_TAIL_LINES lines), and a passing check's kept output is unchanged. Existing tests, including red_reused_run_records_failing_tests_and_log_tail and the run/tests.rs reuse test, still pass under `cargo test --locked`.",
+        "status": "met",
+        "evidence": "failure_section_without_marker_or_cleanup_is_the_old_tail pins equality with the old rule. The passing branch of run_check is untouched. The existing checks and gh tests pass, and cargo test --locked exited 0."
+      },
+      {
+        "criterion": "`cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings` and `cargo test --locked` pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran all three and they passed."
+      },
+      {
+        "criterion": "CHANGELOG.md has one entry under Fixed or Changed stating that a failed check record now keeps the failing test section instead of the log tail. It states only what the diff does.",
+        "status": "met",
+        "evidence": "One bullet added at the top of [Unreleased] → Fixed in CHANGELOG.md."
+      },
+      {
+        "criterion": "Not a change to refusal rules: no check is added that refuses or holds work, so no replay refusal-rate criterion applies.",
+        "status": "met",
+        "evidence": "failure_section only selects which lines are stored. No admission, gate or reading rule changed."
+      }
+    ],
+    "open_issues": [
+      "I did not count the tests in the full cargo test --locked run: it exited 0, but I could not read its saved output.",
+      "The cleanup markers (`Post job cleanup`, `Post Run `, `Cleaning up orphan processes`) are guessed from GitHub Actions. The repository holds no real CI log to check them against. If a log uses another form, the jump path to the earliest marker is the fallback."
+    ],
+    "mistakes": [
+      "Used `tail` in a Bash pipeline once; the hook denied it and I reran without it."
+    ],
+    "learnings": [
+      "Bash cannot read tool-result files outside the working directory, so a large cargo test output can't be searched afterwards.",
+      "plain_log_line already strips timestamps, so failure_section sees plain lines in the CI path."
+    ],
+    "desires": []
+  }
+}

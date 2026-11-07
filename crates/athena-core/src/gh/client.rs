@@ -283,17 +283,28 @@ pub fn detail_from_job_logs(
     let readable: Vec<&(&str, &str, Option<String>)> =
         plain.iter().filter(|(_, _, l)| l.is_some()).collect();
     let mut text = String::new();
+    let n = readable.len().max(1);
+    let header = usize::from(n > 1);
+    let per_lines = (crate::checks::FAILED_TAIL_LINES / n)
+        .saturating_sub(header)
+        .max(1);
+    let per_bytes = crate::checks::FAILED_TAIL_BYTES / n;
     for (name, _, log) in &readable {
         if readable.len() > 1 {
             text.push_str(&format!("== {name}\n"));
         }
-        text.push_str(log.as_deref().unwrap_or_default());
-        text.push('\n');
+        let mut section = crate::checks::failure_section(
+            log.as_deref().unwrap_or_default(),
+            per_lines,
+            per_bytes,
+        );
+        if !section.ends_with('\n') {
+            section.push('\n');
+        }
+        text.push_str(&section);
     }
-    let tail = crate::checks::tail_lines(&text, crate::checks::FAILED_TAIL_LINES);
-    let tail = crate::checks::tail(&tail, crate::checks::FAILED_TAIL_BYTES);
     let mut failed_tests: Vec<String> = Vec::new();
-    let mut output_tail = tail;
+    let mut output_tail = text;
     if !names.is_empty() {
         failed_tests = names.into_iter().collect();
         if failed_tests.len() > MAX_RECORDED_TESTS {
