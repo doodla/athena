@@ -400,8 +400,9 @@ mod tests {
             let composed = compose(&[CONTRACT.into(), frame.into()]);
             assert!(check_budget(set, &composed).is_ok(), "{}", frame.id);
             // The planner frame gained the required dependents rule and the critic frame its "what else does
-            // this break" question; each stays well inside the 1300-token budget checked above.
-            assert!(estimate_tokens(frame.text) < 700, "{} is short", frame.id);
+            // this break" question, and both the commit-shape table rule; the 1300-token budget above is the
+            // real limit, this bound only keeps a frame from growing unnoticed.
+            assert!(estimate_tokens(frame.text) < 900, "{} is short", frame.id);
         }
     }
 
@@ -477,6 +478,40 @@ mod tests {
             "calls an external service (GitHub API, CI run, deploy)",
             "without naming the state it needs",
             "how the plan checks or waits for it",
+        ] {
+            assert!(
+                CRITIC_FRAME.text.contains(wording),
+                "critic frame lacks: {wording}"
+            );
+        }
+    }
+
+    /// Failure class plan-tested-only-against-job-commits-not-realistic-branch-history (introspections
+    /// 20261024-154443-51wt, 20261024-161503-q0pp, 20261025-012736-2q6w): the planning stage derived a
+    /// landing, history or attribution rule from the happy-path commit shape instead of every shape the
+    /// system produces, and demonstrated it on a fixture that lacked them. Guidance only: the planner frame
+    /// asks for the commit-shape table and the realistic fixture, and the critic frame rejects a plan without.
+    #[test]
+    fn landing_history_rules_need_a_commit_shape_table_and_realistic_fixture() {
+        for wording in [
+            "enumerated commit-shape table",
+            "job commits, records-only, owner-path, intervention and retry-after-block landing",
+            "the rule's outcome for each",
+            "fixture of a realistic branch",
+            "one intervention commit, one records-only commit and the job landing",
+            "where the fixture differs from the real repository",
+            "every crate that calls the changed classification functions",
+        ] {
+            assert!(
+                PLANNER_FRAME.text.contains(wording),
+                "planner frame lacks: {wording}"
+            );
+        }
+        for wording in [
+            "raise a major finding",
+            "commit-shape table",
+            "realistic-branch fixture",
+            "every crate calling the changed classification functions",
         ] {
             assert!(
                 CRITIC_FRAME.text.contains(wording),

@@ -292,6 +292,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- The planner and critic prompts now make a landing, history-check or attribution plan derive its rule from every
+  commit shape the real branch holds. Root cause: the planning stage derived the rule from the happy path (job
+  commits), not from the full set of shapes the system produces (job commits, records-only, owner-path,
+  intervention, retry-after-block landing), and demonstrated it on a fixture without them. This is the class
+  plan-tested-only-against-job-commits-not-realistic-branch-history, seen in introspections 20261024-154443-51wt,
+  20261024-161503-q0pp and 20261025-012736-2q6w. The planner must include an enumerated commit-shape table with the
+  rule's outcome for each shape, demonstrate on a realistic-branch fixture (an intervention commit, a records-only
+  commit and the job landing) and run the tests of every crate that calls the changed classification functions; the
+  critic raises a major finding when any of these is missing. The code of jobs 20261024-153908-1rve,
+  20261024-154552-e65v and 20261025-012657-hac3 is not changed here. The guard is prose, pinned by a test in
+  `athena-context`, so removing it fails the build; compliance rests on the critic's finding, not on code. The
+  planner and critic budget lines in `docs/system-facts.md` and the frame-size bound in the frame test follow.
 - An open earlier throughput design request no longer stops the throughput review. The review runs, asks the
   model, records the proposal, and notes the open request in the record and in `THROUGHPUT.md`; four of seven runs
   on 4 to 6 Nov did nothing for this reason. A proposal recorded without a design request has `request_job` unset.
