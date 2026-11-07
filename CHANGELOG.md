@@ -489,6 +489,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A race in the test `status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain`: its stand-in
+  drain exited at the stop file, so on a busy machine it could be gone before the waiting `stop_and_wait` call
+  looked. The stand-in now also waits for a release file, made once that call has seen it running. A new test
+  pins that a stand-in already gone reads as `NotRunning(Dead)`. Test code only; `drain-stop` is unchanged.
 - A failed check's record now keeps the failing test section of the log (the `failures:`, `panicked at` and
   `test result: FAILED` lines) with CI post-job cleanup text dropped, instead of the last 200 lines. One
   function, `checks::failure_section`, does this for a local run, a reused CI run's detail and each CI job log.
