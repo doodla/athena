@@ -1,0 +1,353 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-110045-yp1e",
+  "round": 2,
+  "at": "2026-11-07T17:20:49.750919939Z",
+  "invocation_seq": 4,
+  "approach": "Root cause: landing, history and attribution rules are derived from the happy-path commit shape (the job's own commits), and the only guard is planner/critic prose (planner.md:16, critic.md:14). Nothing runs where readings are accepted, so jobs 20261024-153908-1rve, 20261024-154552-e65v and 20261025-012657-hac3 each got readings whose criteria never required a branch with an intervention commit, a records-only commit and the job landing. Fix: one pure check, `check_history_fixture(reading)`, in crates/athena-core/src/reading.rs, added as one `step!` line in `refusing_check` right after `check_code_survey`. Revision changes after the critic's findings: (a) bare `landing` is no longer a trigger; (b) the file trigger matches full crate paths of the real classification code (not bare file names); (c) refusal and acceptance tests are built in the shape of each of the three source jobs; (d) the athena-context change stays inside that crate; (e) the doc comment and CHANGELOG say the check has no reader rule line, and why.\n\nGate: the same conditions as `check_code_survey` (capability set, no question, class `code` or `tests`, at least one Behavior criterion), factored into one private helper.\n\nTrigger (either): (1) a non-Delete deliverable whose full path is one of crates/athena-core/src/land.rs, crates/athena-core/src/commits.rs, crates/athena-core/src/reconcile.rs, crates/athena-gate/src/invariant.rs, crates/athena-gate/src/history.rs, crates/athena-gate/src/attribution.rs, crates/athena-git/src/attrs.rs. These are where `pr_commits` (land.rs:212), `classify_commit` (land.rs:229), `classify_pre_merge` (invariant.rs:320), `classify` (attrs.rs:46) and the merge-method-follows-commit-shape test (reconcile.rs:652) live. crates/athena-data/src/history.rs (a record schema) and crates/athena-gate/src/reconcile.rs (usage records) are not on the list. (2) Any criterion text (any kind) holds one of these whole-word phrases, matched with the existing `has_phrase` on lowercase, white-space-collapsed, straight-apostrophe text: `commit shape`, `commit shapes`, `commit-shape`, `pr_commits`, `classify_commit`, `classify_pre_merge`, `history check`, `attribution check`, `records-only commit`, `records only commit`, `trailer`, `trailers`, `--history`, `--attribution`, `--pr-head`. The bare word `landing` triggers nothing. `has_phrase` only tests `char::is_alphanumeric` on each side (reading.rs:3752-3757), so `_` and `-` count as boundaries; the doc comment and the tests state this.\n\nSatisfaction: some Behavior criterion whose normalised text has `realistic`, `fixture`, `intervention commit`, `records-only commit` (or `records only commit`) and `job landing` (or `job's landing`). Otherwise the check bails with 'the reading was refused because ...', naming what triggered it and giving an example criterion.\n\nEstimate: HISTORY.txt (last 200 commits) lists 15 commits that touched a listed source file (land.rs 8, reconcile.rs 3 more, commits.rs 1 more, athena-gate attribution/history 3 more; counted from the path lines I read). That is 7.5% as an upper bound for the file trigger, since not every such job is a code reading with a behavior criterion and no fixture. The phrase triggers add only commits already in that count. The declaration is 'expected 7% of newly refused readings', labelled an unmeasured estimate that the replay at verification measures.\n\nThe check reads only the Reading: no model call, no repository, no records, no network. It does not touch land.rs, gh.rs, invariant.rs, commits.rs or athena-git, so no classification function changes and no commit-shape table applies to this plan (see risks).",
+  "decisions": [
+    {
+      "choice": "Enforce at the reading-stage gate: `step!(check_history_fixture(reading));` right after `check_code_survey` in `refusing_check`.",
+      "reason": "All three failures began when a reading was accepted whose criteria never required a branch with more than job commits. `refusing_check` is the one seam every reading passes (`check_reading_acceptance` at reading.rs:3199, `check_reading_text` for `athena check-reading` and the replay, and `Athena::read`). The step name comes from `stringify!`. The new line does not sit between the governance/outcome_state/environment_reach steps whose adjacency tests pin them.",
+      "rejected": [
+        {
+          "option": "Re-land the pr_commits classification or the trailer cutover work (land.rs, gh.rs, invariant.rs, commits.rs)",
+          "why": "Those are the instances, and the brief drops them. Another fix to one classification leaves the next landing rule free to be tested only against job commits."
+        },
+        {
+          "option": "More planner/critic prose or a planner-side check",
+          "why": "The guidance already exists as prose (planner.md:16, critic.md:14, lib.rs test at 490) and failed three times. Those prompts are out of scope, and the planner has no mechanical gate."
+        },
+        {
+          "option": "A rule line in the reader prompt",
+          "why": "The reader prompt has 3 tokens of headroom (budget reader: 1997 of 2000 in docs/system-facts.md) and the briefs.rs test pins 7 rule lines. The briefs.rs list (briefs.rs:4411) only asserts that named checks have rules, so it does not fail for a missing one. The gap is stated openly in the check's doc comment and the CHANGELOG instead, and the refusal message with its example criterion is how readers learn the rule."
+        }
+      ]
+    },
+    {
+      "choice": "Do not trigger on the bare word `landing`. Trigger on commit-classification phrases (`commit shape`, `pr_commits`, `history check`, `attribution check`, `records-only commit`, `trailer`, `--history`, `--attribution`, `--pr-head`, `classify_commit`, `classify_pre_merge`) or on the classification source files.",
+      "reason": "Finding 2: about 12 of the last 200 HISTORY.txt subjects say 'landing' (6e7fd3a stack-aware rebase for landing, e15681f FIFO LandingQueue, 47cadfa landing time, c7c4157 wait for the early CI run before the landing commit, 1676fe9 config edits not only at landing). Their behavior criteria are about queues, timing and CI waits, not commit shape, and would be refused for a fixture that does not apply. A test pins that a queue/timing/CI-wait criterion is not refused.",
+      "rejected": [
+        {
+          "option": "Keep `landing` as a trigger, as in the first plan",
+          "why": "Common-word false positive; it also makes the declared share too low."
+        },
+        {
+          "option": "Trigger on `landing commit`",
+          "why": "c7c4157 ('pushing the landing commit') is a CI-wait change, not a classification rule."
+        }
+      ]
+    },
+    {
+      "choice": "The file trigger matches full crate paths of the classification code (land.rs, commits.rs and reconcile.rs in athena-core; invariant.rs, history.rs and attribution.rs in athena-gate; attrs.rs in athena-git). It does not match bare file names and does not trigger on gh.rs or gh/landing.rs.",
+      "reason": "Finding 3: a bare `history.rs` also matches crates/athena-data/src/history.rs, a record-schema module. The listed files are where the classification functions are (land.rs:212 and :229, invariant.rs:320, attrs.rs:46, reconcile.rs:652) and where job hac3 changed commits.rs and athena-git. A test shows athena-data/src/history.rs does not trigger. gh.rs holds PR creation and CI polling, so a gh.rs job that changes a landing check is caught by the phrase triggers instead.",
+      "rejected": [
+        {
+          "option": "Match by bare file name",
+          "why": "False positive on the athena-data history module."
+        },
+        {
+          "option": "Trigger on any gh.rs deliverable",
+          "why": "Would refuse most unrelated code jobs."
+        },
+        {
+          "option": "Include athena-gate/src/reconcile.rs",
+          "why": "It reconciles usage records (module doc line 1), not commit shape."
+        }
+      ]
+    },
+    {
+      "choice": "Tests are built from the shape of each of the three source jobs: 1rve and e65v (deliverables land.rs, gh.rs, invariant.rs, records-history.md, CHANGELOG.md; criteria about pr_commits, the reconcile merge method and the commit shape) and hac3 (deliverables commits.rs, manage.rs, an athena-git file, status.rs, auditor.rs, gate files; criteria about trailers after C0). Each is refused without the realistic-fixture criterion and accepted with it. The same shapes go into the refusal corpus.",
+      "reason": "Finding 3 and criterion 3 ('for the cause and not only for one job'): the check must be shown on the class, not on one invented `land::` criterion. The brief records only the deliverable lists and the nature of each job, so the readings are rebuilt from that, and the corpus `source` text says so.",
+      "rejected": [
+        {
+          "option": "One invented land:: criterion only",
+          "why": "Shows one instance."
+        }
+      ]
+    },
+    {
+      "choice": "Factor the gate conditions of `check_code_survey` (reading.rs:3913-3920) into a private helper used by both checks.",
+      "reason": "One definition of 'a code reading with a behavior criterion'. The existing `code_survey_does_not_apply_outside_its_gate` covers it.",
+      "rejected": [
+        {
+          "option": "Copy the condition",
+          "why": "Two copies can drift."
+        }
+      ]
+    },
+    {
+      "choice": "The satisfying criterion must be a Behavior criterion carrying `realistic`, `fixture` and the three shapes. The three shapes are the ones the brief fixes; the retry-after-block landing is not required.",
+      "reason": "A fixture belongs to a test, so only a Behavior criterion is a test demonstration. A fourth shape would raise the refusal share beyond the declared estimate, and the planner prose already asks for it. The shared CutoverFixture by name alone is not accepted: its documented history does not by itself include an intervention commit.",
+      "rejected": [
+        {
+          "option": "Accept a Content criterion",
+          "why": "It cannot show a test on a branch."
+        },
+        {
+          "option": "Accept the fixture name `CutoverFixture` alone",
+          "why": "It would let a rule pass without the shapes."
+        },
+        {
+          "option": "Require the retry-after-block landing too",
+          "why": "Outside the brief's three shapes; raises the share."
+        }
+      ]
+    },
+    {
+      "choice": "Add corpus cases and four input-form tags in crates/athena-core/tests/refusal_corpus.rs (INPUT_FORMS 30 to 34), even though that file is not in the reading's deliverable list.",
+      "reason": "Finding 1: `every_acceptance_check_has_a_refusing_corpus_case` (refusal_corpus.rs ~1300) fails when a `step!` check has no corpus case in which it refuses, so the file must change for the test criterion to pass. The request's Files line is `crates/`. The edit is additive test data only.",
+      "rejected": [
+        {
+          "option": "Leave the corpus alone",
+          "why": "cargo test --locked would fail on the mechanism test."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the athena-context change inside that crate: extend `landing_rules_need_a_commit_shape_table_and_a_realistic_fixture` (lib.rs:490) with a short loop asserting PLANNER_FRAME holds `intervention commit`, `records-only commit` and `job landing` separately (the words the check requires), and a comment naming `check_history_fixture` as the mechanical counterpart. No include_str! of athena-core.",
+      "reason": "Finding 5: the frame phrase is already asserted and the step line is pinned in reading.rs; reading another crate's source in reverse dependency order adds little. This keeps lib.rs a deliverable with a minimal, real edit.",
+      "rejected": [
+        {
+          "option": "include_str! of reading.rs from athena-context",
+          "why": "Reverse dependency order for a check already pinned in reading.rs."
+        },
+        {
+          "option": "Edit planner.md or critic.md",
+          "why": "Out of scope and would move the budget lines."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `pub fn check_history_fixture` with a doc comment (root cause, jobs 20261024-153908-1rve, 20261024-154552-e65v, 20261025-012657-hac3, why at the acceptance gate, limits including has_phrase boundaries, no reader rule line because of the reader budget, 'expected 7% of newly refused readings' as an estimate); a private shared gate helper also used by `check_code_survey`; consts for the classification source paths, trigger phrases and fixture shapes; the `step!(check_history_fixture(reading));` line after `check_code_survey`; a mention in the `check_reading_acceptance` doc; unit tests (including the three source-job shapes and the unrelated-readings test); the ENGM fixture test update.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Required by `every_acceptance_check_has_a_refusing_corpus_case` (not in the reading's deliverable list; additive test data only): six corpus cases, four INPUT_FORMS tags (30 to 34), and a `history_fixture_refusal_is_declared_intended` test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased/Added entry naming the root cause, the placement at the reading-stage check, what the check reads and its limits, the 7% estimate, 'higher refusal rate is intended', and that there is no reader rule line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/lib.rs",
+      "action": "modify",
+      "purpose": "Small extension of `landing_rules_need_a_commit_shape_table_and_a_realistic_fixture`: assert the planner frame holds each of the three shape phrases the check requires, with a comment naming `check_history_fixture` as the mechanical counterpart. No cross-crate read.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/test_support.rs",
+      "action": "modify",
+      "purpose": "Module-doc paragraph only: which commit shapes `CutoverFixture` holds, and that a landing/history criterion using it must also name an intervention commit, a records-only commit and the job landing (`check_history_fixture`).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In reading.rs, add a private helper (for example `changes_code_with_behavior_criterion(reading) -> bool`) holding the gate condition now inline in `check_code_survey` (reading.rs:3913-3920) and make `check_code_survey` call it. Behavior stays identical.",
+    "Add consts: the seven classification source paths (full paths); the trigger phrases (`commit shape`, `commit shapes`, `commit-shape`, `pr_commits`, `classify_commit`, `classify_pre_merge`, `history check`, `attribution check`, `records-only commit`, `records only commit`, `trailer`, `trailers`, `--history`, `--attribution`, `--pr-head`); and the fixture shapes with their spellings. No bare `landing`.",
+    "Add `pub fn check_history_fixture(reading: &Reading) -> Result<()>` after `check_code_survey`. Doc comment: root cause (rules derived from the happy-path commit shape; jobs 20261024-153908-1rve, 20261024-154552-e65v, 20261025-012657-hac3); why it sits at the gate where readings are accepted and not at one pr_commits or trailer instance; what it reads (the Reading only); the trigger and the satisfying criterion; its limits (lexical, no negation reading, has_phrase boundaries); that it has no reader rule line because the reader prompt has 3 tokens of headroom, so the refusal message teaches the rule; 'This check refuses more readings; the higher refusal rate is intended.'; and 'expected 7% of newly refused readings' labelled an estimate from HISTORY.txt. Logic: gate helper; trigger = a non-Delete deliverable with an exact listed path, or a criterion (any kind) whose lowercase, white-space-collapsed, straight-apostrophe text has a trigger phrase by `has_phrase`; satisfied when a Behavior criterion holds `realistic`, `fixture`, `intervention commit`, `records-only commit`/`records only commit` and `job landing`/`job's landing`. Otherwise bail with 'the reading was refused because ...' naming the trigger and giving an example criterion.",
+    "Add `step!(check_history_fixture(reading));` right after the `check_code_survey` step in `refusing_check`, and mention [`check_history_fixture`] in the `check_reading_acceptance` doc after the code survey.",
+    "Add the unit tests in the reading.rs tests module: `history_fixture_refuses_a_rule_tested_only_on_job_commits` (message content, spelling variants, near-misses), the three source-job tests (1rve, e65v, hac3, each refused and then accepted) and the criterion-only trailer test, `history_fixture_leaves_unrelated_readings_alone` (including the landing-queue/timing/CI-wait criterion, the athena-data history.rs path, a Delete of land.rs and the real `has_phrase` boundaries), `history_fixture_has_one_step_line`, `history_fixture_refusal_needs_the_step_line` and `history_fixture_doc_and_changelog_name_the_cause`. Update `environment_reach_source_refuses_a_records_branch_read_in_the_engm_shape` with the realistic-fixture Behavior criterion.",
+    "Search the other tests modules, crates/*/tests and athena-agent/src/fake.rs (Grep) for code/tests-class behavior readings that hold a trigger phrase or listed path; update any found (expected: only ENGM).",
+    "In refusal_corpus.rs add the six cases after the code-survey cases (ids in demonstration 6), each from `case`/`base_reading` with class code, a Behavior criterion and a `Code survey:` assumption; the `source` text says the reading is rebuilt from the job brief. Add the tags `landing-history-rule`, `realistic-branch-fixture`, `classification-source-deliverable` and `landing-word-without-commit-shape` to INPUT_FORMS (length 34), tag the cases, and add `history_fixture_refusal_is_declared_intended` like the environment-reach one (line 1390).",
+    "Add the CHANGELOG.md Unreleased/Added entry with the exact phrases the doc test looks for (the cause, `check_history_fixture`, 'happy-path', 'expected 7% of newly refused readings', 'higher refusal rate is intended', 'no reader rule line', the three job ids).",
+    "In athena-context/src/lib.rs, extend the landing-rules test as designed (three shape phrases asserted separately, comment naming `check_history_fixture`). Confirm that no prompt file and no budget line changes.",
+    "Add the test_support.rs module-doc paragraph (documentation only).",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-core reading`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-context`, then `cargo test --locked`. Fix every failure; if a new corpus case is refused by another check, adjust the case, never the check order."
+  ],
+  "risks": [
+    {
+      "risk": "Over-refusal: a code job that touches a listed source for an unrelated reason (for example land.rs for a queue or timing change) is refused and costs a reader retry. HISTORY.txt shows land.rs touched by several such jobs.",
+      "mitigation": "The file list is the exact classification code, the phrase list has no bare `landing`, and the gate is code/tests with a behavior criterion. The refusal message gives an example criterion, so one retry fixes it. The share is declared (7%, estimate) and the replay at verification measures it; above 10% the replay holds the job unless a share is declared."
+    },
+    {
+      "risk": "The reader cannot satisfy the check because it does not know the wording, and there is no reader rule line (the reader has 3 tokens of headroom).",
+      "mitigation": "The error text gives an exact example criterion. Spelling variants (hyphen or space, `job's landing`, curly apostrophe) are accepted. The doc comment and CHANGELOG say openly that the refusal is how readers learn the rule."
+    },
+    {
+      "risk": "A criterion names the three shapes but the test uses a poor fixture, since the check is lexical and cannot read a negation.",
+      "mitigation": "The limit is stated in the doc comment. The criterion must be a Behavior criterion, and the planner/verifier still judge the fixture."
+    },
+    {
+      "risk": "An existing test builds a code/tests reading that holds a trigger phrase or a listed path and now fails.",
+      "mitigation": "The producer searches the tests modules and crates/*/tests for such readings (expected: only ENGM) and runs the full `cargo test --locked`."
+    },
+    {
+      "risk": "A corpus case is refused by an earlier check, so its expected check name is wrong; Accept cases using a deliverable absent from `repo_files()` would be refused by the repo check.",
+      "mitigation": "Cases start from `base_reading` with one field changed; code cases set class code, a Behavior criterion and a `Code survey:` assumption so check_code_survey passes first. Accept cases use phrase triggers and the existing deliverable reading.rs; the Refuse cases for listed source paths are refused by my check before the repo-file check runs. The check order is never changed to fit a case."
+    },
+    {
+      "risk": "This plan changes a reading gate, not a landing or history rule, so the commit-shape table rule does not apply, and no classification function is changed. If the producer touched land.rs or athena-git by mistake the scope would widen.",
+      "mitigation": "Criterion 7 has the verifier read the diff and confirm that only the five planned files changed. The producer still runs the full `cargo test --locked`, which covers every crate that calls those functions."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusing_check step order",
+      "dependent": "crates/athena-core/src/reading.rs `refusing_check` step order and the adjacency tests `check_outcome_state_doc_names_root_cause_and_scope` (about line 8224) and `environment_reach_has_one_step_line` (line 8700)",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading",
+      "reason": "The new step goes right after `check_code_survey`, before `check_design_existing_code`. The only pinned adjacencies are governance to outcome_state and outcome_state to environment_reach, which stay unchanged."
+    },
+    {
+      "name": "corpus coverage rule for every `step!(check_` and every INPUT_FORMS tag",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `every_acceptance_check_has_a_refusing_corpus_case`, `an_extra_check_with_no_case_is_reported`, `no_check_bypasses_refusing_check`, `corpus_covers_the_listed_input_forms` (rule)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus: the new cases make check_history_fixture refuse, and each of the four new tags (landing-history-rule, realistic-branch-fixture, classification-source-deliverable, landing-word-without-commit-shape) is held by at least one case.",
+      "reason": ""
+    },
+    {
+      "name": "reading acceptance for production reads",
+      "dependent": "crates/athena-core/src/reading.rs `Athena::read` call of `check_reading_acceptance` (about line 663), the reader retry on `ReadError::Refused`, and `check_reading_text` (line 4622, used by `athena check-reading`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading and cargo test --locked. The check reads only the Reading, never the repository, records or job state, so the landing path, the drain and `[parallel] max_concurrency` are not reached. A refused reading follows the existing refusal and retry path, which costs one reader retry for a landing/history reading the first time; that is the intent.",
+      "reason": ""
+    },
+    {
+      "name": "replay of accepted readings and the declared share",
+      "dependent": "crates/athena-core/src/reading.rs replay (`replay`, `replay_cases`, `BinaryChecker`, replay tests such as `replay_lists_only_the_requests_the_candidate_newly_refuses` at 9373) and `replay_declaration_of`",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading::tests::history_fixture_doc_and_changelog_name_the_cause (declaration parses as Some(7)) and the existing replay tests under cargo test -p athena-core reading. The replay runs the real gate, so stored accepted landing/history readings may be newly refused; that is the declared share (7%, estimate). Above 10% the replay holds the job unless a share is declared.",
+      "reason": ""
+    },
+    {
+      "name": "gate conditions of the code-survey check, now a shared helper",
+      "dependent": "crates/athena-core/src/reading.rs `check_code_survey` (line 3912) and its tests (about 9930-10123), `code_survey_does_not_apply_outside_its_gate`",
+      "kind": "code",
+      "test": "cargo test -p athena-core code_survey",
+      "reason": "The helper holds exactly the old condition (capability set, no question, class code/tests, a behavior criterion), so behavior is unchanged."
+    },
+    {
+      "name": "ENGM fixture criterion 'The history check reads the job records on the records branch'",
+      "dependent": "crates/athena-core/src/reading.rs test `environment_reach_source_refuses_a_records_branch_read_in_the_engm_shape` (line 8485; ENGM_CRITERION contains 'history check')",
+      "kind": "code",
+      "test": "cargo test -p athena-core reading::tests::environment_reach_source_refuses_a_records_branch_read_in_the_engm_shape: the test gains the realistic-fixture Behavior criterion so check_environment_reach stays its refuser.",
+      "reason": ""
+    },
+    {
+      "name": "existing corpus cases that carry 'history check' or code class",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs environment cases 'environment-records-branch-read-*' (about lines 962-990) and `code-reading-with-a-survey` (line 706)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": "The records-branch cases have class docs, so the new check's code/tests gate does not apply. `code-reading-with-a-survey` has class code but its criterion ('A retry reading that omits the prior job id is refused by cargo test') holds no trigger phrase and its deliverable is docs/guide.md."
+    },
+    {
+      "name": "readings produced by fake agents in end-to-end tests",
+      "dependent": "crates/athena-cli/tests/common/mod.rs (fake reader class docs) and crates/athena-agent/src/fake.rs (fake reader class docs/other, content criteria)",
+      "kind": "code",
+      "test": "cargo test --locked",
+      "reason": "They are docs/other class with content criteria, so the class and criterion-kind gate keeps the check from firing; no listed path or phrase appears in them."
+    },
+    {
+      "name": "reader rule lines and token budgets",
+      "dependent": "crates/athena-context/src/briefs.rs `the_reader_brief_names_each_reading_rule_in_one_short_line` (line 4401; READING_RULES length 7 at line 4423) and docs/system-facts.md budget reader 1997 of 2000, `system_facts_budgets_match_computed`",
+      "kind": "rule",
+      "test": "cargo test -p athena-context",
+      "reason": "No prompt or brief constant is edited, so READING_RULES, the budgets and the budget test are unchanged. The briefs.rs list (line 4411) only checks that named checks have rules; it has no assertion that every check is listed, so the missing rule line does not fail it. The gap is documented in the check's doc comment and the CHANGELOG, as the critic asked."
+    },
+    {
+      "name": "planner/critic guidance on the commit-shape table and realistic-branch fixture",
+      "dependent": "crates/athena-context/src/lib.rs `landing_rules_need_a_commit_shape_table_and_a_realistic_fixture` (line 490) and crates/athena-context/prompts/planner.md:16 / critic.md:14",
+      "kind": "rule",
+      "test": "cargo test -p athena-context landing_rules: the test gains an assertion that the planner frame holds `intervention commit`, `records-only commit` and `job landing`. The prose is unchanged.",
+      "reason": ""
+    },
+    {
+      "name": "shared cutover fixture module doc",
+      "dependent": "crates/athena-core/src/test_support.rs `CutoverFixture` and its users crates/athena-cli/tests/cutover_fixture.rs, reconcile.rs, trailer_stop.rs",
+      "kind": "code",
+      "test": "cargo test --locked",
+      "reason": "Only a documentation paragraph is added: which shapes the fixture holds and which a landing/history criterion must add. No code or history construction changes."
+    },
+    {
+      "name": "changelog text",
+      "dependent": "CHANGELOG.md Unreleased/Added and the tests that read it (reading.rs `code_survey_refusal_is_declared_intended`, corpus `environment_reach_refusal_is_declared_intended`, the new doc test)",
+      "kind": "code",
+      "test": "cargo test -p athena-core history_fixture_doc_and_changelog_name_the_cause",
+      "reason": "The existing tests look for phrases of their own entries; a new entry cannot break them. The new entry carries its own phrases for the new doc test."
+    },
+    {
+      "name": "classification and landing code that the trigger list names",
+      "dependent": "crates/athena-core/src/land.rs `pr_commits`/`classify_commit`, crates/athena-gate/src/invariant.rs `classify_pre_merge`, crates/athena-git/src/attrs.rs `classify`, crates/athena-core/src/reconcile.rs (merge_method_follows_the_commit_shape)",
+      "kind": "code",
+      "test": "cargo test --locked",
+      "reason": "None of these is modified. They are only named in the trigger's path list as data, so their behavior, callers and the landing and drain paths are unaffected."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test `history_fixture_doc_and_changelog_name_the_cause` in the reading.rs tests module, in the style of `environment_reach_doc_and_changelog_name_the_cause` (reading.rs:8728): it takes the `///` lines directly above `pub fn check_history_fixture(` from include_str!(\"reading.rs\"), collapses white space, and asserts the text holds the three job ids, 'happy-path', 'where readings are accepted', 'This check refuses more readings; the higher refusal rate is intended.', 'no reader rule line', 'expected 7% of newly refused readings' and 'estimate'. It asserts `replay_declaration_of` of a criterion with that sentence gives `share == Some(7)`, and that the source holds the exact signature `pub fn check_history_fixture(reading: &Reading) -> Result<()>`.",
+      "command": "cargo test -p athena-core history_fixture_doc_and_changelog_name_the_cause",
+      "observes": "The doc comment names the root cause and the three jobs, states why the check sits where readings are accepted, and declares a whole-percent share that the replay parser reads as 7.",
+      "fails_without": "Without the function or with a doc that omits the cause, jobs, or whole-percent declaration, the include_str! split finds no doc lines or the contains assertions fail.",
+      "seam": "Production function `check_history_fixture` and `replay_declaration_of` (exists, used by the environment_reach doc test at reading.rs:8696). Source read through include_str!(\"reading.rs\"), as the existing doc tests do. No fake. Step 3 adds the function and doc."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit test `history_fixture_has_one_step_line`, shaped like `environment_reach_has_one_step_line` (reading.rs:8700): take the `refusing_check` body, keep lines starting `step!(check_`, assert exactly one equals `step!(check_history_fixture(reading));` and that it comes directly after `step!(check_code_survey(reading));`, and that the text before `check_reading_acceptance` mentions [`check_history_fixture`]. The corpus mechanism test `every_acceptance_check_has_a_refusing_corpus_case` also confirms the name through `Expected::Refuse(\"check_history_fixture\")` on the new cases.",
+      "command": "cargo test -p athena-core history_fixture_has_one_step_line",
+      "observes": "The step line exists once, right after the code-survey step, and the acceptance doc lists the check, so the first-failure name comes from stringify!.",
+      "fails_without": "Deleting or moving the step line, or adding a direct call outside refusing_check, makes the count or position assertion fail.",
+      "seam": "Source text of `refusing_check` read via include_str!(\"reading.rs\"), exactly as the existing step-line test does (exists). Step 4 adds the step line. No fake."
+    },
+    {
+      "criterion": 3,
+      "method": "New unit tests in the reading.rs tests module, driven through production `check_reading_acceptance` and `refusing_check` using the existing helpers `code_reading`, `add_behavior`, `accept` and `refuser`. (a) `history_fixture_refuses_a_rule_tested_only_on_job_commits`: a code reading with the SURVEY assumption and a Behavior criterion such as 'Run `cargo test -p athena-core land::`: pr_commits accepts the job commits' is refused with `refuser == Some(\"check_history_fixture\")`; the error holds 'was refused', 'realistic-branch fixture', 'intervention commit', 'records-only commit', 'job landing'. After adding the Behavior criterion 'Run `cargo test -p athena-core --test reconcile`: the realistic-branch fixture holds an intervention commit, a records-only commit and the job landing, and the rule classifies each', `refuser` is None and `accept` is Ok. Spelling variants (`records only commit`, `job's landing`, curly apostrophe, extra white space) are accepted; a Content-kind fixture criterion, a criterion missing one shape, and a criterion without 'fixture' stay refused. (b) The three source-job shapes, each refused without and accepted with the fixture criterion: `history_fixture_job_1rve_shape` (deliverables land.rs, gh.rs, invariant.rs, docs/design/records-history.md, CHANGELOG.md; criterion on pr_commits content classification), `history_fixture_job_e65v_shape` (land.rs, invariant.rs; criterion that the reconcile merge method follows the commit shape), `history_fixture_job_hac3_shape` (commits.rs, manage.rs, an athena-git attrs.rs, status.rs, auditor.rs; criterion that no Athena trailers are written after C0), plus a criterion-only trigger test where the deliverables are manage.rs and status.rs and the criterion says 'trailer'. (c) `history_fixture_refusal_needs_the_step_line` greps the `refusing_check` body for the step and fails if it is removed.",
+      "command": "cargo test -p athena-core reading::tests::history_fixture",
+      "observes": "A code reading for a landing, history or attribution rule, in the shape of each of the three source jobs, is refused with an actionable message when no criterion names a realistic-branch fixture with the three shapes, and is accepted once one does.",
+      "fails_without": "Removing the step line makes `refuser` return None, so the `Some(\"check_history_fixture\")` and `accept(..).is_err()` assertions fail in every one of these tests. Removing the trigger logic fails the same assertions. Removing the Behavior-kind or shape tests fails the near-miss assertions.",
+      "seam": "Entry points `check_reading_acceptance` (reading.rs:3199) and `refusing_check` (reading.rs:3227). Input is a plain `Reading` built by the existing `code_reading` (9901), `add_behavior` (8005), `accept` (9921) and `refuser` (8362) helpers, all read in the file. No fake or injection; the logic under test stays in the production check. Step 5 adds the tests; the source-job readings are rebuilt from the deliverable lists in the brief, not the original readings."
+    },
+    {
+      "criterion": 4,
+      "method": "New test `history_fixture_leaves_unrelated_readings_alone` in reading.rs asserts `check_history_fixture(r).unwrap()` and `refuser(r) != Some(\"check_history_fixture\")` for: a docs-class reading with a behavior criterion 'The history check reads the job records on the records branch'; a code reading touching reading.rs with the stock `cargo test` criterion; a code reading touching gh.rs and gh/landing.rs with a criterion about the FIFO landing queue, landing time and waiting for the early CI run; a code reading touching crates/athena-data/src/history.rs and crates/athena-gate/src/reconcile.rs; a tests-class reading touching none of the listed files; a Delete deliverable of land.rs; a decline (capability None); a question reading; a content-only code reading that names the `history check`; and the boundary behavior `has_phrase` really has ('trailing' and 'trailered' do not match; 'trailer_x' and 'trailer-x' do). The same command also runs every existing reading test, including the replay tests (for example `replay_lists_only_the_requests_the_candidate_newly_refuses`, reading.rs:9373) and the refusal-rate tests. Corpus companion, run by the producer and the verifier: `cargo test -p athena-core --test refusal_corpus`; the new accept cases are `landing-queue-reading-is-not-refused` and `docs-reading-naming-the-history-check`, and the existing accept cases include `code-reading-with-a-survey` (refusal_corpus.rs:706) and the environment-records-branch docs cases (about lines 962-990).",
+      "command": "cargo test -p athena-core reading",
+      "observes": "The new check does not fire outside its gate or on common-word landing readings, and the existing replay and refusal-rate tests still pass.",
+      "fails_without": "A trigger that is too wide (bare `landing`, any class, bare `history.rs`, any gh.rs deliverable) would refuse one of the listed readings and fail `history_fixture_leaves_unrelated_readings_alone`; an existing replay test fails if the check newly refused its accepted readings.",
+      "seam": "`check_history_fixture` and `refusing_check` over `Reading` values from the existing `code_reading`, `scoped_reading` and `behavior_reading` helpers. The replay tests use the real `check_reading_text` (reading.rs:4622). No fake. Step 5 adds the test."
+    },
+    {
+      "criterion": 5,
+      "method": "Update the one existing test reading that legitimately names a history rule: `environment_reach_source_refuses_a_records_branch_read_in_the_engm_shape` (reading.rs:8485; ENGM_CRITERION 'The history check reads the job records on the records branch' now triggers the new check) gets a Behavior criterion naming the realistic-branch fixture with the three shapes. Step 6 searches the other tests modules, crates/*/tests and the fake reader (athena-agent/src/fake.rs) for code/tests-class behavior readings that hold a trigger phrase or a listed path; the refusal corpus (class docs) and the CLI fake readings (docs/other, content criteria) are outside the gate. The CHANGELOG.md Unreleased/Added entry names the root cause (rules derived from the happy-path commit shape, the three jobs), the placement at the reading-stage check, 'expected 7% of newly refused readings', 'the higher refusal rate is intended', and that the check has no reader rule line because of the reader budget. The doc test from criterion 1 asserts those phrases in the changelog item after collapsing white space.",
+      "command": "cargo test -p athena-core reading::tests::environment_reach_source_refuses_a_records_branch_read_in_the_engm_shape",
+      "observes": "The existing fixture still reaches `check_environment_reach` as its refuser (not `check_history_fixture`), and the changelog entry names the cause (checked by the criterion 1 command).",
+      "fails_without": "Without the fixture criterion the test's first assertion sees `check_history_fixture` as the refuser instead of `check_environment_reach`.",
+      "seam": "Existing test driving `refuser` (exists); the CHANGELOG is read through include_str!(\"../../../CHANGELOG.md\") as `environment_reach_doc_and_changelog_name_the_cause` does (exists)."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks, plus the targeted suites. The refusal corpus gains cases (ids to add): `landing-rule-on-job-commits-only-job-1rve` (code, survey, pr_commits criterion, Refuse check_history_fixture), `classification-source-deliverables-without-a-fixture-job-e65v` (land.rs and invariant.rs deliverables, neutral criterion, Refuse check_history_fixture), `trailer-cutover-reading-without-a-fixture-job-hac3` (commits.rs and athena-git attrs.rs deliverables, trailer criterion, Refuse check_history_fixture), `landing-rule-with-a-realistic-branch-fixture` (Accept), `landing-queue-reading-is-not-refused` (Accept) and `docs-reading-naming-the-history-check` (Accept). Four input-form tags are added and INPUT_FORMS goes from 30 to 34. The producer and verifier run `cargo test -p athena-core --test refusal_corpus` and `cargo test -p athena-context landing_rules`. I read the corpus structure and the existing case ids; I did not run anything.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "Formatting, lints and the whole workspace test suite pass with the new check, corpus cases, athena-context assertion and test_support.rs doc paragraph in place.",
+      "fails_without": "Without the corpus cases, `every_acceptance_check_has_a_refusing_corpus_case` fails; if INPUT_FORMS keeps length 30 the file does not compile; an untagged form fails `corpus_covers_the_listed_input_forms`.",
+      "seam": "Whole workspace. The corpus runs `refusing_check` through its existing `run` helper (refusal_corpus.rs:1181) and the `case` and `base_reading` builders (exist). Step 7 adds the cases, tags and a `history_fixture_refusal_is_declared_intended` test."
+    },
+    {
+      "criterion": 7,
+      "method": "The criterion 1 doc/changelog test asserts the doc comment and the changelog item explain the cause: 'derived from the happy-path commit shape' and 'where readings are accepted', and state that the fix is not a `pr_commits` or trailer change. The verifier also reads the diff to confirm that no file under crates other than reading.rs, refusal_corpus.rs, athena-context/src/lib.rs and test_support.rs changed (no land.rs, gh.rs, invariant.rs, commits.rs or athena-git file), plus CHANGELOG.md. The producer's change description repeats the root cause and the reason for fixing it at the reading-stage check, not at one pr_commits or trailer instance.",
+      "command": "cargo test -p athena-core history_fixture_doc_and_changelog_name_the_cause",
+      "observes": "Doc comment and changelog name the happy-path cause and the placement reason; `git diff` of the job (a command the verifier may run) lists only the five planned files.",
+      "fails_without": "A doc or changelog without the cause or placement sentence fails the contains assertions; a diff that touches land.rs, gh.rs, invariant.rs, commits.rs or athena-git contradicts the criterion.",
+      "seam": "Same as criterion 1 (include_str! of reading.rs and CHANGELOG.md); the diff check uses git diff on the job branch. No fake."
+    }
+  ],
+  "open_questions": [
+    "User: Is the declared 'expected 7% of newly refused readings' acceptable? It is an estimate from HISTORY.txt (15 of the last 200 commits touched a listed classification source, 7.5%), not a measurement over stored readings; the replay at verification measures the real share."
+  ],
+  "producer_section_sha256": "a67a308e381b51eba79d930c5628f80cb03819800a641443baf1a0121ab4f732"
+}

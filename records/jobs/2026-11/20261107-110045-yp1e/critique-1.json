@@ -1,0 +1,55 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-110045-yp1e",
+  "round": 1,
+  "at": "2026-11-07T17:17:53.182668031Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/tests/refusal_corpus.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/tests/refusal_corpus.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The bare word `landing` triggers the check, so code readings about landing queues, timing, CI waits or config checks that are not commit-shape rules get refused.",
+      "evidence": "I read HISTORY.txt: about 12 of the last 200 commit subjects contain 'landing', for example 6e7fd3a 'Add stack-aware plan_rebase … for landing', e15681f 'Add FIFO LandingQueue to Drain landing', 47cadfa 'Measure landing time to the landing record', c7c4157 'Wait for the early CI run before pushing the landing commit', 1676fe9 'Check config edits … not only at landing'. Their behavior criteria would plausibly say 'landing' and would be refused with a demand for an intervention commit, a records-only commit and the job landing that does not apply. This is the common-word false positive the soundness brief warns about, and it makes the declared 'expected 3%' (unmeasured) likely too low. Fix: Drop bare `landing` as a trigger. Trigger on phrases specific to commit classification ('commit shape', 'pr_commits', 'history check', 'attribution check', 'landing commit', 'records-only', 'classif* … commit', 'trailer'), or require `landing` together with a commit or classification word. Count how many HISTORY.txt subjects the chosen trigger would hit and base the declared N% on that count, labelled as an estimate.",
+      "location": "Plan: trigger phrases (Approach; Step 2), and the 3% declaration",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The file trigger misses where the source jobs actually changed code, and no test checks readings in the shape of the three source jobs.",
+      "evidence": "Classification code lives in crates/athena-core/src/land.rs:212 `pr_commits` and :229 `classify_commit`, crates/athena-gate/src/invariant.rs:320 `classify_pre_merge`, crates/athena-git/src/attrs.rs:46 `classify`, and reconcile (crates/athena-core/src/reconcile.rs:652 `merge_method_follows_the_commit_shape`). Job 20261025-012657-hac3 changed commits.rs, manage.rs and athena-git, none of which is in the file list, and the phrase list has no 'trailer' or 'reconcile'. Introspection q0pp traced its miss to the reconcile tests. The only refusal demonstration is an invented `land::` criterion, so criterion 3's 'for the cause and not only for one job' is not shown. Meanwhile `history.rs` also matches crates/athena-data/src/history.rs, a record-schema module, which is a false positive. Fix: Base the file trigger on where the classification functions live (land.rs, invariant.rs, athena-git/src/attrs.rs, commits.rs, reconcile.rs), matched by crate and path rather than bare file name, so athena-data's history.rs is excluded. Add refusal tests (and corpus cases) built from the deliverables and criterion wording of each of the three source jobs (1rve, e65v, hac3), each refused without the realistic-fixture criterion and accepted with it.",
+      "location": "Plan: deliverable trigger (Step 2) and Demonstration for criterion 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The planned assertion that `landing_x` does not match contradicts the existing `has_phrase`.",
+      "evidence": "reading.rs:3752-3757: `has_phrase` checks only `char::is_alphanumeric` on each side, and `_` and `-` are not alphanumeric. So 'landing_x' and 'landing-intent' both count as 'landing', and that test would fail as planned. Fix: Either drop the `landing_x` near-miss, or (better, with finding 1) stop triggering on bare `landing`, and state the boundary behavior that `has_phrase` actually has.",
+      "location": "Plan: Demonstration for criterion 4 ('landings'/'landing_x' have no whole-word match)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The athena-context test adds little: the planner-frame phrase is already asserted, and the step line is already pinned in reading.rs.",
+      "evidence": "crates/athena-context/src/lib.rs:493-505 already asserts PLANNER_FRAME contains 'an intervention commit, a records-only commit and the job landing'. The planned `include_str!(\"../../athena-core/src/reading.rs\")` reads another crate's source in reverse dependency order only to re-check a step line that `history_fixture_has_one_step_line` in reading.rs already pins. Fix: Keep the lib.rs change minimal: either skip it and say the existing test covers the prose, or add a short comment naming `check_history_fixture` as its mechanical counterpart. Avoid reading athena-core source from athena-context.",
+      "location": "Plan: Files, crates/athena-context/src/lib.rs (Decision 5)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The new check breaks the convention that every reading check has a reader rule line, and the plan does not say so.",
+      "evidence": "briefs.rs:4411 carries the comment 'Each reading check in athena-core has its rule.' and lists the check names. The plan adds a check without a rule line, so every qualifying reading learns the rule only through a refusal and a reader retry. Fix: Say in the doc comment and the CHANGELOG that `check_history_fixture` has no reader rule line because of the reader budget (1997 of 2000), and that the refusal message is how readers learn it. Optionally add it to the briefs.rs test as a named exception so the gap is explicit.",
+      "location": "Plan: Decision 1, rejected reader rule line; crates/athena-context/src/briefs.rs:4411",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan puts the fix in the right place: one `step!(check_history_fixture(reading))` line in `refusing_check` (reading.rs:3227), right after `check_code_survey` (line 3912). The seams it names exist: `refuser`, `code_reading`, `add_behavior`, `accept`, `ENGM_CRITERION` at line 8483, and the corpus tests. It correctly sees that the ENGM fixture and the corpus need updating because the new step runs before `check_environment_reach`. No athena.toml field or external service is involved, and the work fits one producer run. The trigger is unsound in two ways. (1) The bare word `landing` triggers the check, and in this repository it mostly names queue, timing and CI-wait work, not commit-shape rules. About 12 of the 200 HISTORY.txt subjects contain it (for example \"FIFO LandingQueue\", \"Measure landing time\", \"Wait for the early CI run before pushing the landing commit\"), so the declared 3% (an unmeasured estimate) looks low and false positives are likely. (2) The file trigger (land.rs, history.rs, attribution.rs, invariant.rs) misses where two of the three source jobs changed code: commits.rs, athena-git's attrs.rs `classify`, and the reconcile tests. No demonstration builds readings in the shape of those three jobs, so criterion 3's \"for the cause and not only for one job\" goes unshown. One planned test assertion (`landing_x` does not match) contradicts the existing `has_phrase`, which treats `_` as a word boundary. Verdict: revise."
+}
