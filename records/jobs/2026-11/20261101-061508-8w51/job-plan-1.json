@@ -1,0 +1,274 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261101-061508-8w51",
+  "round": 1,
+  "at": "2026-11-07T13:34:27.770955041Z",
+  "invocation_seq": 2,
+  "approach": "Add one reading check, `check_environment_reach(reading: &Reading) -> Result<()>`, in crates/athena-core/src/reading.rs, modelled on `check_code_survey` (label-prefixed assumption, gating on capability and no question), and register it as a single `step!(check_environment_reach(reading));` line in `refusing_check` right after `check_outcome_state`. The check reads only the reading (deliverable paths, criteria, summary, assumptions), never the request or the repo. It finds two triggers. (A) Site-action: a deliverable under `.github/workflows/`, or a criterion naming a push, `origin`, `remote`, `gh`, or a pull request. (B) Unreachable source: a criterion or the summary citing job records, job or commit or git history, the records branch or `athena/records` as a source. A reading with a trigger must carry an `Environment:` assumption that names a site (CI job, runner, producer snapshot, local, host and so on), a permission (read or write) and the data or refs reached. For a host action (push, origin, remote, gh, pull request) it must also state the no-origin case. For case B it must also quote at least one figure inline or name a reachable file path, which is not under records/ or athena/records. The doc comment names the root cause and the three jobs. The reader brief gets one rule line, and the corpus gets refuse and accept cases. Two existing tests that accepted workflow deliverables get an `Environment:` assumption. Nothing else changes: no record schema, no data file, no prompt file, no governance file.\n\nRoot cause, as the doc comment and changelog will state it: the reading stage had no step asking who performs each action, where, with what permissions, and what data it reaches. The check lives at the reading gate because that is the stage that assigns the actions. It is a gate step and not a patch for one job.",
+  "decisions": [
+    {
+      "choice": "Implement the rule as a lexical check on the reading's own fields, with the `Environment:` assumption label, in `refusing_check` as one `step!` line placed after `check_outcome_state`.",
+      "reason": "`check_code_survey` (reading.rs:3910) and `check_design_existing_code` (reading.rs:4033) already enforce a label-prefixed assumption the same way, with no model call and no repo read. A `step!` line is what the corpus mechanism (`every_acceptance_check_has_a_refusing_corpus_case`, refusal_corpus.rs:1061) tracks. After outcome_state keeps the test `check_outcome_state_doc_names_root_cause_and_scope` (reading.rs:7725), which pins outcome_state right after governance, passing. It also leaves the anchor line `step!(check_reading_references(` that `an_extra_check_with_no_case_is_reported` (refusal_corpus.rs:1083) needs.",
+      "rejected": [
+        {
+          "option": "Add an `environment` field to the Reading record",
+          "why": "It changes the record schema (`deny_unknown_fields`, records.rs:444) and the reader output schema, and touches stored records. The request says no record or data file is added."
+        },
+        {
+          "option": "A checked-in environment-capabilities table file, as introspection 20261024-220314-yjtg proposed",
+          "why": "Out of scope: the brief excludes any table, record or data file. The reader states the environment per reading, and the gate checks that it did."
+        },
+        {
+          "option": "Fold the rule into `check_code_survey`",
+          "why": "That check applies only to class code or tests with a behavior criterion. Job 20261025-034247-nm0k was a docs reading, and a workflow deliverable can sit in any class."
+        },
+        {
+          "option": "Trigger on the request text",
+          "why": "The action is assigned in the reading's criteria and deliverables, so that is where to look. Request words already feed the governance and outcome checks, and a request may mention push without the reading assigning it."
+        },
+        {
+          "option": "Also scan assumptions for triggers",
+          "why": "The `Environment:` assumption itself must say push, origin and records, so scanning it would trigger on its own repair text."
+        }
+      ]
+    },
+    {
+      "choice": "Trigger A fires on a deliverable path starting `.github/workflows/` (any action) or a criterion word: push, pushes, pushed, pushing, origin, remote, remotes, gh, or the pair pull + request(s). Words are whole lowercase alphanumeric tokens.",
+      "reason": "This matches the two environment-dependent shapes in the brief (CI workflow, external host action). Whole-token matching keeps `originates`, `ghost`, `pushdown` and `remotely` from triggering. No reading fixture in the repo that is accepted through the gate has these words in a criterion or summary; I grepped reading.rs, the corpus, the fake reader and the CLI test helpers. The two tests that do have workflow deliverables (reading.rs:7451, 7492) are updated.",
+      "rejected": [
+        {
+          "option": "Match substrings",
+          "why": "`origin` would hit 'originates', and the root-cause bullet 'fixed where it originates' sits in the corpus's root_cause_request, so it would refuse an unrelated reading."
+        },
+        {
+          "option": "Include the bare word `records` or the path `records/` in trigger B",
+          "why": "Too common (`AnyRecord`, 'records validation'). B uses the phrases job records, job history, commit history, git history, git log, records branch and athena/records."
+        }
+      ]
+    },
+    {
+      "choice": "An `Environment:` assumption is complete when its own words hold a site word, a permission word and a data word from three fixed lists. A host action also needs the origin word with a no/without/missing/absent/none/non word. Case B also needs a number of 1–5 digits (a quoted figure) or a file path with a data/doc extension that is not under records/ or athena/records.",
+      "reason": "A mechanical test of 'who/where, what permissions, what data reached' that the reader can satisfy from one sentence, and a refusal text that names which part is missing. The 1–5 digit limit avoids counting the 6- and 8-digit parts of a job id as a figure. The host-action case list carries the 20261025-070538-8ra0 prevention (no origin, non-GitHub origin, GitHub origin). The inline-or-file rule carries the 20261025-034247-nm0k prevention.",
+      "rejected": [
+        {
+          "option": "Accept any non-empty `Environment:` assumption",
+          "why": "The reader could write 'Environment: fine' and the gate would pass a reading that never says who runs it or what it reaches."
+        },
+        {
+          "option": "A free-text judge by a model call",
+          "why": "It adds cost and non-determinism to a gate that today runs no model call, and it is hard to pin in the corpus."
+        }
+      ]
+    },
+    {
+      "choice": "Add one rule line to `READING_RULES` in briefs.rs (array length 6 to 7) and update the briefs.rs tests that count it. The line is at most 220 characters; the existing test caps rule lines at 220.",
+      "reason": "The reader writes the assumption only if told. The briefs sit outside the budgeted prompt sets (system-facts: 'Their briefs ... sit outside these sets'), so the budget lines in docs/system-facts.md do not move. Prompt files are not edited because the reader set is 1997 of 2000.",
+      "rejected": [
+        {
+          "option": "Edit crates/athena-context/prompts/reader.md",
+          "why": "No token headroom (budget reader: 1997 of 2000), and prompt files are out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Declare the higher refusal rate in the doc comment, the changelog and criterion 6, expected 8% of newly refused readings, and add a corpus test that pins the doc and changelog wording, as `design_existing_code_refusal_is_declared_intended` (refusal_corpus.rs:1102) does for the design check.",
+      "reason": "The replay holds a candidate that newly refuses more than 10% unless the share is declared. The wording tests make the declaration part of the gate.",
+      "rejected": []
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `check_environment_reach` and its helpers (`environment_assumptions`, token and phrase helpers, word lists, `names_reachable_file`) next to `check_code_survey`. The doc comment names the root cause (no step asking who performs each action, where, with what permissions, and what data it reaches), cites jobs 20261024-220048-engm, 20261025-070538-8ra0 and 20261025-034247-nm0k, gives the triggers and the limits, and carries the sentences 'This check refuses more readings; the higher refusal rate is intended.' and 'expected 8% of newly refused readings'. Add the line `step!(check_environment_reach(reading));` after `check_outcome_state` in `refusing_check`. Add the unit tests and update the two workflow-deliverable tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add refuse and accept corpus cases for `check_environment_reach` to `reading_check_cases()`, add the new form tags to `INPUT_FORMS` with the array length raised to match, and add `environment_reach_refusal_is_declared_intended`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add one `READING_RULES` line for `check_environment_reach` (array length 6 to 7; line at most 220 bytes) telling the reader to write an `Environment:` assumption, and update `the_reader_brief_names_each_reading_rule_in_one_short_line` (count 7, the new check in its list, a section size bound set from the measured size).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Under `## [Unreleased]` / `### Added`, add an entry that names the root cause and the three jobs, describes the triggers, the `Environment:` assumption and the figures-or-file rule, and says the check refuses more readings, the higher refusal rate is intended, expected 8% of newly refused readings.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In reading.rs next to `check_code_survey` (line ~3910), add `environment_assumptions(reading)` (assumptions whose trimmed text starts with 'environment:' in any case, as `code_surveys` at line 3828 does), a lowercase alphanumeric tokenizer, the three word lists (site, permission, data), the host-action detector (push/pushes/pushed/pushing, origin, remote, remotes, gh, or pull followed by request/requests, whole tokens over criteria text), the workflow detector (a deliverable path starting `.github/workflows/`, any action), the unreachable-source detector (token-sequence phrases job records, job history, commit history, git history, git log, records branch, athena records, over criteria and the summary), and `names_reachable_file` / `quotes_figures` for case B (a file token with a .md/.json/.jsonl/.txt/.csv/.toml/.rs/.yml/.yaml extension that is not under records/ or athena/records; or a purely numeric token of 1–5 digits).",
+    "Add `pub fn check_environment_reach(reading: &Reading) -> Result<()>`. It returns Ok when the capability is None, a question is set, or no trigger fires. Otherwise it needs one complete `Environment:` assumption: a site word, a permission word and a data word; for a host action also the origin-or-remote word with a no/without/missing/absent/none/non word; for case B also a quoted figure or a reachable file. On failure it bails with one line starting 'the reading was refused because', naming the trigger found and the missing parts, and telling the reader to add an assumption that starts `Environment:`. The doc comment follows the style of `check_code_survey`: root cause (no step asking who performs each action, where, with what permissions, and what data it reaches), the three jobs, the triggers, the limits (lexical; the bare word `records` is not a trigger), the replay hold sentences ('This check refuses more readings; the higher refusal rate is intended.' and 'expected 8% of newly refused readings'), and what the error says. Add `step!(check_environment_reach(reading));` directly after `step!(check_outcome_state(reading, request));` in `refusing_check`; also mention `check_environment_reach` in the `check_reading_acceptance` doc as the other checks are.",
+    "In the reading.rs `mod tests`, add a helper `with_environment(reading, text)` and the tests: `environment_reach_*` for workflow, host action and incomplete assumption (criterion 3); `environment_reach_source_*` for the three job shapes, every B phrase and the figure and file alternatives (criterion 4); `environment_reach_accepts_*` for plain docs, trigger words inside other words, declined and question readings, and the label forms (criterion 6); `environment_reach_has_one_step_line` and `environment_reach_doc_and_changelog_name_the_cause` (criteria 1 and 2). Edit the `named` reading at line 7451 and `with_workflow` at line 7492 to carry a complete `Environment:` assumption (a shared const), so those accept tests still hold.",
+    "In crates/athena-core/tests/refusal_corpus.rs add to `reading_check_cases()` the cases `environment-ci-workflow-without-an-environment` (refuse), `environment-ci-workflow-with-an-environment` (accept), `environment-host-action-without-an-environment` (refuse), `environment-host-action-with-origin-cases` (accept), `environment-records-source-without-figures` (refuse), `environment-records-source-with-quoted-figures` (accept), `environment-records-source-with-a-reachable-file` (accept), `environment-trigger-words-only-inside-other-words` (accept). Each is built with `case(..)` from a one-line request with 0 bullets (or with `- ` bullets and the matching `bullets_expected`), changes one field of `base_reading`, and carries source text and form tags. Add the tags `ci-workflow-deliverable`, `host-action-criterion`, `records-source-citation`, `environment-assumption` and `trigger-word-inside-other-word` to `INPUT_FORMS` and raise the array length from 23 to match. Add `environment_reach_refusal_is_declared_intended` modelled on `design_existing_code_refusal_is_declared_intended`: the step is in `acceptance_check_names`, the doc comment holds the needles, and the changelog holds them.",
+    "In crates/athena-context/src/briefs.rs add the rule line before the 'Valid reading' line and change `READING_RULES: [&str; 6]` to 7. Update `the_reader_brief_names_each_reading_rule_in_one_short_line`: add `check_environment_reach` to its check list, `assert_eq!(READING_RULES.len(), 7)`, and the section size bound set just above the measured size (the current bound is 2400 and the new line adds about 215 bytes). Keep the 220-byte line cap.",
+    "In CHANGELOG.md add the entry at the top of `## [Unreleased]` / `### Added`: the root cause, the jobs, the triggers, the `Environment:` assumption, the figures-or-file rule, the limits, and 'refuses more readings; the higher refusal rate is intended; expected 8% of newly refused readings'.",
+    "Run `cargo test -p athena-core`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-context`, then `cargo fmt --all --check`, `cargo clippy --workspace --all-targets` and `cargo test --workspace`. Fix any fixture reading elsewhere that the new rule refuses by adding an `Environment:` assumption to it, never by weakening the check."
+  ],
+  "risks": [
+    {
+      "risk": "False positives: a docs or code reading that mentions 'push' or 'remote' in a criterion for an unrelated reason is refused.",
+      "mitigation": "Triggers are whole-token matches on criteria, the summary and deliverable paths. They skip assumptions, out_of_scope and the request text. The accept tests in criterion 6 cover 'originates', 'ghost', 'pushdown' and 'remotely'. The declared share of 8% is for the replay hold, and a full `cargo test --workspace` run checks the fixtures in every crate."
+    },
+    {
+      "risk": "The lexical lists are gameable: an `Environment:` sentence can hold the right words and still be wrong.",
+      "mitigation": "The check cannot know the facts; it only makes the reader state them. The three word lists and the figure/file rule are fixed and tested, and the refusal text names exactly what is missing. The doc comment states that the check is lexical, which is the same level of check as the 'Code survey:' rule. A later change can tighten the lists, with cases."
+    },
+    {
+      "risk": "Existing tests that accept workflow-deliverable readings fail once the step exists.",
+      "mitigation": "The plan lists those two tests (reading.rs:7451, 7492) as edits. The producer must run `cargo test -p athena-core` and fix any other fixture the run reveals with an `Environment:` assumption, not by weakening the check."
+    },
+    {
+      "risk": "The new rule line pushes the briefs.rs rule section over its size bound or the 220-byte cap.",
+      "mitigation": "The brief's own test caps rule lines at 220 bytes and the section size is bounded. The producer measures the section size, sets the bound just above it, and keeps the line short. The line is: 'Environment: an action on CI, a push or pull request, or a source in job records or history needs an `Environment:` assumption naming site, read/write permissions and data it reaches (`check_environment_reach`).'"
+    },
+    {
+      "risk": "The new text trips the boundary scan (banned words about who runs Athena) or the personal-data allow-list.",
+      "mitigation": "The check reads only deliverable paths, criteria, summary and assumptions, as `check_code_survey` does. The producer must not paraphrase who runs Athena in any new text. The word lists use CI and host vocabulary (ci, runner, producer, snapshot, local, host, github) and avoid the banned list, and the full workspace test run includes the boundary scan."
+    },
+    {
+      "risk": "A new corpus case is refused by an earlier check (governance, repo paths, references) and so does not exercise the new step.",
+      "mitigation": "The corpus accept cases use only docs/design/roadmap.md, which is in `repo_files()` (refusal_corpus.rs:173). The workflow case uses a Create deliverable, so `check_boundary_and_repo_files` does not need the file to exist. Each case changes one field of `base_reading` so no earlier check refuses first, and the producer verifies each refuse case names `check_environment_reach` and not an earlier check."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Reading gate: `refusing_check` gains a step",
+      "dependent": "crates/athena-core/src/reading.rs `check_reading_acceptance` (line 3198), the wrapper over `refusing_check`, called by the reader loop at line 663",
+      "kind": "code",
+      "test": "cargo test -p athena-core (the reader loop tests in reading.rs and `the_wrapper_agrees_with_refusing_check_on_every_case`, refusal_corpus.rs:973). The wrapper only calls `refusing_check` (`no_check_bypasses_refusing_check`, refusal_corpus.rs:1151), so it picks up the step with no change.",
+      "reason": null
+    },
+    {
+      "name": "Which stored readings pass the text-only check",
+      "dependent": "crates/athena-core/src/reading.rs `check_reading_text` (line 4128), used by crates/athena-core/src/steward.rs:421 (queued work is marked read only if the stored reading passes), crates/athena-cli/src/main.rs:641 (`athena check-reading`), the replay (run/mod.rs:2201, 2387) and the tests at run/tests.rs:1460, 1467, 1785 and athena-cli/tests/drain.rs:4073",
+      "kind": "code",
+      "test": "cargo test --workspace. A stored reading that cites a push, origin, workflow, or job records or history and has no `Environment:` assumption now fails `check_reading_text`. The steward then lists it unread and the drain reads it again, which is the intended effect. I found no fixture reading in these tests with a trigger word in a criterion or summary (grepped for `text:` and `summary:` literals and tuple criteria); the full workspace run confirms.",
+      "reason": null
+    },
+    {
+      "name": "Replay hold on newly refused readings",
+      "dependent": "Replay of accepted readings through base and candidate checkers (`replay`, `replay_cases`, `replay_declaration` in reading.rs; hold limit 10% unless a share is declared; send-back in run/send_back.rs:155 and briefs.rs:699)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus (`environment_reach_refusal_is_declared_intended`) and the criterion 6 text 'expected 8% of newly refused readings'. `replay_declaration` reads the share from the criterion (tested at refusal_corpus.rs:1104-1111). The hold itself is data-driven on stored records; the tests use fake checkers, so nothing depends on the real check's result there.",
+      "reason": null
+    },
+    {
+      "name": "Corpus coverage mechanism and input-form list",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `every_acceptance_check_has_a_refusing_corpus_case` (line 1061), `an_extra_check_with_no_case_is_reported` (line 1082, anchor `    step!(check_reading_references(`), `corpus_covers_the_listed_input_forms` (line 998, `INPUT_FORMS` array length 23)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus. The new step appears in `acceptance_check_names`, so it needs a refusing case (added). The anchor line stays. New form tags are added to `INPUT_FORMS`, with the array length raised to match, and every tag is carried by at least one case.",
+      "reason": null
+    },
+    {
+      "name": "Order of the `step!` lines",
+      "dependent": "crates/athena-core/src/reading.rs test `check_outcome_state_doc_names_root_cause_and_scope` (line 7725), which pins `check_outcome_state` right after `check_governance_coverage`",
+      "kind": "rule",
+      "test": "cargo test -p athena-core check_outcome_state_doc_names_root_cause_and_scope",
+      "reason": "The new step goes after `check_outcome_state`, so governance and outcome_state keep their adjacent positions."
+    },
+    {
+      "name": "Readings with a workflow deliverable that the existing tests expect to be accepted",
+      "dependent": "crates/athena-core/src/reading.rs tests `a_request_naming_a_governance_path_is_refused_until_it_is_covered` (line 7430, the `named` reading at 7451) and `a_request_naming_a_workflow_file_needs_it_listed_and_named` (line 7484, `with_workflow` at 7492), which accept a reading with a `.github/workflows/` deliverable",
+      "kind": "code",
+      "test": "Both tests are edited in plan step 3 to add a complete `Environment:` assumption to the accepted readings. The loop's `file` is a workflow only for the pages.yml rows. The same two tests then show the accept path, and the new refuse tests show the refusal.",
+      "reason": null
+    },
+    {
+      "name": "Reader brief rule list",
+      "dependent": "crates/athena-context/src/briefs.rs `READING_RULES` (line 2225, array of 6), the reader brief builder (line 2416) and the test `the_reader_brief_names_each_reading_rule_in_one_short_line` (line 4400, which asserts `READING_RULES.len() == 6`, a 220-byte line cap and a section size under 2400)",
+      "kind": "code",
+      "test": "cargo test -p athena-context. The test is updated in plan step 5 to the length 7, the `check_environment_reach` entry in its list of checks, and a section size bound set from the measured size. The line cap of 220 stays and the new line must meet it.",
+      "reason": null
+    },
+    {
+      "name": "Prompt-set token budgets",
+      "dependent": "docs/system-facts.md `budget reader: 1997 of 2000` (and the other budget lines) and the test `system_facts_budgets_match_computed` in crates/athena-cli/tests/budgets.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "The briefs (reader_brief) are built at run time and sit outside the always-loaded prompt sets, per the 'Prompt sets and budgets' fact. No prompt file is edited, so the computed sizes do not change."
+    },
+    {
+      "name": "Prose that describes the reading rules",
+      "dependent": "docs/decisions.md line ~4486 ('the six reading rules are fixed') and crates/athena-context/prompts/reader.md line 15 (workflow governance guidance)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The decision text records a past decision and the brief says docs/decisions.md is left as landed. The prompt file is out of scope and has no token headroom. The new rule reaches the reader through the brief and the refusal text."
+    },
+    {
+      "name": "Governance configuration",
+      "dependent": "athena.toml, defaults.toml and .github/workflows/ci.yml (governance files)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "The check is a compiled rule in reading.rs. It adds no config key, and no workflow reads the reading rules, so no host setting changes."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A unit test reads the check's doc comment and CHANGELOG.md from the source with `include_str!`, as `code_survey_refusal_is_declared_intended` (reading.rs:9127) does. It collapses white space, then asserts these are present: 'no step asking who performs each action, where, with what permissions, and what data it reaches', '20261024-220048-engm', '20261025-070538-8ra0', '20261025-034247-nm0k', 'higher refusal rate is intended' and 'expected 8% of newly refused readings'. The same needles are asserted in the CHANGELOG text.",
+      "command": "cargo test -p athena-core environment_reach_doc_and_changelog_name_the_cause",
+      "observes": "The doc comment before `pub fn check_environment_reach` and the CHANGELOG.md Unreleased entry both name the cause and the three jobs. The test passes only when both texts hold every needle.",
+      "fails_without": null
+    },
+    {
+      "criterion": 2,
+      "method": "Two tests. (a) In athena-core, take the body of `refusing_check` as `function_body` does (refusal_corpus.rs:1019) and assert the text `check_environment_reach` appears once, as the line `step!(check_environment_reach(reading));`, and that it is the next step after `step!(check_outcome_state(reading, request));`. (b) In athena-context, the updated `the_reader_brief_names_each_reading_rule_in_one_short_line` (briefs.rs:4400) asserts the brief has 7 rule lines, one containing `check_environment_reach` and the `Environment:` label, each at most 220 bytes, with the section under its updated size bound.",
+      "command": "cargo test -p athena-core environment_reach_has_one_step_line && cargo test -p athena-context the_reader_brief_names_each_reading_rule_in_one_short_line",
+      "observes": "Exactly one step line, in the stated position, and a reader rule line that names the check and tells the reader to write an `Environment:` assumption.",
+      "fails_without": null
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in reading.rs `mod tests`. Each builds a `Reading` with `governed_reading` and `add_behavior` (both exist, reading.rs:7364 and 7505) and calls the public `refusing_check` (exists, reading.rs:3226). The cases: (i) a deliverable `.github/workflows/lint.yml` (Create) named in a criterion, no Environment assumption: the refusing check is `check_environment_reach`, and the error starts 'the reading was refused because' and names site, permissions and data. (ii) One reading each for criteria 'Athena pushes the job branch to origin', 'The pull request is opened with gh', 'Pull requests are opened on the remote' and 'The branch was pushed': all refused. (iii) The same readings with a complete `Environment:` assumption, which for host actions also states 'no origin' (for example 'Environment: the local Athena process has write access to the working copy and, with no origin or a non-GitHub origin, skips the push; with a GitHub origin it can push refs and open a pull request'): `refusing_check` returns None. (iv) An Environment assumption missing the permission part is refused, and the error names 'permissions'. (v) The label is matched after trimming and in any case; an assumption that merely mentions the word 'environment' does not count. No test double: the Reading values are the input and the production function decides. Nothing is mocked.",
+      "command": "cargo test -p athena-core environment_reach",
+      "observes": "Readings with a workflow deliverable or a push/pull-request/gh/origin criterion and no complete Environment assumption are refused by `check_environment_reach`. The same readings with such an assumption are accepted (`refusing_check` is None).",
+      "fails_without": "With the `step!` line removed, `refusing_check` returns None for the refused readings, so the asserts that the refusing check is `check_environment_reach` fail. With the step in but the label or word lists wrong, the accept assertions fail.",
+      "seam": "Production entry point `refusing_check` (reading.rs:3226) and the new `check_environment_reach`, called directly. Fixtures are `Reading` values from the existing `governed_reading` and `add_behavior` helpers (exist; read at reading.rs:7364 and 7505). Plan step 2 adds the tests and the new assumption-adding helper `with_environment`. No fake is used."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit tests with three readings shaped like the three jobs. (engm) A code-class reading with a `Code survey:` assumption, so check_code_survey passes, whose criterion says 'The history check reads the job records on the records branch'. Without an Environment assumption it is refused. A complete Environment assumption with no figure or file is still refused (the error says 'quote the figures inline or name a reachable file'). A complete one that says CI has read-only contents and cannot write the records branch, and quotes '3 jobs, 12 readings', is accepted. (8ra0) The push/origin/pull-request reading from criterion 3, accepted only when the no-origin case is stated. (nm0k) A docs reading whose summary says 'Use figures from job records and history' is refused. It is accepted when the Environment assumption quotes the figures inline, and when it lists the file docs/design/roadmap.md instead. An assumption listing only records/foo.json or athena/records/x.json as the file is refused. Each of the three readings is also checked through `refusing_check` so the refusing check's name is `check_environment_reach`. A loop covers every B phrase: job records, job history, commit history, git history, git log, records branch, athena/records.",
+      "command": "cargo test -p athena-core environment_reach_source",
+      "observes": "A reading citing records or history as a source is refused unless the figures are inline or a reachable file is listed, and is accepted when they are. Three differently shaped readings are covered, so the class is tested and not one job.",
+      "fails_without": "Without the step, `refusing_check` returns None for the refused readings and the name assertions fail. Without the figure/file rule, the 'complete but nothing quoted' reading is wrongly accepted.",
+      "seam": "Production entry point `refusing_check` and `check_environment_reach` (the latter added in plan step 1). Fixtures are `code_reading` (exists, reading.rs:8936) and `governed_reading` (exists, reading.rs:7364), edited in place. No double."
+    },
+    {
+      "criterion": 5,
+      "method": "The refusal corpus. Plan step 4 adds cases to `reading_check_cases()` in crates/athena-core/tests/refusal_corpus.rs, each built with `case(..)` and `base_reading` (exist), each changing one field. Refuse cases: `environment-ci-workflow-without-an-environment`, `environment-host-action-without-an-environment`, `environment-records-source-without-figures`. Accept cases: `environment-ci-workflow-with-an-environment`, `environment-host-action-with-origin-cases`, `environment-records-source-with-quoted-figures`, `environment-records-source-with-a-reachable-file`, `environment-trigger-words-only-inside-other-words`. Refuse cases expect `Expected::Refuse(\"check_environment_reach\")`. The existing `every_acceptance_check_has_a_refusing_corpus_case` (refusal_corpus.rs:1061) then passes only because one of these refuses. A new test `environment_reach_refusal_is_declared_intended` pins the step line, the doc comment and the changelog wording, as `design_existing_code_refusal_is_declared_intended` does (refusal_corpus.rs:1102).",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "All corpus cases get their expected outcome, and every `step!` check has a refusing case. Existing ids I read in this file include code-reading-without-a-survey, code-reading-with-a-survey, design-reading-without-existing-code, design-reading-with-existing-code, request-names-a-governance-file-the-reading-ignores, delivery-request-naming-a-workflow-fails-governance-first, boundary-word-in-a-deliverable-path and full-deliverable-path. I have not run the suite, so I cite no result.",
+      "fails_without": "Without the new check, `every_acceptance_check_has_a_refusing_corpus_case` fails with the new step line present but unreachable, and the new refuse cases fail with 'expected Refuse(check_environment_reach), got accepted'.",
+      "seam": "Production entry point `athena_core::reading::refusing_check` (public; used at refusal_corpus.rs:943). Fixtures are `Case`, `case()`, `base_reading()` and `repo_files()` (exist, refusal_corpus.rs:57-206). The new cases come from plan step 4. No double."
+    },
+    {
+      "criterion": 6,
+      "method": "Unit tests plus corpus accept cases. A plain docs reading (`governed_reading(&[\"docs/x.md\"], &[\"docs/x.md exists\"], &[])`) passes `check_environment_reach` and `refusing_check` returns None. Readings with trigger words only inside other words ('fixed where it originates', 'ghost', 'pushdown', 'remotely', 'history of the page' with no trigger phrase) pass. A declined reading (capability None), a reading with a question, and one with no deliverables pass even with a push criterion. Existing accept tests keep passing, with `Environment:` assumptions added only to the two workflow-deliverable tests (reading.rs:7451, 7492). The declared-share wording is pinned by the doc/changelog test from criterion 5.",
+      "command": "cargo test -p athena-core environment_reach_accepts",
+      "observes": "Docs-only readings and readings without a trigger are accepted. The 8% declaration is present in the doc comment and the changelog.",
+      "fails_without": "If the triggers were substring matches, 'originates' would be refused and the accept test would fail. If the gating on capability and question were missing, the declined and question readings would be refused.",
+      "seam": "Production entry points `check_environment_reach` (new) and `refusing_check` (exists). Fixtures are `governed_reading` (exists, reading.rs:7364), plus `scoped_reading` through it. No double."
+    },
+    {
+      "criterion": 7,
+      "method": "Run the three workspace commands. The full workspace test run is needed because the gate is shared: `check_reading_text` is called by steward.rs:421, athena-cli main.rs:641, run/tests.rs:1460/1467/1785 and drain.rs:4073. The new reading rule could newly refuse a fixture reading elsewhere, and only a run finds that.",
+      "command": "cargo fmt --all --check && cargo clippy --workspace --all-targets && cargo test --workspace",
+      "observes": "All three exit 0.",
+      "fails_without": "If a fixture reading in another crate trips the new check, `cargo test --workspace` fails. If the briefs.rs array length or size bound is not updated, the briefs tests fail.",
+      "seam": "The workspace build and test commands themselves; no fixture of my own."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "c6482af68e26f077f39b5c72d07b47ba1793cf39f2fd238427d769d76f8ec37d"
+}

@@ -1,0 +1,503 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261030-060835-ryvc",
+  "round": 5,
+  "at": "2026-11-07T12:35:21.095109747Z",
+  "invocation_seq": 10,
+  "approach": "Add one reading-gate check, `check_speed_timeline(reading, request)`, in crates/athena-core/src/reading.rs, wired as one `step!(check_speed_timeline(reading, request));` line in `refusing_check` right after `check_outcome_state`. Root cause, named in the doc comment, D163 and the changelog: the reading stage checked a request's own figures only if the reader chose to, so readings were planned around stated timings with no stage timeline from the code. The gate every speed request passes is where it is fixed. `speed_request(request)` decides what a speed request is, in four steps. (a) A request that has a line starting `Spec requirement: ` (hestia.rs SPEC_LINE, made `pub(crate)`) is a speed request exactly when `Priority::from_text` is High, because `spec_request` (hestia.rs:726-730) sets High only when `gap.speed` (`is_speed`) holds. Its `Requirement:` statement is never scanned, which keeps the existing choice at hestia.rs:3229-3233 that 'faster' in passing is not speed. (b) A line starting with the SLOWDOWN_MARKER or THROUGHPUT_MARKER of Hestia is a speed request. (c) `own_request_text` drops text that other people wrote. For a root-cause request it drops the `Introspection … ; prevention it proposed:` lines. For an approved-proposal request (work_decisions.rs) it drops everything from the `## Source` heading on, which copies cited records. (d) The remaining text is scanned with the whole-word and phrase cues. A speed request then needs a `Timeline:` assumption with a crates/ path, a `stages:` list of at least two stages each with a duration (unless it says no recorded timing), and a place word followed by a stage name. The fake reader gets one fixed Timeline, with a drain test pinning it.\n\nScope: beyond the five listed deliverables I touch four files under the request's `Files: crates/`, each with the smallest edit and each named in D163 and the changelog. They are fake.rs, hestia.rs, work_decisions.rs and drain.rs. D163 will say so.",
+  "decisions": [
+    {
+      "choice": "Enforce at the reading gate with one `step!` in `refusing_check` (reading.rs:3226), placed after `check_outcome_state`.",
+      "reason": "Every reading passes `refusing_check`. The corpus test `every_acceptance_check_has_a_refusing_corpus_case` forces a refusing case per step. No model call is needed, and a refused reading gets one re-read with the refusal text. `check_outcome_state_doc_names_root_cause_and_scope` needs `check_outcome_state` right after `check_governance_coverage`; a step after it leaves that position alone.",
+      "rejected": [
+        {
+          "option": "Prompt-only guidance (reader brief or reader.md)",
+          "why": "It is prose only and the reader can ignore it, which is the failure. The 'mechanism' default requires a check, and reader.md is out of scope."
+        },
+        {
+          "option": "A planner-stage check (plan_findings)",
+          "why": "By then the reading is accepted and the criteria are fixed around the request's figure."
+        },
+        {
+          "option": "A verifier-stage check",
+          "why": "It runs after the producer built the wrong thing; the failure is in planning."
+        },
+        {
+          "option": "Have Athena run the stages at reading time",
+          "why": "A build and test run per reading is unbounded cost and beyond one producer run."
+        }
+      ]
+    },
+    {
+      "choice": "Quoted text written by others is never scanned. Three builders quote such text: the root-cause request (prevention lines), the spec-gap request (`Requirement:` statement) and the approved-proposal request (copied Source and Evidence). The spec request is classified by `Priority::from_text(request) == High`, which equals `is_speed` for requests built by `spec_request`. The approved-proposal request is cut at the `## Source` heading, so only its title and Proposal lines are scanned. The root-cause request drops only the Introspection prevention lines, so its Cause and Failure class lines are still scanned. Shared consts: `pub(crate) SPEC_LINE` (already a private const at hestia.rs:520), `pub const ROOT_CAUSE_MARKER`, `INTROSPECTION_PREFIX` and `PREVENTION_MARK` in hestia.rs, and `pub const APPROVED_LINE` and `SOURCE_HEADING` in work_decisions.rs. The builders format with these consts so the rendered bytes stay identical.",
+      "reason": "Answers critic finding 4. I read `spec_request` (hestia.rs:691-739): the statement comes from docs/spec.toml, and the code already decided that a stray 'faster' there is not speed (`is_speed`, hestia.rs:613; test at :3056 and :3229-3233). `approve_request` (work_decisions.rs:279-313) copies the content of cited files, jobs and commits into the text, so a cue there is not this job's goal. The reason that skips prevention lines applies to all three. A person's own non-builder request is scanned whole. Priority text is a sound signal for spec requests because the only writer of a `Spec requirement:` line is `spec_request`, which sets High only for `gap.speed`; hestia.rs tests at :3087-3089 pin High versus Normal. A High spec request still needs a Timeline, as the class intends.",
+      "rejected": [
+        {
+          "option": "Scan the whole spec request",
+          "why": "Five active statements in docs/spec.toml hold 'faster' and similar words (lines 1187, 1917, 1929, 2117, 2885 per the critic), so gap requests for them would be refused for a cue the code already rejected."
+        },
+        {
+          "option": "Scan the statement with `is_speed` also OR-ed in",
+          "why": "Still scans the statement. The Priority signal alone matches `is_speed`."
+        },
+        {
+          "option": "Duplicate the marker strings in reading.rs",
+          "why": "They drift from the builders. Shared consts used by both the format! calls and the detector cannot drift, and tests pass real builder output through the detector."
+        },
+        {
+          "option": "Leave approve_request text unscanned-edited (scan all of it)",
+          "why": "It copies arbitrary cited records; a quoted cue would force a Timeline the job's goal does not need."
+        }
+      ]
+    },
+    {
+      "choice": "Hestia's own speed requests are structural: a line starting with `hestia::SLOWDOWN_MARKER` or `hestia::THROUGHPUT_MARKER` makes `speed_request` true. Added human cues: 'takes longer' and 'takes too long' (take-form word then `longer` or `too long`), a duration after under/below/within with a wide time noun before it, a duration after `to` with a cut verb and a wide time noun before it, and a shorten verb with a narrow time noun within three words.",
+      "reason": "`slowdown_request` (hestia.rs:1735) renders 'takes longer' and 'shortens that stage'. `throughput_request` (:1611) is built around 'Predicted saving: N minutes', which is the failure class: planning around a predicted timing figure. Word cues alone would see neither. The markers are already `pub const` and used by `open_request_with_marker` (:1651). Two time-noun lists: a wide one for the figure-target rules and a narrow one (time, duration, runtime, run, runs, stage, stages, wait, pipeline) for the shorten rule, so 'shorten the error message' is not a cue.",
+      "rejected": [
+        {
+          "option": "Leave Hestia's requests to word cues",
+          "why": "'takes longer' and 'shortens that stage' are not cues, so the slowdown request would pass unseen."
+        },
+        {
+          "option": "Treat `too long` alone as a cue",
+          "why": "'the title is too long' is not about speed."
+        },
+        {
+          "option": "One wide time-noun list for shorten",
+          "why": "'Shorten the test names' would be flagged."
+        }
+      ]
+    },
+    {
+      "choice": "A cut verb (cut, cuts, save, saves, reduce, reduces, shave, shaves, trim, trims, lower, lowers) is a cue only when a duration figure is its object (the figure starts within two words after the verb, optionally after about, around, another, roughly, nearly, almost) or follows `by`/`off` within five words, with no setting word between. Setting words: timeout(s), interval(s), ttl, expiry, retention, lifetime, retry, backoff, debounce. Weak words (slow, slower, slowest, slowly, slowdown, delay, delays, delayed, timing, timings) count only after a cut verb within five words or right after `too`. Stand-alone cues: faster, quicker, speedup, latency, `speed up`, `head start`. Matching is whole-word over `request_words` (reading.rs:3503).",
+      "reason": "Keeps settings changes out: 'Save the state every 30 seconds', 'Reduce the retry timeout to 10 s', 'Trim the log after 5 minutes', 'Add a retry delay setting', 'Fix a timing attack' are not cues, while 'Save 12 minutes', 'Cut 5 minutes from the checks' and 'Shave 30 s off the run' are. Rules are kept no wider than the corpus cases need (critic finding 5): each rule has an accept or refuse case, and a rule with no case is not added.",
+      "rejected": [
+        {
+          "option": "Any cut verb with a figure within five words",
+          "why": "Flags settings changes."
+        },
+        {
+          "option": "Bare delay, timing or slow as cues",
+          "why": "Common in requests that are not about speed."
+        },
+        {
+          "option": "Substring match like the fake reader's SPEED_WORDS",
+          "why": "Matches inside other words and drifts from the gate."
+        }
+      ]
+    },
+    {
+      "choice": "The Timeline must hold a crates/ path (`names_crates_path`, reading.rs:3838), a `stages:` clause with at least two ordered stages, a duration per stage (unless it says 'no recorded timing'), and a clause with a place word (sits, slowest, longest, bottleneck) followed by a stage name. 'No recorded timing' replaces only the durations. The gate checks the shape, not the truth of the figures; D163 and the doc comment say so.",
+      "reason": "The three introspections ask for each stage in order, its measured duration and where the claimed delay sits. Stage order and place come from the code; only durations may be missing from records. A text-only gate cannot verify figures.",
+      "rejected": [
+        {
+          "option": "A stock 'no recorded timing' phrase plus a crates/ path clears the check",
+          "why": "One fixed sentence would clear every speed request without the stage order, which is the cause."
+        },
+        {
+          "option": "Keep 'delay' as a place word",
+          "why": "'the claimed delay is real' would pass without placing the delay in a stage."
+        },
+        {
+          "option": "Check only when the request holds a duration figure",
+          "why": "The class includes 'make it faster' with no figure."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the crates/ path requirement and state the limit in D163: a target repository with no crates/ directory cannot meet the rule.",
+      "reason": "It mirrors `check_code_survey` and the reading's contract (the Timeline names the crates/ code read). Athena's own repository is the target today; a non-crates generalisation is a named follow-up.",
+      "rejected": [
+        {
+          "option": "Accept any slash path the reading references",
+          "why": "Widens the rule beyond the reading's contract."
+        }
+      ]
+    },
+    {
+      "choice": "Answers findings 1-3 (scope) and 6 (fake Timeline). Keep four files beyond the five deliverables, each with the smallest edit: fake.rs (one fixed Timeline assumption and a comment), hestia.rs (consts and tests), work_decisions.rs (two consts used by `approve_request`, with the text unchanged, and one test) and drain.rs (one new test, no existing test edited). The fake's Timeline keeps an absence phrase so it passes `check_reading_references` in a fixture repo with no crates/ (tests/common/mod.rs:144-158; ABSENCE_PHRASES reading.rs:3030).",
+      "reason": "drain.rs:7008 sends 'Speed up planning' through the real gate with the fake reader, whose reading (fake.rs:283) has no Timeline, so without the fake.rs edit an existing test fails. A bare crates/ path in the fake would be refused by `check_reading_references` in every fixture-based CLI test; the fixture has no crates/ file for a Timeline path to name, so the absence phrase stays (finding 6 allowed this). athena-agent cannot call athena-core, so the pin test lives in athena-cli. The shared consts and the tests that feed real builder output to the detector belong in the files that hold the builders. All four files are under the request's `Files: crates/`.",
+      "rejected": [
+        {
+          "option": "Edit the drain test request to avoid the cue",
+          "why": "Hides the dependency and weakens an existing test."
+        },
+        {
+          "option": "Emit the Timeline only when the fake's SPEED_WORDS match",
+          "why": "SPEED_WORDS and the gate's cues differ; a nested run with a gate cue the fake misses would be refused."
+        },
+        {
+          "option": "Put the shared-const tests in reading.rs only",
+          "why": "They would not call the real builders; a builder change would go unseen."
+        }
+      ]
+    },
+    {
+      "choice": "Answers finding 5 (measurement). Step 9 has the producer look for stored readings and run the existing `replay` (reading.rs:4439) or `athena check-reading` (athena-cli main.rs:641) over them. D163 records the newly refused share beside the declared 5%. If no stored readings exist in the producer's snapshot, D163 says the share could not be measured, because the snapshot has no `records/` (system facts, 'Producer snapshot'), and names the replay run on the real repository as the follow-up. The 5% stays labelled an estimate.",
+      "reason": "The tool exists and the plan reuses it. I cannot run it, and the producer's snapshot lacks records, so the honest record is either a measured share or a stated reason.",
+      "rejected": [
+        {
+          "option": "Claim a measured rate",
+          "why": "Nothing here was measured."
+        },
+        {
+          "option": "Write a new measuring tool",
+          "why": "The replay already counts newly refused readings."
+        }
+      ]
+    },
+    {
+      "choice": "Add a seventh `READING_RULES` line of at most 218 characters naming `check_speed_timeline` and what a Timeline holds. Do not extend CODE_SURVEY_GUIDE; keep the 220-character line cap and the 2400-byte section cap.",
+      "reason": "READING_RULES in briefs.rs is not in the reader token budget (contract, reader.md, defaults, catalog), so `budget reader: 1997 of 2000` does not change. The reader must be told what to write or the one re-read is wasted.",
+      "rejected": [
+        {
+          "option": "Raise the 2400 cap",
+          "why": "Weakens an existing test."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `check_speed_timeline`, `pub(crate) speed_request`, `own_request_text`, the cue and setting-word lists, the Timeline parser, one `///` doc paragraph (root cause, three job ids, limits, intended refusal rate), the one `step!` line after `check_outcome_state`, a mention in the `check_reading_acceptance` doc, and unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add `speed_timeline_cases()` to `cases()`, new INPUT_FORMS tags, and the test `speed_timeline_refusal_is_declared_intended`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Seventh READING_RULES line naming `check_speed_timeline`; update the rule-list test; add a Timeline rule test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D163: case, cause, decision, alternatives, tradeoff and limits, measured share or why not measured, reversal cost, Provenance.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Entry under [Unreleased] / Added with root cause, check name, intended refusal rate, D163 and the four files beyond the listed deliverables.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-agent/src/fake.rs",
+      "action": "modify",
+      "purpose": "Beyond the listed deliverables but under `Files: crates/`: one fixed Timeline assumption in the fake reader plus a comment that the absence phrase exists only to pass `check_reading_references` in a fixture repo without crates/. Needed so the existing drain test at drain.rs:7008 passes the real gate.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "Beyond the listed deliverables but under `Files: crates/`: three new `pub const`s (ROOT_CAUSE_MARKER, INTROSPECTION_PREFIX, PREVENTION_MARK) used by `root_cause_request_at`, SPEC_LINE made `pub(crate)`, rendered text unchanged, plus tests that pass real `root_cause_request`, `slowdown_request`, `throughput_request` and `spec_request` output through `speed_request`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/work_decisions.rs",
+      "action": "modify",
+      "purpose": "Beyond the listed deliverables but under `Files: crates/`: two `pub const`s (APPROVED_LINE, SOURCE_HEADING) used by `approve_request` with identical text, and a test that passes real `approve_request` text through `speed_request`.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Beyond the listed deliverables but under `Files: crates/`: add `the_fake_readers_timeline_passes_the_speed_gate_and_the_reference_check`; no existing test is edited.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read reading.rs around `refusing_check` (3226), `request_words` (3503), `names_crates_path` (3828-3845), `check_code_survey` (~3910), `check_reading_references` and `sentences` (3043-3186); hestia.rs:450-520 (root-cause builder, SPEC_LINE), :691-739 (`spec_request`), :1304-1314 (markers), :1611-1647, :1735-1777, and the tests at :3056, :3087-3089, :3229-3242, :3381-3400, :3609-3629, :5765-5785; work_decisions.rs:271-313 and the test at :534; plan.rs:97 `Priority::from_text`. Re-search drain.rs, run/tests.rs, steward.rs, code_health.rs and proposals.rs tests for requests holding the new cues (takes longer, under N minutes, shorten). Do not touch secrets.rs or checks.rs.",
+    "In hestia.rs add `pub const ROOT_CAUSE_MARKER = \"Fix the root cause of a repeated failure: \"`, `INTROSPECTION_PREFIX = \"Introspection \"` and `PREVENTION_MARK = \"; prevention it proposed:\"` beside the other markers, make SPEC_LINE `pub(crate)`, and change `root_cause_request_at` to build with the consts. Rendered bytes must stay identical; run the existing hestia tests. In work_decisions.rs add `pub const APPROVED_LINE` (the text 'A person approved this proposal from the steward role.') and `SOURCE_HEADING = \"## Source\"` and use them inline in `approve_request`'s format! with the text unchanged.",
+    "In reading.rs add the private lists (stand-alone cues, weak words, cut verbs, shorten verbs, duration units, place words, setting words, wide and narrow time nouns). Add `own_request_text(request)`: when a line starts with `hestia::ROOT_CAUSE_MARKER`, drop lines that start with `INTROSPECTION_PREFIX` and hold `PREVENTION_MARK`; when a line equals `work_decisions::APPROVED_LINE`'s start, cut at the first line equal to `SOURCE_HEADING`; otherwise return the text whole. Add `pub(crate) fn speed_request(request) -> bool` in this order: (a) a line starts with `hestia::SPEC_LINE` returns `Priority::from_text(request) == Priority::High` with no scanning; (b) a line starts with SLOWDOWN_MARKER or THROUGHPUT_MARKER returns true; (c) scan the words of `own_request_text` for the cues in decisions 3 and 4, with setting words cancelling a phrase cue. Add `timeline_assumptions(reading)` and `timeline_problem(text) -> Option<String>` (crates/ path clause; `stages:` with two or more entries split at `,`, `->`, `→` or ` then `; a duration per entry unless 'no recorded timing'; a place word followed by a stage name). Add `pub fn check_speed_timeline(reading, request) -> Result<()>` with ONE `///` paragraph holding the root cause, the three job ids, the limits (shape not truth of figures; crates/ path only; quoted text of other people not scanned), 'This check refuses more readings; the higher refusal rate is intended.' and 'expected 5% of newly refused readings'. Return Ok when capability is None, a question is set, or `speed_request` is false. Each refusal is one line starting 'the reading was refused because' and gives the form 'Timeline: read <crates/ path>; stages: <name> <duration>, <name> <duration>; the delay sits in <name>.' Add `step!(check_speed_timeline(reading, request));` right after the `check_outcome_state` step and mention the check in the `check_reading_acceptance` doc.",
+    "In the reading.rs tests module add `speed_requests_are_found_by_whole_word_cues_and_figures` and `a_timeline_assumption_needs_stages_durations_and_a_placed_delay` with the positives, negatives and Timeline defects in demonstrations 1 and 2 (use `governed_reading`, reading.rs:7364), including the structural marker lines, a spec-line request with each Priority, and an approved-proposal-shaped text.",
+    "In hestia.rs tests add: `the_real_root_cause_request_is_not_a_speed_request_for_quoted_prevention_text`, `a_root_cause_request_whose_cause_is_slowness_is_a_speed_request`, `this_jobs_own_cause_text_is_not_a_speed_request`, `the_real_slowdown_request_is_a_speed_request`, `the_real_throughput_request_is_a_speed_request`, `a_spec_request_is_a_speed_request_exactly_when_the_requirement_is_speed` (a non-speed gap whose statement says 'faster' is false; `speed: true` is true). All call `crate::reading::speed_request`. In work_decisions.rs add a test on the real `approve_request` text (a cue in the source or evidence gives false; a cue in the title gives true), using the fixture of the test at :534.",
+    "In briefs.rs add the seventh `READING_RULES` line (type `[&str; 7]`, at most 218 characters), for example: \"Speed timeline: a speed or delay request needs a `Timeline:` assumption: a crates/ path read, `stages:` of two or more with measured durations, where the delay sits (`check_speed_timeline`).\" Update `the_reader_brief_names_each_reading_rule_in_one_short_line` (count 7, new check name) and add `the_reader_brief_says_what_a_timeline_assumption_holds`. Run `cargo test -p athena-context briefs`; shorten the line if a cap fails, never raise a cap.",
+    "In fake.rs add to the reader's `assumptions` the old text plus the fixed string 'Timeline: read crates/athena-agent/src/fake.rs, which does not exist in a nested-run repository; stages: read, write; no recorded timing exists; the delay sits in write.', with a comment that the absence phrase exists only to pass `check_reading_references` in a fixture repo without crates/. In drain.rs add `the_fake_readers_timeline_passes_the_speed_gate_and_the_reference_check`: ask 'Speed up planning so it times out less.' with `fx.athena(deterministic())`, load the recorded reading, list fixture files as at drain.rs:3971, and assert no `crates/` file, `check_speed_timeline` Ok, `check_reading_references(&reading, Some(&files))` Ok, and that the Timeline holds 'not exist'.",
+    "In refusal_corpus.rs add the new tags to INPUT_FORMS (including `speed-cue-word`, `speed-up-phrase`, `cut-minutes-figure`, `head-start-phrase`, `timeline-assumption`, `speed-word-lookalike`, `quoted-record-line`, `setting-time-figure`, `hestia-marker-request`, `takes-longer-phrase`, `target-figure-phrase`, `slowness-cause-line`, `spec-requirement-quote`, `approved-proposal-quote`) and update the asserted length after reading the file. Add `speed_timeline_cases()` to `cases()` with every case id in demonstrations 1 and 2 (every Refuse expects `check_speed_timeline`; pin `bullets_expected` per case; retry cases built like refusal_corpus.rs:628-647; the hestia-shaped cases use a helper that mirrors the line shapes of the real builders). Add `speed_timeline_refusal_is_declared_intended`, modelled on `design_existing_code_refusal_is_declared_intended` (:1102): step line right after `check_outcome_state`, doc needles, changelog and decisions.md needles.",
+    "Measure the share (finding 5): look in the snapshot for stored readings; if present, run `replay` (reading.rs:4439) or `athena check-reading` (main.rs:641) and record the newly refused share. If not, record why it could not be measured. Then append D163 to docs/decisions.md (no earlier text edited): heading '## D163 · A reading of a speed or delay request needs a measured stage timeline'; Case; Decision (check, Hestia marker lines, the three quoted-text rules and shared consts, cues, Timeline grammar, fake reader line and its pin test, rule line, prose amendment of D161's 'six reading rules' remark); Alternatives (prompt-only guidance, planner-stage check, reading gate check chosen, verifier-stage check, running the stages); Tradeoff (more refusals, intended, expected 5% of newly refused readings as an estimate with the measured share or the reason it was not measured; shape not truth; crates/ path only; unskipped quoted text in accept_request, blind_spot_request and design-review titles); Reversal cost; Provenance bullet. Add the CHANGELOG.md entry at the top of Added under [Unreleased] with the root cause, check name, 'the higher refusal rate is intended', 'expected 5% of newly refused readings', D163 and the four files beyond the listed deliverables (fake.rs, hestia.rs, work_decisions.rs, drain.rs).",
+    "Run `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-core hestia`, `cargo test -p athena-core work_decisions`, `cargo test -p athena-context briefs`, `cargo test -p athena-agent`, `cargo test -p athena-cli --test drain`, `cargo test -p athena-cli --test work_decisions`, `cargo test -p athena-cli the_decision_log_is_well_formed_and_only_appended_to`, then `cargo test --locked`. Fix any case refused by an earlier check. Confirm `git diff --stat -- crates/athena-gate/src/secrets.rs crates/athena-core/src/checks.rs` shows nothing."
+  ],
+  "risks": [
+    {
+      "risk": "False refusals: a request using a cut verb plus `by`/`off`/`to` and a figure for a non-speed purpose (for example 'Reduce the grace period by 5 minutes') is refused until the reader writes a Timeline.",
+      "mitigation": "Setting words, the object-of-verb rule and the time-noun requirement for the `to`/`under` forms keep the common settings forms out, pinned by accept cases. The reader gets one re-read with refusal text saying what to write, and can use the no-recorded-timing form. The 5% is an estimate, measured only if stored readings are available (step 9)."
+    },
+    {
+      "risk": "Builders that quote other text and are not skipped (accept_request, blind_spot_request, the design review's failed-job titles) could carry a stray cue and force a Timeline.",
+      "mitigation": "Cues are phrase-based, not bare words. The fixed text of those builders holds none (read). The reader gets one re-read. D163 states the limit and the follow-up of skipping those quoted parts if the replay shows they matter."
+    },
+    {
+      "risk": "Spec requests are classified by the Priority line, so a hand-written request with a `Spec requirement:` line and `Priority: high` is treated as a speed request.",
+      "mitigation": "Only `spec_request` writes that line (hestia.rs:710), and the worst effect is a Timeline asked for; a hestia.rs test pins High versus Normal against `is_speed`."
+    },
+    {
+      "risk": "Scanning the Cause line means a root-cause request whose cause text holds a stray cue needs a Timeline.",
+      "mitigation": "Phrase-based rules. A hestia.rs test pins this job's own visible Cause as not a speed request. A cause that is truly about slowness is meant to need one."
+    },
+    {
+      "risk": "Hestia's throughput design request, which only edits docs/design/, now needs a Timeline.",
+      "mitigation": "It names a Stage and predicted minutes, the class this change targets. The no-recorded-timing form covers missing run data. Pinned by an accept twin."
+    },
+    {
+      "risk": "The check judges the shape of the Timeline, not whether the figures are measured, so a reader can write invented numbers.",
+      "mitigation": "Stated as a limit in the doc comment and D163. The check still forces the crates/ path, the ordered stages and the stage where the delay sits into the reading before the criteria are fixed. Checking figures against run data is a named follow-up."
+    },
+    {
+      "risk": "A target repository with no crates/ directory cannot meet the crates/ path rule.",
+      "mitigation": "Stated as a limit in D163; Athena's own repository is the target today; the rule mirrors `check_code_survey`."
+    },
+    {
+      "risk": "The reading-rules section may pass the 2400-byte or 220-character cap (briefs.rs:4430); the size figure is a hand count.",
+      "mitigation": "Keep the new rule at 218 characters or fewer; `cargo test -p athena-context briefs` asserts both caps. Never raise a cap."
+    },
+    {
+      "risk": "The prevention-line skip or the `## Source` cut misses a builder line shape, so a quoted cue triggers a false speed request.",
+      "mitigation": "`one_line` flattens the prevention (hestia.rs:482-485). Tests feed real builder output through the detector, and shared consts mean a builder change that breaks a skip fails those tests."
+    },
+    {
+      "risk": "Hand-written corpus fixtures trip an earlier check and refuse for the wrong reason.",
+      "mitigation": "Build each case from `base_reading` and change one field; name only crates/athena-core/src/reading.rs in Timeline text; copy the retry case's summary, deliverable and out_of_scope from `retry-complaint-reading-names-the-job` (refusal_corpus.rs:630-647). The corpus asserts the refusing check's name."
+    },
+    {
+      "risk": "Stored Proposed readings of speed requests are dropped from the steward queue (steward.rs:421) after the change.",
+      "mitigation": "This is the effect of every new reading check; the declared share covers it and the steward leaves them for a person. Named in D163 and the changelog."
+    },
+    {
+      "risk": "The rule count edit (6 to 7) and the INPUT_FORMS length edit could read as weakening existing tests.",
+      "mitigation": "They are forced by an added rule and added tags; all line, size and name-check assertions stay and gain the new check name. The summary says so."
+    },
+    {
+      "risk": "Four files beyond the listed deliverables (fake.rs, hestia.rs, work_decisions.rs, drain.rs) widen scope.",
+      "mitigation": "All are under the request's `Files: crates/`; each edit is minimal and necessary; the changelog and D163 name them."
+    },
+    {
+      "risk": "The replay of stored readings may be impossible in the producer's snapshot, because `records/` is absent.",
+      "mitigation": "D163 then says the share was not measured and why, and names the replay on the real repository as the follow-up. It does not claim a number."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusing_check step list and the readings it accepts",
+      "dependent": "crates/athena-core/src/reading.rs:663 `check_reading_acceptance` after `build_reading` (production read path); a refusal becomes `ReadError::Refused` and one re-read with the refusal text (reading.rs:473)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus (new refuse and accept cases); cargo test -p athena-cli --test drain a_speed_improving_request_is_read_as_urgent",
+      "reason": null
+    },
+    {
+      "name": "order of step! lines in refusing_check",
+      "dependent": "crates/athena-core/src/reading.rs:7725 `check_outcome_state_doc_names_root_cause_and_scope`",
+      "kind": "code",
+      "test": "cargo test -p athena-core check_outcome_state_doc_names_root_cause_and_scope",
+      "reason": "The new step goes after `check_outcome_state`, so the position that test asserts does not move."
+    },
+    {
+      "name": "corpus mechanism that requires a refusing case per step, and the INPUT_FORMS tag list",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs: every_acceptance_check_has_a_refusing_corpus_case (:1061), an_extra_check_with_no_case_is_reported (:1082), no_check_bypasses_refusing_check (:1151), the_wrapper_agrees_with_refusing_check_on_every_case (:973), corpus_covers_the_listed_input_forms (:998)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus",
+      "reason": null
+    },
+    {
+      "name": "root-cause request builder text and its new `pub const` ROOT_CAUSE_MARKER, INTROSPECTION_PREFIX, PREVENTION_MARK",
+      "dependent": "crates/athena-core/src/hestia.rs:458-507 `root_cause_request_at`, caller `root_cause_request` (:453), queueing at :1192, hestia tests at :2384, :3381-3400, :3609-3626",
+      "kind": "code",
+      "test": "cargo test -p athena-core hestia (existing tests assert the exact rendered text and must stay green; new tests feed the real output through `speed_request`)",
+      "reason": null
+    },
+    {
+      "name": "text of a Hestia root-cause request read elsewhere",
+      "dependent": "crates/athena-core/src/hestia.rs:1072 (reads the root-cause request's cause text) and the request text Hestia queues, read later by the reading gate",
+      "kind": "code",
+      "test": "cargo test -p athena-core hestia",
+      "reason": "The rendered text is unchanged: the consts hold the same strings the format! calls held, so every byte is identical; existing hestia tests fail on any difference."
+    },
+    {
+      "name": "spec-gap request (`Requirement:` statement from docs/spec.toml) and SPEC_LINE becoming `pub(crate)`",
+      "dependent": "hestia.rs `spec_request` (:691-739, queued at :795), `SPEC_LINE` users `spec_request_is_open` (:742) and `open_spec_requests` (:748-757), tests at :2916, :3087-3089 and :3241-3242",
+      "kind": "code",
+      "test": "New hestia.rs tests: real `spec_request` output with a non-speed gap whose statement says 'faster' is not a speed request; a speed gap is. Corpus cases `spec-request-with-faster-in-its-statement-needs-no-timeline` and `high-priority-spec-request-without-a-timeline`. cargo test -p athena-core hestia",
+      "reason": "Only the visibility of SPEC_LINE changes; the text and open-request matching are untouched. The detector reads the `Spec requirement: ` line and the Priority line, never the statement, so it agrees with `is_speed` (hestia.rs:613)."
+    },
+    {
+      "name": "approved-proposal request text (copies cited record content) and the new consts APPROVED_LINE and SOURCE_HEADING",
+      "dependent": "crates/athena-core/src/work_decisions.rs:279-313 `approve_request`, caller `approve_work` (:326-331) and the CLI at athena-cli/src/main.rs:1092, tests at work_decisions.rs:534 and athena-cli/tests/work_decisions.rs:99,135-167, drain.rs:5328,6210,6276",
+      "kind": "code",
+      "test": "New work_decisions.rs test on the real `approve_request` text; cargo test -p athena-core work_decisions; cargo test -p athena-cli --test work_decisions",
+      "reason": "The format! uses the consts with the same strings, so the text is identical. The request texts of the existing tests hold no speed cue (searched athena-cli/tests/work_decisions.rs and work_decisions.rs: no match for faster, speed, slow, latency, delay, timing, minutes, longer). The detector scans only the part before `## Source`."
+    },
+    {
+      "name": "Hestia's throughput design request now counts as a speed request by THROUGHPUT_MARKER",
+      "dependent": "hestia.rs:1611-1647 `throughput_request`, :1927-1951 (queueing), :1660-1662 `open_throughput_request`, :2148, marker test at :4732",
+      "kind": "code",
+      "test": "New hestia.rs test passing real `throughput_request` output through `speed_request`; corpus cases `throughput-design-request-without-a-timeline` and its with-a-timeline twin; cargo test -p athena-core hestia",
+      "reason": "The builder and marker are not edited; only the reading gate reads the marker line, so queueing and follow-up logic are unchanged."
+    },
+    {
+      "name": "Hestia's slowdown request now counts as a speed request by SLOWDOWN_MARKER",
+      "dependent": "hestia.rs:1735-1777 `slowdown_request`, :2096-2099 (queueing and the open-slowdown guard via `open_request_with_marker`), tests at :5011 and :5765-5785",
+      "kind": "code",
+      "test": "New hestia.rs test passing real `slowdown_request(25.0, 60.0, &growth)` output through `speed_request`; corpus cases `slowdown-request-without-a-timeline` and its twin; cargo test -p athena-core hestia",
+      "reason": "The builder and marker are not edited. The existing tests assert the title and body text, which does not change."
+    },
+    {
+      "name": "requests built by Athena that quote text (new speed gate reads them)",
+      "dependent": "Other machine-built requests: proposals.rs:442 `accept_request` (quotes the defaults statement), steward.rs:754 `blind_spot_request` (quotes a source name and a title), code_health.rs:530-557 (structural: numbers and a path) and :684-695 (design review: quotes up to eight failed job titles)",
+      "kind": "code",
+      "test": "cargo test -p athena-core (steward, code_health and proposals tests run the builders; none holds a cue by my reading of the builders above)",
+      "reason": "They pass through the same gate and are scanned whole. Their fixed text holds none of the phrase cues (read each builder). A quoted statement or a failed job's title that holds a cue, such as 'Speed up CI', would make that request need a Timeline; the reader gets one re-read with the form. This is a stated limit in D163, not handled by a skip, because the quoted parts are the request's subject there (a statement to apply; a title to review). The producer greps tests for these builders' fixed text (steward.rs, code_health.rs, proposals.rs tests) for cues in step 1."
+    },
+    {
+      "name": "check_reading_text acceptance of stored readings",
+      "dependent": "crates/athena-core/src/steward.rs:421 (a Proposed job whose stored reading no longer passes `check_reading_text` is left out of the drain queue) and the test at steward.rs:2420",
+      "kind": "code",
+      "test": "cargo test -p athena-core steward",
+      "reason": "A stored, not yet drained reading of a speed request with no Timeline is now left for a person, as with any reading that fails a check; this is the intended refusal. The steward tests use REREAD_REQUEST and a source path with no speed cue."
+    },
+    {
+      "name": "check-reading output and the replay's newly refused share",
+      "dependent": "crates/athena-cli/src/main.rs:641 (`athena check-reading`) and `replay` (reading.rs:4439); the replay limit is the declared share plus 5 points (reading.rs:4378)",
+      "kind": "code",
+      "test": "cargo test -p athena-core replay",
+      "reason": "Both call the same gate, so the replay counts speed readings with no Timeline as newly refused. The doc comment declares 'expected 5% of newly refused readings', which sets the limit. No replay code changes."
+    },
+    {
+      "name": "check_reading_text on test requests",
+      "dependent": "crates/athena-cli/tests/drain.rs:4073,4093 (UNREAD_FIRST/UNREAD_SECOND) and crates/athena-core/src/run/tests.rs:1460,1467,1785",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain",
+      "reason": "Their request texts hold no speed cue (searched drain.rs and run/tests.rs: only the 'Speed up planning' request at drain.rs:7012 matches). The producer re-searches for the new cues (takes longer, under N minutes, shorten) in step 1."
+    },
+    {
+      "name": "fake reader's reading (one added Timeline assumption)",
+      "dependent": "crates/athena-cli/tests/drain.rs:7008, tests/common/mod.rs:675,689, drain.rs:6904, focus.rs:141 (all use the fake reader); display.rs:322 only prints assumptions",
+      "kind": "code",
+      "test": "cargo test -p athena-cli --test drain a_speed_improving_request_is_read_as_urgent; new test the_fake_readers_timeline_passes_the_speed_gate_and_the_reference_check; cargo test -p athena-agent",
+      "reason": "The old text 'This is a nested run with fake agents.' is read by no test (only fake.rs:283 holds it). The new assumption list keeps it and adds the Timeline."
+    },
+    {
+      "name": "the fake's Timeline path under check_reading_references",
+      "dependent": "crates/athena-core/src/reading.rs:3121-3185 `check_reading_references` run on every fake reading against `repo_files`; fixture repo crates/athena-cli/tests/common/mod.rs:144-158 has no crates/ directory; ABSENCE_PHRASES (reading.rs:3030) and `sentences` (:3045)",
+      "kind": "code",
+      "test": "The new drain test (asserts the fixture has no crates/ file, that both checks accept the recorded reading, and that the Timeline holds an absence phrase)",
+      "reason": null
+    },
+    {
+      "name": "READING_RULES (six to seven lines)",
+      "dependent": "crates/athena-context/src/briefs.rs:4400-4431 (rule count, 220-character line cap, 2400-byte section cap) and the reader brief printed at briefs.rs:2416-2420",
+      "kind": "rule",
+      "test": "cargo test -p athena-context briefs",
+      "reason": null
+    },
+    {
+      "name": "reader prompt-set token budget",
+      "dependent": "docs/system-facts.md line `budget reader: 1997 of 2000` and crates/athena-cli/tests/budgets.rs:34-39",
+      "kind": "host_setting",
+      "test": "cargo test -p athena-cli --test budgets",
+      "reason": "The reader set is contract + reader.md + defaults + catalog. READING_RULES lives in briefs.rs and is not in that set, so the figure does not change and system-facts.md is not edited."
+    },
+    {
+      "name": "decision log append (D163)",
+      "dependent": "docs/decisions.md log guard (athena-cli decisions.rs:218 `check_log`; mirrors.rs `decision_log_problems`) and docs/decision-links.toml `[[governs]]`",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli the_decision_log_is_well_formed_and_only_appended_to",
+      "reason": "D163 is appended after D162 with the next id and a Provenance bullet; no earlier byte is edited. The governs table lists only D08's two paths, which this change does not touch."
+    },
+    {
+      "name": "count of reading rules",
+      "dependent": "docs/decisions.md D161 (says 'the six reading rules are fixed') and CHANGELOG.md refusal-rule text",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli the_decision_log_is_well_formed_and_only_appended_to",
+      "reason": "D163 states in prose that it amends D161's remark; D161 is not edited."
+    },
+    {
+      "name": "new test files",
+      "dependent": "xtask/shard-timings.txt mirror (mirrors.rs TimingUnits) and the per-test-file registry",
+      "kind": "rule",
+      "test": null,
+      "reason": "No test file is added; new tests go into existing files (reading.rs, hestia.rs, work_decisions.rs, refusal_corpus.rs, briefs.rs, drain.rs)."
+    },
+    {
+      "name": "files this job must leave unchanged",
+      "dependent": "crates/athena-gate/src/secrets.rs and crates/athena-core/src/checks.rs (criterion 7)",
+      "kind": "code",
+      "test": "git diff --stat -- crates/athena-gate/src/secrets.rs crates/athena-core/src/checks.rs shows nothing",
+      "reason": "No step edits either file."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Run the refusal corpus. A new `speed_timeline_cases()` in refusal_corpus.rs is added to `cases()`. Each Refuse case is `Expected::Refuse(\"check_speed_timeline\")` and is built from `base_reading()` with one field changed, so no earlier check refuses it. Input forms and case ids: plain request 'Move the call earlier to save 12 minutes.' = `speed-request-without-a-timeline`; dash bullet = `speed-word-in-a-dash-bullet`; star bullet = `speed-word-in-a-star-bullet`; `1.` part = `speed-word-in-a-numbered-dot-part`; `2)` part = `speed-word-in-a-numbered-paren-part`; `(a)` part = `speed-word-in-a-lettered-paren-part`; retry complaint = `retry-complaint-still-too-slow-without-a-timeline`; a request that cites a job without relying on it = the existing root-cause cases at refusal_corpus.rs:604-617 stay Accept, plus new `root-cause-request-with-its-own-speed-goal-without-a-timeline` (Refuse); a crate-relative path = `timeline-with-a-crate-relative-path` (Refuse, names src/reading.rs); a brand word or environment variable is not read by this rule, so no case is added (the rule reads only whole words and durations). More Refuse cases: `root-cause-request-whose-cause-is-slowness-without-a-timeline`, `slowdown-request-without-a-timeline`, `throughput-design-request-without-a-timeline`, `high-priority-spec-request-without-a-timeline`, `approved-proposal-title-with-a-cue-without-a-timeline`, `takes-too-long-without-a-timeline`, `get-the-checks-under-6-minutes-without-a-timeline`, `reduce-ci-time-to-6-minutes-without-a-timeline`, `shorten-the-run-without-a-timeline`. Timeline-defect Refuse cases: `timeline-without-a-crates-path`, `timeline-with-one-stage-only`, `timeline-stage-without-a-duration`, `timeline-says-no-recorded-timing-without-stages`, `timeline-without-where-the-delay-sits`, `timeline-place-word-names-no-stage`, `timeline-label-not-at-the-start`. Fourteen new INPUT_FORMS tags are added, including `spec-requirement-quote` and `approved-proposal-quote`, and the asserted length is updated (read the file to confirm the count; about 23 to 37). The hestia-shaped cases come from a helper that mirrors the line shapes of the real builders.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "`corpus_cases_get_the_expected_outcome` passes: each Refuse case is refused by `check_speed_timeline` and by no earlier check. `every_acceptance_check_has_a_refusing_corpus_case` passes with the new step. `corpus_covers_the_listed_input_forms` passes with the new tags.",
+      "fails_without": "Remove the `step!(check_speed_timeline(reading, request));` line and every Refuse case is accepted ('expected Refuse(\"check_speed_timeline\"), got accepted'). Drop the structural marker rule and the slowdown and throughput cases fail. Drop the human-form cues and those cases fail. Drop the Timeline requirement and the defect cases fail. Drop the Priority rule and the high-priority spec case fails.",
+      "seam": "Production entry point `athena_core::reading::refusing_check` (reading.rs:3226, exists), called by `run(c)` in refusal_corpus.rs (exists) with `Some(repo_files())` injected (exists). `case()` and `base_reading()` exist. Guards: capability is Some and question is None. `speed_timeline_cases()` and the builder-shape helper are added by plan step 8. No double holds check logic."
+    },
+    {
+      "criterion": 2,
+      "method": "The corpus holds accept cases, and unit tests in reading.rs, hestia.rs and work_decisions.rs call the detector on real builder output. Corpus accepts: `speed-request-with-a-timeline` ('Timeline: read crates/athena-core/src/reading.rs; stages: compile 9 min, check 40 s; the delay sits in compile.'); `speed-request-timeline-says-no-recorded-timing` (stages named, no durations, place given); `retry-complaint-…-with-a-timeline`; `slowdown-request-with-a-timeline`; `throughput-design-request-with-a-timeline`; `root-cause-request-quoting-speed-words-in-its-prevention-needs-no-timeline`; `spec-request-with-faster-in-its-statement-needs-no-timeline` (Priority: normal, statement holds 'faster'); `high-priority-spec-request-with-a-timeline`; `approved-proposal-source-quoting-speed-words-needs-no-timeline`; `speed-request-question-reading-needs-no-timeline`; `speed-word-lookalikes-are-not-speed-requests` ('Add a timeline view and a speedometer widget. Write a quickstart guide. Wait 30 seconds before the retry. Cover the slowloris case.'); the non-speed pins `add-a-retry-delay-setting-…`, `fix-a-timing-attack-…`, `save-the-state-every-30-seconds-…`, `set-the-retry-timeout-to-10-s-…`, `reduce-the-retry-timeout-by-5-s-…`, `trim-the-log-after-5-minutes-…`, `reduce-the-grace-period-to-5-minutes-…`, `the-title-is-too-long-…`, `shorten-the-error-message-…` (each ending `-is-not-a-speed-request`); and the existing `steward-three-dash-bullets`. reading.rs unit tests `speed_requests_are_found_by_whole_word_cues_and_figures` and `a_timeline_assumption_needs_stages_durations_and_a_placed_delay` cover the positives, negatives and Timeline defects (one-line error starting 'the reading was refused because'). hestia.rs tests feed real output into `crate::reading::speed_request`: `slowdown_request(25.0, 60.0, &growth)` is true; `throughput_request` is true; `root_cause_request` with speed words only in prevention text is false; with Cause 'verifier runs time out because the suite is too slow' is true; this job's own visible Cause is false; cue-free text plus an own line 'Make it faster.' is true; `spec_request` for a gap with `speed: false` whose statement says 'faster' in passing is false (matching hestia.rs:3229-3233); `spec_request` for a `speed: true` gap is true. A work_decisions.rs test builds `approve_request` text and checks that a speed word in the source or evidence is false and one in the title is true. Both can be done by a unit test on the formatted text if building Records/Git is heavy; the producer chooses the existing fixture used by the test at work_decisions.rs:534.",
+      "command": "cargo test -p athena-core",
+      "observes": "All accept cases return None from `refusing_check`; unit and builder-output tests pass; the check is skipped when capability is None or a question is set.",
+      "fails_without": "If the check refused every speed request regardless of the Timeline, `speed-request-with-a-timeline` fails. If the detector scanned prevention lines, the prevention accept case and the hestia.rs false test fail. If it scanned the spec statement, the spec 'faster' accept case and the hestia.rs spec test fail. If it scanned the approved-proposal Source, that accept case fails. If the Cause line were dropped, the slowness-cause Refuse case fails. If bare delay/timing/slow or any cut verb plus a figure counted, the retry-delay, timing-attack, 30-seconds, retry-timeout and grace-period pins fail. If `too long` alone counted, 'the title is too long' fails. If the check applied to non-speed requests, `steward-three-dash-bullets` fails.",
+      "seam": "Production entry points `refusing_check`, `check_speed_timeline` and `speed_request` (the last two added by step 3; `speed_request` is `pub(crate)`). The hestia.rs tests call the real `root_cause_request` (hestia.rs:453), `slowdown_request` (:1735), `throughput_request` (:1611) and `spec_request` (:691), all existing, with the builders and setups used at hestia.rs:3241, :3381-3400, :3609-3620 and :5765. `approve_request` (work_decisions.rs:279, exists) is called in the test at work_decisions.rs:534. `governed_reading` (reading.rs:7364) exists. No double holds check logic."
+    },
+    {
+      "criterion": 3,
+      "method": "A corpus test `speed_timeline_refusal_is_declared_intended`, added in step 8 and modelled on `design_existing_code_refusal_is_declared_intended` (refusal_corpus.rs:1102), reads reading.rs through `READING_SOURCE` and asserts that the exact line `step!(check_speed_timeline(reading, request));` appears once in `refusing_check`, directly after the `check_outcome_state` step. It also asserts that the doc paragraph above `pub fn check_speed_timeline(` is one `///` paragraph holding the root-cause sentence, the three ids, the limits (shape not truth; crates/ path only; quoted text of other people not scanned), 'the higher refusal rate is intended' and 'expected 5% of newly refused readings', and that `replay_declaration` (reading.rs:4337) returns share 5 for it.",
+      "command": "cargo test -p athena-core --test refusal_corpus speed_timeline_refusal_is_declared_intended",
+      "observes": "The step line is present once after `check_outcome_state`; the doc holds the ids 20261025-110525-8hzb, 20261025-034733-c453 and 20261025-190606-eebk; the declared share is 5.",
+      "fails_without": "Without the step line or the doc paragraph the string assertions fail.",
+      "seam": "`include_str!(\"../src/reading.rs\")` as READING_SOURCE (exists) and `athena_core::reading::replay_declaration` (exists). The test is added by step 8."
+    },
+    {
+      "criterion": 4,
+      "method": "Update `the_reader_brief_names_each_reading_rule_in_one_short_line` (rule count 6 to 7, `check_speed_timeline` added to the named-check list) keeping the 220-character and 2400-byte caps. Add `the_reader_brief_says_what_a_timeline_assumption_holds`, which finds the rule line in the rendered reader brief.",
+      "command": "cargo test -p athena-context briefs",
+      "observes": "The `# Reading rules` section has seven lines; one names `check_speed_timeline`, `Timeline:`, a crates/ path, `stages:`, measured durations and where the delay sits; every line is at most 220 characters and the section is under 2400 bytes.",
+      "fails_without": "Without the rule line the count is 6 and the named-check loop fails for `check_speed_timeline`.",
+      "seam": "`reader_brief(&reader_inputs(&reading()))` (briefs.rs:2251; helper at briefs.rs:4385, both exist). `READING_RULES` is the constant step 6 changes. No fake."
+    },
+    {
+      "criterion": 5,
+      "method": "The step 8 corpus test also reads docs/decisions.md and CHANGELOG.md with whitespace collapsed. decisions.md must hold `## D163`, `check_speed_timeline`, the alternatives (prompt-only guidance, planner-stage check, reading gate check, verifier-stage check, running the stages), the cause wording, the quoted-text rules (prevention lines, spec statement, approved-proposal source), the limits (crates/ path; shape not truth; builder-quoted job titles in a design review are scanned) and the measured share or the reason it could not be measured. The changelog must hold `check_speed_timeline`, 'higher refusal rate is intended', 'expected 5% of newly refused readings', D163, and the four files beyond the listed deliverables. The decision-log guard confirms D163 is well formed and appended.",
+      "command": "cargo test -p athena-core --test refusal_corpus speed_timeline_refusal_is_declared_intended && cargo test -p athena-cli the_decision_log_is_well_formed_and_only_appended_to",
+      "observes": "Both pass; `check_log` (athena-cli decisions.rs:218) finds D163 in order with a Provenance bullet and the earlier text unchanged.",
+      "fails_without": "Without the D163 entry or the changelog entry the string assertions fail.",
+      "seam": "include_str of `../../../CHANGELOG.md` and `../../../docs/decisions.md` (the form the existing test uses, exists); `check_log` exists."
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three checks Athena runs. No test is removed or ignored; the only edits to existing assertions are the rule count 6 to 7 in briefs.rs and the INPUT_FORMS length, both forced by added rules and tags and said so in the summary. The full run covers every drain test through the fake reader and the real gate in a fixture repo with no crates/ directory, the hestia tests that assert the rendered text byte for byte, the work_decisions tests, and the new drain test `the_fake_readers_timeline_passes_the_speed_gate_and_the_reference_check`.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. `a_speed_improving_request_is_read_as_urgent_with_a_reason_and_an_ordinary_one_is_not` (drain.rs:7008) passes because the fake's Timeline passes the speed gate and, through the absence phrase, the reference check.",
+      "fails_without": "Without the fake.rs line the drain test fails: the request is refused twice by `check_speed_timeline`. With a bare crates/ path in the fake, every fixture-based drain test fails in `check_reading_references`. If ABSENCE_PHRASES stops skipping the fake's clause, the pin test fails with a message naming the fake's Timeline.",
+      "seam": "Whole workspace. `athena_agent::fake::deterministic_turn` (fake.rs:195, exists) is the injected reader via `fx.athena(deterministic())` (drain.rs:7010, exists). The new drain test uses the same `Fixture`, the recorded reading from `Records::load`, and the file list as at drain.rs:3971. Step 7 adds the fixed assumption; the fake holds no check logic."
+    },
+    {
+      "criterion": 7,
+      "method": "Compare the two files with the job's base commit. No step edits either file; the check lives in reading.rs.",
+      "command": "git diff --stat -- crates/athena-gate/src/secrets.rs crates/athena-core/src/checks.rs",
+      "observes": "No output: neither file is changed.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "6d6fdc6ab36ebdeba9824fd744016a15b38b9400848d13d17725da54808fdb64"
+}

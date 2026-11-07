@@ -72,7 +72,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 23] = [
+const INPUT_FORMS: [&str; 30] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -96,6 +96,13 @@ const INPUT_FORMS: [&str; 23] = [
     "delivery-verb-technical-use",
     "out-of-scope-names-delivery",
     "delivery-state-in-content-criterion",
+    "ci-workflow-deliverable",
+    "host-action-criterion",
+    "records-branch-read",
+    "records-evidence-citation",
+    "environment-assumption",
+    "trigger-word-inside-other-word",
+    "pr-or-api-wording",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -850,7 +857,239 @@ fn reading_check_cases() -> Vec<Case> {
     let c = with_behavior(c, &["The status page is reachable at its GitHub Pages URL"]);
     out.push(c);
 
+    out.extend(environment_cases());
     out.extend(boundary_word_cases());
+    out
+}
+
+/// Cases for `check_environment_reach`: an action or a source the reading assigns to a place must come with an
+/// `Environment:` assumption (the place, its permissions, the data it reaches), and a summary that cites job
+/// records or history needs quoted figures or a reachable file. Shapes are those of jobs 20261024-220048-engm
+/// (a records read from a read-only place), 20261025-070538-8ra0 (a push and pull request with no origin) and
+/// 20261025-034247-nm0k (records cited without figures); rebuilt from the job briefs.
+fn environment_cases() -> Vec<Case> {
+    const ENGM: &str = "job 20261024-220048-engm, a records read from a place that cannot reach them; rebuilt from the job brief";
+    const EIGHT_RA0: &str = "job 20261025-070538-8ra0, a push and pull request met by a working copy with no origin; rebuilt from the job brief";
+    const NM0K: &str = "job 20261025-034247-nm0k, records and history cited without figures; rebuilt from the job brief";
+    const CI: &str = "Environment: the CI job has write permission to refs on the GitHub origin";
+    const LOCAL: &str = "Environment: the local Athena working copy has write access to the repo; with no origin \
+                         or a non-GitHub origin it skips the push; with a GitHub origin it can push refs";
+    let request = "Review the guide.";
+    let refuse = "check_environment_reach";
+    let mut out: Vec<Case> = Vec::new();
+    let mut add = |id: &'static str,
+                   source: &'static str,
+                   forms: &'static [&'static str],
+                   expected: Expected,
+                   change: &dyn Fn(&mut Case)| {
+        let mut c = case(id, source, forms, request, 0, expected);
+        change(&mut c);
+        out.push(c);
+    };
+    let workflow = |c: &mut Case| {
+        c.reading.deliverables.push(deliverable(
+            ".github/workflows/lint.yml",
+            DeliverableAction::Create,
+        ));
+        c.reading.acceptance_criteria.push(Criterion {
+            text: ".github/workflows/lint.yml runs the lint job".into(),
+            kind: CriterionKind::Content,
+        });
+    };
+    let behavior = |c: &mut Case, text: &str| {
+        c.reading.acceptance_criteria.push(Criterion {
+            text: text.into(),
+            kind: CriterionKind::Behavior,
+        });
+    };
+    let assume = |c: &mut Case, text: &str| c.reading.assumptions.push(text.into());
+
+    add(
+        "environment-ci-workflow-without-an-environment",
+        ENGM,
+        &["ci-workflow-deliverable"],
+        Expected::Refuse(refuse),
+        &|c| workflow(c),
+    );
+    add(
+        "environment-ci-workflow-with-an-environment",
+        ENGM,
+        &["ci-workflow-deliverable", "environment-assumption"],
+        Expected::Accept,
+        &|c| {
+            workflow(c);
+            assume(c, CI);
+        },
+    );
+    add(
+        "environment-host-action-without-an-environment",
+        EIGHT_RA0,
+        &["host-action-criterion"],
+        Expected::Refuse(refuse),
+        &|c| behavior(c, "Athena pushes the job branch to origin"),
+    );
+    add(
+        "environment-host-action-with-origin-cases",
+        EIGHT_RA0,
+        &["host-action-criterion", "environment-assumption"],
+        Expected::Accept,
+        &|c| {
+            behavior(c, "Athena pushes the job branch to origin");
+            assume(c, LOCAL);
+        },
+    );
+    add(
+        "environment-pr-without-an-environment",
+        EIGHT_RA0,
+        &["host-action-criterion", "pr-or-api-wording"],
+        Expected::Refuse(refuse),
+        &|c| behavior(c, "Athena opens the job's PR at verification start"),
+    );
+    add(
+        "environment-github-api-without-an-environment",
+        EIGHT_RA0,
+        &["pr-or-api-wording"],
+        Expected::Refuse(refuse),
+        &|c| behavior(c, "The check calls the GitHub API for the run status"),
+    );
+    add(
+        "environment-ci-write-without-an-environment",
+        ENGM,
+        &["pr-or-api-wording"],
+        Expected::Refuse(refuse),
+        &|c| behavior(c, "The CI job writes the records"),
+    );
+    add(
+        "environment-records-branch-read-without-an-environment",
+        ENGM,
+        &["records-branch-read"],
+        Expected::Refuse(refuse),
+        &|c| {
+            behavior(
+                c,
+                "The history check reads the job records on the records branch",
+            )
+        },
+    );
+    add(
+        "environment-records-branch-read-with-an-environment",
+        ENGM,
+        &["records-branch-read", "environment-assumption"],
+        Expected::Accept,
+        &|c| {
+            behavior(
+                c,
+                "The history check reads the job records on the records branch",
+            );
+            assume(
+                c,
+                "Environment: the CI job has read-only access to contents and cannot write the records \
+                 branch; the producer snapshot has no records directory",
+            );
+        },
+    );
+    add(
+        "environment-records-summary-without-figures",
+        NM0K,
+        &["records-evidence-citation"],
+        Expected::Refuse(refuse),
+        &|c| c.reading.summary = "Use the figures from job records.".into(),
+    );
+    add(
+        "environment-bare-history-summary-without-figures",
+        NM0K,
+        &["records-evidence-citation"],
+        Expected::Refuse(refuse),
+        &|c| c.reading.summary = "Use the figures from history.".into(),
+    );
+    add(
+        "environment-records-summary-with-a-bare-year",
+        NM0K,
+        &["records-evidence-citation", "environment-assumption"],
+        Expected::Refuse(refuse),
+        &|c| {
+            c.reading.summary = "Use the figures from job records.".into();
+            assume(c, "Environment: the figures date from 2026");
+        },
+    );
+    add(
+        "environment-records-summary-with-quoted-figures",
+        NM0K,
+        &["records-evidence-citation"],
+        Expected::Accept,
+        &|c| {
+            c.reading.summary = "Use the figures from job records.".into();
+            assume(c, "The figures cover 3 jobs, 40% of them landed");
+        },
+    );
+    add(
+        "environment-records-summary-with-a-reachable-file",
+        NM0K,
+        &["records-evidence-citation", "environment-assumption"],
+        Expected::Accept,
+        &|c| {
+            c.reading.summary = "Use the figures from job records.".into();
+            assume(
+                c,
+                "Environment: the figures are listed in docs/design/roadmap.md",
+            );
+        },
+    );
+    add(
+        "environment-product-reads-records-accepted",
+        ENGM,
+        &["records-branch-read"],
+        Expected::Accept,
+        &|c| {
+            behavior(
+                c,
+                "Run `athena status`: rounds per landed job are computed from the job records",
+            );
+            behavior(c, "Scores a job from its records");
+        },
+    );
+    add(
+        "environment-trigger-words-only-inside-other-words",
+        EIGHT_RA0,
+        &["dash-bullet", "trigger-word-inside-other-word"],
+        Expected::Accept,
+        &|c| {
+            behavior(c, "Fixed where it originates");
+            behavior(c, "`parse_remote` returns None for a local path");
+            behavior(c, "Entries are pushed onto the list");
+            behavior(c, "A Vec push appends the entry");
+        },
+    );
+    add(
+        "environment-gh-module-path-only",
+        EIGHT_RA0,
+        &["trigger-word-inside-other-word"],
+        Expected::Accept,
+        &|c| behavior(c, "gh/early.rs is not changed"),
+    );
+    add(
+        "environment-pr-inside-paths-only",
+        EIGHT_RA0,
+        &["trigger-word-inside-other-word"],
+        Expected::Accept,
+        &|c| {
+            behavior(c, "pr.rs is not changed");
+            behavior(c, "The page lists the history of the page");
+            behavior(c, "The record is written in the records branch");
+        },
+    );
+    // The dash-bullet request names a push and a PR in a content criterion, which the check does not read.
+    let bullet_request = lines(&["Update the guide.", "- Push to origin when the PR is ready"]);
+    let mut c = case(
+        "environment-trigger-words-only-inside-other-words-request",
+        EIGHT_RA0,
+        &["dash-bullet", "trigger-word-inside-other-word"],
+        &bullet_request,
+        1,
+        Expected::Accept,
+    );
+    behavior(&mut c, "Fixed where it originates");
+    out.push(c);
     out
 }
 
@@ -1145,6 +1384,53 @@ fn design_existing_code_refusal_is_declared_intended() {
     assert!(changelog.contains("check_design_existing_code"));
     assert!(changelog.contains("higher refusal rate is intended"));
     assert!(changelog.contains("expected 5% of newly refused readings"));
+}
+
+#[test]
+fn environment_reach_refusal_is_declared_intended() {
+    // The declared share is read from the criterion text by the replay.
+    let declared = athena_core::reading::replay_declaration(
+        &[Criterion {
+            text: "The change refuses more readings: expected 8% of newly refused readings".into(),
+            kind: CriterionKind::Behavior,
+        }],
+        &[],
+    );
+    assert_eq!(declared.share, Some(8));
+    // The step line is in refusing_check, and the doc comment names the cause and the estimate.
+    assert!(
+        acceptance_check_names(READING_SOURCE).contains(&"check_environment_reach".to_string())
+    );
+    let doc = READING_SOURCE
+        .split("pub fn check_environment_reach(")
+        .next()
+        .unwrap()
+        .lines()
+        .rev()
+        .take_while(|l| l.starts_with("///"))
+        .map(|l| l.trim_start_matches('/').trim())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "This check refuses more readings; the higher refusal rate is intended.",
+        "no step asking who performs each action, where, with what permissions, and what data it reaches",
+        "20261024-220048-engm",
+        "20261025-070538-8ra0",
+        "20261025-034247-nm0k",
+        "estimate",
+    ] {
+        assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+    }
+    let changelog = include_str!("../../../CHANGELOG.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(changelog.contains("check_environment_reach"));
+    assert!(changelog.contains("higher refusal rate is intended"));
+    assert!(changelog.contains("expected 8% of newly refused readings"));
 }
 
 #[test]
