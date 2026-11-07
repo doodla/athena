@@ -420,6 +420,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- A failed check's record now keeps the failing test section of the log (the `failures:`, `panicked at` and
+  `test result: FAILED` lines) with CI post-job cleanup text dropped, instead of the last 200 lines. One
+  function, `checks::failure_section`, does this for a local run, a reused CI run's detail and each CI job log.
 - An executable is written and run in the same process while a write handle or forked child still holds it, and
   `exec` of a file that any process holds open for writing fails with "Text file busy" (`ETXTBSY`). That is the
   root cause of the flaky test failures that four earlier jobs each guarded only at the last symptom they saw: a
