@@ -1,0 +1,311 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-094333-4z98",
+  "round": 1,
+  "at": "2026-11-07T09:49:07.368611377Z",
+  "invocation_seq": 2,
+  "approach": "Add one reading check, `check_outcome_state(reading, request)`, to `crates/athena-core/src/reading.rs`. It runs as a `step!` line directly after `check_governance_coverage` in `refusing_check`. It skips a reading with no capability, a question, or no deliverables, as the governance check does. It finds delivery verbs (publish, deploy, share, release) in the request only where a verb can stand: the first word of a line, bullet, part or sentence, or after `and`, `then`, `please`, `also`, `should`, `can you`, `could you`, `would you`, `want to`, `need to`, `like to` or `going to`. A verb counts only when a word follows it in the same sentence and that word is not a noun-use word such as `notes`, `process`, `pipeline` or `of`. For a delivery request the reading is accepted only if (a) a criterion names a served or reachable state through a whole-word `has_phrase` list (`reachable`, `is served`, `served page`, `http 200`, `is live`, `downloadable`, `can open` and similar; bare `url` and `tag` are not on the list), or (b) every detected verb is named in an `out_of_scope` item as that verb or its -ing form. Both the check and the -ing match are whole-word, and a noun-use follower such as `Release notes` does not count. The error is one line. It names the verb, a reachable URL and a served page, and the out_of_scope exit. Tests: unit tests in reading.rs, new corpus cases, and a replay test in refusal_corpus.rs that runs `refusing_check` over the three cited requests, asserts the caught set is exactly {g6vy} (1 of 3), and ties the CHANGELOG phrase `1 of 3 cited jobs` to that count. Existing tests and corpus cases that use a Publish or Deploy request with a file-only criterion get a state criterion, because the new check would refuse them. CHANGELOG gets one entry and docs/decisions.md gets D161, both limited to the 1-of-3 claim, with the 5% labeled an estimate. The reader prompt and READING_RULES are not touched.",
+  "decisions": [
+    {
+      "choice": "Put the check in reading acceptance as a `step!` line right after `check_governance_coverage` and before `check_boundary_and_repo_files`. Take the request text as an argument, as the governance check does.",
+      "reason": "The fault starts where a reading is accepted: a delivery verb read as a narrow deliverable, with nothing that compares the criteria with the state the user observes. The governance refusal for a publish request (it names the missing workflow) is the more specific repair, so it keeps coming first. Existing governance tests such as `a_request_naming_a_workflow_file_needs_it_listed_and_named` still see their governance errors. The new check reads only the reading's criteria and out_of_scope plus the request, like the governance check, so it sits before the file-comparison checks.",
+      "rejected": [
+        {
+          "option": "Change the reader prompt or READING_RULES",
+          "why": "Out of scope. The reader budget is 1997 of 2000 and `the_reader_brief_names_each_reading_rule_in_one_short_line` fixes 6 rules. The refusal text reaches the reader on the re-read anyway."
+        },
+        {
+          "option": "Put the check first, or in the verifier",
+          "why": "First would hide the governance refusal that names the workflow. The verifier sees the problem only after the producer has run."
+        },
+        {
+          "option": "Add a general glossary or figurative-term check",
+          "why": "7bf8 (ladder) and 0wtc (ontology) are another class and stay outside this change."
+        }
+      ]
+    },
+    {
+      "choice": "Match verbs by position, not by substring. Detect a verb at the start of a line, bullet, numbered or lettered part or sentence, or after the fixed lead-ins. Require an object word after it and skip noun-use followers.",
+      "reason": "Review finding (e): verbs found only at sentence start missed 'Build the docs and publish them', 'Can you deploy the site' and 'I want to release v1'. Review finding (c) and the noun cases require that 'Release notes', 'Add a share button' and 'shared helpers' are not delivery verbs. Tokenizing words with a segment-start flag handles `-`, `*`, `1.`, `2)` and `(a)` markers, because the gap before the word holds a newline or `.!?:;`.",
+      "rejected": [
+        {
+          "option": "Substring or `contains` match anywhere in the request",
+          "why": "It refuses 'Add release notes' and 'shared helpers' and cannot tell a noun from a verb."
+        },
+        {
+          "option": "Detect the verb in any position",
+          "why": "It gives many false refusals on nouns ('a share button', 'the release process'). The cost of the missed positions is stated as a limit in the doc and in D161."
+        }
+      ]
+    },
+    {
+      "choice": "Accept on a criterion that contains one of a fixed list of whole-word state phrases. Leave out `url`, `tag`, `link` and `page` alone.",
+      "reason": "Review finding (d): `tag` and `url` appear as incidental words ('the <title> tag names the page'). A phrase must say the thing is reachable, served, live, downloadable or openable.",
+      "rejected": [
+        {
+          "option": "Keep single words such as url, tag, link",
+          "why": "They let a file-only criterion pass, which is the g6vy misread."
+        },
+        {
+          "option": "Require a criterion kind of behavior",
+          "why": "The reader sets the kind; a behavior criterion that only says a file exists would pass."
+        }
+      ]
+    },
+    {
+      "choice": "The out_of_scope exit needs the same verb or its -ing form (publish/publishing, deploy/deploying, share/sharing, release/releasing) as a whole word in an item, and a noun-use follower does not count. When the request has several verbs, each must be covered, unless a criterion names a state.",
+      "reason": "Review finding (c): a substring match let 'Changes to shared helpers' and 'Release notes are unchanged' satisfy the exit. 'shared' is not a verb form in the list, and 'release' followed by 'notes' is a noun use.",
+      "rejected": [
+        {
+          "option": "Substring `contains` as in `governance_is_covered`",
+          "why": "That is the matching that produced the review finding."
+        }
+      ]
+    },
+    {
+      "choice": "Claim only what the replay shows: 1 of 3 cited jobs. The CHANGELOG, D161 and the check's doc comment say g6vy is caught and name 7bf8 and 0wtc as outside the check. The replay test asserts the count and checks that the CHANGELOG contains `1 of 3 cited jobs`.",
+      "reason": "Findings (a) and (b) of job 20261027-054230-8nz8: it claimed 3 of 3 and the reading did not match the request. The g6vy request text is quoted in the brief. The 7bf8 and 0wtc texts are in records/, which the snapshot lacks, so those two fixtures are rebuilt from D94 and D152 and labeled as rebuilt. The test's own comment states that the check only reads delivery verbs and so cannot catch them.",
+      "rejected": [
+        {
+          "option": "Claim the whole misread class",
+          "why": "Two of the three cited jobs have no delivery verb and are another class."
+        },
+        {
+          "option": "Write a replay count in prose only",
+          "why": "The test ties the CHANGELOG phrase to the computed count, so the two cannot drift."
+        }
+      ]
+    },
+    {
+      "choice": "Do not turn the 5% into a measurement. The CHANGELOG and the doc comment say `expected 5% of newly refused readings` and label it a guess.",
+      "reason": "The records for a real replay are absent from the planning snapshot. The existing `replay_declaration` mechanism reads that sentence from the job's criteria, and a pinned test checks the doc comment and the CHANGELOG say the higher refusal rate is intended.",
+      "rejected": [
+        {
+          "option": "State a measured refusal rate",
+          "why": "Nothing measured it."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add `check_outcome_state` with its doc comment (root cause, 1 of 3 scope, the two excluded jobs, the 'refuses more readings; the higher refusal rate is intended' sentence, the 5% labeled an estimate). Add helpers `delivery_verbs`, a word tokenizer with segment-start flag, `OUTCOME_STATE_PHRASES`, `DELIVERY_VERBS`, `LEAD_INS` and `NOUN_FOLLOWERS`. Add one `step!` line after `check_governance_coverage`. Add the unit tests, and edit the three existing governance tests that use a Publish or Deploy request.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add four input-form tags (`INPUT_FORMS` goes from 17 to 21). Add refusing and accepting corpus cases for the delivery-verb forms. Add `delivery_verb_replay_over_the_cited_jobs` (1 of 3, tied to the CHANGELOG phrase). Add a state criterion to the `brand-word-and-placeholder-are-not-repo-paths` case.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One `### Added` entry in `[Unreleased]`: root cause, `check_outcome_state`, 1 of 3 cited jobs (g6vy caught; 7bf8 and 0wtc not covered), 'refuses more readings; the higher refusal rate is intended', 'expected 5% of newly refused readings' labeled an estimate.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Add D161 with scope (four verbs, positions, state phrases, exit), alternatives, placement after `check_governance_coverage` and why, tradeoff (missed positions and verbs, rare false positives), reversal cost and provenance.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "In crates/athena-core/src/reading.rs, add a doc-commented section after `check_governance_coverage`. Add constants `DELIVERY_VERBS: [(&str, &str); 4]` (base and -ing forms), `LEAD_INS` (`and`, `then`, `please`, `also`, `should`; pairs `can you`, `could you`, `would you`, `want to`, `need to`, `like to`, `going to`), `NOUN_FOLLOWERS` (`notes`, `note`, `process`, `pipeline`, `workflow`, `checklist`, `candidate`, `date`, `plan`, `of`) and `OUTCOME_STATE_PHRASES` (whole-word lowercase: `reachable`, `is served`, `are served`, `served at`, `served from`, `served page`, `serves`, `http 200`, `200 ok`, `is live`, `goes live`, `live at`, `available at`, `accessible at`, `opens in a browser`, `loads in a browser`, `can be opened`, `can open`, `can be downloaded`, `can download`, `available for download`, `downloadable`, `can be installed`, `installable`, `visible at`).",
+    "Add a private tokenizer: lowercase the text, make curly apostrophes straight, take runs of alphanumeric characters (and `'`) as words, and flag a word as segment-start when the gap before it holds a newline or any of `.!?:;`, or when it is the first word. Add `delivery_verbs(request) -> Vec<(&'static str, &'static str)>` returning the verbs used at a segment start or after a lead-in, with a following word in the same segment that is not in `NOUN_FOLLOWERS`, deduplicated. Add a helper that says whether an out_of_scope item names a verb or its -ing form as a whole word not followed by a noun follower. Criteria are normalized (lowercase, white space collapsed) and tested with `has_phrase`.",
+    "Add `pub fn check_outcome_state(reading: &Reading, request: &str) -> Result<()>`. Return Ok when `capability` is none, a `question` is set, `deliverables` is empty, or `delivery_verbs` is empty. Return Ok when any criterion has a state phrase, or when every detected verb is named in an out_of_scope item. Otherwise `bail!` with one line, starting 'the reading was refused because', naming each verb, saying the criteria name no observable state, and giving the repairs: a criterion that names a reachable URL, a served page, a downloadable release or a link the recipient can open, or an out_of_scope item that names the delivery (for example 'Publishing is out of scope'). Write the doc comment as one block: the root cause (a delivery verb read as a narrow deliverable, with no check against the state the user observes); jobs 20261014-082328-g6vy caught; 'covers 1 of the 3 cited jobs' with 20261014-174815-7bf8 (ladder of requirements) and 20261017-173508-0wtc (ontology decision) named as outside the check; the verbs, positions and limits; 'This check refuses more readings; the higher refusal rate is intended.'; and the 5% as an estimate, not a measurement.",
+    "Add `step!(check_outcome_state(reading, request));` right after the `check_governance_coverage` step in `refusing_check`, before `check_boundary_and_repo_files`.",
+    "In `mod tests` of reading.rs add: the g6vy refusal test (criterion 1); the acceptance pairs for publish, deploy, share and release plus 'Add a timeout setting' (criterion 3); `delivery_verbs_are_found_after_lead_ins_and_markers` with the positive and negative strings listed in the demonstration (criterion 3); `out_of_scope_and_incidental_words_do_not_satisfy_the_check` (criterion 4); a guard test for the declined, asking and no-deliverable readings; `check_outcome_state_doc_names_root_cause_and_scope` (criterion 5); and `outcome_state_refusal_is_declared_intended` (criterion 7). Edit the existing tests at `a_request_naming_a_governance_path_is_refused_until_it_is_covered` (the `named` and `excluded` readings), `a_request_with_only_common_words_and_no_governance_path_is_accepted` (the `bare` reading) and `a_request_naming_a_workflow_file_needs_it_listed_and_named` (`with_workflow`) so each accepted reading also has the criterion 'the site is served at a reachable URL'. Leave the assertions on the refused readings as they are.",
+    "In crates/athena-core/tests/refusal_corpus.rs: add `delivery-verb-first`, `delivery-verb-after-lead-in`, `delivery-word-as-noun` and `out-of-scope-names-delivery` to `INPUT_FORMS` and change its length to 21. Add a `delivery_cases()` list to `cases()` with these ids. Refuse by `check_outcome_state`: `delivery-verb-first-reading-names-only-a-file` (g6vy request, verbatim, 0 bullets); `delivery-verb-in-a-dash-bullet` (request 'Update the guide.' plus the bullet '- Publish the page', form `dash-bullet`, 1 bullet); `delivery-verb-after-and` ('Build the docs and publish them.'); `delivery-verb-after-can-you` ('Can you deploy the site?'); `delivery-verb-after-want-to` ('I want to release v1.'); `delivery-verb-out-of-scope-shared-helpers-refused` (Share request, out_of_scope 'Changes to shared helpers'); `delivery-verb-out-of-scope-release-notes-refused` (Release request, out_of_scope 'Release notes are unchanged'). Accept: `delivery-verb-first-reading-names-a-served-state` (criterion 'The page is reachable at its public URL'); `delivery-verb-out-of-scope-names-it-accepted` (out_of_scope 'Sharing the report is out of scope'); `delivery-word-as-a-noun-is-accepted` ('Add release notes for 0.4 and a share button.'). Existing accepting cases with no delivery verb stay accepted, including `request-names-a-governance-file-the-reading-excludes` ('Add a timeout setting that is read from athena.toml.'). Add a criterion 'The status page is reachable at its GitHub Pages URL' to `brand-word-and-placeholder-are-not-repo-paths`. Each new case states its source (job 20261014-082328-g6vy or the requests in this brief) and whether it is verbatim or rebuilt. Update the file header comment to mention the new forms.",
+    "In refusal_corpus.rs add `delivery_verb_replay_over_the_cited_jobs`: three (job, request, source) entries (g6vy verbatim from the brief; 7bf8 and 0wtc rebuilt from D94 and D152, text with no delivery verb and labeled rebuilt). Build the same file-only reading for each, run `refusing_check`, assert the set of jobs refused by `check_outcome_state` equals {20261014-082328-g6vy} and the caught count is 1 of 3, and assert the whitespace-collapsed CHANGELOG contains `format!(\"{caught} of {total} cited jobs\")`. The test comment states that 7bf8 and 0wtc are another class and are not caught.",
+    "In CHANGELOG.md add one bullet at the top of `[Unreleased]` / `### Added`: the root cause; `reading::check_outcome_state` as a `step!` after `check_governance_coverage`; 'covers 1 of 3 cited jobs' (g6vy caught, 7bf8 and 0wtc not covered and in another class); the four verbs and positions; the out_of_scope whole-word exit; 'This check refuses more readings; the higher refusal rate is intended: expected 5% of newly refused readings', with 5% labeled an estimate and not measured; the existing tests that gained a state criterion. Use no banned word.",
+    "In docs/decisions.md append D161 after D160, in the fields Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance. Record the narrowed scope and count; the alternatives (prompt change, substring matching, the verifier, a glossary, any-position detection); the placement after `check_governance_coverage` (its refusal names the workflow and stays first; this check reads only the reading and request, so it sits before the file-comparison checks); that D08 and the governed paths are not touched; and the limits (other verbs, comma lists, gerunds).",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any other test that uses a delivery request with a file-only criterion by adding a state criterion to its reading. Check that athena.toml, defaults.toml, workflows and toolchain and lint config are unchanged."
+  ],
+  "risks": [
+    {
+      "risk": "False refusals: a request that uses a delivery word as a verb in an unusual way (for example 'Rename share and release functions') is refused.",
+      "mitigation": "Noun-follower words (`notes`, `process`, `pipeline`, `of` and similar) and the object-word rule cut the common cases. The error tells the reader to add a state criterion or name the delivery in out_of_scope, so a re-read can repair it. The 5% estimate is declared, and the verification-time replay holds the job if the real rate is over its limit."
+    },
+    {
+      "risk": "False negatives: other delivery verbs (ship, launch, post, upload), verbs inside a comma list ('Review, share, ...') and gerund starts ('Publishing the docs') are not detected.",
+      "mitigation": "The claim is limited to the four named verbs and the listed positions. The doc comment and D161 say so. The 1-of-3 count is asserted by the replay test."
+    },
+    {
+      "risk": "Existing tests that use a Publish or Deploy request with a file-only criterion break and the producer misses one.",
+      "mitigation": "Step 5 lists the three reading.rs tests and step 6 the one corpus case found by grep. The producer runs `cargo test -p athena-core` and fixes any other failure by adding a state criterion to the reading, never by weakening the check."
+    },
+    {
+      "risk": "The state phrase list is too loose or too tight: `can open` or `serves` match unrelated text, and a good criterion with other wording is refused.",
+      "mitigation": "The list is whole-word phrases only, with `url`, `tag`, `link` and `page` excluded. The refusal text names the accepted kinds of state. The list is one constant that can be extended."
+    },
+    {
+      "risk": "The replay fixtures for 7bf8 and 0wtc are rebuilt and could be read as proof that the check does not fire on the stored requests.",
+      "mitigation": "The fixture comment says the text is rebuilt and that the check fires only on delivery verbs, so what the test shows is the scope: 1 of 3. The CHANGELOG and D161 say the same."
+    },
+    {
+      "risk": "New text trips the boundary scan (a banned word) or the personal-data allow-list.",
+      "mitigation": "The producer avoids the words in `boundary_words()` and writes no email-like text; the xtask policy test runs under `cargo test`."
+    },
+    {
+      "risk": "Several lines in the CHANGELOG entry wrap, and the phrase assertion `1 of 3 cited jobs` fails on a line break.",
+      "mitigation": "The assertions collapse white space first, as the existing CHANGELOG tests do."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "`refusing_check` step list (new `step!(check_outcome_state(reading, request))` after `check_governance_coverage`)",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs: `every_acceptance_check_has_a_refusing_corpus_case`, `an_extra_check_with_no_case_is_reported`, `no_check_bypasses_refusing_check`, `the_wrapper_agrees_with_refusing_check_on_every_case`",
+      "kind": "rule",
+      "test": "cargo test -p athena-core --test refusal_corpus. The new check is a `step!` with refusing corpus cases (step 6). `an_extra_check_with_no_case_is_reported` anchors on the `step!(check_reading_references(` line, which stays. `function_body` ends at the first `\\n}\\n`, and `refusing_check` keeps one closing brace at column 0.",
+      "reason": null
+    },
+    {
+      "name": "Acceptance of a request with a delivery verb (new refusals)",
+      "dependent": "crates/athena-core/src/reading.rs `check_reading_acceptance` caller in `Athena::read_for` (line ~663), which turns a refusal into `ReadError::Refused` and a re-read with the refusal text",
+      "kind": "code",
+      "test": "The new unit tests call `check_reading_acceptance`. The refusal error is one line, as `ReadError::Refused(format!(\"{e:#}\"))` expects. Request text comes from `request.text`, already passed to the governance check.",
+      "reason": null
+    },
+    {
+      "name": "Stored-reading replay (`check_reading_text`, `replay_cases`, `replay`, `replay_declaration`)",
+      "dependent": "crates/athena-core/src/reading.rs lines ~3773 to 4130, which run `check_reading_acceptance` on the newest accepted readings and hold a candidate that newly refuses more than 10% unless the job declares a share",
+      "kind": "rule",
+      "test": "`outcome_state_refusal_is_declared_intended` asserts `replay_declaration` parses 'expected 5% of newly refused readings' as 5. The existing replay tests use requests with no delivery verb (checked by grep of reading.rs), so they are unchanged.",
+      "reason": null
+    },
+    {
+      "name": "Existing governance tests whose request is 'Publish to GitHub Pages…' or 'Deploy the site on every push'",
+      "dependent": "crates/athena-core/src/reading.rs tests `a_request_naming_a_governance_path_is_refused_until_it_is_covered` (7079), `a_request_with_only_common_words_and_no_governance_path_is_accepted` (7119), `a_request_naming_a_workflow_file_needs_it_listed_and_named` (7130)",
+      "kind": "code",
+      "test": "These tests are edited in step 5 to add a state criterion ('the site is served at a reachable URL') to each reading expected to be accepted. The refused readings still fail first at governance, which runs before the new check, so their error assertions hold. `the_governance_check_applies_to_a_retry_as_to_a_first_attempt`, `a_request_without_governance_keywords_or_deliverables_is_accepted_unchanged` (declined, asking and no-deliverable readings) are unchanged because the new check skips those readings.",
+      "reason": null
+    },
+    {
+      "name": "Corpus case `brand-word-and-placeholder-are-not-repo-paths` (request 'Publish the status page to GitHub.', expected Accept)",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs line ~559",
+      "kind": "code",
+      "test": "Step 6 adds the criterion 'The status page is reachable at its GitHub Pages URL' to the reading so the case still isolates the brand-word rule and stays Accept. `corpus_cases_get_the_expected_outcome` covers it.",
+      "reason": null
+    },
+    {
+      "name": "READING_RULES (6 entries) and the reader token budget",
+      "dependent": "crates/athena-context/src/briefs.rs `the_reader_brief_names_each_reading_rule_in_one_short_line` (line 4400) and docs/system-facts.md `budget reader: 1997 of 2000`",
+      "kind": "rule",
+      "test": null,
+      "reason": "The plan changes neither READING_RULES nor any prompt. The briefs test lists the checks that need a rule by name and does not include the new one, so it passes unchanged. The reader is told the refusal reason through the existing re-read."
+    },
+    {
+      "name": "Boundary scan and personal-data allow-list for new text",
+      "dependent": "xtask/tests/policy.rs `boundary_words()`; `[personal_data]` in athena.toml (docs/system-facts.md 'Banned words')",
+      "kind": "rule",
+      "test": "fmt, clippy and `cargo test` (step 8) include the xtask policy test.",
+      "reason": "The new CHANGELOG, D161 and code comments use no banned word and no email-like text. The producer is told to check this."
+    },
+    {
+      "name": "Decision log format and decision links",
+      "dependent": "crates/athena-cli/src/decisions.rs (sequential ids, each entry has a `- **Provenance:**` line); docs/decision-links.toml `[[governs]]` (D08 only: snapshot.rs and candidate.rs)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli decisions (existing tests over the real log's format).",
+      "reason": "D161 is the next id after D160 with a Provenance line. reading.rs is not a governed path of D08, so no `[[link]]` or reconciliation is required."
+    },
+    {
+      "name": "Other callers of `check_reading_acceptance`/`refusing_check` in other crates",
+      "dependent": "crates/athena-cli and other crates",
+      "kind": "code",
+      "test": null,
+      "reason": "grep over crates for `check_reading_acceptance` and `refusing_check` finds callers only in athena-core (reading.rs, refusal_corpus.rs). No test in athena-cli or athena-context passes a request with a delivery verb to the reading gate (grep of tests/ found only the unrelated words 'share' and 'release' in slot_exec.rs and drain.rs)."
+    },
+    {
+      "name": "docs/architecture.md line 48 (describes `check_governance_coverage`)",
+      "dependent": "docs/architecture.md",
+      "kind": "code",
+      "test": null,
+      "reason": "It describes only the governance check and its order is not asserted. The new check does not change it, and the plan edits no docs file other than docs/decisions.md."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in `mod tests` of `crates/athena-core/src/reading.rs` (a `governed_reading(&[\"docs/explainer.md\"], &[\"docs/explainer.md exists\"], &[])` fixture). It calls `check_outcome_state` directly with the g6vy request, then `check_reading_acceptance` with the same reading and request, and `refusing_check`. It asserts each refuses, the error text contains `reachable URL`, `served page` and `publish`, and `refusing_check` names `check_outcome_state`. Production entry points: `check_outcome_state` (added by step 1), `refusing_check` and `check_reading_acceptance` (exist, reading.rs 3197 and 3225). Seam: the plain Reading fixture helper `governed_reading` (exists, reading.rs 7013), passed as an argument, so there is no double and no I/O. The guards `capability`, `question` and `deliverables` are set by `scoped_reading` (exists, 6157). Without the check removed from `refusing_check`, this test sees `Ok` and fails; without the function it does not compile.",
+      "command": "cargo test -p athena-core --lib check_outcome_state",
+      "observes": "The g6vy request 'Publish a first explainer page on how firstmate handles work.' with a file-exists criterion is refused by `check_outcome_state`, and the error names a reachable URL or a served page.",
+      "fails_without": "Without `check_outcome_state` in `refusing_check`, `refusing_check` returns None and `check_reading_acceptance` returns Ok, so the unwrap_err and the name assertion fail.",
+      "seam": "`check_outcome_state` and `refusing_check` called directly with a `Reading` built by `governed_reading`/`scoped_reading`. The helpers exist; the check and the test are added by steps 1 and 5."
+    },
+    {
+      "criterion": 2,
+      "method": "Replay test `delivery_verb_replay_over_the_cited_jobs` in `crates/athena-core/tests/refusal_corpus.rs`. For each of the three cited jobs it takes the request text (g6vy verbatim from the brief; 7bf8 and 0wtc rebuilt from D94 and D152, each labeled with its source). It builds the same reading for each from `base_reading(request)` with one criterion, 'docs/guide.md exists' (kind content). It runs `refusing_check` through the existing `run`-style call with repo_files `Some(repo_files())`. It asserts the set of jobs where the result is `Some((\"check_outcome_state\", _))` equals {g6vy} and the caught count is 1 of 3. It also reads CHANGELOG through `include_str!` with whitespace collapsed (the same technique as `design_existing_code_refusal_is_declared_intended`) and asserts it contains `1 of 3 cited jobs`.",
+      "command": "cargo test -p athena-core --test refusal_corpus delivery_verb_replay",
+      "observes": "Exactly g6vy is refused by check_outcome_state; 7bf8 and 0wtc are accepted. The caught count is 1 of 3, and the CHANGELOG states the same count.",
+      "fails_without": "Without the check, the caught set is empty and the equality to {g6vy} fails. If the CHANGELOG says another count, the phrase assertion fails.",
+      "seam": "Public `athena_core::reading::refusing_check` called with fixtures from `base_reading` and the request strings. These exist (refusal_corpus.rs 106 and 660). The replay test and the fixture constants are added by step 6."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit tests in reading.rs. (1) `check_outcome_state_accepts_a_served_state_for_each_delivery_verb`: pairs of request and criterion, run through `check_reading_acceptance`: 'Publish the explainer page' with 'The page is reachable at its public URL'; 'Deploy the site on every push' with 'The site is served at the deployed address'; 'Share the report with the team' with 'The recipient can open the shared link'; 'Release v1' with 'The v1 release assets are downloadable'. A file-only criterion for the same four requests is refused, and 'Add a timeout setting' is accepted with a file-only criterion. (2) `delivery_verbs_are_found_after_lead_ins_and_markers` calls the private `delivery_verbs` on 'Build the docs and publish them', 'Can you deploy the site', 'I want to release v1', '* Publish the page', '1. Share the report', '2) Deploy it', '(a) Release v1' and 'Priority: high\\n\\nPublish the page', and asserts the verb is found. It also asserts none is found in 'Add release notes', 'Add a share button', 'Rename shared helpers', 'Add tests for share and release.', 'We deployed it' and 'Add a timeout setting'. Corpus cases `delivery-verb-after-and`, `delivery-verb-after-can-you` and `delivery-verb-after-want-to` run the same three requests through `refusing_check`.",
+      "command": "cargo test -p athena-core",
+      "observes": "A reachable-URL or served-state criterion is accepted for publish, deploy, share and release. A file-only criterion is refused for each. Verb detection works at all the listed positions and fails on the noun uses. 'Add a timeout setting' is not refused.",
+      "fails_without": "Without lead-in detection, 'Build the docs and publish them', 'Can you deploy the site' and 'I want to release v1' are not found, so the test and the corpus cases (expected Refuse) fail. Without the state list, the accepting pairs are refused.",
+      "seam": "Private `delivery_verbs` is called from `mod tests` in the same file, which can see it. `check_reading_acceptance` and `refusing_check` are the public entry points. The `Reading` fixture comes from `governed_reading` (exists, 7013). The tests and the corpus cases are added by steps 5 and 6."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit test `out_of_scope_and_incidental_words_do_not_satisfy_the_check` in reading.rs. A Share request ('Share the report with the team') with out_of_scope ['Changes to shared helpers'] is refused. A Release request ('Release v1') with out_of_scope ['Release notes are unchanged'] is refused. The same two requests with out_of_scope ['Sharing the report is out of scope'] and ['Releasing is out of scope: no tag is cut'] are accepted. A publish request with the criterion 'the <title> tag names the page' and another with 'The URL field is documented' are refused. Corpus cases `delivery-verb-out-of-scope-shared-helpers-refused`, `delivery-verb-out-of-scope-release-notes-refused` and `delivery-verb-out-of-scope-names-it-accepted` run the same shapes through `refusing_check`.",
+      "command": "cargo test -p athena-core",
+      "observes": "Substring or incidental words ('shared', 'Release notes', 'tag', 'URL') do not satisfy the check; a whole-word verb or -ing form in out_of_scope does.",
+      "fails_without": "A substring match on out_of_scope accepts 'Changes to shared helpers' and 'Release notes are unchanged', so the Refuse assertions fail. A state list that contains `tag` or `url` accepts the publish criteria, so those fail.",
+      "seam": "`check_reading_acceptance` and `refusing_check` called with `governed_reading` fixtures that set `out_of_scope` and the criteria. The helpers exist; the tests and corpus cases are added by steps 5 and 6."
+    },
+    {
+      "criterion": 5,
+      "method": "Grep for the step line and read the doc comment, and run a pinning unit test. The test `check_outcome_state_doc_names_root_cause_and_scope` in reading.rs reads `include_str!(\"reading.rs\")`, takes the doc block above `pub fn check_outcome_state(` (same technique as the existing doc tests at reading.rs 8619), and asserts it contains the root-cause words (delivery verb, narrow deliverable, state the user observes), `1 of the 3 cited jobs`, `20261014-082328-g6vy`, `20261014-174815-7bf8`, `20261017-173508-0wtc` and 'This check refuses more readings; the higher refusal rate is intended.'.",
+      "command": "grep -n \"step!(check_outcome_state(\" crates/athena-core/src/reading.rs",
+      "observes": "One match, in `refusing_check`, directly after the `check_governance_coverage` line; the doc comment pinned by the test names the root cause and the 1-of-3 scope.",
+      "fails_without": "Not a behavior criterion. The pinning test fails if the doc comment drops the root cause, the count or the two excluded ids."
+    },
+    {
+      "criterion": 6,
+      "method": "The corpus gains refusing cases whose first refusing check is `check_outcome_state` and matching accepting cases (listed under dependents and decisions). `every_acceptance_check_has_a_refusing_corpus_case` extracts the `step!(check_` names from `refusing_check` and fails when a name has no refusing case, so it passes only because a case refuses by `check_outcome_state`. The matching accepting cases are `delivery-verb-first-reading-names-a-served-state` and `delivery-verb-out-of-scope-names-it-accepted`. I read these case ids in the file and its runner; I did not run them.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "`corpus_cases_get_the_expected_outcome` gives every new case its expected outcome; `corpus_covers_the_listed_input_forms` finds the four new form tags; `every_acceptance_check_has_a_refusing_corpus_case` and `the_wrapper_agrees_with_refusing_check_on_every_case` pass.",
+      "fails_without": "Without a refusing case, `every_acceptance_check_has_a_refusing_corpus_case` reports `check_outcome_state` uncovered. Without the check, the Refuse cases get Accept and fail.",
+      "seam": "`refusing_check` through the corpus `run(c)` helper. The corpus (refusal_corpus.rs 236 to 668) exists; the cases and four form tags are added by step 6."
+    },
+    {
+      "criterion": 7,
+      "method": "Unit test `outcome_state_refusal_is_declared_intended` in reading.rs, modeled on `design_existing_code_refusal_is_declared_intended` (reading.rs 8619). It builds the criterion 'The change refuses more readings: expected 5% of newly refused readings' and asserts `replay_declaration(&[criterion], &[]).share == Some(5)`. It reads the doc block above `pub fn check_outcome_state(` and asserts it holds the sentence 'This check refuses more readings; the higher refusal rate is intended.' and the word `estimate`. It reads CHANGELOG (whitespace collapsed) and asserts `refuses more readings`, `higher refusal rate is intended`, `expected 5% of newly refused readings` and the word `estimate` are present. The 5% is not measured; the records for a real replay are absent from the snapshot.",
+      "command": "cargo test -p athena-core --lib outcome_state_refusal_is_declared_intended",
+      "observes": "The declared share parses as 5, below the 10% hold level, and the doc comment and CHANGELOG both say the higher rate is intended and the figure is an estimate.",
+      "fails_without": "Without the doc sentence or the CHANGELOG wording the assertions fail. Without the declared share in the criteria, the replay holds the job at over 10%.",
+      "seam": "Public `replay_declaration` (exists, reading.rs 3986) called with a Criterion built in the test, and `include_str!` of reading.rs and CHANGELOG.md (the technique exists at reading.rs 8625). The test is added by step 5."
+    },
+    {
+      "criterion": 8,
+      "method": "Run the three project checks. `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` need new code free of clippy lints (no needless collects, no long-argument functions). `cargo test` runs the whole workspace, including `the_reader_brief_names_each_reading_rule_in_one_short_line` in `crates/athena-context/src/briefs.rs` (asserts READING_RULES.len() == 6), which stays untouched.",
+      "command": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test",
+      "observes": "All three exit 0, and the briefs.rs test still sees 6 rules.",
+      "fails_without": "A formatting or lint fault, or a change to READING_RULES, fails one of them.",
+      "seam": "Whole-workspace commands; there is no double."
+    },
+    {
+      "criterion": 9,
+      "method": "Content check by reading the files. CHANGELOG.md gets an entry at the top of `[Unreleased]` / `### Added`. It names the root cause, `check_outcome_state`, the count `1 of 3 cited jobs`, g6vy as caught, 7bf8 and 0wtc as not caught, and the estimate. docs/decisions.md gets D161 with Case, Decision, Alternatives (including the placement alternatives), Tradeoff, Reversal cost and Provenance. The replay test and `outcome_state_refusal_is_declared_intended` tie the CHANGELOG wording to the code. `git status` shows no change to athena.toml, defaults.toml, .github/workflows, rust-toolchain.toml or lint config.",
+      "command": "git status",
+      "observes": "Only reading.rs, refusal_corpus.rs, CHANGELOG.md and docs/decisions.md are modified. The CHANGELOG contains `1 of 3 cited jobs` (asserted by the replay test) and no claim that 7bf8 or 0wtc is caught.",
+      "fails_without": "Not a behavior criterion. The CHANGELOG assertions in the replay test fail on a wrong count."
+    }
+  ],
+  "open_questions": [
+    "Host: the recorded request texts of jobs 20261014-174815-7bf8 and 20261017-173508-0wtc are in records/, which the planning snapshot lacks. The replay fixtures for those two are rebuilt from D94 and D152 and labeled as rebuilt. Only the g6vy text is quoted verbatim from the brief. If the verifier compares them with the stored requests, it needs access to records/.",
+    "Host: the true refusal rate over past accepted readings can only be measured by the verification-time replay, which reads records/. The plan keeps 5% as an estimate and does not claim a measured figure."
+  ],
+  "producer_section_sha256": "63ba0af2dd0eb325207d4fe7ffa82398ca377e6f4de0ae8b227b4245f29ea147"
+}
