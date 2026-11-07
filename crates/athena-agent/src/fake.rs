@@ -280,7 +280,13 @@ pub fn deterministic_turn(spec: &AgentInvocation) -> FakeTurn {
                 "decline_reason": null,
                 "producer_model": first_enum(&spec.json_schema, "producer_model", ""),
                 "defaults_applied": [],
-                "assumptions": ["This is a nested run with fake agents."],
+                // The Timeline is for a speed request, which the reading gate refuses without one. The
+                // absence phrase ("does not exist") is only there so the reference check skips the crates/
+                // path in a fixture repository that has no crates/ directory.
+                "assumptions": [
+                    "This is a nested run with fake agents.",
+                    "Timeline: read crates/athena-agent/src/fake.rs, which does not exist in a nested-run repository; stages: read, write; no recorded timing exists; the delay sits in write."
+                ],
                 "question": null,
                 "acceptance_criteria": [{ "text": format!("{FAKE_DELIVERABLE} contains the request"), "kind": "content" }],
                 "deliverables": [{ "path": FAKE_DELIVERABLE, "action": action, "p": 0.9 }],

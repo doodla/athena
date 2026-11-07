@@ -447,6 +447,16 @@ pub fn improvement_of(records: &Records) -> Improvement {
     }
 }
 
+/// The first words of a root-cause request's title line. The reading gate reads it to know that the request
+/// quotes earlier introspections (see [`INTROSPECTION_PREFIX`]).
+pub const ROOT_CAUSE_MARKER: &str = "Fix the root cause of a repeated failure: ";
+
+/// The start of each line of a root-cause request that quotes one introspection.
+pub const INTROSPECTION_PREFIX: &str = "Introspection ";
+
+/// The words after the job id on such a line, before the quoted prevention text that someone else wrote.
+pub const PREVENTION_MARK: &str = "; prevention it proposed:";
+
 /// The text of the high-priority root-cause request for a repeated cause, built with [`StewardRequest`]. High is
 /// the most Hestia queues: urgent is for a person. No body line starts like a bullet: the builder refuses one,
 /// since `athena plan` would read it as acceptance.
@@ -484,7 +494,7 @@ fn root_cause_request_at(
             .map(one_line)
             .unwrap_or_default();
         body.push_str(&format!(
-            "Introspection {id} (job {job}); prevention it proposed: {prevention}\n"
+            "{INTROSPECTION_PREFIX}{id} (job {job}){PREVENTION_MARK} {prevention}\n"
         ));
     }
     let acceptance = [
@@ -496,7 +506,7 @@ fn root_cause_request_at(
     let title: String = cause_text.chars().take(100).collect();
     let request = StewardRequest::new(
         Some(priority),
-        &format!("Fix the root cause of a repeated failure: {title}"),
+        &format!("{ROOT_CAUSE_MARKER}{title}"),
         &body,
         &acceptance,
         &["crates/".to_string()],
@@ -516,8 +526,9 @@ pub const SPEC_FILE: &str = "docs/spec.toml";
 pub const SPEC_REQUESTS_PER_PASS: usize = 5;
 
 /// The line that ties a request to its requirement. A request job that is not closed and holds this exact
-/// line, followed by the requirement id, is the open request for that requirement.
-const SPEC_LINE: &str = "Spec requirement: ";
+/// line, followed by the requirement id, is the open request for that requirement. The reading gate reads it
+/// to know a request is a spec request (see `speed_request` in `reading.rs`).
+pub(crate) const SPEC_LINE: &str = "Spec requirement: ";
 
 /// The status labels whose measures are about time, so a requirement measured by them is about speed.
 const SPEED_LABELS: &[&str] = &["throughput", "checks"];
@@ -5783,6 +5794,111 @@ mod tests {
         // No review id: a landed job that cites one is read as the change that implements its proposal.
         assert!(!text.contains("20260"), "{text}");
         assert!(slowdown_request(25.0, 60.0, &[]).is_err());
+    }
+
+    /// A repeated cause over two introspections whose prevention text is `prevention`.
+    fn cause_with_prevention(class: Option<&str>, cause: &str, prevention: &str) -> String {
+        let mut records = Records::default();
+        let mut first = introspection(10, 'a', None, cause);
+        first.prevention = Some(prevention.to_string());
+        let mut second = introspection(20, 'b', None, cause);
+        second.prevention = Some(prevention.to_string());
+        records.introspections = vec![first, second];
+        let repeated = RepeatedCause {
+            key: "cause:x".into(),
+            class: class.map(String::from),
+            cause: one_line(cause),
+            introspections: vec![rec_id(10).to_string(), rec_id(20).to_string()],
+            jobs: vec![job('a').as_str().to_string(), job('b').as_str().to_string()],
+            request: None,
+        };
+        root_cause_request(&repeated, &records).unwrap()
+    }
+
+    #[test]
+    fn the_real_root_cause_request_is_not_a_speed_request_for_quoted_prevention_text() {
+        let text = cause_with_prevention(
+            None,
+            "A rule is planned by reasoning and never run on real inputs.",
+            "Make the checks faster, save 12 minutes and speed up the head start.",
+        );
+        assert!(text.lines().any(|l| l.starts_with(INTROSPECTION_PREFIX)));
+        assert!(text.contains("faster"), "{text}");
+        assert!(!crate::reading::speed_request(&text), "{text}");
+    }
+
+    #[test]
+    fn a_root_cause_request_whose_cause_is_slowness_is_a_speed_request() {
+        let text = cause_with_prevention(
+            None,
+            "Verifier runs time out because the suite is too slow.",
+            "Add a check.",
+        );
+        assert!(crate::reading::speed_request(&text), "{text}");
+        // Make it faster is a person's own line, added after the builder's text.
+        let plain =
+            cause_with_prevention(None, "A rule is never run on real inputs.", "Add a check.");
+        assert!(!crate::reading::speed_request(&plain));
+        assert!(crate::reading::speed_request(&format!(
+            "{plain}\nMake it faster."
+        )));
+    }
+
+    #[test]
+    fn this_jobs_own_cause_text_is_not_a_speed_request() {
+        let text = cause_with_prevention(
+            Some(
+                "speed-change-requested-without-checking-measured-stage-timeline (20261025-110542-wa68)",
+            ),
+            "The request named a fix (move the call earlier) and a timing figure, but nothing required the \
+             reading or planner to check that figure against the real stage order and durations before \
+             planning around it. The class already exists for a speed change.",
+            "For any request that claims a delay or speed-up, the reading stage must first produce a timeline.",
+        );
+        assert!(!crate::reading::speed_request(&text), "{text}");
+    }
+
+    #[test]
+    fn the_real_slowdown_request_is_a_speed_request() {
+        let growth = [StageGrowth {
+            stage: "producer",
+            previous_minutes: 25.0,
+            minutes: 45.0,
+        }];
+        let text = slowdown_request(25.0, 60.0, &growth).unwrap();
+        assert!(text.lines().any(|l| l.starts_with(SLOWDOWN_MARKER)));
+        assert!(crate::reading::speed_request(&text), "{text}");
+    }
+
+    #[test]
+    fn the_real_throughput_request_is_a_speed_request() {
+        let answer = ThroughputOutput {
+            bottleneck: "The producer waits for the checks.".into(),
+            stage: "checks".into(),
+            change: "Start the pull request earlier.".into(),
+            expected_minutes_saved: 12.0,
+            rationale: "The checks start late.".into(),
+        };
+        let text = throughput_request(&rec_id(10), &answer, 60.0).unwrap();
+        assert!(text.lines().any(|l| l.starts_with(THROUGHPUT_MARKER)));
+        assert!(crate::reading::speed_request(&text), "{text}");
+    }
+
+    #[test]
+    fn a_spec_request_is_a_speed_request_exactly_when_the_requirement_is_speed() {
+        let gap = |speed: bool| SpecGap {
+            id: "R-9".into(),
+            statement: "Athena learns faster from its mistakes.".into(),
+            owner: "steward".into(),
+            no_mechanism: true,
+            measure_problem: None,
+            speed,
+        };
+        let plain = spec_request(&gap(false)).unwrap();
+        assert!(plain.contains("faster"), "{plain}");
+        assert!(!crate::reading::speed_request(&plain), "{plain}");
+        let fast = spec_request(&gap(true)).unwrap();
+        assert!(crate::reading::speed_request(&fast), "{fast}");
     }
 
     #[test]

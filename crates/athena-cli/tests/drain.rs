@@ -7026,6 +7026,54 @@ fn a_speed_improving_request_is_read_as_urgent_with_a_reason_and_an_ordinary_one
 }
 
 #[test]
+fn the_fake_readers_timeline_passes_the_speed_gate_and_the_reference_check() {
+    let request = "Speed up planning so it times out less.";
+    assert!(
+        athena_core::reading::refusing_check(
+            &athena_data::records::Reading {
+                assumptions: vec![],
+                ..recorded_fake_reading(request)
+            },
+            request,
+            None,
+            &[],
+            None
+        )
+        .is_some_and(|(name, _)| name == "check_speed_timeline")
+    );
+    let reading = recorded_fake_reading(request);
+    // The fixture repository has no crates/ directory, so the Timeline's path can only pass the reference
+    // check through its absence phrase.
+    let fx = Fixture::new();
+    let tree = fx
+        .git
+        .run(["ls-tree", "-r", "--name-only", "HEAD"])
+        .unwrap();
+    assert!(!tree.lines().any(|l| l.starts_with("crates/")), "{tree}");
+    let files: std::collections::BTreeSet<String> = tree.lines().map(String::from).collect();
+    athena_core::reading::check_speed_timeline(&reading, request).unwrap();
+    athena_core::reading::check_reading_references(&reading, Some(&files)).unwrap();
+    let timeline = reading
+        .assumptions
+        .iter()
+        .find(|a| a.starts_with("Timeline:"))
+        .expect("the fake reader writes a Timeline");
+    assert!(timeline.contains("not exist"), "{timeline}");
+}
+
+/// The reading the fake reader records for `request`.
+fn recorded_fake_reading(request: &str) -> athena_data::records::Reading {
+    let fx = Fixture::new();
+    let athena = fx.athena(deterministic());
+    let proposal = athena.ask(request, &Quiet).unwrap();
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    records.jobs[proposal.job.as_str()]
+        .latest_reading()
+        .unwrap()
+        .clone()
+}
+
+#[test]
 fn a_scripted_reading_with_an_urgent_reason_reaches_the_recorded_reading_and_null_does_not() {
     for (given, recorded) in [
         (
