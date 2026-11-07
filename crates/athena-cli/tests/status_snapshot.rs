@@ -118,6 +118,14 @@ fn status_snapshot_reads_records_and_history_from_the_snapshot_with_no_records_i
         .text();
     assert!(shown.contains(&throughput), "{shown}");
     assert!(shown.contains("1 landed"), "{shown}");
+    // The three measures of wasted work, over the one landing there is.
+    for expected in [
+        "attempts per landed change: 1.00 over the last 1 landing(s)",
+        "spent on attempts that did not land: 0.00 USD over the last 1 landing(s)",
+        "landed on the first attempt: 100% over the last 1 landing(s)",
+    ] {
+        assert!(shown.contains(expected), "{expected:?} not in:\n{shown}");
+    }
     assert!(
         shown.contains(&format!("history     {} first-parent", hashes.len())),
         "{shown}"

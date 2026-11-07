@@ -1,0 +1,62 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-031925-mrpk",
+  "round": 2,
+  "at": "2026-11-07T05:40:11.348111481Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "Tests 4411 and 4757 (and the second half of 4628) will fail under the gate, yet the dependents list says they pass unchanged.",
+      "evidence": "Decision 4 and the criterion 4(a) pure case say 'window 1 absent gives queue=true'. Test 4411's second review runs at 20 landings (seed_landed 0..10 then 10..10), and a_flat_median_queues_nothing (4757) also has 20 landings (seed 10 + 10). With fewer than 40 landings window 1 is absent, so the gate queues: the model is asked and a second design request is queued. Those tests assert `seen.lock().unwrap().len() == 1` / `seen.is_empty()`, `open_design_requests(&known).len() == 1` and `known.request_jobs().len() == before`. The plan says both tests 'keep asserting no model call' and does not list them for rewrite. The second half of 4628 (31 landings, 4693-4720) would likewise queue a third design request and ask the model, against its assertions at 4719-4720. Fix: Either change the gate as in the next finding so that these cases queue nothing, or list 4411, 4757 and the second half of 4628 as rewritten and state what each will assert. The dependents list must match what decision 4 actually does.",
+      "location": "Dependents: 'open-request behaviour of throughput_review' (4411, 4757); Decision 4; hestia.rs:4411-4452, 4757-4787",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "\"Cannot judge → queue\" combined with the removed skip queues a design request on every review while a repository has fewer than 40 landings, even when nothing changed.",
+      "evidence": "Today an open design request caps throughput design requests at one (hestia.rs:1728). Under the plan, any repository with fewer than 40 landings queues a new design request on every due review, because 'the change cannot be judged' means queue. That includes a Cadence review with flat measures, as in the 4411/4757 fixtures. Each new request gets the guaranteed turn (build_improving). With fewer than 60 landings, any worsening at all is judged against zero noise. That is a rule with obvious false positives, and it contradicts 'only queues a request when the change is larger than the noise between recent windows'. Fix: When the change cannot be judged (no window 1, or no noise estimate), do not queue a request when a throughput design request is already open, or do not queue at all and write 'not enough history: N of 40/60 landings' in the note. At minimum, require a worsening against the stored baseline (the trigger's own comparison) before queuing. Keep the first review's behaviour as the one exception if wanted. Update the criterion 3 and 4 tests to match.",
+      "location": "Decision 4 ('with window 1 absent ... queue') together with Decision 5 (skip removed)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The full-window-only rule hides the three measures for the one-landing status fixture, so criterion 5's assertions cannot pass.",
+      "evidence": "The status_snapshot fixture has exactly one landed job (status_snapshot.rs:91 `jobs_by_state.landed == 1`, :120 '1 landed'). With full windows only, waste_windows returns nothing, `Throughput.waste` is None and text() has no figure to print. Yet the demonstration asserts 'attempts per landed change: 1.00', '... 0.00 USD' and '100%'. Either the assertions fail or the code breaks decision 2. The rule also means the first review (10 landings) stores no figures, and `athena status` shows none of the three measures in any repository with fewer than 20 landings. The median section, by contrast, uses a partial newest window (status.rs:1003 `saturating_sub`). Fix: Report the newest window even when it holds fewer than 20 landings, as the median does, and print how many landings it covers. Require full windows only for the previous window, the noise and the gate comparison. Say this in decision 2 and step 2, and keep the criterion 5 assertions.",
+      "location": "Decision 2 ('A window is reported only when it holds 20 landings'), Step 2 ('only full windows') vs Criterion 5 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Jobs still running count as attempts but neither as landings nor as wasted, which inflates attempts per landing.",
+      "evidence": "'Attempt = a request job that did work (has invocations) or a landed job' also counts in-flight or waiting jobs. The did_not_land predicate (status.rs:1015-1018) counts only closed-not-landed or stopped jobs. A job that is running at the time is then an attempt that is neither a landing nor wasted, which inflates attempts per landing. It also has no closing outcome time to place it in a window. Fix: Define attempts in a window as landings + did_not_land attempts, leaving out open jobs, and state that open jobs are not counted until they close.",
+      "location": "Decision 1 (Attempt definition), Step 2 WasteWindow",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The criterion 1 fixture does not say when the failed jobs end, and that timing decides whether they fall in window 0.",
+      "evidence": "Window 0 holds only the unlanded attempts that ended at or after the 20th-newest landing's end (decision 2). With exactly 20 landings, a failed job that ends before the oldest landing ends falls into no window, and the 2.0 assertion fails for a fixture-timing reason. The demonstration does not say when the 20 failed jobs start or end. Fix: State the fixture timing: each failed job ends after the oldest landing's end. Also assert the window's attempt count (40) before the ratios.",
+      "location": "Criterion 1 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Skipping the model whenever the gate rejects makes most cadence reviews do nothing, the very complaint behind the request.",
+      "evidence": "The request objects that four of seven runs 'did nothing'. Under this plan, once a repository has 40 or more landings, every cadence review whose measures stay within noise asks no model and records no proposal, so the periodic bottleneck search effectively stops. The request limits only the queuing of a request, not the asking. Fix: Default to asking the model on a due review and recording the proposal, and let the gate decide only whether a request is queued. If the cost matters, keep skipping the model as an option for the user, as open question 2 already offers.",
+      "location": "Decision 5 / Open question 2 (gate rejects → no model call)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The noise estimate rests on one or two differences and the note does not say which.",
+      "evidence": "Noise is the largest of one or two adjacent differences (|w1-w2|, |w2-w3|). With 60 landings that is a single sample, so the gate swings widely from run to run. Fix: State in the note how many differences the noise used (1 or 2), so a reader can weigh it.",
+      "location": "Decision 4 noise estimate",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read hestia.rs (throughput_due at 1341, throughput_review at 1701-1827, improvement_of at 409, the test helpers at 4233-4359 and the tests at 4362-4828 and 5116), status.rs (Throughput::compute at 984-1051, text() at 1054, the retry chain at 448), reading.rs retried_job at 1522, store.rs spent_usd at 169, display.rs 1113/1202, snapshot.rs and status_snapshot.rs. The plan's names, lines and seams are real. display.rs and snapshot.rs really do print `Throughput::text()` without changes. The trigger design and the criterion 2(b) and 4(b) numbers check out (spend noise 3 against a change of 8 or 2; attempts noise 0.15 against 0.4 or 0.1). Three problems remain. (1) The gate rule \"window 1 absent → queue\" goes against the plan's own dependents list. The flat-median tests at 4411 and 4757 have only 20 landings, so under the new gate they would ask the model and queue a second design request. The plan says those tests keep asserting no model call, and it does not list them for rewrite. (2) That same rule, now that the open-request skip is gone, means a repository with fewer than 40 landings queues a new design request on every 10-landing cadence review, even when nothing changed. That contradicts \"only queues when the change is larger than the noise\". (3) Decision 2 reports a window only when it holds 20 landings. Criterion 5's demonstration expects 'attempts per landed change: 1.00' from a fixture with one landing, which that rule would hide. Each problem has a direct fix, so the verdict is revise."
+}

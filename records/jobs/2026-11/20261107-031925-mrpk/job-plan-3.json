@@ -1,0 +1,363 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-031925-mrpk",
+  "round": 3,
+  "at": "2026-11-07T05:42:50.684977606Z",
+  "invocation_seq": 7,
+  "approach": "Three changes meet in the throughput review. (1) athena-data: a `WasteFigures` struct (attempts per landing, wasted USD, first-attempt share), an optional defaulted `waste` field on `ThroughputReview`, and a `Wasted` trigger, so old records still parse. (2) status.rs: `waste_windows(records, window)` returns the newest window (partial allowed, with its landing count) and up to three full windows before it. `Throughput::compute` keeps the newest window, the one before it, the median for both, and a noise estimate per measure. `Throughput::text()` prints the three measures, so `athena status` shows them. (3) hestia.rs: `throughput_due` fires `Wasted` on a rise of more than 20% against the figures stored on the previous review. `throughput_review` never skips for an open design request: it names the request in the record's note and in THROUGHPUT.md, and it always asks the model on a due review. A pure `request_gate` decides only whether a design request is queued. Judged case: it queues only when a measure got worse by more than the noise, comparing the newest full 20-landing window with the 20 before it. The noise is the largest adjacent difference among the older full windows, and the note says how many differences were used (1 or 2). Not-judged case (fewer than 60 landings): it queues nothing, except for the very first review when no throughput design request is open. The note says 'not enough history: N of 60 landings'. The 25% slowdown rule and the stage-growth comparison are unchanged. No parser, stem list or reading rule changes, so refusal_corpus is not touched.",
+  "decisions": [
+    {
+      "choice": "Definitions. Landing = a landed request job. Attempt in a window = its landings + its did-not-land attempts. A did-not-land attempt is a request job with invocations that failed, was closed unlanded, or was stopped, using the same predicate as `unlanded_jobs` (status.rs:1015-1018), moved into a shared helper `did_not_land(job)`. Jobs still open count in neither side until they close. First-attempt landing = a landed job whose request is not 'try again on <job>' pointing at an earlier job that did work (`reading::retried_job`, reading.rs:1522). Wasted spend = `JobRecords::spent_usd` (store.rs:169) summed over the did-not-land attempts of the window.",
+      "reason": "All figures come from job and invocation records, so no new record type is needed. Leaving open jobs out (finding 4) means attempts per landing is not inflated by work in flight, and every counted attempt has a close time to place it in a window. The retry link is the codebase's existing meaning of 'another attempt at the same change'.",
+      "rejected": [
+        {
+          "option": "Count every request job with invocations as an attempt",
+          "why": "A running or waiting job is neither a landing nor wasted, which inflates attempts per landing and gives it no window."
+        },
+        {
+          "option": "Read cost from Outcome.totals.cost_all",
+          "why": "Jobs stopped before an outcome carry no totals."
+        },
+        {
+          "option": "Count invocations or producer runs as attempts",
+          "why": "A job's planner, critic and verifier runs are not attempts to land a change; the request's '58% of attempts did not land' is about jobs."
+        }
+      ]
+    },
+    {
+      "choice": "Windows. Landed request jobs are ranked by (landing end, id), the ranking `landed_jobs_among_first` uses (status.rs:963), shared as a helper. Window 0 = the newest 20 landings, or all landings when there are fewer, plus every did-not-land attempt that closed at or after the oldest of those landings' end. Windows 1-3 = landings 21-40, 41-60, 61-80 plus did-not-land attempts closed between their cut times. A did-not-land attempt is placed by its closing outcome time, or its last invocation end if it has none. Window 0 is reported even when partial, with its landing count printed, as the median section does (status.rs:1003 uses saturating_sub). Windows 1-3 are reported only when full. `waste_windows(records, window)` takes the size so tests can use small windows; production passes THROUGHPUT_WINDOW. The median windows use the same cut over the measured landed jobs of `landed_jobs`.",
+      "reason": "Answers finding 3: `athena status` and the first review show the three measures with fewer than 20 landings (the one-landing snapshot fixture shows 1.00, 0.00 USD, 100%). A thin window can never be the 'previous' window, so it cannot gate anything. The cut by landing end avoids a second time axis.",
+      "rejected": [
+        {
+          "option": "Report only full windows",
+          "why": "Hides the measures in any repository with under 20 landings and breaks the criterion 5 fixture, which has one landing."
+        },
+        {
+          "option": "Windows cut by calendar time",
+          "why": "Landings per day vary, so a window would not be 20 changes."
+        },
+        {
+          "option": "Waste figures over the measured jobs of landed_jobs() only",
+          "why": "It drops landed jobs that ran no model, which are still landings."
+        }
+      ]
+    },
+    {
+      "choice": "Trigger (`throughput_due(landed, median, waste: Option<WasteFigures>, latest)`) compares the newest-window figures with the figures stored on the previous review (new `waste: Option<WasteFigures>`), as the median trigger uses `window_median_minutes`, and needs a landing since that review. Rises: attempts per landing > previous x WORSEN_RATIO; wasted USD > previous x WORSEN_RATIO; first-attempt share < previous x (2 - WORSEN_RATIO). Floor for a rise from zero: when the previous wasted USD is 0, the spend rise counts only if attempts per landing also exceeds previous x WORSEN_RATIO. A previous review with no stored figures gives no waste trigger. Cadence still fires first at 10 landings beyond the previous review.",
+      "reason": "A level that stays high triggers once, not on every landing, and old records stay valid. The zero floor ties a rise from zero to a measured ratio, not to a fixed cent value.",
+      "rejected": [
+        {
+          "option": "Trigger on newest 20 vs the 20 before, recomputed",
+          "why": "A level that stays high would fire on every new landing."
+        },
+        {
+          "option": "Any wasted spend of 0.01 USD or more after a zero baseline",
+          "why": "One failed run after a clean window would fire a review."
+        },
+        {
+          "option": "One ThroughputTrigger variant per measure",
+          "why": "One `Wasted` variant suffices; the note names the measures that rose."
+        }
+      ]
+    },
+    {
+      "choice": "The request gate. `request_gate` is pure and decides only whether a design request is queued; the model is asked on every due review. For each of four measures (median minutes, attempts per landing, wasted USD, first-attempt share) it forms, when windows 0, 1 and 2 are full (60 landings), the change = window 0 minus window 1 in the bad direction (median, attempts, spend up; share down), and the noise = the largest adjacent difference among the older full windows, |w1-w2| and |w2-w3| when window 3 is full, in that measure's own unit. A measure counts as beyond noise when change > noise (equal is within noise). A measure whose own windows are not full (for example fewer than 60 measured landed jobs for the median) is left out and the note says so. Judged: queue iff at least one measure is beyond noise; the note names each such measure with its change, noise and the number of differences used (1 or 2), or says 'within noise' or 'no measure worsened'. Not judged (no measure can be judged, under 60 landings): queue nothing and write 'not enough history: N of 60 landings, no request queued', with one exception: the first review (no earlier review) queues when no throughput design request is open, as today. The note and docs/design/hestia.md state this basis.",
+      "reason": "Answers findings 1, 2, 6 and 7. The gate cannot queue on every review of a young repository, because 'cannot judge' now means 'do not queue', and it asks the model so a due review never does nothing. Change and noise are both differences between non-overlapping 20-landing windows, so they are like for like. The newest pair is excluded from its own noise. The stored-baseline comparison remains only the trigger's.",
+      "rejected": [
+        {
+          "option": "Cannot judge means queue",
+          "why": "With the skip removed it queues a design request on every due review below 40 landings, even when nothing changed (finding 2)."
+        },
+        {
+          "option": "Skip the model whenever the gate rejects",
+          "why": "Most cadence reviews would do nothing, the complaint behind the request; the request limits queuing, not asking (finding 6)."
+        },
+        {
+          "option": "Change = current vs the previous review's stored figures",
+          "why": "That review may be 1 to 9 landings old, so its window overlaps window 0 and the change is diluted against a non-overlapping noise."
+        },
+        {
+          "option": "A fixed percentage threshold",
+          "why": "It is the 20% trigger again and does not adapt to the repository."
+        },
+        {
+          "option": "Standard error inside the two windows",
+          "why": "Not 'noise between recent windows' as accepted, and needs per-job series."
+        }
+      ]
+    },
+    {
+      "choice": "An open earlier design request no longer stops the review. The record's note says 'throughput design request <id> is still open; this review ran anyway', THROUGHPUT.md names the open request (id and title) so the proposal differs from it, the model is asked, and the proposal is recorded. A design request is queued only if the gate says so. When a request is open and the gate says queue, a second one is queued; both are linked by their reviews' `proposal.request_job`. When the gate says no, the proposal is recorded with `request_job: None` (as in the existing 'could not be queued' path).",
+      "reason": "This is 'does not skip a run' plus 'notes the open request' plus 'only queues beyond noise'. No code assumes at most one throughput design request: `improvement_of` (hestia.rs:409-443) returns a set and `Plan::build_improving` (plan.rs:832-839) treats it as a set.",
+      "rejected": [
+        {
+          "option": "Keep the skip and reword it",
+          "why": "The request calls the skipped runs 'did nothing'."
+        },
+        {
+          "option": "Ask the model but never queue while a request is open",
+          "why": "A change beyond noise would then go unanswered until the open request closes; the plan leaves this as open question 1."
+        }
+      ]
+    },
+    {
+      "choice": "Existing hestia tests are rewritten exactly where the new behaviour changes their assertions. The model is now asked on every due review, and with a previous review and under 60 landings nothing is queued. Rewritten: (a) `a_review_queues_one_design_request_...` (4411), second review: assert `proposal` is Some with `request_job == None`, the note holds 'still open', `open_design_requests` stays 1, the model log has 2 entries. (b) `a_median_rise_from_25_to_60_...` (4628): first half asserts proposal Some with `request_job None`, model log 1, one open design request and the unchanged slowdown assertions; second half asserts the model log is 2 and open design requests stay 1. (c) `unmeasured_landed_jobs_before_...` (4724): model log has 1 entry (was empty). (d) `a_flat_median_queues_nothing` (4757): model log has 1 entry, no request queued, nothing reported. (e) the 4790 rise-of-20-to-25-percent test, the improvement_of test (5116, whose second half queues no design request, so `items` stays empty) and the followup tests at 4526 and 4561 need no assertion change. `Lines` and `earlier_review` literal get the new field.",
+      "reason": "Answers finding 1: the dependents list now matches what decisions 4 and 5 do, test by test.",
+      "rejected": [
+        {
+          "option": "State that 4411 and 4757 pass unchanged",
+          "why": "They assert the model is not called; under always-ask the log has more entries."
+        }
+      ]
+    },
+    {
+      "choice": "display.rs and snapshot.rs are not edited. Both print `Throughput::text()` (display.rs:1114 and :1203, snapshot.rs:245/276) and snapshot.rs serializes the `Throughput` struct, so new fields and lines flow through. The status_snapshot test is extended to assert the new labels.",
+      "reason": "Nothing to change there; a separate renderer would duplicate text() and could drift from what the review is given.",
+      "rejected": [
+        {
+          "option": "Separate display code for the three measures",
+          "why": "It would duplicate text() and could drift."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "purpose": "Add `WasteFigures`, the optional defaulted `waste` field on `ThroughputReview`, the `Wasted` trigger (as_str 'wasted'), validation of the figures, doc updates for `ThroughputProposal.request_job` and `ThroughputReview.proposal`, tests for old JSON, round-trip, bad figures and trigger name, and the literal in `throughput_review_with` (~4142).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "purpose": "Add `did_not_land`, the shared landing ranking helper, `WasteWindow`, `waste_windows`, the median windows and noise, the new `Throughput` fields, the three printed measures with basis lines in `text()`, and tests for criteria 1 and 5.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "Extend `throughput_due`; add `waste_rises` and `request_gate`; change `throughput_review` so an open request is noted not skipped, the model is always asked, the gate decides only queuing, and the record stores the figures; name the open request in THROUGHPUT.md via `ask_throughput`; update docs; add helpers and tests; rewrite the existing tests listed in decision 6.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/status_snapshot.rs",
+      "action": "modify",
+      "purpose": "Assert the printed `athena status --snapshot` text carries the three new labels and figures.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One Unreleased entry stating only what the diff does.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/design/hestia.md",
+      "action": "modify",
+      "purpose": "Section 12: the three measures, the Wasted trigger, the gate and its noise basis (older windows, number of differences), not-enough-history behaviour, and the note instead of a skip when a request is open; remove the old wording (lines ~288, 300-301).",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "records.rs: add `WasteFigures` (Copy, Serialize, Deserialize, PartialEq, deny_unknown_fields) and `waste: Option<WasteFigures>` on ThroughputReview with #[serde(default, skip_serializing_if = \"Option::is_none\")]. Add the `Wasted` trigger with as_str 'wasted'. Extend `validate` (finite, non-negative, share in 0..=1, attempts at least 1). Update the docs at ~2159 and ~2196. Fix the literal at ~4142. Add the old-JSON, round-trip, bad-figure and trigger-name tests.",
+    "status.rs: extract `did_not_land(job)` from the loop at 1015-1018 and use it in both places. Extract the landing ranking of `landed_jobs_among_first` (963) into a helper. Add `WasteWindow { landings, attempts, unlanded_attempts, first_attempt_landings, wasted_usd }` with accessors for the three figures and `figures() -> WasteFigures`. Add `pub fn waste_windows(records, window) -> Vec<WasteWindow>` (newest first, at most 4; window 0 may be partial, the others only when full) per decision 2. A did-not-land attempt lands in the window of its closing outcome time, or its last invocation end; open jobs are not counted. A landing is first-attempt unless `reading::retried_job` resolves to another job with invocations. Add the median windows over `landed_jobs` and the per-measure noise as (largest of |w1-w2|, |w2-w3|, number of differences), None below three full windows.",
+    "status.rs: add `waste`, `waste_previous`, `median_previous` and `noise` to `Throughput`, filled in `compute` with THROUGHPUT_WINDOW. Update `text()` to print 'attempts per landed change: N', 'spent on attempts that did not land: N USD' and 'landed on the first attempt: N%', each with 'over the last N landings' and a basis line, and the previous 20 beside it when present. Keep the existing 'did not land: N job(s)' line.",
+    "hestia.rs: change `throughput_due` to `(landed, median, waste: Option<WasteFigures>, latest)`. Add pure `waste_rises(previous, now)` with the zero floor and the `Wasted` branch, which needs a landing since the previous review and stored figures. Add pure `request_gate(...)` returning `{ queue: bool, note: String }` per decision 4 (judged and not-judged paths, differences count in the note). Update the doc comment above `throughput_due`.",
+    "hestia.rs `throughput_review`: remove the early skip at 1728-1733. Always call `ask_throughput`, passing the open request's id and title (from `open_throughput_request`) so the THROUGHPUT.md it writes names it. Queue the design request only when the gate says so; otherwise record the proposal with `request_job: None`. Build the note from the open-request remark ('throughput design request <id> is still open; this review ran anyway'), the gate note, any model or queue error and the slowdown remark. Store `waste: measured.waste.map(|w| w.figures())` on the record. Update the module doc (~43-62), `THROUGHPUT_MARKER`, `open_throughput_request` and `throughput_review` docs.",
+    "hestia.rs tests: add helpers `earlier_review_with_waste`, `put_earlier_review_with_waste`, `put_earlier_review_citing` and `seed_failed(dir, athena, slot, usd)`. Update the throughput_due test (4362) and the `earlier_review` literal. Add the tests for criteria 2, 3 and 4 (pure gate cases, review-level within and beyond noise). Rewrite 4411, both halves of 4628, 4724 and 4757 as listed in decision 6; leave 4790, 4526, 4561 and 5116 as they are.",
+    "status.rs tests: add `half_of_the_attempts_not_landing` (criterion 1) with its no-failure and partial-window cases, a noise test with four full windows and a three-window case, and extend `every_printed_figure_states_its_basis...` (3796) and add the 40-landing previous-20 test.",
+    "status_snapshot.rs: assert the three new strings for the one-landing fixture. Run `cargo test -p athena-cli --test status_snapshot`.",
+    "docs/design/hestia.md section 12 and CHANGELOG.md: write them from the final diff, replacing the wording at hestia.md ~288 and 300-301. State the gate's basis (newest full window vs the one before, noise from the older windows, not enough history below 60 landings).",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`, and fix what they report. Then Grep the old wording from criterion 8."
+  ],
+  "risks": [
+    {
+      "risk": "Every due review now calls the model, including those that queue nothing, so model spend per due review is no longer capped by an open request.",
+      "mitigation": "This matches today's cost when no request is open; reviews are due only on a 10-landing cadence or a rise; the record keeps the invocation; open question 3 asks the user."
+    },
+    {
+      "risk": "Under 60 landings no request is queued after the first review, so a young repository gets fewer design requests than today.",
+      "mitigation": "The note says 'not enough history: N of 60 landings'; the model's proposal is still recorded; the CHANGELOG and hestia.md state the rule; open question 2 asks the user."
+    },
+    {
+      "risk": "The noise rests on one difference with exactly 60 landings, so the gate can swing from run to run.",
+      "mitigation": "The note states the number of differences used (1 or 2) next to the noise."
+    },
+    {
+      "risk": "Two design requests can be open at once and both get the guaranteed turn.",
+      "mitigation": "A second is queued only beyond noise; THROUGHPUT.md names the open request so the proposal differs; the criterion 4 test asserts `improvement_of` lists both; build_improving is set-based."
+    },
+    {
+      "risk": "Failed-job fixtures end in the wrong window, so the criterion 1, 2(b) and 4(b) figures are off.",
+      "mitigation": "Failed jobs start 30 minutes after their slot's landing start and end after that landing's end (landings 20 min long, 2 h apart, hestia.rs:4281-4283); each test asserts `waste_windows` counts per window (40 attempts in criterion 1) before asserting results."
+    },
+    {
+      "risk": "Window and retry reconstruction can drift: a landing record written later moves a landing end, and a 'try again on' link can point at a missing job.",
+      "mitigation": "A missing or unrun predecessor counts as no predecessor; the docs call the figures a reconstruction, as `previous_stage_medians` does."
+    },
+    {
+      "risk": "A new record field makes a newer record unreadable by an older Athena because of deny_unknown_fields.",
+      "mitigation": "skip_serializing_if keeps the field out until the new code writes it; forward reading by old binaries is already limited for every new field in the crate."
+    },
+    {
+      "risk": "Existing hestia tests fail if one of the rewrites in decision 6 is missed.",
+      "mitigation": "Step 6 lists each test and what it asserts afterwards; `cargo test --locked` runs them all."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "throughput_due signature and Wasted trigger",
+      "dependent": "crates/athena-core/src/hestia.rs `Athena::throughput_review` (~1701), the only production caller of `throughput_due`, reached from `review_passes` (hestia.rs:2196) at drain start and in each sweep",
+      "kind": "code",
+      "test": "The new throughput_due test (criterion 2a) and the updated a_throughput_review_is_due_at_ten_landings_and_on_a_rise_of_more_than_twenty_percent (hestia.rs:4362), which pass `None` for the new argument",
+      "reason": null
+    },
+    {
+      "name": "open-request behaviour of throughput_review: the model is now asked on every due review; with a previous review and under 60 landings nothing is queued",
+      "dependent": "hestia.rs tests 4411, 4628, 4724, 4757 (assert the model is not called while a request is open)",
+      "kind": "code",
+      "test": "Rewritten in step 6 as listed in decision 6 (4411 second review, both halves of 4628, 4724, 4757). The tests at 4790, 4526, 4561, 4572 and 5116 keep their assertions: 4790 asserts only slowdown requests; 5116's second half has 21 landings with a previous review, so no design request is queued and `items` stays empty.",
+      "reason": null
+    },
+    {
+      "name": "guaranteed turn for Athena's own requests when two throughput design requests are open",
+      "dependent": "hestia.rs `improvement_of` (409-443), `Plan::build_improving` (plan.rs:832-839, 871-900) and the drain help text at crates/athena-cli/src/main.rs:288",
+      "kind": "rule",
+      "test": "The criterion 4 beyond-noise test asserts `improvement_of` lists both ids; the set-based build_improving tests in plan.rs (~1952-2002) cover the dispatch order with several improvement items. No code assumes at most one throughput design request.",
+      "reason": null
+    },
+    {
+      "name": "THROUGHPUT_MARKER and open_throughput_request docs and call site",
+      "dependent": "hestia.rs THROUGHPUT_MARKER (1296-1298), `open_throughput_request` (1468), `open_request_with_marker` (also used for SLOWDOWN_MARKER at 1874)",
+      "kind": "code",
+      "test": "Criterion 8 Grep; the slowdown assertions in the 4628 and 4790 tests",
+      "reason": "Only docs and the throughput_review call site change; the marker constant and `open_request_with_marker` are unchanged, so the slowdown tests (4411-4790) still cover it."
+    },
+    {
+      "name": "ThroughputReview record shape (optional `waste`, new `Wasted` trigger)",
+      "dependent": "records.rs `ThroughputReview` literals (hestia.rs:1772 and 4349, records.rs ~4142), `AnyRecord::parse`, `check_record_file`, and files under records/throughput-reviews/",
+      "kind": "code",
+      "test": "New records.rs tests (criterion 6): old JSON parses, a new one round-trips, bad figures are refused",
+      "reason": "`#[serde(default, skip_serializing_if = \"Option::is_none\")]` keeps existing records valid and unrewritten; no new record type or allow-list entry."
+    },
+    {
+      "name": "A recorded proposal with request_job None when the gate rejects",
+      "dependent": "hestia.rs `throughput_followups` and `improvement_of` (read proposal.request_job, review.at, window_median_minutes)",
+      "kind": "code",
+      "test": "after_a_cited_change_lands_the_next_review_records_predicted_against_measured_minutes (hestia.rs:4526)",
+      "reason": "Field types are unchanged and both read only Some(request_job); the existing 'could not be queued' path already records a proposal without a request job."
+    },
+    {
+      "name": "Throughput struct fields and text()",
+      "dependent": "crates/athena-core/src/snapshot.rs:245/276, crates/athena-cli/src/display.rs:1114 and :1203, crates/athena-cli/tests/status_snapshot.rs:95-119, the StatusView JSON",
+      "kind": "code",
+      "test": "status_snapshot.rs compares the JSON `throughput` with the serialized view and checks the printed text contains `Throughput::compute(..).text()`; extended with the new labels",
+      "reason": "Both the JSON and the printed text are built from the same struct, so added serde-serializable fields keep them equal; display.rs and snapshot.rs print `text()` unchanged."
+    },
+    {
+      "name": "'did not land' predicate moved into a shared helper",
+      "dependent": "status.rs tests at ~3509 and ~3765 that read `unlanded_jobs` and `unlanded_minutes`",
+      "kind": "code",
+      "test": "did_not_land_counts_the_time_spent_not_the_days_the_job_stayed_open (status.rs:3748) and the test at 3509 pass unchanged",
+      "reason": "Moved with no change in meaning."
+    },
+    {
+      "name": "status label `throughput`",
+      "dependent": "docs/spec.toml measures, `STATUS_MEASURE_LABELS` (status.rs ~1128), the Hestia spec pass `measure_problem`",
+      "kind": "rule",
+      "test": "Existing spec-gap tests and the xtask spec test, run by `cargo test`",
+      "reason": "The label stays at the start of the first throughput line; no label is added or renamed."
+    },
+    {
+      "name": "CI checks and prompt-set budgets",
+      "dependent": "fmt, clippy -D warnings, test checks; `system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": "cargo test --locked, cargo clippy --all-targets --locked -- -D warnings, cargo fmt --all --check",
+      "reason": "No prompt component or system-facts line changes; THROUGHPUT_PROMPT is unchanged and the open-request notice goes into the THROUGHPUT.md data file."
+    },
+    {
+      "name": "records branch and merge rules",
+      "dependent": "records branch `athena/records` and squash-merge rules (docs/system-facts.md)",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "No existing record is rewritten and no new record file type is added; new reviews go through the same `commit_records` path."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "A new status.rs test builds in-memory records with the existing helpers `timed_job` (status.rs:3261) and `loaded` (3343). It makes 20 landed jobs (index i starts at hour 2i on one day, 20 minutes long) and 20 failed jobs (`OutcomeState::Failed`). Failed job k starts 30 minutes after landing k starts, so each ends after the oldest landing's end (fixture timing for finding 5). Each failed job's invocation cost is set to 0.50 USD with `invocation(&job, 1, Role::Producer, 0.5)` (status.rs:2443). Landings 1-10 get request text 'try again on <id of failed job k-1>' in the form `reading::retry_reference` accepts, so 10 landings are retries. Failed jobs 10-19 are never retried. The test first asserts the window counts (20 landings, 20 unlanded, 40 attempts), then calls `waste_windows(&records, THROUGHPUT_WINDOW)` and `Throughput::compute(&records)`. A second case with only 20 landed jobs, and a third with 7 landed jobs (a partial window).",
+      "command": "cargo test -p athena-core half_of_the_attempts_not_landing",
+      "observes": "Window 0 holds 40 attempts; attempts per landing is exactly 2.0; first-attempt share is exactly 0.5; wasted spend is 10.00 USD; `Throughput::compute(..).waste` shows the same figures. The no-failure case gives 1.0, 1.0, 0.0. The 7-landing case reports window 0 with landings == 7 and no previous window.",
+      "fails_without": "Without `waste_windows` the test does not compile. With attempts counted as landings only, attempts per landing is 1.0, and with no retry link the share is 1.0, so the 2.0 and 0.5 assertions fail.",
+      "seam": "Production entry points `status::waste_windows` (added by step 2) and `Throughput::compute`. Fixtures `timed_job`, `loaded`, `invocation` exist (status.rs:3261, 3343, 2443); the test edits request text and invocation cost on the loaded records. No double stands in front of the logic under test."
+    },
+    {
+      "criterion": 2,
+      "method": "Two tests. (a) Pure `throughput_due(landed, median, waste, latest)` with `earlier_review_with_waste(10, 10.0, Some(attempts 1.5, wasted 2.00, share 0.8))`. Case A: 15 landed, same median 10.0, wasted 2.50, other figures equal returns Some(Wasted). Case C: all figures equal returns None. Case B: wasted 2.50 with no landing since (10 landed) returns None, and exactly 2.40 (20%) with 15 landed returns None. Case D: attempts 1.9, then share 0.6, each return Some(Wasted). Case E: previous with `waste: None` returns None. Case F: previous wasted 0.0 and current 0.5 with attempts equal returns None; with attempts up 25% returns Some(Wasted). (b) Review level: 80 landings in four windows (`seed_landed(.., 0, 80, 10.0)`, median flat), failed attempts from `seed_failed` at 1.00 USD each: windows 3, 2, 1, 0 hold 2, 5, 2, 10. The previous review (75 landings, median 10.0, stored wasted 2.00) is stored with `put_earlier_review_with_waste`. `athena.throughput_review(&Quiet)` runs with `throughput_model(6.0)` injected through `athena_with`.",
+      "command": "cargo test -p athena-core a_rise_in_wasted_spend_triggers_a_review_with_the_median_unchanged",
+      "observes": "(a) The Some/None results above, with the median identical in A and C. (b) The record has trigger `Wasted` and `window_median_minutes` 10.0, and the model log has one entry. Spend rose 10 vs 2 (change 8) against noise 3, so the gate queues one design request and the note names wasted spend as beyond noise.",
+      "fails_without": "Without the waste argument and the Wasted branch, Case A returns None because the median is unchanged, and the review-level case returns Ok(None) because nothing is due.",
+      "seam": "Production `hestia::throughput_due` (signature changed in step 4) and `Athena::throughput_review`. Existing fixtures: `athena_with`, `seed_landed`, `put_earlier_review`, `throughput_model` (hestia.rs:4233-4346), `earlier_review` literal (4348). Step 6 adds `earlier_review_with_waste`, `put_earlier_review_with_waste` and `seed_failed(dir, athena, slot, usd)`: a Failed job built with `timed_job` starting 30 minutes after slot's landing start, producer cost set via `invocation(..).cost`, committed with `put`. Landings end 20 minutes after their start and the next starts 2 hours later (hestia.rs:4281-4283), so each failed job closes inside its slot's window. The test asserts `waste_windows` counts per window before the review is asserted. Noise comes from the real `Throughput::compute`."
+    },
+    {
+      "criterion": 3,
+      "method": "A new hestia.rs test: `athena_with`, `seed_landed(.., 0, 10, 25.0)`, `put_earlier_review_citing` (previous review whose proposal's `request_job` is the open request), `open_design_request_job` (id 20260905-000000-d000), then `seed_stages(.., 10, 11, slow_stages())` so the median rises 25 to 60. The fake `throughput_model(6.0)` logs each THROUGHPUT.md it receives. It calls `athena.throughput_review(&Quiet)`.",
+      "command": "cargo test -p athena-core an_open_design_request_no_longer_stops_the_review",
+      "observes": "The review returns a record whose note contains the open request's id, 'still open' and 'not enough history' (21 landings). The model log has exactly one entry and that THROUGHPUT.md names d000. The proposal is Some with `request_job == None`. `open_design_requests` stays at 1, and the slowdown request is still queued (the 25% rule is unchanged).",
+      "fails_without": "With the old branch (hestia.rs:1728-1733) the model log is empty and `proposal` is None, so the log-length, proposal and THROUGHPUT.md assertions fail.",
+      "seam": "Production `Athena::throughput_review`. `athena_with`, `seed_landed`, `seed_stages`, `put_earlier_review`, `open_design_request_job`, `throughput_model` exist (hestia.rs:4233-4346). `put_earlier_review_citing` is added in step 6. The model is the fake driver injected by `athena_with`; the skip removal in step 5 is the production change."
+    },
+    {
+      "criterion": 4,
+      "method": "Three tests. (a) Pure `request_gate`: change 0.1 attempts against noise 0.3 gives queue false and a note containing 'within noise'; change 0.5 against 0.3 gives queue true, naming the measure, change, noise and 'differences'; change exactly equal to the noise is within noise; a share that fell counts as worse; a measure that improved or did not move gives 'no measure worsened'; under 60 landings gives queue false with 'not enough history: N of 60'; the same with no earlier review and no open request gives queue true, and with an open request gives false. (b) Review level, the criterion 2(b) fixture (80 landings, flat median, 1.00 USD failed attempts, windows 3/2/1 hold 2/5/2, so spend noise 3 USD, attempts noise 0.15, share and median noise 0) with the previous review citing the open d000. Within case: window 0 holds 4 failed (spend +2, attempts +0.1); the stored baseline 2.00 makes `Wasted` fire. Beyond case: window 0 holds 10 failed (spend +8, attempts +0.4). Both cases use `throughput_model(6.0)`. (c) Beyond case also asserts two design requests are open and `improvement_of` lists both.",
+      "command": "cargo test -p athena-core a_change_within_the_noise_queues_no_request",
+      "observes": "Within: the record has trigger Wasted, the model log has one entry, the proposal has `request_job None`, no design request is queued (still only d000), and the note contains 'within noise', 'still open' and the count of differences (2). Beyond: the model log has one entry, a second design request is queued, `improvement_of` lists d000 and the new one, and the note names spend and attempts as beyond noise. The pure cases give the results above.",
+      "fails_without": "Without the gate, the within-noise case still queues a request, so the 'only d000 open' assertion and the 'within noise' note fail; without the noise comparison, the beyond case is not distinguished from it.",
+      "seam": "Production `hestia::request_gate` (pure, step 4) and `Athena::throughput_review` (step 5). Fixtures: in-memory values for (a); for (b) the seed helpers, `seed_failed`, `put_earlier_review_with_waste`, `put_earlier_review_citing` (step 6) and the fake driver injected by `athena_with`. Window figures and noise come from the real `Throughput::compute`, not from a double."
+    },
+    {
+      "criterion": 5,
+      "method": "Extend crates/athena-cli/tests/status_snapshot.rs. After reading the output of `athena status --snapshot` (via `athena_in`, status_snapshot.rs:40), assert it contains 'attempts per landed change: 1.00', 'spent on attempts that did not land: 0.00 USD' and 'landed on the first attempt: 100%' for the one-landed-job fixture. In status.rs, extend `every_printed_figure_states_its_basis...` (3796) so each new figure line is followed by a basis line, and add a 40-landing test that checks the previous-20 figures and the 'over the last N landings' text print.",
+      "command": "cargo test -p athena-cli --test status_snapshot",
+      "observes": "The binary's real output carries the three measures with figures and bases, even with one landing (partial window). `cargo run -- status --snapshot <dir>` prints the same text.",
+      "fails_without": "On today's output the three strings are absent, so the assertions fail.",
+      "seam": "The real binary through `athena_in` and `Throughput::text` (exist). The text lines are added by step 3. No double."
+    },
+    {
+      "criterion": 6,
+      "method": "New records.rs tests: an old ThroughputReview JSON (a serialized record with the `waste` key removed) parses through `AnyRecord::parse` and `check_record_file` with `waste == None`; a review with figures round-trips equal; NaN, negative, share above 1 and attempts below 1 are refused by `validate`; the `Wasted` trigger serializes as 'wasted'. Then the whole suite, clippy and fmt.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass; `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` print nothing.",
+      "fails_without": "Without `#[serde(default)]` on `waste`, the old-JSON parse fails with a missing field; without `Wasted` in the trigger enum a new record is refused.",
+      "seam": "`AnyRecord::parse` (records.rs ~2951) and `check_record_file` (~3111) with in-memory JSON strings; both exist."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the CHANGELOG.md diff. One Unreleased entry lists only: the three measures in the throughput section of `athena status`; the `Wasted` trigger; the open-request note and the review no longer skipping; the noise rule for queuing (and that nothing is queued below 60 landings except the first review); the optional `waste` field on the throughput-review record. Each sentence maps to a hunk in hestia.rs, status.rs or records.rs. No entry for display.rs or snapshot.rs.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "Nothing is claimed that the diff does not do.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "Inspect the diff of the docs and Grep for the old wording. Updated: the hestia.rs module doc (~43-62), the `THROUGHPUT_MARKER` doc (1296-1298), the `open_throughput_request` doc (~1467), the `throughput_review` doc (1690-1700, including '(none while an earlier one is open)') and the note text at 1730; docs/design/hestia.md lines ~288 and 300-301 and section 12; the docs of `ThroughputProposal.request_job` and `ThroughputReview.proposal` in records.rs (~2159, ~2196). The slowdown wording (hestia.rs:1306, hestia.md:316) stays because it still holds.",
+      "command": "git diff -- crates/athena-core/src/hestia.rs docs/design/hestia.md crates/athena-data/src/records.rs",
+      "observes": "Grep for 'queues no second one and does not ask the model', 'none while an earlier one is open', 'the model was not asked for another' and 'the review queues no second one' finds none; hestia.md section 12 describes the three measures, the Wasted trigger, the window gate with its noise basis, and the note instead of a skip.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [
+    "User: When an earlier design request is still open and the change is beyond noise, should a second design request be queued (this plan does, and tells the model about the open one), or should the review record the proposal and queue nothing until the open request closes?",
+    "User: Below 60 landings the noise cannot be estimated. This plan queues nothing then, except for the very first review, and says so in the note. Should it instead queue on any worsening, or wait?",
+    "User: This plan asks the model on every due review, as it does today when no request is open, so a due review costs one model call even when no request is queued. Should a review whose change is within noise skip the model to save that cost?"
+  ],
+  "producer_section_sha256": "5d22dfe272ec1ea0f4c98e71937ea0d26536d3f413c036abd85f0d88aaf56efa"
+}

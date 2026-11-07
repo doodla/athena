@@ -755,6 +755,119 @@ pub struct Throughput {
     pub unlanded_minutes: f64,
     /// Time checks waited for a build slot, over all request jobs; none when no check recorded a wait.
     pub build_wait: Option<BuildWait>,
+    /// Wasted work over the newest [`THROUGHPUT_WINDOW`] landings (fewer when fewer have landed).
+    pub waste: WasteWindow,
+    /// The same figures over the [`THROUGHPUT_WINDOW`] landings before those; none until 20 more have landed.
+    pub waste_previous: Option<WasteWindow>,
+    /// The median minutes over the measured landed jobs before the newest window; none until 20 more exist.
+    pub median_previous: Option<f64>,
+    /// The noise between recent windows, and the smallest change one job can make, per measure.
+    pub bars: Bars,
+}
+
+/// Wasted work over one window of landings: attempts per landed change, money spent on attempts that did not
+/// land, and the share of landed changes that landed on their first attempt.
+///
+/// A landing is a request job that landed. An attempt that did not land is a request job that ran a model
+/// and failed, was closed unlanded, or was stopped in planning ([`did_not_land`]); one that never ran is not
+/// an attempt. A window holds the landings and the unlanded attempts that closed between the cut times of
+/// its landings (by closing outcome, or by the end of the last invocation when there is none). A landing is a
+/// first-attempt landing unless its request is "try again on <job>" and that job ran a model.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WasteWindow {
+    /// Landings in the window; fewer than the window size only for the newest, partial window.
+    pub landings: usize,
+    /// Landings plus the attempts that did not land.
+    pub attempts: usize,
+    /// Attempts that ran a model and did not land.
+    pub unlanded_attempts: usize,
+    /// Landings that were not a retry of a job that ran a model.
+    pub first_attempt_landings: usize,
+    /// What the unlanded attempts cost, in US dollars (the lower bound of each invocation's best cost).
+    pub wasted_usd: f64,
+    /// What each unlanded attempt cost, for the one-job floor of the spend measure.
+    #[serde(skip)]
+    unlanded_costs: Vec<f64>,
+}
+
+impl WasteWindow {
+    /// Attempts per landing; 0 for a window with no landing.
+    pub fn attempts_per_landing(&self) -> f64 {
+        if self.landings == 0 {
+            return 0.0;
+        }
+        self.attempts as f64 / self.landings as f64
+    }
+
+    /// The share of landings that landed on the first attempt, from 0 to 1; 0 for a window with no landing.
+    pub fn first_attempt_share(&self) -> f64 {
+        if self.landings == 0 {
+            return 0.0;
+        }
+        self.first_attempt_landings as f64 / self.landings as f64
+    }
+
+    /// The three figures, as a throughput review stores them.
+    pub fn figures(&self) -> athena_data::records::WasteFigures {
+        athena_data::records::WasteFigures {
+            attempts_per_landing: self.attempts_per_landing().max(1.0),
+            wasted_usd: self.wasted_usd,
+            first_attempt_share: self.first_attempt_share(),
+        }
+    }
+}
+
+/// How large a change in one measure must be before it counts as more than the noise between recent windows.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Bar {
+    /// The largest difference between two adjacent windows older than the newest one: `|w1 - w2|` and, when
+    /// there is a fourth window, `|w2 - w3|`. None unless the newest three windows are full (60 landings).
+    pub noise: Option<f64>,
+    /// How many differences the noise is the largest of (1 or 2); 0 when there is no noise figure.
+    pub differences: usize,
+    /// The smallest change one job can make to the measure; a change at or below it is never counted.
+    pub floor: f64,
+}
+
+impl Bar {
+    /// The size a change must exceed, or None when the noise cannot be estimated.
+    pub fn bar(&self) -> Option<f64> {
+        self.noise.map(|n| n.max(self.floor))
+    }
+}
+
+/// The [`Bar`] of each measure the throughput review watches.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Bars {
+    pub median_minutes: Bar,
+    pub attempts_per_landing: Bar,
+    pub wasted_usd: Bar,
+    pub first_attempt_share: Bar,
+}
+
+/// One measure in the newest window and in the window before it, with its bar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Measure {
+    pub name: &'static str,
+    pub unit: &'static str,
+    /// The figure over the newest window, and over the window before it (None until that window is full).
+    pub now: f64,
+    pub before: Option<f64>,
+    /// Whether a rise is the bad direction (true for all but the first-attempt share).
+    pub higher_is_worse: bool,
+    pub bar: Bar,
+}
+
+impl Measure {
+    /// How much worse `now` is than `before`; negative when it is better. None without a window before.
+    pub fn worsening(&self) -> Option<f64> {
+        let before = self.before?;
+        Some(if self.higher_is_worse {
+            self.now - before
+        } else {
+            before - self.now
+        })
+    }
 }
 
 /// The time checks waited for a build slot: the sum of `queued_s` over the checks of every request job's
@@ -961,14 +1074,7 @@ pub fn landed_jobs(records: &Records) -> Vec<LandedJob> {
 /// and only then are the unmeasured ones dropped. The result is a reconstruction of what that review saw: a
 /// landing record written after the review can move a job's landing end and so its rank.
 pub fn landed_jobs_among_first(records: &Records, landings: usize) -> Vec<LandedJob> {
-    let mut ranked: Vec<(jiff::Timestamp, String)> = records
-        .request_jobs()
-        .into_iter()
-        .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
-        .filter_map(|j| Some((landing_end(records, j)?.0, j.id().as_str().to_string())))
-        .collect();
-    ranked.sort();
-    let first: BTreeSet<String> = ranked
+    let first: BTreeSet<String> = ranked_landings(records)
         .into_iter()
         .take(landings)
         .map(|(_, id)| id)
@@ -977,6 +1083,144 @@ pub fn landed_jobs_among_first(records: &Records, landings: usize) -> Vec<Landed
         .into_iter()
         .filter(|j| first.contains(&j.id))
         .collect()
+}
+
+/// Every landed request job as (landing end, id), oldest first: the order [`landed_jobs`] uses, over all
+/// landed jobs and not only the measured ones.
+fn ranked_landings(records: &Records) -> Vec<(jiff::Timestamp, String)> {
+    let mut ranked: Vec<(jiff::Timestamp, String)> = records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| matches!(j.state(), JobState::Closed(OutcomeState::Landed)))
+        .filter_map(|j| Some((landing_end(records, j)?.0, j.id().as_str().to_string())))
+        .collect();
+    ranked.sort();
+    ranked
+}
+
+/// Whether `job` ran a model and did not land: it failed, was closed unlanded, or was stopped in planning. A
+/// job that never ran a model is not an attempt, and a job still open is neither landed nor wasted yet.
+fn did_not_land(job: &JobRecords) -> bool {
+    if job.invocations.is_empty() {
+        return false;
+    }
+    let state = job.state();
+    let stopped = plan_state(job).is_some_and(|s| !s.accepted);
+    let failed = matches!(state, JobState::Closed(s) if s != OutcomeState::Landed);
+    failed || (stopped && state != JobState::Closed(OutcomeState::Landed))
+}
+
+/// Windows of wasted work, the newest first: the newest `window` landings (all of them when fewer have
+/// landed) and up to three full windows of `window` landings before it. Each holds its landings and the
+/// attempts that did not land ([`did_not_land`]) that closed from the end of the window's oldest landing up
+/// to the end of the next newer window's oldest landing; an attempt that closed before the oldest reported
+/// landing is in no window. An attempt is placed by its closing outcome, or by the end of its last invocation
+/// when it has none. Empty when nothing has landed.
+///
+/// The figures are a reconstruction from job and invocation records: a landing record written later can move
+/// a landing end and so a cut.
+pub fn waste_windows(records: &Records, window: usize) -> Vec<WasteWindow> {
+    let ranked = ranked_landings(records);
+    let n = ranked.len();
+    if n == 0 || window == 0 {
+        return Vec::new();
+    }
+    // The (start, end) of each window in `ranked`.
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for k in 0..4 {
+        let end = n.saturating_sub(k * window);
+        if end == 0 || (k > 0 && end < window) {
+            break;
+        }
+        spans.push((end.saturating_sub(window), end));
+    }
+    let attempts: Vec<((jiff::Timestamp, String), f64)> = records
+        .request_jobs()
+        .into_iter()
+        .filter(|j| did_not_land(j))
+        .filter_map(|j| {
+            let at = closing_outcome(j)
+                .map(|o| o.at)
+                .or_else(|| j.invocations.iter().map(|i| i.ended_at).max())?;
+            Some(((at, j.id().as_str().to_string()), j.spent_usd()))
+        })
+        .collect();
+    let did_work = |id: &str| {
+        records
+            .jobs
+            .get(id)
+            .is_some_and(|j| !j.invocations.is_empty())
+    };
+    spans
+        .iter()
+        .enumerate()
+        .map(|(k, &(start, end))| {
+            let lower = &ranked[start];
+            let upper = k.checked_sub(1).map(|newer| &ranked[spans[newer].0]);
+            let costs: Vec<f64> = attempts
+                .iter()
+                .filter(|(key, _)| key >= lower && upper.is_none_or(|u| key < u))
+                .map(|(_, cost)| *cost)
+                .collect();
+            let first_attempt_landings = ranked[start..end]
+                .iter()
+                .filter(|(_, id)| {
+                    let retried = records
+                        .jobs
+                        .get(id.as_str())
+                        .and_then(|j| j.request.as_ref())
+                        .and_then(|r| crate::reading::retried_job(records, &r.text));
+                    !retried.is_some_and(|r| r.as_str() != id && did_work(r.as_str()))
+                })
+                .count();
+            WasteWindow {
+                landings: end - start,
+                attempts: end - start + costs.len(),
+                unlanded_attempts: costs.len(),
+                first_attempt_landings,
+                wasted_usd: crate::store::positive_zero(costs.iter().sum()),
+                unlanded_costs: costs,
+            }
+        })
+        .collect()
+}
+
+/// The median of the total minutes in the newest `window` measured landed jobs and in up to three full
+/// windows before it, newest first. `measured` is [`landed_jobs`], oldest first.
+fn median_windows(measured: &[LandedJob], window: usize) -> Vec<f64> {
+    let mut out = Vec::new();
+    for k in 0..4 {
+        let end = measured.len().saturating_sub(k * window);
+        if end == 0 || (k > 0 && end < window) {
+            break;
+        }
+        let jobs = &measured[end.saturating_sub(window)..end];
+        out.push(median(
+            &jobs.iter().map(|j| j.stages.total()).collect::<Vec<_>>(),
+        ));
+    }
+    out
+}
+
+/// The bar of a measure from its windows, newest first: the noise is the largest difference between
+/// adjacent windows older than the newest, which needs the newest three (so 60 landings).
+fn bar_of(values: &[f64], floor: f64) -> Bar {
+    if values.len() < 3 {
+        return Bar {
+            noise: None,
+            differences: 0,
+            floor,
+        };
+    }
+    let differences: Vec<f64> = values[1..]
+        .windows(2)
+        .map(|p| (p[0] - p[1]).abs())
+        .collect();
+    Bar {
+        noise: differences.iter().copied().reduce(f64::max),
+        differences: differences.len(),
+        floor,
+    }
 }
 
 impl Throughput {
@@ -1012,10 +1256,7 @@ impl Throughput {
                 continue;
             }
             spans.extend(busy_intervals(records, job));
-            let state = job.state();
-            let stopped = plan_state(job).is_some_and(|s| !s.accepted);
-            let failed = matches!(state, JobState::Closed(s) if s != OutcomeState::Landed);
-            if failed || (stopped && state != JobState::Closed(OutcomeState::Landed)) {
+            if did_not_land(job) {
                 unlanded_jobs += 1;
                 unlanded_minutes += time_spent(records, job);
             }
@@ -1033,7 +1274,28 @@ impl Throughput {
                 reach = Some(end);
             }
         }
+        let windows = waste_windows(records, THROUGHPUT_WINDOW);
+        let waste = windows.first().cloned()?;
+        let medians = median_windows(&measured, THROUGHPUT_WINDOW);
+        let one_job = 1.0 / THROUGHPUT_WINDOW as f64;
+        let costs: Vec<f64> = windows
+            .iter()
+            .filter(|w| w.landings == THROUGHPUT_WINDOW)
+            .flat_map(|w| w.unlanded_costs.iter().copied())
+            .collect();
+        let series =
+            |pick: fn(&WasteWindow) -> f64| -> Vec<f64> { windows.iter().map(pick).collect() };
+        let bars = Bars {
+            median_minutes: bar_of(&medians, 1.0),
+            attempts_per_landing: bar_of(&series(WasteWindow::attempts_per_landing), one_job),
+            wasted_usd: bar_of(&series(|w| w.wasted_usd), median(&costs)),
+            first_attempt_share: bar_of(&series(WasteWindow::first_attempt_share), one_job),
+        };
         Some(Throughput {
+            waste,
+            waste_previous: windows.get(1).cloned(),
+            median_previous: medians.get(1).copied(),
+            bars,
             landed_total,
             landed_per_day: per_day
                 .into_iter()
@@ -1050,8 +1312,65 @@ impl Throughput {
         })
     }
 
+    /// The four measures the throughput review watches, each in the newest window and in the one before it,
+    /// with its bar: median minutes per landed job, attempts per landed change, money spent on attempts that
+    /// did not land, and the share of changes that landed on the first attempt.
+    pub fn measures(&self) -> Vec<Measure> {
+        let before = self.waste_previous.as_ref();
+        vec![
+            Measure {
+                name: "median minutes per landed job",
+                unit: "min",
+                now: self.median_minutes,
+                before: self.median_previous,
+                higher_is_worse: true,
+                bar: self.bars.median_minutes,
+            },
+            Measure {
+                name: "attempts per landed change",
+                unit: "",
+                now: self.waste.attempts_per_landing(),
+                before: before.map(WasteWindow::attempts_per_landing),
+                higher_is_worse: true,
+                bar: self.bars.attempts_per_landing,
+            },
+            Measure {
+                name: "spent on attempts that did not land",
+                unit: "USD",
+                now: self.waste.wasted_usd,
+                before: before.map(|w| w.wasted_usd),
+                higher_is_worse: true,
+                bar: self.bars.wasted_usd,
+            },
+            Measure {
+                name: "share landed on the first attempt",
+                unit: "",
+                now: self.waste.first_attempt_share(),
+                before: before.map(WasteWindow::first_attempt_share),
+                higher_is_worse: false,
+                bar: self.bars.first_attempt_share,
+            },
+        ]
+    }
+
     /// The lines `athena status` prints, and the section the throughput review is given.
     pub fn text(&self) -> String {
+        let waste = &self.waste;
+        let landings = waste.landings;
+        let earlier = |show: &dyn Fn(&WasteWindow) -> String| {
+            self.waste_previous.as_ref().map_or_else(String::new, |p| {
+                format!("; the {} landings before: {}", p.landings, show(p))
+            })
+        };
+        let waste_lines = format!(
+            "\n           attempts per landed change: {:.2} over the last {landings} landing(s){}\n           basis: landings plus attempts that ran a model and did not land (failed, closed unlanded or stopped), placed by when they closed; jobs still open and requests that never ran are not counted\n           spent on attempts that did not land: {:.2} USD over the last {landings} landing(s){}\n           basis: the cost recorded for the invocations of those attempts, lower bound\n           landed on the first attempt: {:.0}% over the last {landings} landing(s){}\n           basis: landed changes whose request is not 'try again on' a job that ran a model, out of all landed changes",
+            waste.attempts_per_landing(),
+            earlier(&|w| format!("{:.2}", w.attempts_per_landing())),
+            waste.wasted_usd,
+            earlier(&|w| format!("{:.2} USD", w.wasted_usd)),
+            waste.first_attempt_share() * 100.0,
+            earlier(&|w| format!("{:.0}%", w.first_attempt_share() * 100.0)),
+        );
         let stages = self
             .median_stages
             .named()
@@ -1083,7 +1402,7 @@ impl Throughput {
             )
         });
         format!(
-            "throughput {} landed ({days})\n           basis: landed jobs counted by their landing outcome's UTC day\n           median per landed job over the last {} measured: {:.1} min ({stages})\n           basis: invocation wall times, measured check durations, and landing and rebuild from the verifier's end to the later of the outcome and the landing record; {landing_basis}\n           idle between jobs {:.1} min\n           basis: gaps between merged busy intervals of all jobs (invocations, checks placed by estimate before the verifier, landing wait), not the time a job stayed open\n           did not land: {} job(s), {:.1} min\n           basis: time spent (invocation wall times plus measured check durations), not the time from dispatch to close{build_wait}",
+            "throughput {} landed ({days})\n           basis: landed jobs counted by their landing outcome's UTC day\n           median per landed job over the last {} measured: {:.1} min ({stages})\n           basis: invocation wall times, measured check durations, and landing and rebuild from the verifier's end to the later of the outcome and the landing record; {landing_basis}\n           idle between jobs {:.1} min\n           basis: gaps between merged busy intervals of all jobs (invocations, checks placed by estimate before the verifier, landing wait), not the time a job stayed open\n           did not land: {} job(s), {:.1} min\n           basis: time spent (invocation wall times plus measured check durations), not the time from dispatch to close{waste_lines}{build_wait}",
             self.landed_total,
             self.window_jobs,
             self.median_minutes,
@@ -3807,6 +4126,18 @@ pub(crate) mod planning_cost_tests {
                 "basis: gaps between merged busy intervals",
             ),
             ("did not land", "basis: time spent"),
+            (
+                "attempts per landed change",
+                "basis: landings plus attempts",
+            ),
+            (
+                "spent on attempts that did not land",
+                "basis: the cost recorded",
+            ),
+            (
+                "landed on the first attempt",
+                "basis: landed changes whose request",
+            ),
         ] {
             let at = lines
                 .iter()
@@ -3843,6 +4174,263 @@ pub(crate) mod planning_cost_tests {
         assert_eq!(throughput.landed_total, 22);
         assert_eq!(throughput.window_jobs, THROUGHPUT_WINDOW);
         assert_eq!(throughput.median_minutes, 10.0);
+    }
+
+    /// The start of landing `n` in the waste fixtures: two hours apart from 2026-10-01.
+    fn landing_start(n: usize) -> jiff::Timestamp {
+        t("2026-10-01T00:00:00Z")
+            .checked_add(jiff::SignedDuration::from_secs(2 * 3600 * n as i64))
+            .unwrap()
+    }
+
+    /// The start of failed attempt `j` after landing `n`: 30 minutes after it started, 10 minutes apart.
+    fn failed_start(n: usize, j: usize) -> jiff::Timestamp {
+        landing_start(n)
+            .checked_add(jiff::SignedDuration::from_secs(30 * 60 + 600 * j as i64))
+            .unwrap()
+    }
+
+    fn landed_id(n: usize) -> String {
+        athena_data::RecordId::from_parts(landing_start(n), 0)
+            .as_str()
+            .to_string()
+    }
+
+    fn failed_id(n: usize, j: usize) -> String {
+        athena_data::RecordId::from_parts(failed_start(n, j), 1)
+            .as_str()
+            .to_string()
+    }
+
+    /// `landings` landed jobs of `landed_minutes` producer minutes (landing `n` starts at hour `2n`), and
+    /// `failed(n)` failed attempts of 5 producer minutes after landing `n`, each costing `usd`. Each failed
+    /// attempt closes after landing `n` ends and before landing `n + 1` ends, so it belongs to landing `n`'s window.
+    fn waste_records(
+        landings: usize,
+        landed_minutes: f64,
+        failed: impl Fn(usize) -> usize,
+        usd: f64,
+    ) -> Records {
+        let mut all = Vec::new();
+        for n in 0..landings {
+            all.extend(timed_job(
+                &landed_id(n),
+                landing_start(n),
+                minutes(0.0, 0.0, landed_minutes, 0.0, 0.0, 0.0),
+                OutcomeState::Landed,
+            ));
+            for j in 0..failed(n) {
+                all.extend(timed_job(
+                    &failed_id(n, j),
+                    failed_start(n, j),
+                    minutes(0.0, 0.0, 5.0, 0.0, 0.0, 0.0),
+                    OutcomeState::Failed,
+                ));
+            }
+        }
+        let mut records = loaded(all);
+        for job in records.jobs.values_mut() {
+            if job
+                .outcome
+                .as_ref()
+                .is_some_and(|o| o.state == OutcomeState::Failed)
+            {
+                for i in &mut job.invocations {
+                    i.cost = Quantity::reported(usd, Unit::Usd, "test");
+                }
+            }
+        }
+        records
+    }
+
+    /// Makes landing `n` ask to try again on failed attempt `j` of landing `m`.
+    fn retry(records: &mut Records, n: usize, m: usize, j: usize) {
+        let job = records.jobs.get_mut(&landed_id(n)).unwrap();
+        job.request.as_mut().unwrap().text = format!("try again on {}", failed_id(m, j));
+    }
+
+    #[test]
+    fn half_of_the_attempts_not_landing() {
+        // Twenty landings and twenty failed attempts: forty attempts, half of them did not land.
+        let mut records = waste_records(20, 20.0, |_| 1, 0.5);
+        // Ten of the landings retry the attempt that failed before them, so they are not first attempts.
+        for n in 1..=10 {
+            retry(&mut records, n, n - 1, 0);
+        }
+        let windows = waste_windows(&records, THROUGHPUT_WINDOW);
+        assert_eq!(windows.len(), 1, "twenty landings are one window");
+        let w = &windows[0];
+        assert_eq!((w.landings, w.unlanded_attempts, w.attempts), (20, 20, 40));
+        assert_eq!(w.attempts_per_landing(), 2.0);
+        assert_eq!(w.first_attempt_share(), 0.5);
+        assert_eq!(w.wasted_usd, 10.0);
+
+        let throughput = Throughput::compute(&records).unwrap();
+        assert_eq!(throughput.waste, *w);
+        assert_eq!(throughput.waste_previous, None);
+        assert_eq!(throughput.waste.attempts_per_landing(), 2.0);
+        assert_eq!(throughput.waste.first_attempt_share(), 0.5);
+        let text = throughput.text();
+        assert!(
+            text.contains("attempts per landed change: 2.00 over the last 20 landing(s)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("spent on attempts that did not land: 10.00 USD"),
+            "{text}"
+        );
+        assert!(text.contains("landed on the first attempt: 50%"), "{text}");
+        assert!(
+            !text.contains("landings before"),
+            "no earlier window yet: {text}"
+        );
+
+        // A closed job that never ran a model is not an attempt.
+        let mut with_idle = waste_records(20, 20.0, |_| 1, 0.5);
+        for n in 1..=10 {
+            retry(&mut with_idle, n, n - 1, 0);
+        }
+        let idle = failed_id(0, 5);
+        let mut idle_records = timed_job(
+            &idle,
+            failed_start(0, 5),
+            StageMinutes::default(),
+            OutcomeState::Failed,
+        );
+        idle_records.retain(|r| !matches!(r, AnyRecord::Invocation(_)));
+        for record in idle_records {
+            let AnyRecord::Outcome(o) = record else {
+                continue;
+            };
+            let job = with_idle.jobs.entry(idle.clone()).or_default();
+            job.id = Some(id(&idle));
+            job.outcome = Some(*o);
+        }
+        assert!(with_idle.jobs[&idle].invocations.is_empty());
+        let after = &waste_windows(&with_idle, THROUGHPUT_WINDOW)[0];
+        assert_eq!(after.attempts, 40, "a job that never ran is not an attempt");
+        assert_eq!(
+            Throughput::compute(&with_idle).unwrap().unlanded_jobs,
+            20,
+            "and it was not counted as time on jobs that did not land"
+        );
+    }
+
+    #[test]
+    fn with_no_failed_attempts_every_landing_is_the_first_attempt_and_nothing_is_wasted() {
+        let records = waste_records(20, 20.0, |_| 0, 0.5);
+        let w = &waste_windows(&records, THROUGHPUT_WINDOW)[0];
+        assert_eq!(w.attempts_per_landing(), 1.0);
+        assert_eq!(w.first_attempt_share(), 1.0);
+        assert_eq!(w.wasted_usd, 0.0);
+        let text = Throughput::compute(&records).unwrap().text();
+        assert!(text.contains("attempts per landed change: 1.00"), "{text}");
+        assert!(
+            text.contains("spent on attempts that did not land: 0.00 USD"),
+            "{text}"
+        );
+        assert!(text.contains("landed on the first attempt: 100%"), "{text}");
+    }
+
+    #[test]
+    fn a_window_with_fewer_than_twenty_landings_is_reported_with_its_landing_count() {
+        let records = waste_records(7, 20.0, |n| usize::from(n % 2 == 0), 1.0);
+        let windows = waste_windows(&records, THROUGHPUT_WINDOW);
+        assert_eq!(windows.len(), 1, "no window before a partial one");
+        assert_eq!(windows[0].landings, 7);
+        assert_eq!(windows[0].unlanded_attempts, 4);
+        let text = Throughput::compute(&records).unwrap().text();
+        assert!(text.contains("over the last 7 landing(s)"), "{text}");
+        assert_eq!(
+            Throughput::compute(&records).unwrap().bars.wasted_usd.noise,
+            None
+        );
+    }
+
+    #[test]
+    fn a_job_still_open_is_neither_a_landing_nor_wasted() {
+        let mut records = waste_records(3, 20.0, |_| 0, 0.5);
+        let open = failed_id(1, 0);
+        let mut open_job = timed_job(
+            &open,
+            failed_start(1, 0),
+            minutes(0.0, 0.0, 5.0, 0.0, 0.0, 0.0),
+            OutcomeState::Failed,
+        );
+        open_job.retain(|r| !matches!(r, AnyRecord::Outcome(_)));
+        for record in open_job {
+            let job = records.jobs.entry(open.clone()).or_default();
+            job.id.get_or_insert_with(|| id(&open));
+            match record {
+                AnyRecord::Request(r) => job.request = Some(r),
+                AnyRecord::Invocation(i) => job.invocations.push(*i),
+                _ => {}
+            }
+        }
+        let w = &waste_windows(&records, THROUGHPUT_WINDOW)[0];
+        assert_eq!((w.landings, w.attempts), (3, 3));
+    }
+
+    #[test]
+    fn windows_of_wasted_work_are_cut_by_landing_and_the_bars_come_from_the_older_windows() {
+        // Four windows of 20 landings; the failed attempts per window, oldest first, are 2, 5, 2 and 10, each
+        // costing 1 USD, all in the window's first landing.
+        let per_window = [2usize, 5, 2, 10];
+        let records = waste_records(
+            80,
+            20.0,
+            |n| if n % 20 == 0 { per_window[n / 20] } else { 0 },
+            1.0,
+        );
+        let windows = waste_windows(&records, THROUGHPUT_WINDOW);
+        let attempts: Vec<usize> = windows.iter().map(|w| w.attempts).collect();
+        assert_eq!(attempts, vec![30, 22, 25, 22], "newest first");
+
+        let throughput = Throughput::compute(&records).unwrap();
+        assert_eq!(throughput.waste_previous.as_ref().unwrap().wasted_usd, 2.0);
+        // Noise of the spend: |2 - 5| and |5 - 2|, so 3 from two differences; the floor is one attempt's cost.
+        let spend = throughput.bars.wasted_usd;
+        assert_eq!(spend.noise, Some(3.0));
+        assert_eq!(spend.differences, 2);
+        assert_eq!(spend.floor, 1.0);
+        // Attempts per landing: 1.10, 1.25, 1.10; the noise is the larger gap, 0.15.
+        let attempts_bar = throughput.bars.attempts_per_landing;
+        assert!((attempts_bar.noise.unwrap() - 0.15).abs() < 1e-9);
+        assert_eq!(attempts_bar.floor, 0.05);
+        // The shares and medians are flat, so their noise is zero and only the one-job floor is left.
+        assert_eq!(throughput.bars.first_attempt_share.noise, Some(0.0));
+        assert_eq!(throughput.bars.median_minutes.noise, Some(0.0));
+        assert_eq!(throughput.bars.median_minutes.floor, 1.0);
+        assert_eq!(throughput.bars.median_minutes.bar(), Some(1.0));
+        assert_eq!(throughput.median_previous, Some(20.0));
+
+        // The text puts the earlier window beside the newest.
+        let text = throughput.text();
+        assert!(text.contains("attempts per landed change: 1.50 over the last 20 landing(s); the 20 landings before: 1.10"), "{text}");
+        assert!(text.contains("spent on attempts that did not land: 10.00 USD over the last 20 landing(s); the 20 landings before: 2.00 USD"), "{text}");
+
+        // With three windows the noise rests on one difference; with two there is none.
+        let three = Throughput::compute(&waste_records(
+            60,
+            20.0,
+            |n| {
+                if n % 20 == 0 {
+                    per_window[n / 20 + 1]
+                } else {
+                    0
+                }
+            },
+            1.0,
+        ))
+        .unwrap();
+        assert_eq!(three.bars.wasted_usd.noise, Some(3.0));
+        assert_eq!(three.bars.wasted_usd.differences, 1);
+        let two = Throughput::compute(&waste_records(40, 20.0, |_| 1, 1.0)).unwrap();
+        assert_eq!(two.bars.wasted_usd.noise, None);
+        assert!(two.waste_previous.is_some());
+        let measures = two.measures();
+        assert_eq!(measures.len(), 4);
+        assert_eq!(measures[2].worsening(), Some(0.0));
     }
 
     #[test]
