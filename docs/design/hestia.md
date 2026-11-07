@@ -280,12 +280,34 @@ is the sum of the gaps between the merged working spans of all request jobs, so 
 on jobs that did not land counts each closed, non-landed job, and each job stopped in planning, from its first
 invocation to its closing record.
 
+**Wasted work** (`athena status`, the same section; `status::waste_windows`). The minutes per landed job cannot
+see attempts that never landed: on 4 to 6 November 58% of attempts did not land, and the median of the landed ones
+did not move. Three measures are computed from the job and invocation records over the newest 20 landings (fewer
+while fewer have landed, and the count is printed) and over the 20 landings before them:
+
+- **Attempts per landed change**: landings plus attempts that did not land, divided by landings. An attempt that
+  did not land is a request job that ran a model and was closed unlanded (failed, rejected, abandoned) or stopped in
+  planning. A job that never ran a model is not an attempt, and a job still open is neither landed nor wasted yet.
+  Each attempt is placed by when it closed, in the window of the landings it closed among.
+- **Money spent on attempts that did not land**: the recorded cost of those attempts' invocations, in US dollars.
+- **Share landed on the first attempt**: landings whose request is not "try again on" a job that ran a model, over
+  all landings.
+
+The figures are a reconstruction from the records; a landing record written later can move a landing end and so a
+window cut.
+
 **Cadence.** `Athena::review_passes` runs the review at the start of every drain and in each sweep. It is due
 **every 10 landings** (`code_health::REVIEW_EVERY`, the cadence of the design review) after the previous
 throughput review, or the first 10 landings when there is none, **or when the median minutes per landed job is
 worse by more than 20%** than the median the previous review recorded (`WORSEN_RATIO`), once at least one job
-has landed since. Exactly 20% worse is not more than 20%. When it is not due, nothing runs and no model is called.
-A review that runs always makes the comparison described under "Slowdown", whether or not a design request is open.
+has landed since. Exactly 20% worse is not more than 20%. **It is also due on a rise in wasted work** (trigger
+`wasted`, `waste_rises`): attempts per landed change or the money spent on attempts that did not land more than
+20% above the figures the previous review stored on its record, or the first-attempt share more than 20% below
+it, once a job has landed since. When the previous review stored no spend (nothing wasted), a spend above zero
+counts only if attempts per landed change also rose by more than 20%, so one failed run after a clean window starts
+no review. A previous review written before these figures existed gives no such trigger. When it is not due,
+nothing runs and no model is called. A review that runs always makes the comparison described under "Slowdown",
+whether or not a design request is open, and always asks the model.
 
 **The question.** A strong model (the verifier's model, as for the steward, the audience and the auditor) is
 given the status section (`THROUGHPUT.md`) and a copy of `docs/design/` in a read-only workspace. It names the
@@ -297,8 +319,35 @@ builder (`steward::StewardRequest`), so `athena plan` accepts it. Its title star
 carries the bottleneck, the proposed change, the predicted saving and the review's id, and it asks that a change
 which implements the design cites that id. The priority follows the predicted saving, speed first: at least 5
 minutes per landed job is high (never urgent), at least 2 normal, and less is low
-(`priority_for_minutes`). While a request with that title is open (not closed), a later review queues no second
-one and does not ask the model; it still writes its record so the cadence moves on.
+(`priority_for_minutes`).
+
+**An open design request does not stop the review.** While a request with that title is open (not closed), a
+later review still runs and asks the model: the record's note says "throughput design request <id> is still open;
+this review ran anyway", and `THROUGHPUT.md` names the open request (id and title) so the proposal differs from
+it. The proposal is recorded either way. Whether a design request is queued is decided separately, by the noise
+rule below.
+
+**The noise rule** (`request_gate`). A design request is queued only when a measure got worse by more than the
+noise between recent windows. For each of four measures (median minutes per landed job, attempts per landed
+change, money spent on attempts that did not land, and the first-attempt share) the review takes the change from
+the window of 20 landings before the newest to the newest 20 landings, in the bad direction. The noise is the
+largest difference between two adjacent windows older than the newest: the second and third newest, and the third
+and fourth newest when the fourth is full. That needs 60 landings, so it rests on one difference at exactly 60 and
+on two at 80; the note states how many. The change must also exceed the smallest change one job can make (the
+floor), so a flat older history, whose noise is zero, does not turn one retried landing into a request: 1/20 for
+attempts per landed change and for the share, the median cost of one attempt that did not land for spend, and one
+minute for the median. A change equal to the larger of the two is within the noise. The record's note starts that
+sentence with "design request:" and says which measures were beyond (with change, noise, floor and the number of
+differences), or that the change was within noise, or that no measure worsened. A measure whose windows are not
+all full is left out and the note says so.
+
+Under 60 landings the noise cannot be estimated, so the review queues no design request and its note says "not
+enough history: N of 60 landings, none queued"; the proposal is still recorded. The very first review is the
+exception: with no earlier review to compare with, it queues the proposal when no design request is open. Because
+the noise is taken from adjacent differences, it absorbs a steady trend: a worsening of equal steps (for example
+spend of 2, 4, 6, then 8 USD) is within the noise and queues no design request. The 20% trigger and the cadence
+still run the review, and the model's proposal is still recorded. When a request is open and a change is beyond
+the noise, a second design request is queued; both are linked by their reviews' proposals.
 
 **Slowdown.** Every review that runs compares the latest median minutes per landed job with the previous review's,
 even while a design request is open (a rise from 25.4 to about 60 minutes once went unflagged behind an open
@@ -316,12 +365,18 @@ grew. It cites no review id, so it is not mistaken for the change that implement
 request with that title is open, a later review names the stages again but queues no second one. A rise between
 20% and 25% runs a review and names the stages but queues nothing. When the median grew by more than 25% but no
 stage's median did (medians of stages are not additive), or the previous window cannot be rebuilt, nothing is
-queued and the note says so.
+queued and the note says so. The slowdown request follows the noise rule too: with 60 or more landings it is
+queued only if the rise over the previous review's median is also more than the noise between recent windows
+and one minute (`slowdown_beyond_noise`), and otherwise the note says "slowdown request: ... within noise"; with
+fewer landings the noise cannot be estimated, the 25% rule alone decides, and the note says "noise could not be
+estimated".
 
 **Prediction record.** Each review is an `athena.throughput-review/1` record at
 `records/throughput-reviews/<YYYY-MM>/<id>.json`. It holds the landings counted and the window median (the
-baseline the next review compares with), the trigger (`cadence` or `worsened`), the proposal (bottleneck, stage,
-change, expected minutes saved, priority, request job) and the follow-ups it closes. A model that fails or answers
+baseline the next review compares with), the trigger (`cadence`, `worsened` or `wasted`), the proposal (bottleneck,
+stage, change, expected minutes saved, priority, request job, empty when the noise rule queued none), the
+wasted-work figures over the newest window (`waste`, optional, so older records still parse) and the follow-ups
+it closes. A model that fails or answers
 badly still leaves a record, with no proposal and a note. The model's invocation is recorded either way.
 
 **Prediction against measurement.** A change is cited when a landed request job, other than the design request,
@@ -332,4 +387,4 @@ review prints a line for each follow-up. A change that has not landed, or that n
 
 **Not covered.** The review does not change the error review or the code-health review, and it does not
 implement any change. A crash between queuing the request and committing the review record leaves an open
-request with no record: the open request still prevents a second one, and that prediction gets no follow-up.
+request with no record: the next review names it as open, and that prediction gets no follow-up.
