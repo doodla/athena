@@ -9,6 +9,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A `bug-evidence` default in `defaults.toml` and a reading step, `reading::ensure_bug_evidence`, run in
+  `build_reading` beside `ensure_changelog` and before validation (`docs/design/defaults-loop.md` section 3.9).
+  Root cause: bug jobs were rejected at the final verdict because no criterion demanded data-backed root-cause
+  evidence. The standing `root-cause` default asks only for a named cause, so a reader's criterion from it asked for
+  no readable data and did not rule out a guess labelled as an estimate (jobs 20261104-054700-e6js,
+  20261105-051344-q9fv, 20261105-101121-qw9r and 20261105-205835-hk09). For a `change` reading that has at least one
+  criterion and is about a bug, a wrong output, a regression or a slowdown, the step adds one content criterion
+  (before any fix, the change states the root cause, shows it from data the job can read and shows why the symptom
+  follows; a guess labelled as an estimate does not meet this) and one `bug-evidence` entry in `defaults_applied`,
+  each once. Tier 1: the reader listed `bug-evidence` and its `how` does not say it does not apply. Tier 2: a bug
+  word within two words of a fix word in the request, in the earlier job's request on a retry (`read_once` now
+  passes both texts to `build_reading`), or in the reading's title. The step refuses nothing, so there is no new
+  refusal rule and no replay share; a change reading with no criterion is still refused. Limit: a retry whose
+  earlier request is itself only "try again on <job>" is covered by tier 1 and the title alone. Reader budget: the
+  new default's first sentence takes the reader set from 1997 to 2036 tokens, so `BudgetSet::Reader` in
+  `crates/athena-context/src/lib.rs` rises from 2,000 to 2,050 by the appended decision D166 in `docs/decisions.md`,
+  a decided exception to `docs/design/context-engineer.md` section 8; the reader stays above 95%, so the next
+  addition must name what it removes. Files beyond the reading's list, each forced by a test or rule: `lib.rs`,
+  `crates/athena-core/src/run_pin_tests.rs` (reads the budget instead of the literal 2000),
+  `docs/system-facts.md` (its `budget reader` line), `docs/decisions.md` and `docs/design/context-engineer.md` (its
+  reader figures). `athena.toml` and the existing defaults, `root-cause` included, are unchanged.
 - Per-gate counters, the `relax` and `remove` prevention kinds, and Hestia's review of a gate
   (`crates/athena-core/src/gate_counts.rs`, `docs/design/defaults-loop.md` section 3.8). A gate is a failed check
   of a rejected job, the verifier when no check failed, or an admission rule that ended a rejected or failed job.

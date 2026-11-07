@@ -51,7 +51,7 @@ available here, so it is not measured in this design.
 | `gh.rs` size | 5,276 lines | Measured at the base commit, `crates/athena-core/src/gh.rs`; the request says 5,276 |
 | `produce_and_verify` | 737 lines, `run.rs` lines 1527 to 2263 | Measured at base from the `fn` line to its closing brace; the request says 724, so the function grew or was counted differently |
 | Decision log | 3,261 lines at base, 3,231 in the request | Measured at base, `docs/decisions.md`; D129 and later entries explain the difference |
-| Reader prompt | 1997 of 2000 (99.85%) | `docs/system-facts.md` line `budget reader: 1997 of 2000`, checked by `system_facts_budgets_match_computed` |
+| Reader prompt | 2036 of 2050 (99.3%) | `docs/system-facts.md` line `budget reader: 2036 of 2050`, checked by `system_facts_budgets_match_computed` |
 | Other budgets | contract 326 of 350, producer 1257 of 1300, verifier 1298 of 1300, planner 788 of 1300, critic 742 of 1300 | Same file |
 | Critics finding missed callers in `gh.rs` and `produce_and_verify` | not counted | Stated by the request, not measured here |
 | 7 retries that lost an earlier verifier's findings | 7 jobs | Stated by the request, not measured here |
@@ -138,7 +138,7 @@ critics kept finding missed callers in the two largest units (stated by the requ
 | Convention | Measure | Threshold (estimate) | Today | Enforcement |
 |---|---|---|---|---|
 | **A record is readable alone.** The stored text a reader needs fits in the caps. | Stored detail against `DETAIL_CAP`, `TEXT_CAP`, `TAIL_CAP` | Caps as set in `introspect.rs` | Built | mechanism: the caps in `introspect.rs`, with tests there. This design adds no new cap |
-| **A prompt set stays within budget.** | Size of each role's always-loaded set against its budget | Exact match today; headroom rule in section 8 | reader 99.85%; verifier 99.85% (1298 of 1300); producer 96.7%; contract 93.1% (computed from the budget lines) | Exact match: mechanism: `system_facts_budgets_match_computed`. Headroom and offset: mechanism: `budget-guard` (build job 5) |
+| **A prompt set stays within budget.** | Size of each role's always-loaded set against its budget | Exact match today; headroom rule in section 8 | reader 99.3%; verifier 99.85% (1298 of 1300); producer 96.7%; contract 93.1% (computed from the budget lines) | Exact match: mechanism: `system_facts_budgets_match_computed`. Headroom and offset: mechanism: `budget-guard` (build job 5) |
 | **A prompt line earns its place.** | Per-line: does a failure class or post-mortem outcome cite it? | Every line added after this design cites one | n/a | prose-only until `budget-guard` also reads the citation |
 
 Every row in 4.1 to 4.3 is either enforced by a named measure that build jobs 1 to 5 create, or marked
@@ -199,7 +199,8 @@ stored in shadow and changes no outcome.
 | `none` | No context would have helped; the cause was elsewhere | Nothing; counted |
 
 **Displacement rule.** An addition to a prompt set above 95% of its budget must name what it displaces (a line
-to remove or shorten) in the same change. The reader is at 99.85%, so any reader addition today needs an offset.
+to remove or shorten) in the same change. The reader is at 99.3% (it stays above 95% after decision D166, which raised its budget), so any reader addition
+today needs an offset.
 See section 8.
 
 **What stops it growing.** A line added by a post-mortem is kept only if, within 8 weeks (estimate), a later
@@ -227,9 +228,11 @@ activity (a report written), as `hestia.md` section 5 does.
 ## 8. Keeping context within budgets
 
 - **Budgets are not raised to make room.** `system-facts.md` says: update the line, never the budget. This
-  design keeps that. Raising a budget needs a decision of its own.
+  design keeps that. Raising a budget needs a decision of its own. Decision D166 is one: it raised the reader
+  budget from 2,000 to 2,050 for the `bug-evidence` default, as a decided exception to this rule; the reader stays
+  above 95%, so the next reader addition must name what it removes or shortens.
 - **95% rule.** A change that raises a prompt set above 95% of its budget, or adds to one already above it,
-  must name what it removes or shortens. Today the reader (99.85%), the verifier (99.85%) and the producer
+  must name what it removes or shortens. Today the reader (99.3%), the verifier (99.85%) and the producer
   (96.7%) are above 95%; the contract (93.1%), planner (60.6%) and critic (57.1%) are not. All percentages are
   computed from the budget lines in `system-facts.md` and rounded to one place.
 - **Relation to Hestia's flag.** `hestia.md` row 5 reports any role above 90% (estimate). The two numbers are
@@ -333,7 +336,7 @@ Depends on: none.
 Acceptance:
 - A fixture change that takes a set from 94% to 96% without an offset fails; the same change with an offset line
   naming what it removes passes; a change that lowers a set above 95% passes without one.
-- The guard run on the real tree reports the reader at 99.85% and the verifier at 99.85%, as recomputed from
+- The guard run on the real tree reports the reader at 99.3% and the verifier at 99.85%, as recomputed from
   `system-facts.md`.
 - The existing exact-match test still fails on a stale budget line (shown by editing a line in a fixture).
 

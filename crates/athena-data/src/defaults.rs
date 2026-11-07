@@ -145,6 +145,43 @@ source = "s"
     }
 
     #[test]
+    fn bug_evidence_default_parses_and_renders_its_first_sentence() {
+        let model = DefaultsModel::parse(REPO_DEFAULTS).unwrap();
+        let entry = model.get("bug-evidence").unwrap();
+        assert_eq!(entry.applies_to, vec!["*".to_string()]);
+        let first = first_sentence(&entry.statement);
+        assert!(first.starts_with("Only for bug, wrong-output, regression or slowdown work"));
+        for phrase in [
+            "before any fix",
+            "root cause",
+            "data the job can read",
+            "a guess labelled as an estimate does not meet this",
+        ] {
+            assert!(
+                entry.statement.to_lowercase().contains(phrase),
+                "missing: {phrase}"
+            );
+        }
+        for job in [
+            "20261104-054700-e6js",
+            "20261105-051344-q9fv",
+            "20261105-101121-qw9r",
+            "20261105-205835-hk09",
+        ] {
+            assert!(entry.source.contains(job), "source misses {job}");
+        }
+        let out = model.render();
+        assert!(out.contains(&format!("- bug-evidence [*]: {first}\n")));
+        // Only the first sentence reaches the reader; the rest goes to the producer and verifier.
+        assert!(!out.contains("shows it from data the job can read"));
+        // The standing root-cause default is not reworded by this one.
+        assert_eq!(
+            model.get("root-cause").unwrap().statement,
+            "Fix the root cause, not the symptom or the one instance that surfaced. The fault is fixed where it originates; when that lies outside the job's scope, name it and propose the fix rather than working around it. The change description names the root cause and why the change addresses it. The root-cause fix is the one focused change."
+        );
+    }
+
+    #[test]
     fn an_explainer_page_request_gets_the_three_standing_defaults() {
         // An explainer page is class docs: select the defaults for docs the way the reader sees them.
         let model = DefaultsModel::parse(REPO_DEFAULTS).unwrap();

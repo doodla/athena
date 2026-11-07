@@ -2900,6 +2900,37 @@ mod tests {
     }
 
     #[test]
+    fn bug_evidence_statement_reaches_the_producer_brief() {
+        let mut bug = reading();
+        bug.defaults_applied.push(DefaultApplied {
+            id: "bug-evidence".into(),
+            how: "bug work".into(),
+        });
+        bug.acceptance_criteria.push(Criterion {
+            text: "Before any fix, the change states the root cause, shows it from data the job can read."
+                .into(),
+            kind: CriterionKind::Content,
+        });
+        let mut inputs = producer_inputs(None);
+        inputs.reading = AcceptedReading::new(&bug, &defaults(), |_| false);
+        let brief = producer_brief(&inputs);
+        // The full statement (not only the first sentence the reader sees) reaches the producer.
+        assert!(brief.contains("bug-evidence"), "{brief}");
+        assert!(
+            brief.contains("a guess labelled as an estimate does not meet this"),
+            "{brief}"
+        );
+        assert!(
+            brief.contains("shows it from data the job can read"),
+            "{brief}"
+        );
+        assert!(
+            brief.contains("Before any fix, the change states the root cause"),
+            "{brief}"
+        );
+    }
+
+    #[test]
     fn producer_briefs_without_a_pin_have_no_pin_section() {
         let brief = producer_brief(&producer_inputs(None));
         assert!(!brief.contains("## Pinned source"));
