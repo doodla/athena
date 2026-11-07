@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-212343-z26k",
+  "round": 1,
+  "at": "2026-11-07T21:32:00.000628119Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "A pull request waiting to merge, or a job that is landing right now, is counted as a non-landed attempt, so lines whose last attempt passed are held as 'awaiting diagnosis'.",
+      "evidence": "store.rs:57 defines Dispatched as 'running, or interrupted if no process owns it'. drain.rs:514-518 and 131-138: Landing::Waiting leaves the pull request open with checks pending, and 'a later run merges it'. No outcome is written, so the job stays Dispatched with a Pass verification. steward.rs:447-480 (interrupted_work) puts every Dispatched job that is not running and not retried back in the queue as an item, and drain.rs:2126-2129 asks the hold for every item in prepare. Take a line where p1 Failed and its retry p2 passed and is waiting to merge. The plan counts it as 1 + 1 = 2, so prepare holds p2 with 'awaiting diagnosis', yet `athena land --pr` would merge it. The plan's mitigation (`passed.is_none()`) covers only the in-loop check, not prepare. RealSteps can already see live jobs through `self.athena.running(..)` (drain.rs:4212), which the plan does not use. It guesses where the code can be read. Fix: Narrow `unlanded` so that a pending or live job does not count. For example, count an open (Dispatched with Pass) or Blocked job only once a later request on its line has superseded it, and never count one that `running()` reports. Criterion 2's case still holds: c2 is retried by the queued item. Add a test: a line with [Failed, Dispatched+Pass and not superseded] is not held, and a waiting-to-merge item is not passed over as awaiting diagnosis. Drop the Host open question, since the code answers it.",
+      "location": "Plan Decision 2 / Step 1 (`verified_unlanded`: Dispatched with final_verdict Pass); Open question 'Host'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A second-level dependent of a held item would still say 'its line is paused'.",
+      "evidence": "The dependents loop at drain.rs:2206-2223 repeats, and `on` can be a dependent held in an earlier pass. The plan picks the hold wording only 'when the item depended on is a hold item', so a dependent of that dependent gets 'which is held back: its line is paused' even though no line is paused. Fix: Carry the cause (pause or hold) with each held entry and copy it to the dependents, or use wording that fits both, for dependents of dependents only. Existing paused tests must keep their exact text.",
+      "location": "Plan Step 4 (dependents wording in prepare, drain.rs:2206-2223)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The demonstrations say the Stub fixture is added in step 5, but step 6 adds it.",
+      "evidence": "Step 5 adds ItemEnd::Awaiting. Step 6 extends Stub with `records` and `track_runs`. Fix: Change the reference to step 6.",
+      "location": "Demonstrations, Criterion 1 'Test seam' and Criterion 3",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read scope_guard.rs, store.rs, steward.rs, drain.rs (prepare, attempts, land, finish, RealSteps) and the test helpers the plan names. Its overall design holds up. It reuses group_lines and line_attempts, keeps unlanded jobs out of `attempts` so T1 to T5 are untouched, checks the hold beside `paused` and at the top of the attempt loop, and backs it with real-steps and stub tests that would fail without the hold. The helpers, line numbers and struct literals it cites all exist: RequestRecord is built only at scope_guard.rs:658 and in the req() helper. One soundness problem needs a revision. The plan counts every Dispatched job with a passing verification as a verified-but-not-landed attempt. In this codebase that state is also a pull request waiting for checks to merge, or a job another worker is landing right now. steward::interrupted_work puts such a job back in the queue on the next drain. So a common line, one failure followed by a retry that passed and is waiting to merge, would be held as 'awaiting diagnosis' when its latest attempt passed. The plan leaves this as a Host question, but the code answers it. The other findings are minor: the wording for second-level dependents, and a step-number slip."
+}

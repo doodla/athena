@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-212343-z26k",
+  "round": 2,
+  "at": "2026-11-07T21:37:48.171605692Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "A pull request waiting to merge is still counted as a failed attempt, because the drain itself retries it on its next run",
+      "evidence": "Read code: a job waiting to merge has no outcome, so `JobRecords::state` (store.rs:116-129) gives Dispatched. `Landing::Waiting` (drain.rs:1831-1836) writes no record. `steward::interrupted_work` (steward.rs:447-480) lists every Dispatched job of a drained channel that has no registry entry and no 'try again on' retry. After the run ends a waiting job has no registry entry (`Athena::running`, status.rs:2047), so the next drain lists it as interrupted. `attempts` starts it with `retry = item.interrupted` (drain.rs:1860) and makes a 'try again on <job>' retry. The plan's dependents entry admits the item is 'still retried as today'. That retry's `retry_of` names the waiting job, so under Decision 1 the waiting job becomes 'superseded' and counts as one non-landed attempt. Take a line whose only attempt passed verification and is waiting on CI. On the next drain its retry X2 runs. If X2 fails, the check at the top of the loop counts X (superseded) plus X2 (Failed) = 2 and holds the line. X2 never gets the second attempt it gets today, and the pull request may still merge. The plan sets out to fix this case (finding 1, 'a pull request waiting to merge is not a retry candidate'), but supersession does not separate an operator's 'try again' from the drain's own retry of a waiting job. The negative test stops at 'its retry is read and run' and never checks what happens after that retry fails. Fix: Decide how to treat a verified, still-open job that the drain's own interrupted-work retry supersedes, and test it. Options: (a) count an open job only when it is Blocked, i.e. the landing was refused; (b) count a superseded Dispatched+Pass job only when the superseding request was not made by the drain's interrupted retry, if the records can tell them apart (check the request channel or origin); or (c) state that this is intended and justify it against the request. Whichever you choose, extend the waiting-to-merge negative test: the waiting item's retry fails once, and the test asserts whether the second attempt is made.",
+      "location": "Plan Decision 1, Dependents entry 'jobs Dispatched with a passing verification', Criterion 2 negative test",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Interrupted verified jobs on a line that already has two failures are still retried",
+      "evidence": "For records [Failed, Failed, own verified job that was interrupted], `hold_reason` returns None by design. `attempts` then retries the interrupted item (drain.rs:1860, ReadOf::Retry) and pays for a read and a run on a line that already has two counted non-landed attempts. The hold applies only from the next iteration. Fix: State this exception in the hold reason doc comment and the CHANGELOG bullet, or check the line's count without the own job's exemption when the item is interrupted, because the drain retries it anyway.",
+      "location": "Plan Step 2 (`hold_reason` returns None for a job whose own request is verified and unsuperseded)",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Decision 1 says a waiting pull request 'is not a retry candidate', but the code makes it one",
+      "evidence": "`interrupted_work` lists it and `attempts` retries it (steward.rs:447-480, drain.rs:1860). Fix: Correct the wording so a later reader is not misled about current drain behavior.",
+      "location": "Plan Decision 1 reason text",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read scope_guard.rs, the drain loop and `prepare` in drain.rs, store.rs, steward.rs and the drain test helpers. The functions, helpers, line numbers and dependents the plan names exist, with one exception: the plan says a waiting pull request is not retried, but `interrupted_work` does retry it (see findings). The `Steps` implementers that override `paused` are only the Stub; the wrapper implementers do not delegate it, so the new default method leaves them unchanged. `RequestRecord` literals exist only at scope_guard.rs:658 and in the `req()` test helper at line 1789. Counting goes through `group_lines` and `line_attempts`. T1 to T5 are untouched. Asking `paused` first keeps the existing exact-text tests passing. The demonstrations drive production `hold_reason` through `drain::drain`, `drain::plan` and one RealSteps test, so they test real behavior, not a double. One soundness problem remains (major): a job waiting to merge is Dispatched with a passing verification. The next drain lists it as interrupted and retries it itself (steward.rs:447-480, drain.rs:1860). That retry marks the waiting job as superseded, so under Decision 1 it counts as a non-landed attempt. A line whose first attempt is a pending pull request then gets one retry instead of two, which is the false positive finding 1 was meant to remove. The planner should choose a rule for this case and test it. Verdict: revise."
+}

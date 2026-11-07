@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-212343-z26k",
+  "round": 3,
+  "at": "2026-11-07T21:43:14.013310363Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The own-job skip exempts open collision jobs that the drain picks up itself, so a collision-only line is held after three non-landed attempts, not two, and the criterion 2 test never shows this path.",
+      "evidence": "drain.rs:1826-1829: Landing::NotLanded writes no closing record, so the job stays dispatched with a passing verification. After the two landing tries, finish (drain.rs:2576) only passes the item over. steward.rs:447-480 interrupted_work lists any dispatched, not-running job that no request has retried, and RealSteps::queue (drain.rs:4210-4218) adds it as an interrupted item. Under the plan, for the line [X not landed, superseded by X2; X2 not landed, open], the drain's item is X2 and skip = X2, so the count is 1 and a third attempt (X2-retry) is made. Each later run adds one job; the hold fires only when two superseded collision jobs exist, which is three attempts. Criterion 2 names exactly this shape ('two verified-but-not-landed attempts, one with its job still open'). The plan's test builds it only with a person's 'try again on c2' item (the own job is a, not c2), and Risk 2 covers only a chain ending in a failure, not a collision-only chain. Fix: Add a Stub test: records X verified_unlanded superseded by X2, X2 verified_unlanded; item X2 interrupted. State and implement the intended result. To hold at two, either ask the lander or pull-request state whether the own job is waiting to merge before skipping it, or skip the own job only when it is the line's only non-landed request. Otherwise record the three-attempt behavior for collisions in Risks and the changelog, and ask the user to accept it, since it narrows criterion 2.",
+      "location": "Decision 1 / step 2 (`skip = job_id` in hold_reason); Criterion 2 demonstration",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Step 4 adds held items to the held map but does not say the planning read loop must skip them, so an unread item on a held line would still be read and paid for, against Decision 4.",
+      "evidence": "The read loop skips only ids in `paused` (drain.rs:2136: `if paused.contains_key(&id) { continue; }`). The held map is built after the loop, at drain.rs:2202. Step 4 says to 'ask awaiting for ids not in paused; add them to the held map and to a set by_hold', but says nothing about the loop at 2136. Demonstration (a) may not catch it, because the Stub reads in prepare only when a plan entry is underspecified. Fix: In step 4, compute `by_hold` before the read loop and `continue` for ids in it, as for `paused`. Add a Stub test with an underspecified plan entry for the held item that asserts the log has no `read <id>`.",
+      "location": "Step 4 (drain.rs `prepare`, read loop at 2130-2138)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The entry says the interrupted-job tests pass because the default `awaiting` holds nothing, but 5122 and 5217 drive RealSteps, which gets the real `awaiting`.",
+      "evidence": "tests/drain.rs:5134 `real_steps(&athena, &lander)` (5122 test) and 5240 (5217 test) use RealSteps, so the new RealSteps::awaiting runs. They still pass only because the killed jobs have no passing verification and no closed attempt (count 0), not because of the default method. Fix: Correct the reason: these RealSteps tests exercise the real hook and pass because their lines have zero counted attempts. Keep them listed as coverage of the RealSteps path.",
+      "location": "Dependents: 'jobs Dispatched with a passing verification ... which the drain retries itself'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the accepted reading. It works only from committed records, reuses group_lines and line_attempts, and leaves T1 to T5 alone. The code it names exists and behaves as described: RequestRecord is used only in scope_guard.rs; request_records, verdict_of, interrupted_work, Drain::attempts, prepare and finish are as stated; all Steps implementers are listed; the paused-then-hold order and the dependent wording are sound. One design flaw is major. Never counting the item's own job, added to protect pull requests waiting to merge, also exempts the drain's own pickup of an open collision job. A job whose landing failed (Landing::NotLanded) writes no record, so interrupted_work lists it again on the next run. The drain retries it as the item's own job, so a line with two collision attempts, one still open, gets a third attempt. The criterion 2 test uses only a person's 'try again' and never exercises this path. Two minor gaps: step 4 does not make prepare's read loop skip held ids, and one dependents entry gives the wrong reason why the RealSteps interrupted-job tests still pass."
+}

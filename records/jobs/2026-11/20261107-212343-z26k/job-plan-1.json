@@ -1,0 +1,279 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-212343-z26k",
+  "round": 1,
+  "at": "2026-11-07T21:29:19.367176377Z",
+  "invocation_seq": 2,
+  "approach": "Add a records-derived hold. In scope_guard.rs, `RequestRecord` gets an `unlanded` flag (set in `request_records` for a job that is Blocked, or Dispatched with a passing verification, and has no finished attempt). New `non_landed_attempts` counts a line's Rejected and Failed attempts through `group_lines`/`line_attempts`, plus its `unlanded` requests. It ignores Environment attempts and counts nothing on a line with an Accepted attempt. New `hold_reason(requests, job_id)` returns a reason when that count is 2 or more. In drain.rs a new default method `Steps::awaiting(jobs)` (real impl: `request_records` + `hold_reason`) is asked in `Drain::prepare` (merged into the paused/held map, so a held item is not read, planned or run and `athena plan` lists it as held) and at the top of each `Drain::attempts` iteration after the pause check (new `ItemEnd::Awaiting(reason)`, passed over with the reason). Nothing is written, so no record or data file changes and the hold is recomputed from committed records on every drain run. Signals T1 to T5 are untouched because `unlanded` never enters `attempts`.",
+  "decisions": [
+    {
+      "choice": "Count a line's non-landed attempts with a new `scope_guard::non_landed_attempts` built on `group_lines` and `line_attempts`, and expose `hold_reason` over `&[RequestRecord]` so the drain tests can feed real `RequestRecord` values.",
+      "reason": "The brief asks for the grouping the scope guard uses and forbids a second line-grouping function. A pure function over `RequestRecord` is testable without git. `Athena::line_pause`, `line_flag` and `live_marks` already group the same way.",
+      "rejected": [
+        {
+          "option": "Count attempts inside drain.rs from its own job list",
+          "why": "The drain's `jobs` list is per run, so it would not see earlier runs. It would also be a second grouping."
+        },
+        {
+          "option": "Write a pause or flag file for the held line",
+          "why": "Pause files lift only by deleting a file and feed `athena status` and T-signal logic. That is the follow-up line-field and status work, and a pause would change what `line_pause` reports."
+        }
+      ]
+    },
+    {
+      "choice": "Represent a verified-but-not-landed job (Blocked, or Dispatched with a passing verification, no finished attempt) as a new bool `RequestRecord.unlanded`, not as an `AttemptRecord` or a new `Verdict` variant.",
+      "reason": "`counted()` treats every verdict except Environment as an attempt for T1, T2 and T5, and T3 sums cost over all attempts, so a new variant or an extra attempt would change T1 to T5 behavior, which is out of scope. `verdict_of` already returns None for Blocked and Dispatched jobs. Stale and gate-refused jobs are already Failed attempts, so only Blocked and open jobs need the flag. `RequestRecord` is built in only two places, both in scope_guard.rs.",
+      "rejected": [
+        {
+          "option": "New `Verdict::Unlanded`",
+          "why": "Changes `counted`, `t1_retries`, `t3_basis` and `rejections` results; would need threshold review."
+        },
+        {
+          "option": "Change `verdict_of` so Blocked and open jobs become Failed",
+          "why": "Same signal change, and it would turn a job awaiting `go` into a failure for status and Hestia."
+        }
+      ]
+    },
+    {
+      "choice": "Ask the hold in two places: `prepare` (beside `paused`, before any read) and the top of the `attempts` loop (after the pause check, before each read or run). Do not add it after the last failed attempt.",
+      "reason": "The top-of-loop check is the one that stops the retry: with one earlier failure, one new failure makes two, and the second attempt is not made. It also stops a second drain run, because the item stays queued after a double failure (test at tests/drain.rs:1066). The `prepare` check avoids paying a planning read for an unread 'try again on' request on a held line. After a fresh item's two attempts the existing Paused, Flagged and Failed ends keep their text, so existing tests are unchanged.",
+      "rejected": [
+        {
+          "option": "Check only in `attempts`",
+          "why": "An unread 'try again on' request on a held line would still be read by the planning pass and cost a reader run."
+        },
+        {
+          "option": "Check only in `prepare`",
+          "why": "The line count changes during a run, so the second attempt of an item would not be stopped."
+        }
+      ]
+    },
+    {
+      "choice": "Precedence: a paused line is reported as paused first; the hold is asked only for jobs that are not paused. Reuse the `pause_held` map and the `Refusal::held` path for held items, with the dependents' reason saying 'its line is awaiting diagnosis' when the item they wait on was held by this rule.",
+      "reason": "Existing tests assert the paused text exactly ('depends on a, which is held back: its line is paused'). Reusing the map reuses pass_over_paused, the first_paused filtering and the `athena plan` held listing.",
+      "rejected": [
+        {
+          "option": "A second map and a second passed-over printer",
+          "why": "Duplicates the held plumbing and risks double lines."
+        }
+      ]
+    },
+    {
+      "choice": "Environment stops are never counted, and a line with an Accepted attempt is never held.",
+      "reason": "This follows `counted()` and `done()` in scope_guard.rs (lines 222 to 233) and the request. Environment stops are not the work's fault, and an accepted line is finished.",
+      "rejected": [
+        {
+          "option": "Count every closed job",
+          "why": "Would hold lines for a full disk or an expired login."
+        }
+      ]
+    },
+    {
+      "choice": "The reason text says 'awaiting diagnosis' and names the line, the counts and that the drain will not retry it. It never claims a diagnosis job exists, and never contains the word 'paused'.",
+      "reason": "The request names the state; the diagnosis role is a follow-up. A real-steps test at tests/drain.rs:5628 asserts no plan refusal contains 'paused' for a flagged line.",
+      "rejected": [
+        {
+          "option": "Reuse the pause wording",
+          "why": "Would tell the operator to delete a pause file that does not exist."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "purpose": "Add `RequestRecord.unlanded` (doc comment), set it in `request_records` via a private `verified_unlanded(job)`. Add `HOLD_ATTEMPTS = 2`, `non_landed_attempts(requests, line)` and `hold_reason(requests, job_id)`. Update the `req()` test helper and add unit tests under `scope_guard::hold…`. T1 to T5 constants and functions are untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add default `Steps::awaiting`; `RealSteps::awaiting` over `request_records` and `hold_reason`; merge held items into `prepare`'s paused map with wording for dependents; check at the top of `Drain::attempts`; `ItemEnd::Awaiting(String)` and its `finish` arm (pass_over); module-doc bullet.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Stub gains `records` and `track_runs` and implements `awaiting` by calling production `hold_reason`; add the `awaiting_diagnosis_*` stub tests and one RealSteps test.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One Unreleased/Added bullet describing only the hold.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "scope_guard.rs: add `pub unlanded: bool` to `RequestRecord` with a doc comment (verified but not landed: blocked, or open with a passing verification, and no finished attempt; never in `attempts`, so T1 to T5 do not see it). In `request_records`, set it from a private `verified_unlanded(job: &JobRecords)`: `job.job.is_some()` and either `state() == JobState::Blocked` or `Dispatched` with `verification.final_verdict == athena_data::records::Verdict::Pass`, and only when `attempts` is empty. Update the `req()` test helper (line 1790).",
+    "scope_guard.rs: add `pub const HOLD_ATTEMPTS: usize = 2;`, `pub fn non_landed_attempts(requests, line) -> usize` (0 if `done(&line_attempts(..))`, else the Rejected and Failed attempts from `line_attempts` plus the `unlanded` requests of `line`), and `pub fn hold_reason(requests, job_id) -> Option<String>` (find the job's index, find its line with `group_lines`, return the reason text naming the first request id of the line, the counts and 'awaiting diagnosis' when the count reaches `HOLD_ATTEMPTS`). Add unit tests: counts with Environment, with Accepted, with unlanded; `hold_reason` None for an unknown job; derivation of `unlanded` from the rig's records (Blocked, open with Pass, open without verification); `evaluate_before_attempt` equal with and without unlanded requests.",
+    "drain.rs: add `fn awaiting(&self, _jobs: &[String]) -> Vec<(String, String)> { Vec::new() }` to `Steps` beside `flagged`, with a doc comment. Add `RealSteps::awaiting`: load records (none held when they cannot be loaded, as `paused` does), build `request_records` once, and map each job through `scope_guard::hold_reason`.",
+    "drain.rs: in `prepare`, after `paused` is computed, ask `awaiting` for the ids not already paused and add them to `paused` (the held map). In the dependents loop, word the reason as 'its line is awaiting diagnosis' when the item depended on is a hold item and keep 'its line is paused' otherwise.",
+    "drain.rs: add `ItemEnd::Awaiting(String)` with a doc comment. In `Drain::attempts`, right after the `paused_reason` check, call a new `awaiting_reason(item)` (same shape as `paused_reason`) and return `ItemEnd::Awaiting(reason)`. In `finish`, handle it like `Paused` and `Flagged` (`pass_over`). Update the module docs with a bullet: a line with two non-landed attempts is held and not retried.",
+    "tests/drain.rs: extend `Stub` with `records: RefCell<Vec<RequestRecord>>` and `track_runs: bool` and implement `awaiting` by calling `athena_core::scope_guard::hold_reason` over a clone of the records. In `run()`, when `track_runs`, update the record whose id is the job (or push one, with `retry_of` set by stripping the `-retry` suffix) with the attempt for the outcome: Rejected, Failed, Accepted, or `unlanded` when the job is in `unlandable`. Add the tests `awaiting_diagnosis_*` for: two earlier failures held and a second drain run held, plus `drain::plan` listing it; an earlier failure then a new failure so the second attempt is not made; a collision case (Failed plus unlanded, and unlanded plus unlanded); one failure retried as today; Environment attempts not counted. Add one RealSteps test: `rejected_twice(rejecting_verdict(), rejecting_second_criterion())`, queue `try again on <job>`, run `drain::drain` twice, and assert `fx.head()` is unchanged and the passed-over line contains 'awaiting diagnosis'.",
+    "CHANGELOG.md: insert one bullet at the end of `## [Unreleased]` / `### Added` (before `### Changed` at line 423) stating only that the drain holds a line after two attempts that did not land and does not retry it, with the cause (a twice-failed line was queued and retried again, paying for each attempt).",
+    "Run `cargo fmt --all`, then `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix any existing test that fails only because its line now reaches two non-landed attempts."
+  ],
+  "risks": [
+    {
+      "risk": "An existing real-steps or lifecycle test has a line that already reaches two non-landed attempts and then expects a retry, so it now fails.",
+      "mitigation": "I read the real-steps drain tests that retry (tests/drain.rs 3100, 5121 to 5265). Those use environment stops or interrupted jobs, which are not counted, or fresh items. The producer runs the full `cargo test --locked` and updates only a test whose expectation is the retry itself."
+    },
+    {
+      "risk": "A job that is Dispatched with a passing verification while its landing is in progress is counted as unlanded and causes a false hold.",
+      "mitigation": "The check runs only when an item has no passed job pending (`passed.is_none()`), and in `prepare` before work starts. The count needs a second non-landed attempt on the same line to hold. The Host question above records what was not traced."
+    },
+    {
+      "risk": "A held line has no release: it stays held until it lands or the request is rephrased.",
+      "mitigation": "This is the stated scope; the reason text names the line and says the drain will not retry it. The release command is a follow-up. Nothing is written, so no cleanup is owed."
+    },
+    {
+      "risk": "Adding a field to the public `RequestRecord` breaks other struct literals.",
+      "mitigation": "Searched all crates: literals exist only at scope_guard.rs:658 and in the `req()` helper at line 1790; status.rs and display.rs do not use it."
+    },
+    {
+      "risk": "A hold at two attempts overlaps with the T1 flag at three and the T4 pause at two same-criterion rejections, so operators see two reasons.",
+      "mitigation": "A pause is reported first, and the hold is asked only for jobs that are not paused. A line held by this rule shows 'awaiting diagnosis', never 'paused'."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "new default method `Steps::awaiting`",
+      "dependent": "`Steps` implementers: Stub, Unaccepted, Replay, WithRealCheck, Shared, Rebasing in crates/athena-cli/tests/drain.rs; Stub, Capped, Housekeeping, World, Lane in crates/athena-cli/src/drain.rs (unit tests)",
+      "kind": "code",
+      "test": "cargo test --locked -p athena-cli: the default returns no held line, so every existing drain test sees today's behavior.",
+      "reason": null
+    },
+    {
+      "name": "the `pause_held` map now also holds awaiting-diagnosis items",
+      "dependent": "`Drain::prepare` and its consumers: `pass_over_paused`, the `first_paused` filtering (drain.rs about 3005 and 3158), `Refusal::held` and `athena plan` via `drain::plan`",
+      "kind": "code",
+      "test": "New stub test `awaiting_diagnosis_…` calls `drain::plan` and asserts the item is in `plan.refused` with the hold reason. The existing paused tests (tests/drain.rs:788, 835, 953, 1252, 1284) still pass: their text is unchanged because paused is asked first and the dependent wording changes only for items held by this rule.",
+      "reason": null
+    },
+    {
+      "name": "attempt loop control flow and a new `ItemEnd::Awaiting`",
+      "dependent": "`Drain::attempts` ends: ItemEnd::Paused, Flagged and Failed (drain.rs 1942 to 1955) and `finish` (2545 to 2640)",
+      "kind": "code",
+      "test": "tests/drain.rs:1002 and 1070 (flagged and plain double failure) and the real-steps flagged test at 5549, which asserts two attempts for the item. The hold is asked only at the top of an iteration, so a fresh item still gets both attempts.",
+      "reason": null
+    },
+    {
+      "name": "`RequestRecord` shape (new `unlanded` field) and `request_records`",
+      "dependent": "scope guard signals T1 to T5: `evaluate_before_attempt`, `line_state`, `Athena::line_pause`, `line_flag`, `live_marks`, `try_watch_line` in scope_guard.rs",
+      "kind": "code",
+      "test": "scope_guard unit test: `evaluate_before_attempt` over `line_attempts` is equal with and without unlanded requests. Existing scope_guard rig tests (for example scope_guard.rs:1554 and 1594) still pass.",
+      "reason": null
+    },
+    {
+      "name": "`RequestRecord` and `request_records`",
+      "dependent": "crates/athena-core/src/status.rs and crates/athena-cli/src/display.rs",
+      "kind": "code",
+      "test": null,
+      "reason": "A search of crates for `request_records` and `RequestRecord` outside scope_guard.rs finds no use. These files use only `LineMark` and the mark paths, which do not change."
+    },
+    {
+      "name": "the ItemEnd::Failed path for an item that fails twice in one run",
+      "dependent": "Hestia repeated-failure review and the Failed summary text 'failed twice; left for the scope guard and Hestia' (drain.rs 2576 to 2595)",
+      "kind": "rule",
+      "test": null,
+      "reason": "Unchanged. After a fresh item's second failure the existing Paused, Flagged and Failed returns run as before. The new hold only changes what happens when the item is next queued or when a line already has two non-landed attempts."
+    },
+    {
+      "name": "environment stops are not counted",
+      "dependent": "`Stop::Environment` rule (drain.rs 2589 to 2594) and `athena_core::disk::is_environment_reason`",
+      "kind": "rule",
+      "test": "Stub environment test and the unit test that [Failed, Environment, Environment] counts 1. The existing low-disk real-steps drains (tests/drain.rs near 3100) still make their retry.",
+      "reason": null
+    },
+    {
+      "name": "pause and flag precedence",
+      "dependent": "scope guard thresholds T1 (3rd attempt flag) and T4 (2 rejections pause) overlap with the new rule at 2 attempts",
+      "kind": "rule",
+      "test": "Real-steps test at tests/drain.rs:5510 keeps its 'is paused' text because `paused` is asked first and the hold only for jobs it did not report.",
+      "reason": null
+    },
+    {
+      "name": "host merge rules, records branch, CI caches",
+      "dependent": "docs/system-facts.md and host settings",
+      "kind": "host_setting",
+      "test": null,
+      "reason": "Searched system-facts.md: no fact reads the drain's retry behavior, line grouping or attempt counts. No record, config key, check name or workflow changes, so no host setting is touched."
+    },
+    {
+      "name": "reading and request-text refusal rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "Not changed. The hold reads job records, not request text or a reading; 'try again on <job>' is still parsed only by the existing `retried_job`. The corpus has cases such as 'retry-complaint-reading-names-the-job' (line 1371) that cover reading checks, not this rule."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Stub tests over real `RequestRecord` values (the hold logic is production `scope_guard::hold_reason`; the stub only supplies records), plus one RealSteps test over records the fake agent writes.",
+      "command": "cargo test --locked -p athena-cli --test drain awaiting_diagnosis",
+      "observes": "Test (a): records p1 Rejected, p2 Failed (retry of p1), queued item a (retry of p2). `drain::drain` leaves the stub log empty (no read, no run), prints one line `plan       a passed over: line p1 is held, awaiting diagnosis…`, and `report.queued` still lists a. A second `drain::drain` on the same stub does the same. `drain::plan` lists a as refused with that reason. Test (b), dynamic: one earlier Failed attempt, the stub records each run, outcomes Rejected then Landed. The log is exactly `read a`, `run a`, and there is no `reread a`; the item is passed over with the reason. Test (c), RealSteps: `rejected_twice(rejecting_verdict(), rejecting_second_criterion())` (flagged, not paused), then `queue_steward_request(\"try again on <job>\")`. Two `drain::drain` runs leave `fx.head()` unchanged and each prints `passed over: line <job> is held, awaiting diagnosis`.",
+      "fails_without": "Without the hold, test (a) logs `read a` and `run a` and a retry. Test (b) logs `reread a` and `run a-retry`. Test (c) writes new records, so `fx.head()` changes.",
+      "seam": "Production entry points `drain::drain` and `drain::plan`. Fixture: `Stub` (tests/drain.rs:41) gains `records: RefCell<Vec<RequestRecord>>` and `track_runs: bool`, and implements the new `Steps::awaiting` by calling `scope_guard::hold_reason` over a clone of `records`; `run()` appends or updates the run's `RequestRecord` when `track_runs`. Both are added in plan step 5. For (c) the existing `rejected_twice`, `real_steps_with`, `queue_steward_request` helpers (tests/drain.rs:5491, 5503, 5529) exist, and `RealSteps::awaiting` is added in step 3."
+    },
+    {
+      "criterion": 2,
+      "method": "Stub tests over `RequestRecord` values with `unlanded: true`, plus a scope_guard unit test that derives the flag from real job records.",
+      "command": "cargo test --locked -p athena-cli --test drain awaiting_diagnosis_collision && cargo test --locked -p athena-core --lib scope_guard::hold",
+      "observes": "Drain test: c1 is a Failed attempt (a stale or gate-refused job after a passing verification), c2 retries c1 with `unlanded: true` and no attempt, and the queued item a retries c2. The log is empty and a is passed over as held. A second case has c1 and c2 both `unlanded`. Unit test, using the `rig` in scope_guard.rs tests (`r.ask`, `r.go`, `r.records`): after a landed job's `outcome.state` is set to Blocked, `request_records` gives `unlanded == true` and no attempt. With the outcome removed (open job) and the verification still `Pass` it is still `unlanded`. With the verification removed it is false. Two such requests make `hold_reason` return Some. `evaluate_before_attempt` over the line's `line_attempts` is identical with and without the `unlanded` requests, so T1 to T5 are unchanged.",
+      "fails_without": "Without counting `unlanded`, the line has 0 or 1 counted attempts. The drain logs `read a` and `run a`, and the unit test's `hold_reason` returns None.",
+      "seam": "Production `scope_guard::request_records`, `non_landed_attempts` and `hold_reason`, and `drain::drain`. Fixtures: `RequestRecord` literals injected through `Stub.records`, and the existing scope_guard `rig` with `JobRecords` fields edited in memory (the same technique as `readings.clear()` at scope_guard.rs:1566). The `unlanded` field and the functions are added in step 1; the rig exists today."
+    },
+    {
+      "criterion": 3,
+      "method": "Stub drain tests and scope_guard unit tests.",
+      "command": "cargo test --locked -p athena-cli --test drain awaiting_diagnosis_retry && cargo test --locked -p athena-core --lib scope_guard::hold",
+      "observes": "One failed attempt: the stub with `track_runs` and outcomes Rejected then Landed produces the log `read a`, `run a`, `reread a`, `run a-retry`, `land a-retry`, `rate`, the same as today. Environment: records p1 Environment and p2 Environment (retry of p1), queued item a (retry of p2), outcomes Rejected then Landed. The line counts 0, so both attempts are made: `run a` then `run a-retry`. Unit tests: `non_landed_attempts` is 1 for [Failed, Environment, Environment]. It is 0 for a line with an Accepted attempt, including [Rejected, Rejected, Accepted]. It is 2 for [Rejected, Failed, Environment].",
+      "fails_without": "If Environment attempts were counted, the line would hold up front and `run a` would not appear. If the count were 1 instead of 2, the single-failure case would stop after `run a`.",
+      "seam": "Production `scope_guard::non_landed_attempts` and `hold_reason` through `drain::drain` with the `Stub.records` fixture from step 5. Unit tests build `RequestRecord` with the existing `req()` and `att()` helpers (scope_guard.rs:1773, 1789), updated in step 1 for the new field."
+    },
+    {
+      "criterion": 4,
+      "method": "Run the three checks Athena runs.",
+      "command": "cargo test --locked",
+      "observes": "All tests pass, including the unchanged existing drain tests that use the default `Steps::awaiting` (no hold) and the real-steps flagged and paused tests, in which both attempts are still made. Also run: `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check`, which exit 0.",
+      "fails_without": "A missed `RequestRecord` literal, an unused import, or an existing test whose line now reaches 2 non-landed attempts and expected a retry would fail here.",
+      "seam": "The whole workspace test suite. Nothing is injected."
+    },
+    {
+      "criterion": 5,
+      "method": "Content check by search and diff.",
+      "command": "git diff -- crates/athena-core/src/scope_guard.rs crates/athena-cli/src/drain.rs",
+      "observes": "In the diff, `non_landed_attempts` calls `line_attempts(requests, line)` and `hold_reason` calls `group_lines(requests)`. `RealSteps::awaiting` calls `request_records` and then `hold_reason`. No other function in the diff builds groups: a Grep for `fn .*group` and `parent` union-find in the changed files shows only the existing `group_lines`.",
+      "fails_without": "A second grouping function in the diff would be found by the same search.",
+      "seam": "None: a diff and search check, not a behavior."
+    },
+    {
+      "criterion": 6,
+      "method": "Content check of the changelog diff.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "One bullet added under `## [Unreleased]` / `### Added` (after the last bullet before `### Changed` at CHANGELOG.md:423). It says the drain holds a line after two attempts that did not land (rejected, failed, or verified but not landed, not counting environment stops) and does not retry it. It also says the item is passed over with the reason 'awaiting diagnosis', that nothing is written, and that the hold is recomputed from records. It says nothing about a diagnosis job, schema, status display or line field.",
+      "fails_without": "A bullet that mentions those would be seen in the diff.",
+      "seam": "None: a diff check."
+    },
+    {
+      "criterion": 7,
+      "method": "Diff scope check.",
+      "command": "git diff --stat",
+      "observes": "Only CHANGELOG.md, crates/athena-cli/src/drain.rs, crates/athena-cli/tests/drain.rs and crates/athena-core/src/scope_guard.rs are listed. No athena.toml, defaults.toml, .github/workflows or prompt file. The diff to scope_guard.rs touches none of the `T1_*` to `T5_*` constants (lines 40 to 59) and none of `t1_retries`, `t2_plan_growth`, `t3_cost`, `t4_rejections`, `t5_time`.",
+      "fails_without": "An edit to a governance or prompt file would appear in the stat.",
+      "seam": "None: a diff check."
+    }
+  ],
+  "open_questions": [
+    "User: There is no command to release a held line in this job (release is a named follow-up). Is it acceptable that the operator escapes a hold only by asking in new words, which starts a new line, until that follow-up exists?",
+    "Host: Is a job that is Dispatched with a passing verification ever running live (registered in the process registry) at a moment when another worker asks about its line? The code counts it as unlanded; it appears to occur only for an open pull request or an interrupted job, but the registry timing was not traced."
+  ],
+  "producer_section_sha256": "1bb2156fd8732479c0a43d637b0e61340678e8ece3d47041836a31ccf8a03b42"
+}
