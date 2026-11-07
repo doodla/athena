@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- The producer's slotted cargo commands (`build`, `test`, `clippy`, `check`) now build in the build slot's warm
+  target directory: while the wrapper holds a slot it links the job's `CARGO_TARGET_DIR` path to that directory
+  with `BuildLink`, runs cargo, and removes the link afterwards. A path outside the job's directory (D46) or a
+  failed link prints a warning and cargo runs unlinked. Other subcommands are unchanged.
 - A reading check for the place an action runs, `reading::check_environment_reach`, run as a `step!` in
   `refusing_check` right after `check_outcome_state`. Root cause: the reading stage had no step asking who
   performs each action, where, with what permissions, and what data it reaches, so a reading worked from the

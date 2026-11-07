@@ -1,0 +1,215 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261106-104229-ve4d",
+  "n": 1,
+  "at": "2026-11-07T14:49:11.818885054Z",
+  "invocation_seq": 1,
+  "base_commit": "b1126b75eaa9db9249be0fee091fd822e6114538",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Finish ETXTBSY fix: widen exec-write scan, retry on busy, reconcile D08",
+  "summary": "Goal: stop the recurring \"Text file busy\" test flake at its root for the maintainers and verifier. Widen the `no_in_process_exec_writes` scan to flag wrappers and external chmod outside the helper, add fixtures, route any remaining stand-in writes through the shared helper, add a short ETXTBSY retry where production code runs a stand-in, and state the root cause in CHANGELOG. The shared helper already exists as `athena_testkit::write_executable`; the request's \"athena-testutil\" is read as that crate.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust code and tests."
+    },
+    {
+      "id": "tested",
+      "how": "Fixture tests for the scan; cargo test, clippy and fmt must pass."
+    },
+    {
+      "id": "root-cause",
+      "how": "CHANGELOG states the cause; every write site is routed through one helper rather than guarding the last symptom."
+    },
+    {
+      "id": "mechanism",
+      "how": "The rule is enforced by the scan test, not prose."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the scan on fixtures and the tree."
+    },
+    {
+      "id": "verified",
+      "how": "Verifier runs cargo test, clippy and fmt --check."
+    },
+    {
+      "id": "strangers",
+      "how": "Decision entry and CHANGELOG written for an outside reader."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that the scan fails on the bad fixtures and passes on the helper."
+    },
+    {
+      "id": "buy-first",
+      "how": "Reuses the existing helper and the claude.rs retry pattern rather than a new crate."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-testkit/src/lib.rs (write_executable runs sh in a child: cat, chmod 755, mv), crates/athena-testkit/tests/no_in_process_exec_writes.rs (pure `violations(rel, text)` over test regions, EXEMPT list, tree scan of crates/*/{src,tests} and xtask), crates/athena-core/src/toolconfig.rs, crates/athena-git/src/snapshot.rs, crates/athena-cli/src/slot_exec.rs, xtask/src/main.rs, crates/athena-agent/src/claude.rs (existing ETXTBSY retry, 20 attempts). No records or data files are added under crates/, so check_record_file, AnyRecord and the round-trip test are not involved. The property is measured directly by calling `violations` on fixture strings and on the real tree, not through a stand-in.",
+    "Existing code: extends crates/athena-testkit/src/lib.rs, crates/athena-testkit/tests/no_in_process_exec_writes.rs and crates/athena-agent/src/claude.rs (its ETXTBSY retry); reads docs/decisions.md D08, D157, D160 and docs/decision-links.toml.",
+    "Survey result: set_permissions/from_mode/set_mode/set_executable sites are in crates/athena-core/src/{toolconfig,pin,snapshot}.rs, crates/athena-git/src/snapshot.rs, crates/athena-cli/src/slot_exec.rs, crates/athena-testkit/tests/stand_in_stress.rs and xtask/src/main.rs (set_executable at lines 415, 490, 550, 807). Several are production code that is not a test stand-in (pin and snapshot read-only toggles), so only sites that write and run a stand-in are converted. The producer must re-run the search and list each site in the D-entry.",
+    "The scan currently flags direct calls but not a wrapper function defined in test code that hides set_permissions, nor a chmod run through `sh -c`, a shell script string, or `Command::new(\"chmod\")` on a differently spelled line. Widening adds those shapes. The exemption list is kept honest by the existing every_exemption_still_exists test.",
+    "Production sites that run a stand-in (xtask downloaded/adopted tools at xtask/src/main.rs, toolconfig.rs materialisation) get a brief bounded retry on libc ETXTBSY, modelled on claude.rs. Pure permission toggles are left alone.",
+    "If the change touches crates/athena-git/src/snapshot.rs, a D08-governed path, a new decision entry in docs/decisions.md and a [[link]] with older D08 in docs/decision-links.toml are added; line numbers in existing links must stay correct. This is the same-repo local process; no CI, push or PR step is involved.",
+    "The decision-log numbering continues after the latest entry; the producer picks the next free D-number. athena.toml and defaults.toml are unchanged."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "CHANGELOG.md has a new entry whose first sentence states the root cause: an executable is written and run in the same process while a write handle or forked child still holds it.",
+      "kind": "content"
+    },
+    {
+      "text": "docs/decisions.md has a new entry listing every searched site (set_permissions, from_mode, set_mode, set_executable, chmod) in tests, xtask and athena-core, and saying for each whether it was converted to athena_testkit::write_executable, given a retry, or left as a non-stand-in.",
+      "kind": "content"
+    },
+    {
+      "text": "No test, xtask or athena-core code outside athena_testkit writes a stand-in script or marks it executable in-process or via an external chmod; Grep for set_permissions, from_mode, set_mode, set_executable and chmod over crates/*/{src,tests} and xtask shows only the helper, the documented exemptions, and non-stand-in production uses.",
+      "kind": "content"
+    },
+    {
+      "text": "Production code that runs a stand-in retries briefly (bounded attempts, short sleep) on ETXTBSY; Grep shows the retry at each such run site, and the retry is bounded.",
+      "kind": "content"
+    },
+    {
+      "text": "crates/athena-testkit/tests/no_in_process_exec_writes.rs contains fixtures for a wrapper function that hides set_permissions and for an external chmod (shell string or Command) outside the helper, and a fixture for the helper path that is not flagged.",
+      "kind": "content"
+    },
+    {
+      "text": "Run `cargo test -p athena-testkit`: the scan's fixture tests show the wrapper and chmod fixtures are flagged, the helper fixture passes, and the real-tree scan test passes.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: the full workspace suite passes, including the stress test and the exemption-staleness test.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`: both are clean.",
+      "kind": "behavior"
+    },
+    {
+      "text": "If any D08-governed path (crates/athena-git/src/snapshot.rs, crates/athena-core/src/run/candidate.rs) is touched, docs/decisions.md has a new entry saying D08 stands or is amended, and docs/decision-links.toml has a [[link]] with older = \"D08\" and newer = that entry, with a correct line number.",
+      "kind": "content"
+    },
+    {
+      "text": "The scan change refuses more test code than before by design: the tree currently has no flagged lines outside EXEMPT, so expected 0% of newly refused readings; no past readings are replayed through this scan.",
+      "kind": "content"
+    },
+    {
+      "text": "No unrelated behavior changes; no edits to athena.toml, defaults.toml, workflows, or records/.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-testkit/tests/no_in_process_exec_writes.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "p": 0.9
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "xtask/src/main.rs",
+      "action": "modify",
+      "p": 0.6
+    },
+    {
+      "path": "crates/athena-core/src/toolconfig.rs",
+      "action": "modify",
+      "p": 0.45
+    },
+    {
+      "path": "crates/athena-testkit/src/lib.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-agent/src/claude.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-git/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.25
+    },
+    {
+      "path": "crates/athena-cli/src/slot_exec.rs",
+      "action": "modify",
+      "p": 0.2
+    },
+    {
+      "path": "crates/athena-testkit/tests/stand_in_stress.rs",
+      "action": "modify",
+      "p": 0.1
+    }
+  ],
+  "out_of_scope": [
+    "Changing athena.toml, defaults.toml, workflows or records/.",
+    "Converting read-only/writable permission toggles in crates/athena-core/src/pin.rs and snapshot.rs that do not write or run stand-ins.",
+    "Editing the introspection record itself (it is read as input only).",
+    "Reversing D08."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.7,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.9,
+        "p90": 5.0
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2400.0,
+        "p90": 5200.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6711711711711712,
+      "p_user_intervenes": 0.07886178861788617,
+      "cost_usd": {
+        "p10": 0.5613595564666337,
+        "p50": 1.3938792109095357,
+        "p90": 4.533901805032501
+      },
+      "wall_time_s": {
+        "p10": 566.8970291972157,
+        "p50": 2069.032643066,
+        "p90": 4312.9726059102595
+      }
+    }
+  },
+  "departures": "Wider than reference: the change spans several crates, a decision entry and a link gate, and the work needs a full cold test run; the repository already holds part of the fix, so the exact residual scope is uncertain.",
+  "urgent_reason": "It cuts repeated failed jobs: four earlier jobs each guarded only the last ETXTBSY symptom, so a root-cause fix removes redo-work retries.",
+  "hard_reason": "It changes the scan that refuses test code (a check that can fail work) and may touch files covered by decision D08, which Athena's decision-link gate checks.",
+  "producer_effort": "high"
+}
