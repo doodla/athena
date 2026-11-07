@@ -71,7 +71,7 @@
 use crate::capability::{JobConfig, ToolGrant};
 use crate::commits::{NewFile, message};
 use crate::disk::{CargoBuild, CargoBuilder, GB, cargo_lock_blob};
-use crate::plan::Priority;
+use crate::plan::{Improvement, Priority};
 use crate::state::format_bytes;
 use crate::status::{
     LandedJob, StageMinutes, THROUGHPUT_WINDOW, Throughput, landed_jobs, landed_jobs_among_first,
@@ -382,6 +382,66 @@ pub fn repeated_causes(records: &Records) -> Vec<RepeatedCause> {
         .collect()
 }
 
+/// Whether `id` is a request job still waiting to be worked: queued or proposed.
+fn is_waiting_request(records: &Records, id: &str) -> bool {
+    records.jobs.get(id).is_some_and(|j| {
+        j.request.is_some() && matches!(j.state(), JobState::Queued | JobState::Proposed)
+    })
+}
+
+/// Athena's own improvement requests among the open ones, for the drain's guaranteed turn
+/// ([`Improvement`], [`crate::plan::Plan::build_improving`]). Requests are found by what the records link, never
+/// by their title. The kinds:
+///
+/// - open requests the Steward queued (channel `steward`);
+/// - the open request that addresses a repeated cause, filed by the error review ([`repeated_causes`] links it
+///   by the introspection ids its text cites). Its entry in `cause_jobs` is the number of distinct jobs the
+///   cause is recorded in; with several causes the largest count counts;
+/// - the design request of a throughput review: the `request_job` of a recorded proposal;
+/// - the open request that holds the line `Spec requirement: <id>`, filed by the spec review.
+///
+/// A request is linked by what it cites, not by who wrote it: a person's own request that cites a repeated
+/// cause's introspection ids, or holds a `Spec requirement:` line, counts as an improvement request too.
+///
+/// Not covered: the throughput slowdown request ([`slowdown_request`]). Nothing in the records links it to the
+/// review (only its title prefix and the free text of the review's note), so it is not listed, and a title match
+/// is not used. `since_turn` and `tried` are left empty: they are the drain's own count.
+pub fn improvement_of(records: &Records) -> Improvement {
+    let mut items: BTreeSet<String> = crate::steward::improvement_requests(records)
+        .into_iter()
+        .collect();
+    let mut cause_jobs: BTreeMap<String, usize> = BTreeMap::new();
+    for cause in repeated_causes(records) {
+        let Some(request) = cause.request.filter(|r| !r.landed) else {
+            continue;
+        };
+        if !is_waiting_request(records, &request.job) {
+            continue;
+        }
+        let count = cause_jobs.entry(request.job.clone()).or_insert(0);
+        *count = (*count).max(cause.jobs.len());
+        items.insert(request.job);
+    }
+    for job in records
+        .throughput_reviews
+        .iter()
+        .filter_map(|r| r.proposal.as_ref()?.request_job.as_ref())
+        .filter(|job| is_waiting_request(records, job.as_str()))
+    {
+        items.insert(job.as_str().to_string());
+    }
+    for job in open_spec_requests(records, None) {
+        if is_waiting_request(records, job.id().as_str()) {
+            items.insert(job.id().as_str().to_string());
+        }
+    }
+    Improvement {
+        items: items.into_iter().collect(),
+        cause_jobs,
+        ..Improvement::default()
+    }
+}
+
 /// The text of the high-priority root-cause request for a repeated cause, built with [`StewardRequest`]. High is
 /// the most Hestia queues: urgent is for a person. No body line starts like a bullet: the builder refuses one,
 /// since `athena plan` would read it as acceptance.
@@ -675,14 +735,33 @@ pub fn spec_request(gap: &SpecGap) -> Result<String, String> {
 
 /// Whether a request job that is not closed already asks for this requirement.
 fn spec_request_is_open(records: &Records, id: &str) -> bool {
-    let line = format!("{SPEC_LINE}{id}");
-    records.request_jobs().iter().any(|job| {
-        !matches!(job.state(), JobState::Closed(_))
-            && job
-                .request
-                .as_ref()
-                .is_some_and(|r| r.text.lines().any(|l| l.trim() == line))
-    })
+    !open_spec_requests(records, Some(id)).is_empty()
+}
+
+/// The request jobs that are not closed and hold a `Spec requirement:` line: the one for requirement `id`, or
+/// with `None` the line of any requirement. The line test is exact: a whole line, trimmed.
+fn open_spec_requests<'a>(records: &'a Records, id: Option<&str>) -> Vec<&'a JobRecords> {
+    let line = id.map(|id| format!("{SPEC_LINE}{id}"));
+    let holds = |l: &str| {
+        let l = l.trim();
+        match &line {
+            Some(line) => l == line,
+            None => l
+                .strip_prefix(SPEC_LINE)
+                .is_some_and(|rest| !rest.trim().is_empty()),
+        }
+    };
+    records
+        .request_jobs()
+        .into_iter()
+        .filter(|job| {
+            !matches!(job.state(), JobState::Closed(_))
+                && job
+                    .request
+                    .as_ref()
+                    .is_some_and(|r| r.text.lines().any(holds))
+        })
+        .collect()
 }
 
 /// What a spec review would do over the records.
@@ -4871,5 +4950,227 @@ mod tests {
         );
         review.proposal = None;
         assert!(throughput_outcome(&review).starts_with("no proposal: slowdown request"));
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // Improvement requests: the drain's guaranteed turn
+
+    /// The request the error review queues for a cause recorded in `jobs` (letters), through the real path.
+    fn queue_cause_in(
+        dir: &std::path::Path,
+        athena: &Athena,
+        in_class: &FailureClass,
+        jobs: &[char],
+    ) -> JobId {
+        let mut queued = None;
+        for (n, of) in jobs.iter().enumerate() {
+            let i = introspection(
+                10 + n as u32,
+                *of,
+                Some(&in_class.id),
+                "The verdict is not read.",
+            );
+            put_introspection(dir, athena, &i);
+            if let Some(job) = athena.error_review(&i, &crate::Quiet) {
+                queued = Some(job);
+            }
+        }
+        queued.expect("the cause recurred, so the review queued a request")
+    }
+
+    #[test]
+    fn improvement_of_counts_the_distinct_jobs_of_the_cause_a_request_addresses() {
+        // A failure class that appears in introspections of three distinct jobs, and one that appears in two.
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let c = class(1, "Reading ignores the earlier verdict");
+        put(
+            dir.path(),
+            &athena,
+            vec![AnyRecord::FailureClass(c.clone())],
+        );
+        let queued = queue_cause_in(dir.path(), &athena, &c, &['a', 'b', 'c']);
+        let found = improvement_of(&records(&athena));
+        assert_eq!(found.items, [queued.as_str()]);
+        assert_eq!(found.cause_jobs.get(queued.as_str()), Some(&3));
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        put(
+            dir.path(),
+            &athena,
+            vec![AnyRecord::FailureClass(c.clone())],
+        );
+        let queued = queue_cause_in(dir.path(), &athena, &c, &['a', 'b']);
+        let found = improvement_of(&records(&athena));
+        assert_eq!(found.items, [queued.as_str()]);
+        assert_eq!(found.cause_jobs.get(queued.as_str()), Some(&2));
+        // Two introspections of one job are one job: the count is of jobs.
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        put(
+            dir.path(),
+            &athena,
+            vec![AnyRecord::FailureClass(c.clone())],
+        );
+        let queued = queue_cause_in(dir.path(), &athena, &c, &['a', 'b', 'b']);
+        let found = improvement_of(&records(&athena));
+        assert_eq!(found.cause_jobs.get(queued.as_str()), Some(&2));
+    }
+
+    #[test]
+    fn improvement_of_feeds_the_plan_so_a_three_job_request_is_ordered_as_urgent() {
+        use crate::plan::{Plan, PlanEntry, TierCaps};
+        let build = |jobs: &[char]| {
+            let dir = tempfile::tempdir().unwrap();
+            let state = tempfile::tempdir().unwrap();
+            let athena = athena_in(dir.path(), state.path());
+            let c = class(1, "Reading ignores the earlier verdict");
+            put(
+                dir.path(),
+                &athena,
+                vec![AnyRecord::FailureClass(c.clone())],
+            );
+            let hestia = queue_cause_in(dir.path(), &athena, &c, jobs);
+            let found = improvement_of(&records(&athena));
+            let ready = |id: &str| PlanEntry {
+                goal: format!("goal of {id}"),
+                rung: Some(athena_data::roles::Ladder::Implementation),
+                acceptance: vec![format!("{id} works")],
+                touches: vec![format!("{id}/")],
+                ..PlanEntry::bare(id, id)
+            };
+            // An older normal request of a person comes first by age.
+            let entries = [ready("person"), ready(hestia.as_str())];
+            let (plan, capped) =
+                Plan::build_improving(&entries, &[], TierCaps::UNLIMITED, &[], &found);
+            (hestia, plan, capped)
+        };
+        let (hestia, plan, capped) = build(&['a', 'b', 'c']);
+        assert_eq!(plan.order[0], hestia.as_str(), "ordered ahead as urgent");
+        assert_eq!(plan.promoted.len(), 1);
+        assert_eq!(plan.promoted[0].jobs, 3);
+        assert_eq!(capped[1].priority, Priority::Urgent);
+        let (hestia, plan, capped) = build(&['a', 'b']);
+        assert_eq!(plan.order[1], hestia.as_str(), "two jobs: not promoted");
+        assert!(plan.promoted.is_empty());
+        assert_eq!(capped[1].priority, Priority::Normal);
+    }
+
+    #[test]
+    fn improvement_of_lists_every_kind_of_request_it_can_link_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        assert_eq!(improvement_of(&records(&athena)), Improvement::default());
+
+        // A plain request of a person that cites nothing.
+        let (plain, _) = athena
+            .queue("Add a flag.\n\nAcceptance:\n- the flag works\n\nFiles: src/a.rs\n")
+            .unwrap();
+        // A spec-review request carries the requirement line; the same text without it is not one.
+        let spec = |line: &str| {
+            format!(
+                "Cover the requirement.\n{line}\n\nAcceptance:\n- it is covered\n\nFiles: src/a.rs\n"
+            )
+        };
+        let (spec_open, _) = athena.queue(&spec("Spec requirement: R-1")).unwrap();
+        let (no_line, _) = athena.queue(&spec("Spec requirement R-1")).unwrap();
+        let (closed_spec, _) = athena.queue(&spec("Spec requirement: R-2")).unwrap();
+        athena
+            .close(closed_spec.as_str(), "not wanted", &crate::Quiet)
+            .unwrap();
+        // A request that cites the introspections of a repeated cause is the one that addresses it.
+        let c = class(1, "Reading ignores the earlier verdict");
+        put(
+            dir.path(),
+            &athena,
+            vec![AnyRecord::FailureClass(c.clone())],
+        );
+        let cause = queue_cause_in(dir.path(), &athena, &c, &['a', 'b', 'c']);
+
+        let found = improvement_of(&records(&athena));
+        let mut expected = vec![spec_open.as_str().to_string(), cause.as_str().to_string()];
+        expected.sort();
+        assert_eq!(found.items, expected);
+        for not_listed in [&plain, &no_line, &closed_spec] {
+            assert!(!found.items.contains(&not_listed.as_str().to_string()));
+        }
+        // Only the request that addresses a cause carries a count.
+        assert_eq!(found.cause_jobs.len(), 1);
+        assert_eq!(found.cause_jobs[cause.as_str()], 3);
+        assert_eq!((found.since_turn, found.tried.len()), (0, 0));
+
+        // The cause's request, once closed, is not listed.
+        athena
+            .close(cause.as_str(), "not wanted", &crate::Quiet)
+            .unwrap();
+        let found = improvement_of(&records(&athena));
+        assert_eq!(found.items, [spec_open.as_str()]);
+    }
+
+    #[test]
+    fn improvement_of_lists_the_throughput_design_request_and_not_the_slowdown_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, _) = throughput_model(12.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        seed_landed(dir.path(), &athena, 0, 10, 20.0);
+        let review = athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        let design = review.proposal.unwrap().request_job.unwrap();
+        let found = improvement_of(&records(&athena));
+        assert_eq!(
+            found.items,
+            [design.as_str()],
+            "linked by the recorded proposal"
+        );
+        assert!(found.cause_jobs.is_empty());
+        // Closed, the design request is not listed.
+        athena
+            .close(design.as_str(), "not wanted", &crate::Quiet)
+            .unwrap();
+        assert!(improvement_of(&records(&athena)).items.is_empty());
+
+        // The slowdown request has no recorded link, so it is not listed (and no title is matched).
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (model, _) = throughput_model(6.0);
+        let athena = athena_with(dir.path(), state.path(), model);
+        seed_landed(dir.path(), &athena, 0, 10, 25.0);
+        put_earlier_review(dir.path(), &athena, 10, 25.0);
+        open_design_request_job(dir.path(), &athena);
+        seed_stages(dir.path(), &athena, 10, 11, slow_stages());
+        athena.throughput_review(&crate::Quiet).unwrap().unwrap();
+        let known = records(&athena);
+        let slowdown = open_slowdown_requests(&known);
+        assert_eq!(slowdown.len(), 1, "the review queued a slowdown request");
+        assert!(improvement_of(&known).items.is_empty());
+    }
+
+    #[test]
+    fn improvement_of_lists_open_steward_channel_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        let steward = job('s');
+        put(
+            dir.path(),
+            &athena,
+            vec![AnyRecord::Request(Request {
+                job: steward.clone(),
+                text: "Fix the cause.\n\nAcceptance:\n- it is fixed\n\nFiles: src/a.rs\n".into(),
+                received_at: at(5),
+                channel: crate::steward::REQUEST_CHANNEL.into(),
+            })],
+        );
+        let (person, _) = athena
+            .queue("Add a flag.\n\nAcceptance:\n- the flag works\n\nFiles: src/a.rs\n")
+            .unwrap();
+        let found = improvement_of(&records(&athena));
+        assert_eq!(found.items, [steward.as_str()]);
+        assert!(!found.items.contains(&person.as_str().to_string()));
     }
 }

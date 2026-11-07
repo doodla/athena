@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-031902-ttnw",
+  "round": 1,
+  "at": "2026-11-07T03:30:31.799996544Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "Hestia's root-cause requests are filed on channel `cli`, not `steward`. The channel marker therefore never picks them up, so they get no turn and no promotion.",
+      "evidence": "`try_error_review` builds the text with `root_cause_request` and calls `self.queue(&text)` (hestia.rs:2071). The other Hestia filing paths (749, 1662, 1803, 1993, 2001) do the same, inside `impl Athena`. `Athena::queue` (reading.rs:878) writes `channel: \"cli\".into()` (reading.rs:896), which is the channel of a person's `ask --later`. Only the Steward's `RequestQueue::apply` (steward.rs:654) writes `REQUEST_CHANNEL`. The `channel: \"steward\"` at hestia.rs:3354 is a test fixture, not the filing path. Decision 4 promotes only improvement items, so a Hestia request is never promoted either. That breaks the request's Hestia clause and criterion 2 in production, even though the planned unit tests, fed improvement ids by hand, would pass. Fix: Identify Hestia requests from a recorded link, without changing how they are filed (that is out of scope). `repeated_causes(&records)` already returns, for each cause, `request: Some(AddressingRequest { job, .. })`, the open request that cites the cause's introspections. Make the improvement set the open steward-channel jobs plus every open `RepeatedCause.request.job`. Take the distinct-job count straight from that cause's `jobs.len()`, which replaces the substring helper `cause_jobs_cited`. Correct the fact in the plan and in the CHANGELOG wording, and add a test in which a request queued through `Athena::queue` (channel cli) that addresses a 3-job cause is found as an improvement request and promoted.",
+      "location": "Plan 'Facts read' bullet 1 and Decision 5; crates/athena-core/src/hestia.rs:2068-2071, :749, :1662, :1803; crates/athena-core/src/reading.rs:878-897",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The slot rule fills only the first window of each built plan. The plan `athena plan` prints is therefore not the order the drain will run, and it names only one turn.",
+      "evidence": "The accepted reading says: \"in each window of three consecutive dispatches in plan order, if the window has no improvement item and one is ready ... moves into the window\". Step 2 instead finds one window (`w = 3 - min(since_turn, 2)`), moves one item and stops. With 6 urgent and 2 Steward items, `athena plan` shows the second Steward item at position 8, but the drain, which replans before each wave (drain.rs:2986-2990), runs it at position 6. The request asks that the plan show which jobs take the improvement turn, and the plan would list one turn where several will happen. Decision 2 rejects whole-order interleaving as reshuffling, but applying the same single-item move window after window, while improvement items remain, keeps the tiers and groups just as well. Fix: Apply the move window by window across the whole order: the first window is shortened by `since_turn`, and each later window is 3 untried positions. Record every turn in `Plan.turns`. Then a replan in the drain reproduces the remaining order. Add a test that the order of the first build equals the drain's actual dispatch order over a run of six or more items.",
+      "location": "Decision 2 / Step 2 (one window only), and the reading's assumption on the slot rule",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "No test covers the production path from records to the `Improvement` input. Every ordering and display demonstration takes its improvement ids and cause counts from the Stub or from a hand-built `Improvement`.",
+      "evidence": "Criterion 1 and criterion 2 (plan.rs) pass the ids and `cause_jobs` as plain arguments. Criterion 4 uses the `Stub`'s new `improvement` field. The glue in `RealSteps::improvement`, which looks up each job's request text and combines `improvement_requests`, `repeated_causes` and `cause_jobs_cited`, is never exercised. The blocker above shows that this glue is exactly where the behavior can silently fail. Fix: Put the derivation in a pure athena-core function, such as `improvement_of(records: &Records) -> Improvement`, and test it with `Records` holding a steward-channel request, a cli-channel Hestia request that addresses a 3-job cause, and a plain person request. `RealSteps::improvement` then becomes a one-line call.",
+      "location": "Files: crates/athena-cli/src/drain.rs `RealSteps::improvement`; Demonstrations for criteria 1, 2 and 4",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The six 'person-filed urgent' entries are not in `person_set`, so `build_capped` with the default caps demotes three of them to high. The test then no longer models the request's scenario.",
+      "evidence": "`build_capped` keeps `caps.urgent` (3) urgent items that are not person-set and demotes the rest (plan.rs:704-721). The demonstration does not say whether the six ids are passed as `person_set`. Fix: Pass the six ids in `person_set`, or use `TierCaps::UNLIMITED`, and state which, so all six stay urgent ahead of the Steward items.",
+      "location": "Demonstration for criterion 1 (plan.rs unit test)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Because the promotion happens before the caps, a promoted request can be demoted again when the urgent tier is full. 'Treated as urgent' then holds only when there is room.",
+      "evidence": "The plan acknowledges this. The request's wording is unconditional. Fix: Keep the design, since the caps are out of scope, but have `athena plan` print the promotion and the later demotion together, so the maintainer sees both, and state the limit in the CHANGELOG as planned.",
+      "location": "Risks bullet 1 / Decision 4",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan wraps `build_capped` in a new `build_improving`, adds a per-run counter of dispatches since the last improvement item, and exempts moved items from the priority check. That approach is sound for the ordering, and the file and line references I checked are accurate (prepare at drain.rs:2196, the replan at 2986-2990, `batches_for`, the Plan fields, the `Steps` implementors). But it rests on a false fact. Hestia's root-cause requests are queued through `Athena::queue` on channel `cli` (hestia.rs:2071, reading.rs:896), not on the steward channel. The channel marker misses every Hestia request, so they get neither the turn nor the urgent promotion. The fix is to use the recorded link `RepeatedCause.request.job` and take the count from `jobs.len()`, without changing how Hestia files. Two more problems: the slot rule fills only the first window, unlike the accepted reading's every-window rule, so `athena plan` shows an order and a turn list that differ from what the drain runs; and no test covers the path from records to the improvement ids, because every demonstration takes them from a double. The plan can fix all of these, so the verdict is revise."
+}

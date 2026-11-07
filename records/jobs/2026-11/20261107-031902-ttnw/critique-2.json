@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-031902-ttnw",
+  "round": 2,
+  "at": "2026-11-07T03:36:07.346432709Z",
+  "invocation_seq": 5,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "`improvement_of` finds only Hestia requests linked to a repeated cause. Hestia's spec, throughput and slowdown requests are not counted as improvement requests, so they never get the guaranteed turn.",
+      "evidence": "Hestia queues requests from four paths, not only the error review. These are `spec_review` (hestia.rs:735, queue at 749), `throughput_review` (`throughput_request`, queue at 1662), `slowdown_request` (queue at 1803) and the error review (1993, 2001, 2071). All of them go through `Athena::queue` on channel `cli`. Decision 1 cites these same lines as the reason a channel marker fails. Yet the item set it builds is only the steward-channel jobs plus `RepeatedCause.request.job`. The records already link the throughput request: `ThroughputProposal.request_job` (athena-data/src/records.rs:2160) holds 'The design request this review queued'. The request and the accepted reading both say 'Steward or Hestia'. The plan neither covers these requests nor states that they are left out. Fix: Add the request jobs from Hestia's other reviews to `improvement_of`: `ThroughputProposal.request_job` from the throughput review records, plus whatever links the slowdown and spec requests to their review records, where such a link exists. Add a test that files a request through the real `throughput_review` path, or puts a throughput record with `request_job` set, and asserts it is listed. If a path has no recorded link, name it in the plan and in the CHANGELOG as not covered, with the reason. Do not match on title text.",
+      "location": "Decision 1 / Files: crates/athena-core/src/hestia.rs `improvement_of`; Demonstration for criterion 2",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The concurrent test uses 'the existing thread-safe stub', but only `Stub` gets the `improvement` override. As written, that test would see no improvement items and prove nothing.",
+      "evidence": "tests/drain.rs: `Stub` (line 41) is the stub that step 9 changes. The `drain_concurrent` tests use other doubles: `Shared` (an `impl Steps` at 7228, driven at 7364) and `Rebasing` (8083). Under Decision 7 these keep the default `Steps::improvement()`, which returns an empty `Improvement`. The first-wave assertion would then pass with or without the gap rule. Fix: Name the double the concurrent test uses and add the `improvement` override to it, or make the test use a Sync `Stub` that has the field. Have the test fail when `build_improving` is swapped for `build_capped`: assert that an improvement id is in the first three dispatched ids.",
+      "location": "Demonstration for criterion 4 (`drain_concurrent` case) / Step 9",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The risk is real and the plan handles it in CHANGELOG wording only. A short note in the `improvement_of` doc comment would help readers of the code too.",
+      "evidence": "`addressing_request` (hestia.rs:277-319) accepts any open request whose text contains an introspection id, whoever filed it. Fix: State in the doc comment of `improvement_of` that a person's request citing a cause's introspections counts as an improvement request.",
+      "location": "Risks: 'A person's own request that cites an introspection id...'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read plan.rs, drain.rs (`prepare`, `drain_with`, `batches_for`, `run_parallel`, `Report`, `PlanReport`), steward.rs (the channels, `queued_work`, `RequestQueue::apply`), hestia.rs (`repeated_causes`, `addressing_request`, the filing sites) and records.rs. The plan is mostly sound. The ordering fix sits at the plan sort, and the code paths it names exist: `build_capped`, `priority_violations`, `prepare`, `tried.extend` at drain.rs:2981 and the replan at drain.rs:2986-2990. `run_parallel` never dispatches `later`, so updating `since_turn` from each wave is correct. The cli channel is drained, so Hestia's requests do reach the plan. Feeding `since_turn` into the gap walk keeps the first plan equal to the order the drain runs. One major gap remains: `improvement_of` only finds error-review requests linked to a repeated cause. Hestia also files spec, throughput and slowdown requests on channel `cli`, and the plan treats those as person-filed even though the records link at least the throughput ones. One minor gap: the concurrent demonstration's stub is not given the improvement override."
+}

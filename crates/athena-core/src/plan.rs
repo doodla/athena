@@ -57,6 +57,7 @@
 
 use athena_data::roles::Ladder;
 use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// How soon a request should be worked, ahead of its rung and age. Urgent sorts first, then high.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize)]
@@ -420,6 +421,62 @@ pub struct Plan {
     /// Items [`Plan::build_capped`] demoted one tier because their tier was full. Empty from [`Plan::build`].
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub demoted: Vec<Demotion>,
+    /// The dispatches [`Plan::build_improving`] gave to an improvement request, in order. Empty from the other
+    /// builders and when no improvement request is queued and ready.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<ImprovementTurn>,
+    /// The improvement requests [`Plan::build_improving`] raised to urgent because their cause is recorded in
+    /// [`REPEAT_URGENT_JOBS`] or more distinct jobs. Empty from the other builders.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub promoted: Vec<RepeatPromotion>,
+}
+
+/// The most dispatches in a row that may go to other work while a ready improvement request (a request of
+/// Athena's own, from the Steward or from Hestia's reviews) is queued: one dispatch in every three is its.
+pub const IMPROVEMENT_GAP: usize = 2;
+
+/// The fewest distinct jobs a cause must be recorded in before the request that addresses it is raised to
+/// urgent. Hestia files such a request from [`crate::hestia::REPEAT_JOBS`] (two) jobs; this is the higher bar for
+/// treating it as urgent.
+pub const REPEAT_URGENT_JOBS: usize = 3;
+
+/// What [`Plan::build_improving`] needs to know about Athena's own improvement requests and about the run so
+/// far. Plain data: the drain fills it from the records ([`crate::hestia::improvement_of`]) and from its own
+/// count of dispatches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Improvement {
+    /// The ids of the improvement requests: the Steward's and Hestia's.
+    pub items: Vec<String>,
+    /// For an improvement request that addresses a repeated cause, in how many distinct jobs the cause is
+    /// recorded. An id with no entry has no cause count and is never raised to urgent.
+    pub cause_jobs: BTreeMap<String, usize>,
+    /// How many dispatches in a row have gone to other work, as the run stands. Zero for a plan made before
+    /// any dispatch; values above [`IMPROVEMENT_GAP`] count as [`IMPROVEMENT_GAP`].
+    pub since_turn: usize,
+    /// Items the run has already dispatched. They stay where they are in the order and are not counted or moved.
+    pub tried: BTreeSet<String>,
+}
+
+/// A dispatch that [`Plan::build_improving`] gave to an improvement request: it stood in the slot after two
+/// dispatches to other work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImprovementTurn {
+    pub id: String,
+    /// The place in the order, counted from 1.
+    pub position: usize,
+    /// True when the request ranked later and was moved up to this place; false when it already stood here.
+    pub moved: bool,
+}
+
+/// An improvement request raised to urgent in memory because its cause is recorded in many distinct jobs. The
+/// request's own record is not changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RepeatPromotion {
+    pub id: String,
+    /// In how many distinct jobs the cause is recorded.
+    pub jobs: usize,
+    /// The priority it had before.
+    pub from: Priority,
 }
 
 /// How many items a plan keeps at urgent and at high; `usize::MAX` means no cap.
@@ -529,7 +586,12 @@ impl Plan {
         ranked.sort();
         let mut out = Vec::new();
         for (i, (_, later, later_p)) in ranked.iter().enumerate() {
-            if let Some((_, earlier, earlier_p)) = ranked[..i].iter().find(|(_, _, p)| p > later_p)
+            // An improvement request moved up to its guaranteed turn is meant to stand ahead of better-ranked
+            // work, so it is not an `earlier` item that contradicts the priorities.
+            let moved_up = |id: &str| self.turns.iter().any(|t| t.moved && t.id == id);
+            if let Some((_, earlier, earlier_p)) = ranked[..i]
+                .iter()
+                .find(|(_, id, p)| p > later_p && !moved_up(id))
             {
                 out.push(format!(
                     "{later} ({}) is planned after {earlier} ({}), which has a lower priority",
@@ -742,6 +804,131 @@ impl Plan {
 
         let mut plan = Plan::build_with(&capped, history);
         plan.demoted = demoted;
+        (plan, capped)
+    }
+
+    /// Plans `entries` like [`Plan::build_capped`], then gives Athena's own improvement requests
+    /// (`improvement.items`: the Steward's and Hestia's) a guaranteed turn.
+    ///
+    /// Root cause it addresses: the order was set by priority alone, and a person marks requests urgent or high
+    /// freely, so a request of Athena's own, which carries the cause of a failure, always sorted behind them
+    /// and rarely ran (5 of 32 Steward requests filed 4 to 6 Nov ran).
+    ///
+    /// 1. **Urgent promotion.** An improvement request whose cause is recorded in [`REPEAT_URGENT_JOBS`] or more
+    ///    distinct jobs (`improvement.cause_jobs`) is raised to urgent, in memory, before the tier caps are
+    ///    applied, so a full urgent tier can demote it again (see [`Plan::demoted`]). A priority a person set
+    ///    (`person_set`) is never changed. Each one raised goes in [`Plan::promoted`].
+    /// 2. **Guaranteed turn.** The order is walked once. After [`IMPROVEMENT_GAP`] dispatches in a row to other
+    ///    work (counting `improvement.since_turn` for dispatches already made), the next place goes to the best
+    ///    ranked improvement request that is ready: it is in the order, so its reading passed and it is not
+    ///    held, and every dependency of it in the order is already dispatched (`improvement.tried`) or stands
+    ///    before that place. If the request already stands there nothing moves. A request that is not ready is
+    ///    skipped and the next place is tried. Every place so filled is a [`Plan::turns`] entry. A moved request
+    ///    is a group of its own, so a wave of parallel items cannot push it back.
+    ///
+    /// With no improvement request among `entries` the result is exactly that of [`Plan::build_capped`]. Items
+    /// in `improvement.tried` stay where they are and are neither counted nor moved, so the plan made after each
+    /// dispatch keeps the order the first plan showed.
+    pub fn build_improving(
+        entries: &[PlanEntry],
+        history: &[JobEnd],
+        caps: TierCaps,
+        person_set: &[String],
+        improvement: &Improvement,
+    ) -> (Plan, Vec<PlanEntry>) {
+        let improving = |id: &str| improvement.items.iter().any(|i| i == id);
+        if !entries.iter().any(|e| improving(&e.id)) {
+            return Plan::build_capped(entries, history, caps, person_set);
+        }
+        let mut raised: Vec<PlanEntry> = entries.to_vec();
+        let mut promoted: Vec<RepeatPromotion> = Vec::new();
+        for e in raised.iter_mut().filter(|e| improving(&e.id)) {
+            let jobs = improvement.cause_jobs.get(&e.id).copied().unwrap_or(0);
+            if jobs >= REPEAT_URGENT_JOBS
+                && e.priority != Priority::Urgent
+                && !person_set.contains(&e.id)
+            {
+                promoted.push(RepeatPromotion {
+                    id: e.id.clone(),
+                    jobs,
+                    from: e.priority,
+                });
+                e.priority = Priority::Urgent;
+            }
+        }
+        let (mut plan, capped) = Plan::build_capped(&raised, history, caps, person_set);
+        // Only a request that is in the order was raised in effect: a refused or held one is not planned.
+        promoted.retain(|p| plan.position(&p.id).is_some());
+        plan.promoted = promoted;
+
+        let depends = |id: &str| -> &[String] {
+            capped
+                .iter()
+                .find(|e| e.id == id)
+                .map_or(&[][..], |e| e.depends_on.as_slice())
+        };
+        let mut order = std::mem::take(&mut plan.order);
+        let mut gap = improvement.since_turn.min(IMPROVEMENT_GAP);
+        let mut turns: Vec<ImprovementTurn> = Vec::new();
+        let mut i = 0;
+        while i < order.len() {
+            if improvement.tried.contains(&order[i]) {
+                i += 1;
+                continue;
+            }
+            if improving(&order[i]) {
+                if gap >= IMPROVEMENT_GAP {
+                    turns.push(ImprovementTurn {
+                        id: order[i].clone(),
+                        position: i + 1,
+                        moved: false,
+                    });
+                }
+                gap = 0;
+            } else if gap < IMPROVEMENT_GAP {
+                gap += 1;
+            } else {
+                // The place is due to an improvement request: the best ranked one that is ready moves here.
+                let ready = |j: usize| {
+                    let id = order[j].as_str();
+                    !improvement.tried.contains(id)
+                        && improving(id)
+                        && depends(id).iter().all(|d| {
+                            improvement.tried.contains(d)
+                                || order.iter().position(|o| o == d).is_none_or(|p| p < i)
+                        })
+                };
+                if let Some(j) = (i + 1..order.len()).find(|&j| ready(j)) {
+                    let id = order.remove(j);
+                    turns.push(ImprovementTurn {
+                        id: id.clone(),
+                        position: i + 1,
+                        moved: true,
+                    });
+                    order.insert(i, id);
+                    gap = 0;
+                }
+            }
+            i += 1;
+        }
+        if turns.iter().any(|t| t.moved) {
+            let group_of = |id: &str| plan.groups.iter().position(|g| g.iter().any(|m| m == id));
+            let moved = |id: &str| turns.iter().any(|t| t.moved && t.id == id);
+            let mut groups: Vec<Vec<String>> = Vec::new();
+            let mut previous: Option<&String> = None;
+            for id in &order {
+                let joins = previous
+                    .is_some_and(|p| !moved(id) && !moved(p) && group_of(p) == group_of(id));
+                match groups.last_mut() {
+                    Some(last) if joins => last.push(id.clone()),
+                    _ => groups.push(vec![id.clone()]),
+                }
+                previous = Some(id);
+            }
+            plan.groups = groups;
+        }
+        plan.order = order;
+        plan.turns = turns;
         (plan, capped)
     }
 
@@ -1669,5 +1856,433 @@ mod tests {
         assert!(!log.fell(Stage::Reading, 5), "it rose from none to one");
         assert!(!log.fell(Stage::Criteria, 0), "nothing before to compare");
         assert_eq!(log.by_kind(Stage::Criteria), [(GapKind::Intervention, 4)]);
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // The guaranteed turn of Athena's own improvement requests
+
+    fn improvement(items: &[&str]) -> Improvement {
+        Improvement {
+            items: items.iter().map(|s| s.to_string()).collect(),
+            ..Improvement::default()
+        }
+    }
+
+    /// Six person-filed urgent requests (`u1`..`u6`, in this order) and two normal Steward requests, oldest last.
+    fn six_urgent_and_two_steward() -> Vec<PlanEntry> {
+        let (_, low) = rungs();
+        let mut entries: Vec<PlanEntry> = (1..=6)
+            .map(|n| {
+                with_priority(
+                    entry(&format!("u{n}"), low, &[&format!("u{n}/")], &[]),
+                    Priority::Urgent,
+                )
+            })
+            .collect();
+        entries.push(entry("s1", low, &["s1/"], &[]));
+        entries.push(entry("s2", low, &["s2/"], &[]));
+        entries
+    }
+
+    fn person_urgent() -> Vec<String> {
+        (1..=6).map(|n| format!("u{n}")).collect()
+    }
+
+    #[test]
+    fn improvement_turn_puts_a_steward_request_among_the_first_three_dispatches() {
+        let entries = six_urgent_and_two_steward();
+        let steward = improvement(&["s1", "s2"]);
+        // Without the rule both Steward requests are last, behind the six urgent ones.
+        let (before, _) = Plan::build_capped(&entries, &[], TierCaps::UNLIMITED, &person_urgent());
+        assert_eq!(before.order[6..], ["s1", "s2"]);
+        // Case A: no caps. Case B: the default caps, with the six urgent ones set by a person, so all stay urgent.
+        for (caps, person) in [
+            (TierCaps::UNLIMITED, Vec::new()),
+            (
+                TierCaps {
+                    urgent: 3,
+                    high: 10,
+                },
+                person_urgent(),
+            ),
+        ] {
+            let (plan, _) = Plan::build_improving(&entries, &[], caps, &person, &steward);
+            assert!(
+                plan.order[..3].iter().any(|id| id.starts_with('s')),
+                "{:?}",
+                plan.order
+            );
+            assert_eq!(plan.order, ["u1", "u2", "s1", "u3", "u4", "s2", "u5", "u6"]);
+            assert_eq!(
+                plan.turns,
+                [
+                    ImprovementTurn {
+                        id: "s1".into(),
+                        position: 3,
+                        moved: true
+                    },
+                    ImprovementTurn {
+                        id: "s2".into(),
+                        position: 6,
+                        moved: true
+                    },
+                ]
+            );
+            // A moved request is a group of its own, so a wave cannot dispatch it behind its neighbours.
+            for id in ["s1", "s2"] {
+                assert!(
+                    plan.groups.iter().any(|g| g == &[id.to_string()]),
+                    "{:?}",
+                    plan.groups
+                );
+            }
+            let flat: Vec<&String> = plan.groups.iter().flatten().collect();
+            assert_eq!(flat, plan.order.iter().collect::<Vec<_>>());
+            assert!(
+                plan.groups.iter().all(|g| g.len() <= 2),
+                "{:?}",
+                plan.groups
+            );
+        }
+    }
+
+    #[test]
+    fn improvement_turn_counts_the_dispatches_already_made() {
+        let entries = six_urgent_and_two_steward();
+        let build = |since_turn: usize, tried: &[&str]| {
+            let mut improving = improvement(&["s1", "s2"]);
+            improving.since_turn = since_turn;
+            improving.tried = tried.iter().map(|s| s.to_string()).collect();
+            Plan::build_improving(&entries, &[], TierCaps::UNLIMITED, &[], &improving).0
+        };
+        // Two dispatches have already gone to other work: the very next one is the turn.
+        let plan = build(2, &["u1", "u2"]);
+        assert_eq!(plan.order[2], "s1");
+        assert_eq!(plan.turns[0].position, 3);
+        // One has: the second place is the turn. Counts above the gap count as the gap.
+        assert_eq!(build(1, &["u1"]).order[1..3], ["u2", "s1"]);
+        assert_eq!(build(9, &[]).order[0], "s1");
+        // A request already dispatched stays where it is, is not counted and is not moved.
+        let mut improving = improvement(&["s1", "s2"]);
+        improving.tried = ["s1".to_string()].into();
+        let (plan, _) = Plan::build_improving(&entries, &[], TierCaps::UNLIMITED, &[], &improving);
+        assert_eq!(plan.order, ["u1", "u2", "s2", "u3", "u4", "u5", "u6", "s1"]);
+        assert_eq!(plan.turns.len(), 1);
+        assert_eq!(plan.turns[0].id, "s2");
+    }
+
+    #[test]
+    fn improvement_turn_replans_keep_the_order_the_first_plan_showed() {
+        let entries = six_urgent_and_two_steward();
+        let first = Plan::build_improving(
+            &entries,
+            &[],
+            TierCaps::UNLIMITED,
+            &[],
+            &improvement(&["s1", "s2"]),
+        )
+        .0;
+        // The drain plans again after each dispatch with its count and its tried set.
+        let mut improving = improvement(&["s1", "s2"]);
+        let mut dispatched: Vec<String> = Vec::new();
+        for _ in 0..entries.len() {
+            let (plan, _) =
+                Plan::build_improving(&entries, &[], TierCaps::UNLIMITED, &[], &improving);
+            let next = plan
+                .order
+                .iter()
+                .find(|id| !improving.tried.contains(*id))
+                .unwrap()
+                .clone();
+            improving.since_turn = if next.starts_with('s') {
+                0
+            } else {
+                improving.since_turn + 1
+            };
+            improving.tried.insert(next.clone());
+            dispatched.push(next);
+        }
+        assert_eq!(dispatched, first.order);
+        // At most two dispatches to other work in a row while an improvement request waits.
+        let mut run = 0;
+        for id in &dispatched {
+            run = if id.starts_with('s') { 0 } else { run + 1 };
+            assert!(run <= IMPROVEMENT_GAP, "{dispatched:?}");
+        }
+    }
+
+    #[test]
+    fn improvement_turn_waits_for_nothing_but_leaves_a_better_ranked_request_in_place() {
+        let (_, low) = rungs();
+        // The Steward request already ranks first: it is at the front, so nothing moves.
+        let entries = [
+            with_priority(entry("s1", low, &["s1/"], &[]), Priority::Urgent),
+            with_priority(entry("u1", low, &["u1/"], &[]), Priority::High),
+            entry("n1", low, &["n1/"], &[]),
+        ];
+        let (plan, _) = Plan::build_improving(
+            &entries,
+            &[],
+            TierCaps::UNLIMITED,
+            &[],
+            &improvement(&["s1"]),
+        );
+        let (plain, _) = Plan::build_capped(&entries, &[], TierCaps::UNLIMITED, &[]);
+        assert_eq!(plan.order, plain.order);
+        assert_eq!(plan.groups, plain.groups);
+        assert!(plan.turns.is_empty(), "it was not due: {:?}", plan.turns);
+    }
+
+    #[test]
+    fn build_improving_without_improvement_items_equals_build_capped() {
+        let (top, low) = rungs();
+        let entries = vec![
+            entry("a", low, &["a/"], &[]),
+            with_priority(entry("b", top, &["b/"], &[]), Priority::High),
+            with_priority(entry("c", low, &["c/"], &["a"]), Priority::Urgent),
+            with_priority(entry("d", low, &["d/"], &[]), Priority::Low),
+            entry("e", low, &["a/x"], &[]),
+            entry("f", low, &["f/"], &[]),
+            PlanEntry::bare("g", "g has no plan"),
+            entry("h", low, &["h/"], &["x"]),
+            with_priority(entry("i", low, &["i/"], &[]), Priority::Urgent),
+            with_priority(entry("j", low, &["j/"], &[]), Priority::Urgent),
+            with_priority(entry("k", low, &["k/"], &[]), Priority::Urgent),
+        ];
+        let history = [ended("x", "rejected", None)];
+        for caps in [
+            TierCaps::UNLIMITED,
+            TierCaps {
+                urgent: 3,
+                high: 10,
+            },
+        ] {
+            let person = ["i".to_string()];
+            let expected = Plan::build_capped(&entries, &history, caps, &person);
+            assert!(expected.0.refused.len() >= 2, "a refused and a held item");
+            // No improvement request queued; one that is not among the entries; one that is refused.
+            for items in [&[][..], &["not-queued"][..], &["g"][..], &["h"][..]] {
+                let got =
+                    Plan::build_improving(&entries, &history, caps, &person, &improvement(items));
+                assert_eq!(got, expected, "items {items:?}");
+            }
+        }
+    }
+
+    fn repeat_entries() -> Vec<PlanEntry> {
+        let (_, low) = rungs();
+        vec![
+            entry("n1", low, &["n1/"], &[]),
+            entry("n2", low, &["n2/"], &[]),
+            entry("h", low, &["h/"], &[]),
+        ]
+    }
+
+    fn with_causes(id: &str, jobs: usize) -> Improvement {
+        let mut improving = improvement(&[id]);
+        improving.cause_jobs.insert(id.to_string(), jobs);
+        improving
+    }
+
+    #[test]
+    fn repeat_urgent_raises_a_cause_in_three_distinct_jobs_and_not_in_two() {
+        let entries = repeat_entries();
+        let build = |improving: &Improvement, person: &[String]| {
+            Plan::build_improving(&entries, &[], TierCaps::UNLIMITED, person, improving)
+        };
+        // Three jobs: urgent, so it is ordered first, ahead of the older normal items.
+        let (plan, capped) = build(&with_causes("h", 3), &[]);
+        assert_eq!(plan.order, ["h", "n1", "n2"]);
+        assert_eq!(
+            plan.promoted,
+            [RepeatPromotion {
+                id: "h".into(),
+                jobs: 3,
+                from: Priority::Normal
+            }]
+        );
+        assert_eq!(
+            capped.iter().find(|e| e.id == "h").unwrap().priority,
+            Priority::Urgent
+        );
+        // The request's own entry is not changed.
+        assert_eq!(entries[2].priority, Priority::Normal);
+        // More jobs behave the same.
+        assert_eq!(build(&with_causes("h", 7), &[]).0.order[0], "h");
+        // Two jobs (the filing threshold, not the urgent one): ordered by age, not promoted.
+        let (plan, _) = build(&with_causes("h", 2), &[]);
+        assert_eq!(plan.order, ["n1", "n2", "h"]);
+        assert!(plan.promoted.is_empty());
+        // A cause count for an item that is not an improvement request promotes nothing.
+        let mut other = improvement(&["n2"]);
+        other.cause_jobs.insert("h".into(), 5);
+        let (plan, _) = build(&other, &[]);
+        assert!(plan.promoted.is_empty(), "{:?}", plan.promoted);
+        // A priority a person set is never changed.
+        let (plan, _) = build(&with_causes("h", 3), &["h".to_string()]);
+        assert!(plan.promoted.is_empty());
+        assert_eq!(plan.order, ["n1", "n2", "h"]);
+        // A high request is raised to urgent and says where it came from.
+        let mut high = entries.clone();
+        high[2].priority = Priority::High;
+        let (plan, _) =
+            Plan::build_improving(&high, &[], TierCaps::UNLIMITED, &[], &with_causes("h", 3));
+        assert_eq!(plan.promoted[0].from, Priority::High);
+        // An urgent one stays as it is and is not listed as raised.
+        let mut urgent = entries.clone();
+        urgent[2].priority = Priority::Urgent;
+        let (plan, _) =
+            Plan::build_improving(&urgent, &[], TierCaps::UNLIMITED, &[], &with_causes("h", 3));
+        assert!(plan.promoted.is_empty());
+    }
+
+    #[test]
+    fn repeat_urgent_is_demoted_again_when_person_set_requests_fill_the_urgent_tier() {
+        let (_, low) = rungs();
+        let mut entries = repeat_entries();
+        for n in 1..=3 {
+            entries.push(with_priority(
+                entry(&format!("p{n}"), low, &[&format!("p{n}/")], &[]),
+                Priority::Urgent,
+            ));
+        }
+        let person: Vec<String> = (1..=3).map(|n| format!("p{n}")).collect();
+        let caps = TierCaps {
+            urgent: 3,
+            high: 10,
+        };
+        let (plan, capped) =
+            Plan::build_improving(&entries, &[], caps, &person, &with_causes("h", 3));
+        assert_eq!(plan.promoted.len(), 1);
+        assert_eq!(plan.demoted.len(), 1);
+        assert_eq!(plan.demoted[0].id, "h");
+        assert_eq!(plan.demoted[0].from, Priority::Urgent);
+        assert_eq!(plan.demoted[0].to, Priority::High);
+        assert_eq!(
+            capped.iter().find(|e| e.id == "h").unwrap().priority,
+            Priority::High
+        );
+        // High still sorts ahead of the older normal items.
+        assert!(plan.position("h") < plan.position("n1"));
+    }
+
+    #[test]
+    fn improvement_turn_skips_a_request_whose_reading_fails_and_takes_a_ready_one() {
+        let (_, low) = rungs();
+        let mut entries = six_urgent_and_two_steward();
+        // s1 has no acceptance: refused, so it is never planned and never takes a turn.
+        entries[6].acceptance.clear();
+        let (plan, _) = Plan::build_improving(
+            &entries,
+            &[],
+            TierCaps::UNLIMITED,
+            &[],
+            &improvement(&["s1", "s2"]),
+        );
+        assert!(plan.refused.iter().any(|r| r.id == "s1"));
+        assert!(plan.position("s1").is_none());
+        assert_eq!(plan.turns.len(), 1);
+        assert_eq!(plan.turns[0].id, "s2");
+        assert_eq!(plan.position("s2"), Some(2));
+        // A request that is held for a failed dependency is not given a turn either.
+        let mut entries = six_urgent_and_two_steward();
+        entries[6].depends_on = vec!["x".into()];
+        let history = [ended("x", "rejected", None)];
+        let (plan, _) = Plan::build_improving(
+            &entries,
+            &history,
+            TierCaps::UNLIMITED,
+            &[],
+            &improvement(&["s1", "s2"]),
+        );
+        assert!(plan.refused.iter().any(|r| r.id == "s1"));
+        assert_eq!(
+            plan.turns.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["s2"]
+        );
+        // Nothing ready: no turn, and the order is the plain one.
+        let mut entries = six_urgent_and_two_steward();
+        entries[6].acceptance.clear();
+        entries[7].acceptance.clear();
+        let (plan, _) = Plan::build_improving(
+            &entries,
+            &[],
+            TierCaps::UNLIMITED,
+            &[],
+            &improvement(&["s1", "s2"]),
+        );
+        let (plain, _) = Plan::build_capped(&entries, &[], TierCaps::UNLIMITED, &[]);
+        assert!(plan.turns.is_empty());
+        assert_eq!(plan.order, plain.order);
+        let _ = low;
+    }
+
+    #[test]
+    fn improvement_turn_skips_a_request_whose_dependency_is_not_yet_dispatched() {
+        let mut entries = six_urgent_and_two_steward();
+        // s1 needs u5, which stands at the fifth place: s1 cannot take a place before it.
+        entries[6].depends_on = vec!["u5".into()];
+        let (plan, _) = Plan::build_improving(
+            &entries,
+            &[],
+            TierCaps::UNLIMITED,
+            &[],
+            &improvement(&["s1"]),
+        );
+        assert_eq!(plan.order, ["u1", "u2", "u3", "u4", "u5", "s1", "u6", "s2"]);
+        assert_eq!(plan.turns.len(), 1);
+        assert_eq!(plan.turns[0].position, 6);
+        for e in &entries {
+            for dep in &e.depends_on {
+                assert!(
+                    plan.position(dep) < plan.position(&e.id),
+                    "{dep} before {}",
+                    e.id
+                );
+            }
+        }
+        // Once the dependency has been dispatched, the request takes the first due place.
+        let mut improving = improvement(&["s1"]);
+        improving.since_turn = 2;
+        improving.tried = ["u5".to_string()].into();
+        let (plan, _) = Plan::build_improving(&entries, &[], TierCaps::UNLIMITED, &[], &improving);
+        assert_eq!(plan.order[0], "s1");
+    }
+
+    #[test]
+    fn improvement_turn_skips_a_moved_request_in_the_order_check() {
+        let entries = six_urgent_and_two_steward();
+        let (plan, capped) = Plan::build_improving(
+            &entries,
+            &[],
+            TierCaps::UNLIMITED,
+            &[],
+            &improvement(&["s1", "s2"]),
+        );
+        assert!(plan.priority_violations(&capped).is_empty());
+        // The same order without the record of the turns is a contradiction of priority.
+        let unexplained = Plan {
+            turns: Vec::new(),
+            ..plan.clone()
+        };
+        let found = unexplained.priority_violations(&capped);
+        assert!(
+            found.iter().any(|m| m.starts_with("u3 (urgent)")),
+            "{found:?}"
+        );
+        // Other contradictions are still reported when a request was moved.
+        let mut with_normal = entries.clone();
+        with_normal.push(entry("n1", rungs().1, &["n1/"], &[]));
+        let (mut broken, capped) = Plan::build_improving(
+            &with_normal,
+            &[],
+            TierCaps::UNLIMITED,
+            &[],
+            &improvement(&["s1", "s2"]),
+        );
+        assert!(broken.priority_violations(&capped).is_empty());
+        broken.order.retain(|id| id != "n1");
+        broken.order.insert(0, "n1".into());
+        assert!(!broken.priority_violations(&capped).is_empty());
     }
 }

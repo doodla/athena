@@ -15,7 +15,7 @@ use athena_cli::drain::{
 };
 use athena_core::audience::Page;
 use athena_core::commits::{Committer, message};
-use athena_core::plan::{Ending, JobEnd, PlanEntry, Priority};
+use athena_core::plan::{Ending, Improvement, JobEnd, PlanEntry, Priority};
 use athena_core::run::GoResult;
 use athena_core::state::Stage;
 use athena_core::steward::{ProposedChange, RequestQueue};
@@ -105,6 +105,9 @@ struct Stub {
     /// When set, every run's closing reason is this text instead of `ended <outcome>`, as a job closed for an
     /// environment cause carries one (`environment: producer login expired: ...`).
     run_reason: Option<&'static str>,
+    /// Which queued items are Athena's own improvement requests (the Steward's and Hestia's), and how many
+    /// distinct jobs record the cause each addresses; none when not set.
+    improvement: Improvement,
 }
 
 impl Stub {
@@ -183,6 +186,9 @@ impl Steps for Stub {
     }
     fn job_history(&self) -> Vec<JobEnd> {
         self.history.clone()
+    }
+    fn improvement(&self) -> Improvement {
+        self.improvement.clone()
     }
     fn approve(&self, proposal: &str) -> Approval {
         self.log.borrow_mut().push(format!("approve {proposal}"));
@@ -382,6 +388,159 @@ fn items_are_worked_in_plan_order_not_oldest_first() {
     );
     let text = display::drain(&report);
     assert!(text.contains("could run in parallel"), "{text}");
+}
+
+/// Six urgent requests of a person (`u1`..`u6`), then a Steward request `s1` and a Hestia request `h1`, both
+/// normal; `h1` addresses a cause recorded in `cause_jobs` distinct jobs.
+fn six_urgent_with_two_of_athenas_own(cause_jobs: usize) -> Stub {
+    let mut plan: Vec<PlanEntry> = (1..=6)
+        .map(|n| {
+            let id = format!("u{n}");
+            PlanEntry {
+                priority: Priority::Urgent,
+                ..planned(&id, Ladder::Implementation, &[&format!("src/{id}.rs")], &[])
+            }
+        })
+        .collect();
+    for id in ["s1", "h1"] {
+        plan.push(planned(
+            id,
+            Ladder::Implementation,
+            &[&format!("src/{id}.rs")],
+            &[],
+        ));
+    }
+    let mut improvement = Improvement {
+        items: vec!["s1".into(), "h1".into()],
+        ..Improvement::default()
+    };
+    improvement.cause_jobs.insert("h1".into(), cause_jobs);
+    Stub {
+        items: vec!["u1", "u2", "u3", "u4", "u5", "u6", "s1", "h1"],
+        outcomes: passing(),
+        ratings: RefCell::new(vec![1; 8]),
+        plan,
+        improvement,
+        ..Stub::default()
+    }
+}
+
+fn run_order(stub: &Stub) -> Vec<String> {
+    stub.log()
+        .iter()
+        .filter_map(|e| e.strip_prefix("run ").map(String::from))
+        .collect()
+}
+
+#[test]
+fn the_plan_text_names_each_item_that_takes_the_improvement_turn_and_each_promotion() {
+    let stub = six_urgent_with_two_of_athenas_own(3);
+    let report = drain::plan(&stub, 5.0, &Quiet).unwrap();
+    // h1's cause is recorded in three jobs, so it is urgent and queued after the six; both of Athena's own
+    // requests are moved up to the third and the sixth place.
+    assert_eq!(
+        report.plan.order,
+        ["u1", "u2", "h1", "u3", "u4", "s1", "u5", "u6"]
+    );
+    let text = display::plan(&report);
+    let line = |start: &str| {
+        text.lines()
+            .filter(|l| l.starts_with(start))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let turns = line("turn ");
+    assert!(
+        turns.contains("h1 · title of h1 takes the improvement turn at dispatch 3"),
+        "{text}"
+    );
+    assert!(
+        turns.contains("s1 · title of s1 takes the improvement turn at dispatch 6"),
+        "{text}"
+    );
+    assert_eq!(turns.lines().count(), 2, "only the two turns: {text}");
+    let promoted = line("promoted ");
+    assert!(
+        promoted
+            .contains("h1 · title of h1: cause recorded in 3 jobs, raised from normal to urgent"),
+        "{text}"
+    );
+    assert_eq!(promoted.lines().count(), 1, "{text}");
+    // A cause in two jobs is not raised: the line is not printed, and the turn is still taken.
+    let two = drain::plan(&six_urgent_with_two_of_athenas_own(2), 5.0, &Quiet).unwrap();
+    let text = display::plan(&two);
+    assert!(!text.contains("promoted"), "{text}");
+    assert_eq!(text.lines().filter(|l| l.starts_with("turn ")).count(), 2);
+}
+
+#[test]
+fn the_drain_dispatches_in_the_order_the_plan_showed_and_reports_the_turns_it_took() {
+    let shown = drain::plan(&six_urgent_with_two_of_athenas_own(3), 5.0, &Quiet).unwrap();
+    let stub = six_urgent_with_two_of_athenas_own(3);
+    let report = drain::drain(&stub, limits(20.0), &Quiet).unwrap();
+    assert_eq!(report.stop, Stop::QueueEmpty);
+    // The run follows the printed plan, replanned after every dispatch.
+    assert_eq!(run_order(&stub), shown.plan.order);
+    assert!(run_order(&stub)[..3].contains(&"h1".to_string()));
+    // The report names the two turns, with the dispatch each took.
+    let taken: Vec<(&str, u32, bool)> = report
+        .improvement_turns
+        .iter()
+        .map(|t| (t.job.as_str(), t.dispatch, t.moved))
+        .collect();
+    assert_eq!(taken, [("h1", 3, true), ("s1", 6, true)]);
+    let text = display::drain(&report);
+    assert!(
+        text.contains("improvement h1 · title of h1 took the improvement turn at dispatch 3"),
+        "{text}"
+    );
+    assert!(
+        text.contains("improvement s1 · title of s1 took the improvement turn at dispatch 6"),
+        "{text}"
+    );
+}
+
+#[test]
+fn with_no_improvement_request_queued_the_order_and_the_report_are_unchanged() {
+    let mut stub = six_urgent_with_two_of_athenas_own(3);
+    stub.improvement = Improvement::default();
+    let shown = drain::plan(&stub, 5.0, &Quiet).unwrap();
+    assert_eq!(
+        shown.plan.order,
+        ["u1", "u2", "u3", "u4", "u5", "u6", "s1", "h1"],
+        "the plain order: urgent first, then by age"
+    );
+    let text = display::plan(&shown);
+    assert!(
+        !text.contains("turn ") && !text.contains("promoted"),
+        "{text}"
+    );
+    let report = drain::drain(&stub, limits(20.0), &Quiet).unwrap();
+    assert_eq!(run_order(&stub), shown.plan.order);
+    assert!(report.improvement_turns.is_empty());
+    assert!(!display::drain(&report).contains("improvement"));
+}
+
+#[test]
+fn an_improvement_request_that_ranks_early_on_its_own_is_not_reported_as_a_turn() {
+    // The Steward request is urgent and oldest: it stands first without any help, so it is no turn.
+    let mut stub = six_urgent_with_two_of_athenas_own(2);
+    stub.items = vec!["s1", "u1"];
+    stub.plan = vec![
+        PlanEntry {
+            priority: Priority::Urgent,
+            ..planned("s1", Ladder::Implementation, &["src/s1.rs"], &[])
+        },
+        PlanEntry {
+            priority: Priority::Urgent,
+            ..planned("u1", Ladder::Implementation, &["src/u1.rs"], &[])
+        },
+    ];
+    stub.improvement.items = vec!["s1".into()];
+    stub.ratings = RefCell::new(vec![1; 2]);
+    let report = drain::drain(&stub, limits(20.0), &Quiet).unwrap();
+    assert_eq!(run_order(&stub), ["s1", "u1"]);
+    assert!(report.improvement_turns.is_empty());
 }
 
 #[test]
@@ -7211,6 +7370,8 @@ mod parallel {
         active: AtomicUsize,
         peak: AtomicUsize,
         log: Mutex<Vec<String>>,
+        /// Which queued items are Athena's own improvement requests; none when not set.
+        improvement: Improvement,
     }
 
     impl Shared {
@@ -7246,6 +7407,9 @@ mod parallel {
         }
         fn previous_rating(&self) -> Option<u8> {
             None
+        }
+        fn improvement(&self) -> Improvement {
+            self.improvement.clone()
         }
         fn approve(&self, _: &str) -> Approval {
             Approval::default()
@@ -7459,6 +7623,65 @@ mod parallel {
         assert_eq!(shared.peak.load(Ordering::SeqCst), 1);
         assert_eq!(report.stop, Stop::QueueEmpty);
         assert_eq!(landed_jobs(&report), ["a", "b", "c"]);
+    }
+
+    /// Six urgent requests of a person, all independent (one group), and two Steward requests.
+    fn six_urgent_and_two_steward() -> Shared {
+        let mut plan: Vec<PlanEntry> = independent(&["u1", "u2", "u3", "u4", "u5", "u6"]);
+        for entry in &mut plan {
+            entry.priority = Priority::Urgent;
+        }
+        plan.extend(independent(&["s1", "s2"]));
+        Shared {
+            items: vec!["u1", "u2", "u3", "u4", "u5", "u6", "s1", "s2"],
+            plan,
+            ..Shared::default()
+        }
+    }
+
+    fn starts(shared: &Shared) -> Vec<String> {
+        shared
+            .log()
+            .iter()
+            .filter_map(|e| e.strip_prefix("start ").map(String::from))
+            .collect()
+    }
+
+    #[test]
+    fn a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn() {
+        // Without the improvement requests named, the six urgent items are one group and start together,
+        // ahead of both Steward requests.
+        let plain = six_urgent_and_two_steward();
+        let report = run_with(&plain, 3, 20.0);
+        let mut first_six = starts(&plain)[..6].to_vec();
+        first_six.sort();
+        assert_eq!(first_six, ["u1", "u2", "u3", "u4", "u5", "u6"]);
+        assert!(report.improvement_turns.is_empty());
+
+        // With them named, a Steward request starts among the first three, whatever the bound.
+        for bound in [1, 3] {
+            let mut shared = six_urgent_and_two_steward();
+            shared.improvement.items = vec!["s1".into(), "s2".into()];
+            let report = run_with(&shared, bound, 20.0);
+            let started = starts(&shared);
+            assert!(
+                started[..3].contains(&"s1".to_string()),
+                "bound {bound}: {started:?}"
+            );
+            // No more than two other items start in a row while a Steward request waits.
+            let mut run = 0;
+            for id in &started {
+                run = if id.starts_with('s') { 0 } else { run + 1 };
+                assert!(run <= 2, "bound {bound}: {started:?}");
+            }
+            assert_eq!(started.len(), 8);
+            let taken: Vec<&str> = report
+                .improvement_turns
+                .iter()
+                .map(|t| t.job.as_str())
+                .collect();
+            assert_eq!(taken, ["s1", "s2"], "bound {bound}");
+        }
     }
 
     #[test]

@@ -11,6 +11,12 @@
 //!   parallel ([`Report::plan_groups`]); [`drain_concurrent`] runs the items of one group side by side, up to
 //!   `[parallel] max_concurrency` (default 1, which is [`drain`]'s one job at a time). The pass is
 //!   deterministic code and calls no model of its own; nothing is defaulted into a plan.
+//! - **Athena's own requests get a guaranteed turn.** Requests from the Steward and from Hestia's reviews
+//!   ([`Steps::improvement`]) used to sort behind every request a person marked urgent or high. The plan now
+//!   gives them at least one dispatch in three while a ready one is queued
+//!   ([`athena_core::plan::Plan::build_improving`]); the drain counts its dispatches (`State::since_turn`) so each
+//!   new plan keeps the gap. A cause recorded in three distinct jobs makes its request urgent. `athena plan`
+//!   prints each `turn` and `promoted` item; the report lists the turns taken ([`Report::improvement_turns`]).
 //! - **The drain follows the plan as it stands.** The drain does not keep the plan it built at its start. After
 //!   each item (each group, under [`drain_concurrent`]) it reads the queue again and builds the plan again
 //!   through the same function `athena plan` uses (`Drain::prepare`, which calls
@@ -612,6 +618,12 @@ pub trait Steps {
     fn person_set(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Athena's own improvement requests among the queue (the Steward's and Hestia's), which the plan gives a
+    /// guaranteed turn: [`athena_core::hestia::improvement_of`]. Only `items` and `cause_jobs` are read; the
+    /// drain fills in its own count of dispatches. The default is none, so the plan is the plain one.
+    fn improvement(&self) -> athena_core::plan::Improvement {
+        athena_core::plan::Improvement::default()
+    }
     /// Whether the user asked the loop to stop. It is asked only between jobs, never during one, so a job
     /// that has started is finished (and landed and rated) first. Not asking to stop is the default.
     fn stop_requested(&self) -> bool {
@@ -1140,6 +1152,21 @@ pub struct Report {
     /// The rebases before landing that moved the branch, and how many of them touched a path that needed the
     /// checks run again. Kept for this run only; also stated in [`Report::notes`] when there was one.
     pub rebases: RebaseTally,
+    /// The improvement requests (Steward or Hestia) that took the guaranteed turn: dispatched in the place the
+    /// plan gave them after two dispatches to other work ([`athena_core::plan::Plan::turns`]). Empty when
+    /// none did.
+    pub improvement_turns: Vec<ImprovementTaken>,
+}
+
+/// An improvement request that the drain handed to a worker in its guaranteed turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImprovementTaken {
+    pub job: String,
+    pub title: String,
+    /// Which dispatch of the run it was, counted from 1.
+    pub dispatch: u32,
+    /// True when the request ranked later and was moved up to the turn; false when it already stood there.
+    pub moved: bool,
 }
 
 impl Report {
@@ -1198,6 +1225,15 @@ struct State {
     pump_gone: bool,
     /// Items this run has handed to a worker; a new plan never offers them again.
     tried: BTreeSet<String>,
+    /// How many items this run has handed to a worker.
+    dispatched: u32,
+    /// How many items in a row the run has handed to a worker that were not improvement requests: the count
+    /// the plan's guaranteed turn is measured from ([`athena_core::plan::Improvement::since_turn`]).
+    since_turn: usize,
+    /// The improvement requests the last plan knew ([`Steps::improvement`]).
+    improving: BTreeSet<String>,
+    /// The improvement requests this run handed to a worker in the place the plan's guaranteed turn gave them.
+    improvement_turns: Vec<ImprovementTaken>,
     /// Items that have a "passed over" line, so none gets two.
     passed_over: BTreeSet<String>,
     /// Items the last plan held back because their line is paused (or they wait on one that is), with the
@@ -2193,11 +2229,21 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
             .collect();
         // Items over a priority cap are demoted one tier in memory; the order is judged against the tiers it
         // was built from, so a demotion is not reported as a contradiction.
-        let (mut plan, entries) = Plan::build_capped(
+        // Athena's own improvement requests get a guaranteed turn: the run's count of dispatches since the last
+        // one, and what it has dispatched, decide whose place is due.
+        let mut improvement = self.steps.improvement();
+        {
+            let mut st = self.st();
+            improvement.since_turn = st.since_turn;
+            improvement.tried = st.tried.clone();
+            st.improving = improvement.items.iter().cloned().collect();
+        }
+        let (mut plan, entries) = Plan::build_improving(
             &entries,
             &self.steps.job_history(),
             self.steps.priority_caps(),
             &self.steps.person_set(),
+            &improvement,
         );
         for contradiction in plan.priority_violations(&entries) {
             self.note_once(format!("plan order contradicts priority: {contradiction}"));
@@ -2230,6 +2276,34 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
         }
         self.st().pause_held = held;
         plan
+    }
+
+    /// Counts the items of `wave` as dispatched, in wave order: an improvement request restarts the count the
+    /// plan's guaranteed turn is measured from, any other item adds to it. An improvement request that `plan`
+    /// (the plan the wave came from) gave a turn is recorded for the report with its title from `entries`.
+    fn note_dispatch(&self, wave: &[String], plan: &Plan, entries: &[PlanEntry]) {
+        let mut st = self.st();
+        for id in wave {
+            st.dispatched += 1;
+            if !st.improving.contains(id) {
+                st.since_turn += 1;
+                continue;
+            }
+            st.since_turn = 0;
+            if let Some(turn) = plan.turns.iter().find(|t| &t.id == id) {
+                let title = entries
+                    .iter()
+                    .find(|e| &e.id == id)
+                    .map_or_else(String::new, |e| e.title.clone());
+                let dispatch = st.dispatched;
+                st.improvement_turns.push(ImprovementTaken {
+                    job: id.clone(),
+                    title,
+                    dispatch,
+                    moved: turn.moved,
+                });
+            }
+        }
     }
 
     /// One "passed over" line for each item the last plan held for a paused line, unless this run has worked it.
@@ -2421,6 +2495,10 @@ impl<S: Steps + ?Sized, U: Ui + ?Sized> Drain<'_, S, U> {
                 pump_done: false,
                 pump_gone: false,
                 tried: BTreeSet::new(),
+                dispatched: 0,
+                since_turn: 0,
+                improving: BTreeSet::new(),
+                improvement_turns: Vec::new(),
                 passed_over: BTreeSet::new(),
                 pause_held: BTreeMap::new(),
                 carry: Carry::default(),
@@ -2979,6 +3057,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         }
         wave = now.iter().map(|i| i.job.clone()).collect();
         d.st().tried.extend(wave.iter().cloned());
+        d.note_dispatch(&wave, &plan, &view.plan);
         run(d, vec![now], batches);
         if d.stopped() {
             break;
@@ -3083,6 +3162,7 @@ fn drain_with<'a, S: Steps + ?Sized, U: Ui + ?Sized>(
         rebuild_output: st.rebuild_output.clone(),
         restart,
         rebases: st.rebases.clone(),
+        improvement_turns: st.improvement_turns.clone(),
     })
 }
 
@@ -4178,6 +4258,12 @@ impl Steps for RealSteps<'_> {
             urgent: caps.urgent as usize,
             high: caps.high as usize,
         }
+    }
+
+    fn improvement(&self) -> athena_core::plan::Improvement {
+        self.records()
+            .map(|records| athena_core::hestia::improvement_of(&records))
+            .unwrap_or_default()
     }
 
     fn person_set(&self) -> Vec<String> {
