@@ -89,7 +89,9 @@ pub fn run(args: &[String], lookup: &dyn Fn(&str) -> Option<String>) -> u8 {
     } else {
         None
     };
-    match Command::new(&real).args(args).env("PATH", &path).status() {
+    let mut cmd = Command::new(&real);
+    cmd.args(args).env("PATH", &path);
+    match athena_agent::procs::retry_busy(|| cmd.status()) {
         Ok(status) => exit_code(status),
         Err(error) => {
             eprintln!("cargo: running {}: {error}", real.display());
@@ -125,8 +127,13 @@ mod tests {
 
     fn script(dir: &Path, name: &str, mode: u32) {
         let path = dir.join(name);
-        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let body = "#!/bin/sh\nexit 0\n";
+        if mode & 0o111 != 0 {
+            athena_testkit::write_executable(&path, body);
+        } else {
+            // A newly written file is not executable, so a non-executable stand-in needs no mode change.
+            std::fs::write(&path, body).unwrap();
+        }
     }
 
     #[test]

@@ -15,7 +15,9 @@
 //! child's own handle closes before the rename, so the final path is never open for writing in any process.
 //!
 //! The integration test `no_in_process_exec_writes` scans the workspace's test code and fails on any
-//! in-process write that makes a file executable, so new stand-ins must come through this helper.
+//! in-process write that makes a file executable, on a wrapper function that hides one, and on an external
+//! `chmod`, so new stand-ins must come through this helper. Production code that runs a file it was just
+//! handed also retries briefly on `ETXTBSY` (`athena_agent::procs::retry_busy`), as a second layer.
 
 use std::io::Write;
 use std::path::Path;

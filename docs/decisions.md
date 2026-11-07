@@ -4541,3 +4541,82 @@ should replace those estimates with its figures.
   `crates/athena-cli/tests/mirrors.rs`, D158, D160. Measured: `cargo test -p athena-core mirrors` on the shapes of
   both jobs, joined bullets and a decision inside another, and on prose that must not be found. Not measured: how
   many future edits break structure in a way these rules cannot see.
+
+## D163 · The "Text file busy" race is closed at its writers: one helper for every stand-in, a scan that sees wrappers and an external `chmod`, and a short retry where production runs a file; D160 stands
+
+- **Case:** Four jobs in a row failed to fix the flaky "Text file busy" (`ETXTBSY`) test failures. Each guarded the
+  last symptom it saw: a shared helper, then a scan of call-site names (`set_permissions`, `from_mode`,
+  `set_mode`), then a retry in one test. Root cause: an executable is written and run in the same process while a
+  write handle or forked child still holds it. `exec` of a file that any process has open for writing fails, and
+  a fork in another test thread copies the open handle into its child until that child execs. A scan keyed to
+  names passes a test that reaches the same call through a wrapper such as `xtask`'s `set_executable`, or
+  through an external `chmod`. The request that closes this asks for the cause to be stated first, every writer
+  found by searching, all of them routed through the helper, and a scan that fails on the shapes the last
+  version missed.
+- **Decision:** Amends D160 in prose only: D160 stands (one test-only helper, `athena_testkit::write_executable`,
+  and a scan guard it), and its rejection of a retry as the only fix still holds. The retry is added beside the
+  helper as a second layer for production code that runs a file it was just handed, not instead of the helper.
+  - **Sites.** The search `set_permissions|from_mode|set_mode|set_executable|chmod|.mode(` over
+    `crates/*/{src,tests}` and `xtask` found these, each with what was done:
+    - Converted to the helper: the `script` helper in the unit tests of `crates/athena-cli/src/slot_exec.rs`
+      (an executable stand-in goes through `athena_testkit::write_executable`; a non-executable one is written
+      with `std::fs::write`, because a new file needs no mode change). Its entry in the scan's exemption list is
+      removed. The stand-ins of `crates/athena-cli/tests/slot_exec.rs`, `reconcile.rs`, `checks.rs`, `reading.rs`,
+      `claude.rs` and `xtask`'s tests already used the helper.
+    - Given a retry (they run a file they were just handed): `checks::run_check` (the spawn), `BinaryChecker::check`
+      in `reading.rs`, `GhCli::gh` in `gh/transport.rs`, `run_bounded` in `run/mod.rs`, the real-cargo status in
+      `slot_exec::run`, `claude_version` and the driver spawn in `claude.rs`, and in `xtask` the tool version
+      check `found` and `check_credentials`.
+    - Left as non-stand-in production use: `set_executable` in `toolconfig.rs` and its call (sets a repository
+      file's recorded mode); `set_executable` in `xtask` (marks a downloaded or adopted tool) and its three
+      calls; `set_write_bits` and `set_mode` in `crates/athena-git/src/snapshot.rs` (write-bit toggle and
+      restore of a recorded mode, a D08 path, not edited); the write-bit toggles in `pin.rs` and
+      `athena-core`'s `snapshot.rs`; `write_private` in `claude.rs` (`.mode(0o600)`, a private file); the mode
+      reads in `pin.rs`, `slot_exec::find_program` and the git snapshot tests.
+    - Left as string input, not a command: the `chmod` policy inputs in `athena-agent`'s `policy.rs` and the
+      program list in `athena-cap-change`.
+    - Left on purpose: `crates/athena-testkit/tests/stand_in_stress.rs` (its in-process variant is the control
+      that measures the race), the scan file (it holds the planted violations as text), and the helper's own
+      source in `athena-testkit`.
+  - **The scan.** `crates/athena-testkit/tests/no_in_process_exec_writes.rs` keeps the direct-call checks and
+    adds two. A wrapper is a function whose body both sets a mode (`set_permissions(`, `from_mode(`,
+    `.set_mode(`, `.mode(<arg>)`) and sets an execute bit: an octal literal with an odd digit that no `!`
+    negates, a `+x` string, or a `chmod` argument line. A call to a wrapper in test code is flagged when the
+    wrapper is in the same file, or is `pub` or `pub(crate)` in another file of the same crate. An external
+    `chmod` is flagged when the word and a command marker share a line (`Command::new(`, `.arg(`, `.args(`,
+    `"sh"`, `"bash"`, `"-c"`) or when a `"chmod..."` line follows a marker line. Lines inside a
+    `write_executable(` call are skipped, with parentheses counted outside string, raw string and char literals;
+    a call that stays open for 40 lines is skipped on its first line only. Requiring the execute bit keeps a
+    `0o600` private file and the write-bit toggles (`| 0o200`, `& !0o222`) out of the wrapper rule.
+  - **The retry.** `athena_agent::procs::retry_busy` runs the operation again up to 20 times, 50 ms apart (about
+    one second), only when the error is `ETXTBSY`, and returns any other error at once and the last busy error
+    unchanged. `xtask` does not depend on `athena-agent`, so it keeps a private std-only copy.
+  - **Measured effect.** The tree has no flagged line outside the exemption list now, so the widened scan refuses
+    0 of the current files, 0% newly refused. No past readings are replayed through it: it is a test lint over
+    source text, not a reading or admission rule. No D08-governed path (`crates/athena-git/src/snapshot.rs`,
+    `crates/athena-core/src/run/candidate.rs`) is edited, so D08 stands and needs no link of its own.
+- **Alternatives:** Retry only, with no scan change: it hides the race and leaves the writers unlisted, which D160
+  rejected. Match wrapper names across all crates: a common `pub` name in one crate would flag unrelated calls in
+  another, so matching stays within one crate. Parse Rust with `syn`: a new dependency for a lint over a few
+  shapes. Flag every line with the word `chmod`: it flags the policy and program-list strings. Route the
+  non-stand-in setters through the helper: the helper is test-only, and those functions are production code.
+  Put the retry in `athena-testkit`: it is a dev-dependency, so production cannot use it. Keep the retry in
+  `claude.rs`: the other crates would import it from the Claude driver module.
+- **Tradeoff:** The scan is a text scan, not a parser, and it does not see: a wrapper that takes the mode as a
+  parameter (no literal in its body); a name that two functions of one crate share (rename one, or add a
+  documented exemption); a script held in a variable and written by a function the scan does not know; a call
+  to a wrapper in another crate. The direct-call checks still flag any raw permission call in test code, and
+  the retry is the second layer. The retry adds up to about one second to a run that fails with a busy file and
+  none otherwise. Five files outside the request's listed deliverables changed because a retry at each run
+  site needs them: `procs.rs` (the shared retry), `checks.rs`, `reading.rs`, `gh/transport.rs` and `run/mod.rs`,
+  each by one wrapped call with its error text unchanged.
+- **Reversal cost:** Low. Remove the retry calls and `retry_busy`, restore the private copy in `claude.rs`, and
+  revert the scan to the direct-call checks. The `slot_exec.rs` helper conversion can stay.
+- **Provenance:** Stated: the request that closes the four jobs, and the introspection it quotes. Read: D08, D157,
+  D160, `crates/athena-testkit/src/lib.rs`, `crates/athena-testkit/tests/no_in_process_exec_writes.rs`,
+  `crates/athena-agent/src/claude.rs`, `crates/athena-agent/src/procs.rs` and each file in the site list.
+  Measured: the scan's fixture tests (a wrapper, a generic wrapper, a cross-file `pub` wrapper, a one-letter
+  name, four `chmod` shapes, a raw string holding `$(`, an unclosed call, and the cases that must not be flagged)
+  and the real-tree scan; the retry tests (success after busy errors, the 21-call bound, other errors passing
+  through, and a file held open for writing that is released after 100 ms). Not measured: how often the race
+  recurs in the field, or how many future wrappers escape the text scan.
