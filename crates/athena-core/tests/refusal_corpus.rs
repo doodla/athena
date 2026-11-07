@@ -67,7 +67,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 17] = [
+const INPUT_FORMS: [&str; 20] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -85,6 +85,9 @@ const INPUT_FORMS: [&str; 17] = [
     "code-survey",
     "design-existing-code",
     "boundary-word",
+    "delivery-verb",
+    "delivery-verb-mid-sentence",
+    "delivery-noun-use",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -566,9 +569,173 @@ fn reading_check_cases() -> Vec<Case> {
     );
     c.reading.summary =
         "Read the GitHub/env-var settings of owner/repo and update docs/design/roadmap.md.".into();
+    c.reading.acceptance_criteria.push(Criterion {
+        text: "The status page is reachable at its GitHub URL".into(),
+        kind: CriterionKind::Content,
+    });
     out.push(c);
 
     out.extend(boundary_word_cases());
+    out.extend(delivery_verb_cases());
+    out
+}
+
+/// A delivery verb read as a narrow deliverable: the reading lists a file and its criteria say the file
+/// exists, with no state the user observes. Refused by `check_outcome_state`; the matching readings that
+/// name a reachable URL, and the requests that only mention a verb, are accepted.
+fn delivery_verb_cases() -> Vec<Case> {
+    const SOURCE: &str = "jobs 20261014-082328-g6vy, 20261014-174815-7bf8 and 20261017-173508-0wtc, a delivery verb read as a narrow deliverable; rebuilt from the job briefs";
+    const PUBLISH: &str = "Publish a first explainer page on how firstmate handles work.";
+    const STATE: &str = "The page is reachable at its public URL";
+    let state = || Criterion {
+        text: STATE.into(),
+        kind: CriterionKind::Content,
+    };
+    let mut out = Vec::new();
+
+    out.push(case(
+        "publish-reading-names-no-observable-state",
+        SOURCE,
+        &["delivery-verb"],
+        PUBLISH,
+        0,
+        Expected::Refuse("check_outcome_state"),
+    ));
+    let mut c = case(
+        "publish-reading-names-a-reachable-url",
+        SOURCE,
+        &["delivery-verb"],
+        PUBLISH,
+        0,
+        Expected::Accept,
+    );
+    c.reading.acceptance_criteria.push(state());
+    out.push(c);
+    let mut c = case(
+        "publish-reading-puts-publishing-out-of-scope",
+        SOURCE,
+        &["delivery-verb"],
+        PUBLISH,
+        0,
+        Expected::Accept,
+    );
+    c.reading.out_of_scope = vec!["Publishing the page is not done here".into()];
+    out.push(c);
+
+    // The verb opens a bullet or a numbered part.
+    out.push(case(
+        "delivery-verb-in-a-dash-bullet",
+        SOURCE,
+        &["delivery-verb", "dash-bullet"],
+        &lines(&["Do this:", "- Deploy the site on every push"]),
+        1,
+        Expected::Refuse("check_outcome_state"),
+    ));
+    out.push(case(
+        "delivery-verb-in-a-star-bullet",
+        SOURCE,
+        &["delivery-verb", "star-bullet"],
+        &lines(&["Do this:", "* Share the status report with the team"]),
+        1,
+        Expected::Refuse("check_outcome_state"),
+    ));
+    out.push(case(
+        "delivery-verb-in-numbered-dot-parts",
+        SOURCE,
+        &["delivery-verb", "number-dot-parts"],
+        &lines(&[
+            "Do two things:",
+            "1. Add a --json flag to athena status",
+            "2. Release the tool as a tagged version",
+        ]),
+        2,
+        Expected::Refuse("check_outcome_state"),
+    ));
+    out.push(case(
+        "delivery-verb-in-numbered-paren-parts",
+        SOURCE,
+        &["delivery-verb", "number-paren-parts"],
+        &lines(&[
+            "Do two things:",
+            "1) Add a --json flag to athena status",
+            "2) Release the tool as a tagged version",
+        ]),
+        0,
+        Expected::Refuse("check_outcome_state"),
+    ));
+    out.push(case(
+        "delivery-verb-in-lettered-paren-parts",
+        SOURCE,
+        &["delivery-verb", "letter-paren-parts"],
+        &lines(&[
+            "Do two things:",
+            "(a) Add a --json flag to athena status",
+            "(b) Publish the guide",
+        ]),
+        0,
+        Expected::Refuse("check_outcome_state"),
+    ));
+
+    // A retry whose own text is a complaint: the verb is in the earlier request.
+    let complaint = "The last attempt was rejected: nothing was reachable. Try again.";
+    let retry = |id: &'static str, expected: Expected| {
+        let mut c = case(
+            id,
+            SOURCE,
+            &["delivery-verb", "retry-complaint"],
+            complaint,
+            0,
+            expected,
+        );
+        c.attempt = Some(earlier(RETRIED_JOB, PUBLISH));
+        c.reading.summary = format!("Retry of job {RETRIED_JOB}: publish the explainer page.");
+        c.reading.deliverables = vec![deliverable(
+            "crates/athena-core/src/reading.rs",
+            DeliverableAction::Modify,
+        )];
+        c.reading.out_of_scope = vec!["The reader and verifier prompts are not changed".into()];
+        c
+    };
+    out.push(retry(
+        "retry-complaint-earlier-request-has-a-delivery-verb",
+        Expected::Refuse("check_outcome_state"),
+    ));
+    let mut c = retry(
+        "retry-complaint-earlier-request-with-state-criterion",
+        Expected::Accept,
+    );
+    c.reading.acceptance_criteria.push(state());
+    out.push(c);
+
+    // The root-cause request names the verbs mid-sentence; nothing is asked to be delivered.
+    out.push(case(
+        "root-cause-request-names-the-verbs-mid-sentence",
+        SOURCE,
+        &["delivery-verb-mid-sentence", "dash-bullet"],
+        &root_cause_request(&[
+            "Cause: a reading is never checked against the outcome. For verbs like publish, deploy or share, the real goal is a user-visible state.",
+        ]),
+        3,
+        Expected::Accept,
+    ));
+
+    // Noun uses of the words.
+    out.push(case(
+        "release-notes-noun-use",
+        SOURCE,
+        &["delivery-noun-use"],
+        "Release notes need a March entry.",
+        0,
+        Expected::Accept,
+    ));
+    out.push(case(
+        "share-of-noun-use",
+        SOURCE,
+        &["delivery-noun-use"],
+        "Share of failed jobs is shown on the status page.",
+        0,
+        Expected::Accept,
+    ));
     out
 }
 
