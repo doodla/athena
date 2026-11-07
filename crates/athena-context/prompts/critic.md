@@ -11,4 +11,5 @@ You review one plan before any code is written. Your working directory is a read
 - Athena's own findings are in the brief; do not repeat them, but weigh them.
 - Findings: blocker (the plan cannot work or is harmful), major (a criterion would go unshown or the design is wrong), minor (worth fixing), nit (taste). Each cites a location and evidence, and gives a fix.
 - verdict is accept only when no finding is a blocker or major; revise when the planner can fix the plan; reject when the request or reading cannot be planned as it stands.
+- Raise a major finding when a landing, history or attribution plan lacks the commit-shape table, lacks the realistic-branch fixture, or omits the tests of every crate that calls the changed classification functions.
 - In round one, raise a major finding when a step calls an external service (GitHub API, CI run, deploy) without naming the state it needs or how the plan checks or waits for it.

@@ -3189,7 +3189,8 @@ pub fn check_reading_references(
 /// retried or followed-up job ([`check_prior_result_and_scope`]), then the evidence each criterion rests on
 /// ([`check_criteria_evidence`]), then the code survey a code or tests reading with a behavior criterion
 /// rests on ([`check_code_survey`]), then the governance files the outcome needs
-/// ([`check_governance_coverage`]), then the deliverable paths and `content` criteria against the boundary
+/// ([`check_governance_coverage`]), then the observable state a delivery request needs
+/// ([`check_outcome_state`]), then the deliverable paths and `content` criteria against the boundary
 /// words and the deliverables against the files at the base commit ([`check_boundary_and_repo_files`]; `repo_files` is `None` when
 /// there is no repository to compare with), then the repo paths its text relies on against the same files
 /// ([`check_reading_references`]). It applies to a first attempt as well as a retry. It runs
@@ -3244,6 +3245,7 @@ pub fn refusing_check(
     step!(check_code_survey(reading));
     step!(check_design_existing_code(reading));
     step!(check_governance_coverage(reading, request));
+    step!(check_outcome_state(reading, request));
     step!(check_boundary_and_repo_files(reading, repo_files));
     step!(check_reading_references(reading, repo_files));
     None
@@ -3359,6 +3361,355 @@ pub fn check_governance_coverage(reading: &Reading, request: &str) -> Result<()>
          not change it, name it in out_of_scope; admission refuses a governance change that is not both listed \
          and named, and only after the producer has finished",
         paths.join("; ")
+    )
+}
+
+/// The delivery verbs the outcome-state check reads, each with its `-ing` form.
+const DELIVERY_VERBS: [(&str, &str); 4] = [
+    ("publish", "publishing"),
+    ("deploy", "deploying"),
+    ("share", "sharing"),
+    ("release", "releasing"),
+];
+
+/// Words before a verb that leave it a verb of the request: "Build the docs and publish them", "Please deploy
+/// the site", "Workers should share the report".
+const LEAD_INS: [&str; 5] = ["and", "then", "please", "also", "should"];
+
+/// Two-word lead-ins: "Can you deploy the site", "I want to release v1".
+const LEAD_IN_PAIRS: [(&str, &str); 7] = [
+    ("can", "you"),
+    ("could", "you"),
+    ("would", "you"),
+    ("want", "to"),
+    ("need", "to"),
+    ("like", "to"),
+    ("going", "to"),
+];
+
+/// A word right after the verb that makes it part of a noun phrase: "release notes", "share button".
+const NOUN_FOLLOWERS: [&str; 11] = [
+    "notes",
+    "note",
+    "process",
+    "pipeline",
+    "workflow",
+    "checklist",
+    "candidate",
+    "date",
+    "plan",
+    "button",
+    "of",
+];
+
+/// Words that end the stretch after a verb in which its object is looked for.
+const OBJECT_STOP_WORDS: [&str; 8] = [
+    "before", "after", "when", "while", "if", "because", "until", "unless",
+];
+
+/// Things an audience sees: a verb with one of these as its object delivers something to a reader.
+const VISIBLE_NOUNS: [&str; 13] = [
+    "page",
+    "pages",
+    "site",
+    "website",
+    "docs",
+    "documentation",
+    "explainer",
+    "guide",
+    "book",
+    "report",
+    "tutorial",
+    "article",
+    "dashboard",
+];
+
+/// Places a delivery goes to. `crate`, `package`, `binary`, `app`, `image` and `artifact` are not listed: in a
+/// Rust workspace they are ordinary technical nouns ("share the parsing code between crates"), so they count
+/// only through a destination or a version token beside them.
+const DESTINATION_WORDS: [&str; 8] = [
+    "npm",
+    "pypi",
+    "docker",
+    "crates.io",
+    "registry",
+    "production",
+    "online",
+    "pages",
+];
+
+/// People a delivery reaches.
+const AUDIENCE_WORDS: [&str; 7] = [
+    "team",
+    "everyone",
+    "colleagues",
+    "customers",
+    "stakeholders",
+    "readers",
+    "public",
+];
+
+const OBJECT_PRONOUNS: [&str; 4] = ["it", "them", "these", "those"];
+
+/// Whole-word lowercase phrases that name a state an audience can observe. `url`, `tag`, `link`, `page`,
+/// `can open`, `serves` and a bare `available at` are not listed: they occur in criteria that only check a
+/// file ("the <title> tag names the page", "docs/explainer.md is available at docs/").
+const OUTCOME_STATE_PHRASES: [&str; 22] = [
+    "reachable",
+    "is served",
+    "are served",
+    "served at",
+    "served from",
+    "served page",
+    "http 200",
+    "200 ok",
+    "is live",
+    "goes live",
+    "live at",
+    "available at https",
+    "available at http",
+    "accessible at https",
+    "opens in a browser",
+    "loads in a browser",
+    "can be downloaded",
+    "can download",
+    "available for download",
+    "downloadable",
+    "installable",
+    "can be installed from",
+];
+
+/// One word of a request, lowercase, and whether it opens a segment: the first word, a word after a line
+/// break or after `.`, `!`, `?`, `:` or `;` followed by white space, or the word after a list marker.
+struct RequestWord {
+    text: String,
+    segment_start: bool,
+}
+
+/// Whether the text between two words ends a segment.
+fn gap_ends_segment(gap: &str) -> bool {
+    if gap.contains('\n') {
+        return true;
+    }
+    let chars: Vec<char> = gap.chars().collect();
+    chars.iter().enumerate().any(|(i, c)| {
+        ".!?:;".contains(*c) && chars.get(i + 1).is_none_or(|next| next.is_whitespace())
+    })
+}
+
+/// The words of `text`: runs of letters and digits, where a `.` or `'` between two of them stays in the word
+/// (`crates.io`, `v1.2`, `don't`). A word that is digits or one ASCII letter, followed by `)` or `.`, is a list
+/// marker (`2)`, `(a)`, `1.`) and the word after it opens a segment.
+fn request_words(text: &str) -> Vec<RequestWord> {
+    let text = text.to_lowercase().replace(['\u{2019}', '\u{2018}'], "'");
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].1.is_alphanumeric() {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < chars.len() {
+            let c = chars[j].1;
+            let joins = (c == '.' || c == '\'')
+                && chars
+                    .get(j + 1)
+                    .is_some_and(|(_, next)| next.is_alphanumeric());
+            if c.is_alphanumeric() || joins {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        spans.push((chars[i].0, chars.get(j).map_or(text.len(), |(at, _)| *at)));
+        i = j;
+    }
+    let mut words = Vec::new();
+    let mut after_marker = false;
+    for (k, &(start, end)) in spans.iter().enumerate() {
+        let gap = if k == 0 {
+            ""
+        } else {
+            &text[spans[k - 1].1..start]
+        };
+        let opens = k == 0 || after_marker || gap_ends_segment(gap);
+        let word = &text[start..end];
+        after_marker = opens
+            && (word.chars().all(|c| c.is_ascii_digit())
+                || (word.len() == 1 && word.chars().all(|c| c.is_ascii_alphabetic())))
+            && spans
+                .get(k + 1)
+                .is_some_and(|&(next, _)| matches!(text[end..next].trim(), ")" | "."));
+        words.push(RequestWord {
+            text: word.to_string(),
+            segment_start: opens,
+        });
+    }
+    words
+}
+
+/// Whether `word` is `v` and digits, with dots between them: a version token (`v1`, `v1.2`).
+fn is_version_token(word: &str) -> bool {
+    word.strip_prefix('v').is_some_and(|rest| {
+        rest.chars().any(|c| c.is_ascii_digit())
+            && rest.chars().all(|c| c.is_ascii_digit() || c == '.')
+    })
+}
+
+/// Whether `word` names something an audience sees, a place a delivery goes to, or the people it reaches.
+fn is_delivery_object(word: &str) -> bool {
+    VISIBLE_NOUNS.contains(&word)
+        || DESTINATION_WORDS.contains(&word)
+        || AUDIENCE_WORDS.contains(&word)
+        || is_version_token(word)
+}
+
+/// The delivery verbs the request uses as verbs, each once, as `(verb, -ing form)`. A verb counts when it
+/// opens a segment (a sentence, a line, a list part) or follows a lead-in ([`LEAD_INS`], [`LEAD_IN_PAIRS`]),
+/// is not followed by a word of [`NOUN_FOLLOWERS`], and has a delivery object ([`is_delivery_object`]) within
+/// five words in the same segment, before a word of [`OBJECT_STOP_WORDS`]; or is followed within two words by
+/// `it`, `them`, `these` or `those` when the segment has such an object before the verb.
+fn delivery_verbs(request: &str) -> Vec<(&'static str, &'static str)> {
+    let words = request_words(request);
+    let mut found: Vec<(&'static str, &'static str)> = Vec::new();
+    for (i, word) in words.iter().enumerate() {
+        let Some(&entry) = DELIVERY_VERBS.iter().find(|(verb, _)| *verb == word.text) else {
+            continue;
+        };
+        if found.contains(&entry) {
+            continue;
+        }
+        let at_verb_position = word.segment_start
+            || (i >= 1 && LEAD_INS.contains(&words[i - 1].text.as_str()))
+            || (i >= 2
+                && LEAD_IN_PAIRS
+                    .contains(&(words[i - 2].text.as_str(), words[i - 1].text.as_str())));
+        if !at_verb_position {
+            continue;
+        }
+        let rest = &words[i + 1..];
+        if rest
+            .first()
+            .is_some_and(|next| !next.segment_start && NOUN_FOLLOWERS.contains(&next.text.as_str()))
+        {
+            continue;
+        }
+        let window: Vec<&str> = rest
+            .iter()
+            .take(5)
+            .take_while(|next| {
+                !next.segment_start && !OBJECT_STOP_WORDS.contains(&next.text.as_str())
+            })
+            .map(|next| next.text.as_str())
+            .collect();
+        let object_after = window.iter().any(|w| is_delivery_object(w));
+        let pronoun = window.iter().take(2).any(|w| OBJECT_PRONOUNS.contains(w));
+        let segment_from = if word.segment_start {
+            i
+        } else {
+            words[..i]
+                .iter()
+                .rposition(|w| w.segment_start)
+                .unwrap_or(0)
+        };
+        let object_before = words[segment_from..i]
+            .iter()
+            .any(|w| is_delivery_object(&w.text));
+        if object_after || (pronoun && object_before) {
+            found.push(entry);
+        }
+    }
+    found
+}
+
+/// Whether an out_of_scope item names the delivery: the verb or its `-ing` form as a whole word, not followed
+/// by a word of [`NOUN_FOLLOWERS`]. "Changes to shared helpers" and "Release notes are unchanged" do not.
+fn out_of_scope_names(item: &str, verb: &str, ing: &str) -> bool {
+    let words = request_words(item);
+    words.iter().enumerate().any(|(i, word)| {
+        (word.text == verb || word.text == ing)
+            && !words.get(i + 1).is_some_and(|next| {
+                !next.segment_start && NOUN_FOLLOWERS.contains(&next.text.as_str())
+            })
+    })
+}
+
+/// Whether a criterion text names a state an audience can observe ([`OUTCOME_STATE_PHRASES`], whole words).
+fn names_outcome_state(criterion: &str) -> bool {
+    let text = criterion
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    OUTCOME_STATE_PHRASES.iter().any(|p| has_phrase(&text, p))
+}
+
+/// Refuses a reading for a delivery request (publish, deploy, share, release) that has no behavior criterion
+/// naming a state the audience can observe and does not put the delivery out of scope. Root cause this check removes: a delivery verb was read as a narrow deliverable, and reading acceptance had
+/// no check against the state the user observes. "Publish a first explainer page on how firstmate handles work"
+/// was read as "a page file exists", the criteria passed on the file, and nothing asked whether anyone could
+/// reach the page. Job 20261014-082328-g6vy failed that way. This check covers 1 of the 3 cited jobs, that
+/// one; the other two, 20261014-174815-7bf8 (a ladder of requirements) and 20261017-173508-0wtc (an ontology
+/// decision), contain no delivery verb, are another class (figurative or structural terms that need a glossary)
+/// and are outside the check, which does not catch them; all three recorded requests are replayed in
+/// `delivery_verb_replay_over_the_cited_jobs` in `crates/athena-core/tests/refusal_corpus.rs`, which asserts the
+/// count. The check reads only the request and the reading, costs no model call and, like the governance check,
+/// skips a reading with no capability, a question, or no deliverable. A verb is one of `publish`, `deploy`,
+/// `share` and `release` at the start of a segment (sentence, line or list part such as `2)`, `(a)`, `1.`, `-`
+/// or `*`) or after `and`, `then`, `please`, `also`, `should`, `can you`, `could you`, `would you`, `want to`,
+/// `need to`, `like to` or `going to`, with a delivery object near it: a page, site, docs, guide, report or
+/// similar, a version such as `v1`, a destination such as `crates.io` or `production`, or an audience such as
+/// the team. A crate, package, binary, app, image or artifact is not an object by itself, and a following word
+/// such as `notes` or `button` makes the verb a noun, so "release the lock", "share the HTTP client" and "add
+/// release notes" are not delivery. The reading passes when a criterion of kind behavior holds a whole-word
+/// state phrase (a reachable URL, a served page, an HTTP 200 answer, a downloadable release), or when every
+/// detected verb or its `-ing` form appears as a whole word in an out_of_scope item ("Publishing is out of
+/// scope"); a content criterion that mentions a state still checks only a file, so it does not pass. The error
+/// names the verbs and the two repairs. Limits: other verbs (ship, launch, upload), a verb inside a comma list
+/// or as a gerund start, an object not in the lists, `reachable` said of a file, and a false refusal for a
+/// technical use with a visible object ("release the page lock"). This check refuses more readings; the higher
+/// refusal rate is intended. The expected share of newly refused readings is 5%, an estimate and not a
+/// measurement: 29 of the 1045 recorded requests contain one of the four words anywhere, most as the noun
+/// "share", which bounds the share from above.
+pub fn check_outcome_state(reading: &Reading, request: &str) -> Result<()> {
+    if reading.capability.is_none() || reading.question.is_some() || reading.deliverables.is_empty()
+    {
+        return Ok(());
+    }
+    let verbs = delivery_verbs(request);
+    if verbs.is_empty() {
+        return Ok(());
+    }
+    if reading
+        .acceptance_criteria
+        .iter()
+        .any(|c| matches!(c.kind, CriterionKind::Behavior) && names_outcome_state(&c.text))
+    {
+        return Ok(());
+    }
+    let uncovered: Vec<&str> = verbs
+        .iter()
+        .filter(|(verb, ing)| {
+            !reading
+                .out_of_scope
+                .iter()
+                .any(|item| out_of_scope_names(item, verb, ing))
+        })
+        .map(|(verb, _)| *verb)
+        .collect();
+    if uncovered.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the reading was refused because the request asks to {} but no behavior criterion names a state the \
+         audience can observe, so the work would be judged on a file that exists, not on what the user sees; a \
+         content criterion that mentions a state still checks only a file. Repair: add a criterion of kind \
+         behavior that names the state, such as a reachable URL that answers, a served page that loads or a \
+         downloadable release; or, if this job must not deliver, name the delivery in out_of_scope (for \
+         example \"Publishing is out of scope\")",
+        uncovered.join(" and ")
     )
 }
 
@@ -7097,19 +7448,21 @@ mod tests {
                 "{request}: listed but unnamed"
             );
             // Listed and named: accepted.
-            let named = governed_reading(
+            let mut named = governed_reading(
                 &["src/site.rs", &file],
                 &["the site builds", &format!("{file} runs the build")],
                 &["the logo"],
             );
+            add_behavior(&mut named, SERVED_STATE);
             check_reading_acceptance(&named, request, None, &[], None)
                 .unwrap_or_else(|e| panic!("{request}: {e}"));
             // Put out of scope by name: accepted without the file.
-            let excluded = governed_reading(
+            let mut excluded = governed_reading(
                 &["src/site.rs"],
                 &["the site builds"],
                 &[&format!("Editing {}", path.trim_end_matches('/'))],
             );
+            add_behavior(&mut excluded, SERVED_STATE);
             check_reading_acceptance(&excluded, request, None, &[], None)
                 .unwrap_or_else(|e| panic!("{request}: {e}"));
         }
@@ -7118,7 +7471,8 @@ mod tests {
     #[test]
     fn a_request_with_only_common_words_and_no_governance_path_is_accepted() {
         // None of these words names a path, so none requires a governance file; the reading lists none.
-        let bare = governed_reading(&["src/site.rs"], &["the site builds"], &["the logo"]);
+        let mut bare = governed_reading(&["src/site.rs"], &["the site builds"], &["the logo"]);
+        add_behavior(&mut bare, SERVED_STATE);
         for request in COMMON_WORD_REQUESTS {
             check_governance_coverage(&bare, request).unwrap_or_else(|e| panic!("{request}: {e}"));
             check_reading_acceptance(&bare, request, None, &[], None)
@@ -7135,12 +7489,333 @@ mod tests {
             .to_string();
         assert!(error.contains(".github/workflows"), "{error}");
         assert!(error.contains("names"), "{error}");
-        let with_workflow = governed_reading(
+        let mut with_workflow = governed_reading(
             &["docs/index.md", ".github/workflows/pages.yml"],
             &["pages.yml deploys the site"],
             &[],
         );
+        add_behavior(&mut with_workflow, SERVED_STATE);
         check_reading_acceptance(&with_workflow, request, None, &[], None).unwrap();
+    }
+
+    /// A behavior criterion that names an observable state.
+    const SERVED_STATE: &str = "the site is served at a reachable URL";
+
+    /// Adds a criterion of kind behavior with this text to the reading.
+    fn add_behavior(reading: &mut Reading, text: &str) {
+        reading.acceptance_criteria.push(Criterion {
+            text: text.into(),
+            kind: CriterionKind::Behavior,
+        });
+    }
+
+    /// Adds a criterion of kind content with this text to the reading.
+    fn add_content(reading: &mut Reading, text: &str) {
+        reading.acceptance_criteria.push(Criterion {
+            text: text.into(),
+            kind: CriterionKind::Content,
+        });
+    }
+
+    /// The request of job 20261014-082328-g6vy, as recorded.
+    const G6VY_REQUEST: &str = "Publish a first explainer page on how firstmate handles work.";
+
+    #[test]
+    fn check_outcome_state_refuses_the_g6vy_misread() {
+        // The reading of job 20261014-082328-g6vy: a page file exists, nothing says anyone can reach it.
+        let reading = governed_reading(&["docs/explainer.md"], &["docs/explainer.md exists"], &[]);
+        let error = check_outcome_state(&reading, G6VY_REQUEST)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("reachable URL"), "{error}");
+        assert!(error.contains("served page"), "{error}");
+        assert!(error.contains("publish"), "{error}");
+        assert!(!error.contains('\n'), "{error}");
+        assert!(
+            error.starts_with("the reading was refused because"),
+            "{error}"
+        );
+        // The gate runs it and names it as the check that refused.
+        let gate = check_reading_acceptance(&reading, G6VY_REQUEST, None, &[], None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(gate, error);
+        let (name, _) = refusing_check(&reading, G6VY_REQUEST, None, &[], None).unwrap();
+        assert_eq!(name, "check_outcome_state");
+        // With a behavior criterion that names the state, it is accepted.
+        let mut stated = reading.clone();
+        add_behavior(&mut stated, "The page is reachable at its public URL");
+        check_reading_acceptance(&stated, G6VY_REQUEST, None, &[], None).unwrap();
+    }
+
+    #[test]
+    fn check_outcome_state_accepts_a_behavior_state_for_each_delivery_verb() {
+        let pairs = [
+            (
+                "Publish the explainer page",
+                "The page is reachable at its public URL",
+            ),
+            (
+                "Deploy the site on every push",
+                "The site is served at the deployed address",
+            ),
+            (
+                "Share the report with the team",
+                "The shared link is reachable by the recipient",
+            ),
+            ("Release v1", "The v1 release assets are downloadable"),
+        ];
+        for (request, state) in pairs {
+            let file_only = governed_reading(&["docs/x.md"], &["docs/x.md exists"], &[]);
+            let error = check_reading_acceptance(&file_only, request, None, &[], None)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("reachable URL"), "{request}: {error}");
+            // A content criterion that mentions the state still checks only a file.
+            let mut content = file_only.clone();
+            add_content(&mut content, state);
+            assert!(
+                check_reading_acceptance(&content, request, None, &[], None).is_err(),
+                "{request}: a content criterion must not satisfy the check"
+            );
+            // The same text as a behavior criterion does.
+            let mut behavior = file_only.clone();
+            add_behavior(&mut behavior, state);
+            check_reading_acceptance(&behavior, request, None, &[], None)
+                .unwrap_or_else(|e| panic!("{request}: {e}"));
+        }
+        // A request with no delivery verb is not touched, whatever the criteria say.
+        let file_only = governed_reading(&["src/config.rs"], &["the setting parses"], &[]);
+        for request in [
+            "Add a timeout setting",
+            "Add release notes for 0.4 and a share button.",
+        ] {
+            check_reading_acceptance(&file_only, request, None, &[], None)
+                .unwrap_or_else(|e| panic!("{request}: {e}"));
+        }
+    }
+
+    #[test]
+    fn delivery_verbs_are_found_after_lead_ins_and_markers() {
+        let found: [(&str, &str); 12] = [
+            ("Build the docs and publish them", "publish"),
+            ("Can you deploy the site", "deploy"),
+            ("I want to release v1", "release"),
+            ("* Publish the page", "publish"),
+            ("- Publish the page", "publish"),
+            ("1. Share the report", "share"),
+            ("2) Deploy the site", "deploy"),
+            ("(a) Release v1", "release"),
+            ("Priority: high\n\nPublish the page", "publish"),
+            ("Publish the crate to crates.io", "publish"),
+            ("Release the binary as v1", "release"),
+            ("Update it. Please share the report with the team.", "share"),
+        ];
+        for (request, verb) in found {
+            let verbs = delivery_verbs(request);
+            assert!(
+                verbs.iter().any(|(v, _)| *v == verb),
+                "{request:?}: found {verbs:?}"
+            );
+        }
+        let not_found = [
+            "Add release notes",
+            "Add a share button",
+            "Rename shared helpers",
+            "Add tests for share and release.",
+            "We deployed it",
+            "Add a timeout setting",
+            "Release the lock before awaiting",
+            "Workers should share the HTTP client",
+            "Publish the event to the bus",
+            "Share the parsing code between crates",
+            "Workers should share the package cache",
+            "Release the image buffer before returning",
+            "and release the slot on failure",
+            "Fix the page, then see the release process",
+            "Bump the version to v1.2 and tag the release",
+        ];
+        for request in not_found {
+            let verbs = delivery_verbs(request);
+            assert!(verbs.is_empty(), "{request:?}: found {verbs:?}");
+        }
+        // A dot inside a name or a version does not end a segment; a full stop does.
+        let words = request_words("Use crates.io v1.2. Share it");
+        let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(texts, ["use", "crates.io", "v1.2", "share", "it"]);
+        let starts: Vec<bool> = words.iter().map(|w| w.segment_start).collect();
+        assert_eq!(starts, [true, false, false, true, false]);
+    }
+
+    #[test]
+    fn out_of_scope_and_incidental_words_do_not_satisfy_the_check() {
+        // A substring or a noun use in out_of_scope is not the delivery put out of scope.
+        for (request, item) in [
+            (
+                "Share the report with the team",
+                "Changes to shared helpers",
+            ),
+            ("Release v1", "Release notes are unchanged"),
+        ] {
+            let reading = governed_reading(&["docs/x.md"], &["docs/x.md exists"], &[item]);
+            assert!(
+                check_reading_acceptance(&reading, request, None, &[], None).is_err(),
+                "{request}: {item}"
+            );
+        }
+        // The delivery named as a whole word, or in its -ing form, is.
+        for (request, item) in [
+            (
+                "Share the report with the team",
+                "Sharing the report is out of scope",
+            ),
+            ("Release v1", "Releasing is out of scope: no tag is cut"),
+            ("Publish the explainer page", "Do not publish it"),
+        ] {
+            let reading = governed_reading(&["docs/x.md"], &["docs/x.md exists"], &[item]);
+            check_reading_acceptance(&reading, request, None, &[], None)
+                .unwrap_or_else(|e| panic!("{request}: {item}: {e}"));
+        }
+        // With two verbs, each needs naming.
+        let reading = governed_reading(
+            &["docs/x.md"],
+            &["docs/x.md exists"],
+            &["Publishing is out of scope"],
+        );
+        let error = check_outcome_state(&reading, "Publish the page. Deploy the site.")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("deploy") && !error.contains("publish"),
+            "{error}"
+        );
+        // Words that occur in file-only criteria do not name a state, even in a behavior criterion.
+        for text in [
+            "the <title> tag names the page",
+            "The URL field is documented",
+            "A reader can open docs/explainer.md",
+            "docs/explainer.md is available at docs/",
+            "The link in the page serves as a title",
+        ] {
+            let mut reading = governed_reading(&["docs/x.md"], &["docs/x.md exists"], &[]);
+            add_behavior(&mut reading, text);
+            assert!(
+                check_reading_acceptance(&reading, "Publish the explainer page", None, &[], None)
+                    .is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_outcome_state_check_skips_readings_that_deliver_nothing() {
+        let request = "Publish the explainer page";
+        let mut declined = governed_reading(&["docs/x.md"], &["docs/x.md exists"], &[]);
+        declined.capability = None;
+        declined.decline_reason = Some("no capability fits".into());
+        check_outcome_state(&declined, request).unwrap();
+        let mut asking = governed_reading(&["docs/x.md"], &["docs/x.md exists"], &[]);
+        asking.question = Some("Which page?".into());
+        check_outcome_state(&asking, request).unwrap();
+        let none = governed_reading(&[], &["docs/x.md exists"], &[]);
+        check_outcome_state(&none, request).unwrap();
+    }
+
+    #[test]
+    fn check_outcome_state_doc_names_root_cause_and_scope() {
+        let source = include_str!("reading.rs");
+        let body = source
+            .split("pub fn refusing_check(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        let steps: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("step!(check_"))
+            .collect();
+        let governance = steps
+            .iter()
+            .position(|l| l.starts_with("step!(check_governance_coverage("))
+            .unwrap();
+        assert_eq!(
+            steps[governance + 1],
+            "step!(check_outcome_state(reading, request));"
+        );
+        let doc = source
+            .split("pub fn check_outcome_state(")
+            .next()
+            .unwrap()
+            .rsplit("\n\n")
+            .next()
+            .unwrap();
+        assert!(
+            doc.lines().all(|l| l.starts_with("///") && l != "///"),
+            "{doc}"
+        );
+        let doc = doc
+            .lines()
+            .map(|l| l.trim_start_matches('/').trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for needle in [
+            "delivery verb was read as a narrow deliverable",
+            "no check against the state the user observes",
+            "covers 1 of the 3 cited jobs",
+            "20261014-082328-g6vy",
+            "20261014-174815-7bf8",
+            "20261017-173508-0wtc",
+            "outside the check",
+        ] {
+            assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+        }
+        let acceptance_doc = source
+            .split("pub fn check_reading_acceptance(")
+            .next()
+            .unwrap();
+        assert!(acceptance_doc.contains("[`check_outcome_state`]"));
+    }
+
+    #[test]
+    fn outcome_state_refusal_is_declared_intended() {
+        let declared = replay_declaration(
+            &[Criterion {
+                text: "The change refuses more readings: expected 5% of newly refused readings"
+                    .into(),
+                kind: CriterionKind::Behavior,
+            }],
+            &[],
+        );
+        assert_eq!(declared.share, Some(5));
+        let source = include_str!("reading.rs");
+        let doc = source
+            .split("pub fn check_outcome_state(")
+            .next()
+            .unwrap()
+            .rsplit("\n\n")
+            .next()
+            .unwrap()
+            .lines()
+            .map(|l| l.trim_start_matches('/').trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            doc.contains("This check refuses more readings; the higher refusal rate is intended.")
+        );
+        assert!(doc.contains("estimate"));
+        let changelog = include_str!("../../../CHANGELOG.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for needle in [
+            "check_outcome_state",
+            "refuses more readings",
+            "higher refusal rate is intended",
+            "expected 5% of newly refused readings",
+            "estimate",
+        ] {
+            assert!(changelog.contains(needle), "the changelog lacks {needle:?}");
+        }
     }
 
     #[test]

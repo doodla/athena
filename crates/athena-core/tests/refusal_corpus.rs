@@ -14,6 +14,11 @@
 //! refuse-side complement: shapes live in this file, each with the outcome the gate must give, and a planner
 //! maps the input forms of a new rule to these cases before any code exists.
 //!
+//! Delivery requests (`check_outcome_state`): `delivery_cases` holds the positions a delivery verb takes in a
+//! request and the words that are not delivery, and `delivery_verb_replay_over_the_cited_jobs` runs the recorded
+//! request text of the three jobs the check cites through the gate: it refuses 1 of the 3, the real publish
+//! misread, and the changelog must state that count.
+//!
 //! What the mechanism covers, and what it does not:
 //! - Every `check_*` step in `refusing_check` must have a case in which that check refuses
 //!   (`every_acceptance_check_has_a_refusing_corpus_case`), so a new reading check cannot land without a case.
@@ -67,7 +72,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 17] = [
+const INPUT_FORMS: [&str; 23] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -85,6 +90,12 @@ const INPUT_FORMS: [&str; 17] = [
     "code-survey",
     "design-existing-code",
     "boundary-word",
+    "delivery-verb-first",
+    "delivery-verb-after-lead-in",
+    "delivery-word-as-noun",
+    "delivery-verb-technical-use",
+    "out-of-scope-names-delivery",
+    "delivery-state-in-content-criterion",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -231,13 +242,282 @@ fn root_cause_request(extra: &[&str]) -> String {
     lines(&text)
 }
 
-/// The stored corpus. Every request text is rebuilt from the job brief named in `source`, since the records
-/// of those jobs are not part of the repository snapshot.
+/// The stored corpus. Most request texts are rebuilt from the job brief named in `source`, since the records
+/// of those jobs are not part of the repository snapshot; the delivery cases say in `source` which texts are
+/// the recorded request, quoted verbatim, and which are rebuilt.
 fn cases() -> Vec<Case> {
     let mut out = parser_cases();
     out.extend(request_citing_cases());
     out.extend(reading_check_cases());
+    out.extend(delivery_cases());
     out
+}
+
+/// The recorded request of job 20261014-082328-g6vy, verbatim.
+const G6VY_REQUEST: &str = "Publish a first explainer page on how firstmate handles work.";
+
+/// A reading that says only that files exist, plus these behavior criteria.
+fn with_behavior(mut c: Case, states: &[&str]) -> Case {
+    for text in states {
+        c.reading.acceptance_criteria.push(Criterion {
+            text: (*text).into(),
+            kind: CriterionKind::Behavior,
+        });
+    }
+    c
+}
+
+/// Delivery requests (publish, deploy, share, release): the reading must name a state the user observes, or
+/// put the delivery out of scope. The shapes are the positions a verb can take in a request, and the uses of
+/// the four words that are not delivery.
+fn delivery_cases() -> Vec<Case> {
+    const G6VY: &str = "job 20261014-082328-g6vy, its recorded request, verbatim; the reading is rebuilt as the file-only reading it was given";
+    const BRIEF: &str =
+        "the request in the brief of job 20261107-094333-4z98; rebuilt, not a recorded request";
+    let refuse = |id: &'static str,
+                  source: &'static str,
+                  forms: &'static [&'static str],
+                  request: &str,
+                  bullets: usize| {
+        case(
+            id,
+            source,
+            forms,
+            request,
+            bullets,
+            Expected::Refuse("check_outcome_state"),
+        )
+    };
+    let mut out: Vec<Case> = vec![
+        refuse(
+            "delivery-verb-first-reading-names-only-a-file",
+            G6VY,
+            &["delivery-verb-first"],
+            G6VY_REQUEST,
+            0,
+        ),
+        refuse(
+            "delivery-verb-in-a-dash-bullet",
+            BRIEF,
+            &["dash-bullet", "delivery-verb-first"],
+            &lines(&["Update the guide.", "- Publish the page"]),
+            1,
+        ),
+        refuse(
+            "delivery-verb-in-a-star-bullet",
+            BRIEF,
+            &["star-bullet", "delivery-verb-first"],
+            &lines(&["Update the guide.", "* Share the report"]),
+            1,
+        ),
+        refuse(
+            "delivery-verb-in-a-numbered-dot-part",
+            BRIEF,
+            &["number-dot-parts", "delivery-verb-first"],
+            &lines(&["Do this:", "1. Deploy the site"]),
+            1,
+        ),
+        refuse(
+            "delivery-verb-in-a-numbered-paren-part",
+            BRIEF,
+            &["number-paren-parts", "delivery-verb-first"],
+            &lines(&["Please do this:", "2) Deploy the site"]),
+            0,
+        ),
+        refuse(
+            "delivery-verb-in-a-lettered-paren-part",
+            BRIEF,
+            &["letter-paren-parts", "delivery-verb-first"],
+            &lines(&["Please do this:", "(a) Release v1"]),
+            0,
+        ),
+        refuse(
+            "delivery-verb-after-and",
+            BRIEF,
+            &["delivery-verb-after-lead-in"],
+            "Build the docs and publish them.",
+            0,
+        ),
+        refuse(
+            "delivery-verb-after-can-you",
+            BRIEF,
+            &["delivery-verb-after-lead-in"],
+            "Can you deploy the site?",
+            0,
+        ),
+        refuse(
+            "delivery-verb-after-want-to",
+            BRIEF,
+            &["delivery-verb-after-lead-in"],
+            "I want to release v1.",
+            0,
+        ),
+    ];
+
+    // A criterion of kind content that mentions the state can be met by a Grep on a file, so it is not enough.
+    let mut c = refuse(
+        "delivery-state-in-a-content-criterion-refused",
+        G6VY,
+        &["delivery-state-in-content-criterion"],
+        G6VY_REQUEST,
+        0,
+    );
+    c.reading.acceptance_criteria.push(Criterion {
+        text: "docs/explainer.md says the page is reachable".into(),
+        kind: CriterionKind::Content,
+    });
+    out.push(c);
+
+    // out_of_scope names the delivery only as a whole word: "shared" and "Release notes" do not.
+    let mut c = refuse(
+        "delivery-verb-out-of-scope-shared-helpers-refused",
+        BRIEF,
+        &["out-of-scope-names-delivery"],
+        "Share the report with the team.",
+        0,
+    );
+    c.reading.out_of_scope = vec!["Changes to shared helpers".into()];
+    out.push(c);
+    let mut c = refuse(
+        "delivery-verb-out-of-scope-release-notes-refused",
+        BRIEF,
+        &["out-of-scope-names-delivery"],
+        "Release v1.",
+        0,
+    );
+    c.reading.out_of_scope = vec!["Release notes are unchanged".into()];
+    out.push(c);
+
+    // The governance refusal names the missing workflow and stays first.
+    out.push(case(
+        "delivery-request-naming-a-workflow-fails-governance-first",
+        "job 20261014-082328-g6vy, a publish request naming the Pages workflow; rebuilt from the job brief",
+        &["governance-path", "delivery-verb-first"],
+        "Publish to GitHub Pages from .github/workflows/pages.yml",
+        0,
+        Expected::Refuse("check_governance_coverage"),
+    ));
+
+    // Accepted: a behavior criterion names the state, or the delivery is out of scope, or the word is not a
+    // delivery verb.
+    out.push(with_behavior(
+        case(
+            "delivery-verb-first-reading-names-a-served-state",
+            G6VY,
+            &["delivery-verb-first"],
+            G6VY_REQUEST,
+            0,
+            Expected::Accept,
+        ),
+        &["The page is reachable at its public URL"],
+    ));
+    let mut c = case(
+        "delivery-verb-out-of-scope-names-it-accepted",
+        BRIEF,
+        &["out-of-scope-names-delivery"],
+        "Share the report with the team.",
+        0,
+        Expected::Accept,
+    );
+    c.reading.out_of_scope = vec!["Sharing the report is out of scope".into()];
+    out.push(c);
+    out.push(case(
+        "delivery-word-as-a-noun-is-accepted",
+        BRIEF,
+        &["delivery-word-as-noun"],
+        "Add release notes for 0.4 and a share button.",
+        0,
+        Expected::Accept,
+    ));
+    out.push(case(
+        "delivery-verb-technical-use-is-accepted",
+        BRIEF,
+        &["delivery-verb-technical-use"],
+        "Release the lock before awaiting. Workers should share the HTTP client. Publish the event to the \
+         bus. Share the parsing code between crates. Release the image buffer before returning.",
+        0,
+        Expected::Accept,
+    ));
+    out
+}
+
+/// The recorded requests of the three jobs the change cites, verbatim from their request records.
+const CITED_REQUESTS: [(&str, &str); 3] = [
+    ("20261014-082328-g6vy", G6VY_REQUEST),
+    (
+        "20261014-174815-7bf8",
+        "Build what the BRIEF.md addendum '2026-10-14: A loop that steers Athena, roles, and a ladder of \
+         requirements' asks for, starting small: roles as recorded definitions (A9, A10), and a first role \
+         that runs every 5 tasks in parallel with other work, looks at everything Athena has done, and queues \
+         work items, including one for anything it could not see. Record only what would otherwise be lost; \
+         pull the rest from where it lives. Use the ladder to decide what it may change itself.",
+    ),
+    (
+        "20261017-173508-0wtc",
+        "From Sri's decision sheet of 2026-10-17 (relay note in BRIEF.md, addendum \"2026-10-17: Olympus\"), \
+         decision 5, worded as on the sheet: Should Athena keep an ontology? A small shared vocabulary, grown \
+         from misreads. Defined terms and how they relate, each with its source, in one file that agents read \
+         and checks can use. A term is added when it causes a misread. The study keeps its own concept model, \
+         so firstmate, Hermes Agent and Athena are compared in the same terms.",
+    ),
+];
+
+#[test]
+fn delivery_verb_replay_over_the_cited_jobs() {
+    // Each reading is the file-only reading `base_reading` builds, so a request is refused by
+    // `check_outcome_state` only when the request itself holds a delivery verb.
+    let caught: Vec<&str> = CITED_REQUESTS
+        .iter()
+        .filter(|(_, request)| {
+            matches!(
+                refusing_check(
+                    &base_reading(request),
+                    request,
+                    None,
+                    &[],
+                    Some(&repo_files())
+                ),
+                Some(("check_outcome_state", _))
+            )
+        })
+        .map(|(job, _)| *job)
+        .collect();
+    let total = CITED_REQUESTS.len();
+    // The check refuses exactly the real delivery-verb misread. The ladder-of-requirements request and the
+    // ontology request hold no delivery verb: they are another class and are not caught.
+    assert_eq!(
+        caught,
+        ["20261014-082328-g6vy"],
+        "caught {caught:?} of {total}"
+    );
+    for (job, request) in CITED_REQUESTS {
+        let outcome = refusing_check(
+            &base_reading(request),
+            request,
+            None,
+            &[],
+            Some(&repo_files()),
+        );
+        if job == "20261014-082328-g6vy" {
+            let (name, error) = outcome.expect("the publish request is refused");
+            assert_eq!(name, "check_outcome_state");
+            assert!(error.to_string().contains("reachable URL"), "{error}");
+        } else {
+            assert!(outcome.is_none(), "{job}: {:?}", outcome.map(|(n, _)| n));
+        }
+    }
+    // The changelog states the same count and does not claim the other two.
+    let changelog = include_str!("../../../CHANGELOG.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let claim = format!("covers {} of the {} cited jobs", caught.len(), total);
+    assert!(changelog.contains(&claim), "the changelog lacks {claim:?}");
+    assert!(changelog.contains("are not caught"));
+    for job in CITED_REQUESTS.iter().map(|(job, _)| job) {
+        assert!(changelog.contains(job), "the changelog does not name {job}");
+    }
+    assert!(!changelog.contains("3 of the 3 cited jobs"));
 }
 
 /// Request parser shapes, each with a reading the gate accepts.
@@ -566,6 +846,8 @@ fn reading_check_cases() -> Vec<Case> {
     );
     c.reading.summary =
         "Read the GitHub/env-var settings of owner/repo and update docs/design/roadmap.md.".into();
+    // A publish request: its reading also names the served state, so only the brand-word rule is under test.
+    let c = with_behavior(c, &["The status page is reachable at its GitHub Pages URL"]);
     out.push(c);
 
     out.extend(boundary_word_cases());
