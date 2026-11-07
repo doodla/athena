@@ -17,6 +17,15 @@
 //! Registering a new mirror is prose-only: nothing finds a hand-kept file that has no entry. The registry
 //! makes the comparison a declared unit, so a mirror that is registered cannot drift unseen.
 //!
+//! **Structure of a finished diff.** Two rules compare the new text of a file with its text at the base commit
+//! and judge only what the change adds: [`Rule::PromptStructure`] over every prompt file
+//! (`crates/*/prompts/*.md`; a bullet joined onto another line is a finding) and [`Rule::DecisionEntries`] over
+//! `docs/decisions.md` (a new entry needs the next id, a well-formed heading and a Provenance bullet inside its
+//! own text). Before them, a prompt edited as free text and a decision inserted inside another were found only
+//! at the final verdict, because no check compared the finished diff with the structure it must keep. They
+//! judge structure, not intent: the job holds no machine-readable intended edit, so a wrong word on the right
+//! line is not found here.
+//!
 //! The ontology walk (which governing lines name a term, and whether a sense or an excuse covers each) lives
 //! here as plain functions over plain data, so the registry and `crates/athena-cli/tests/ontology.rs` share
 //! one copy instead of keeping two.
@@ -55,13 +64,22 @@ pub enum Rule {
     /// Every line in a governing document that names a term as a definition or role is covered by a sense or an
     /// excuse of that term.
     OntologyTerms,
+    /// A prompt file keeps its list structure: no line the change adds holds a list item that the base text
+    /// kept on a line of its own, and no added list item holds a second item glued after its text. The mirror
+    /// is a glob, so each matching file is its own mirror.
+    PromptStructure,
+    /// The entries a change appends to the decision log are well formed: a `## D<n> · ` heading, the id one
+    /// greater than the highest before it, and a Provenance bullet inside the entry's own text. Judged only
+    /// when the base text is an exact prefix of the new text (otherwise [`Rule::AppendOnly`] reports).
+    DecisionEntries,
 }
 
 /// One declared mirror.
 #[derive(Debug, Clone, Copy)]
 pub struct Mirror {
     pub name: &'static str,
-    /// The hand-kept file, relative to the repository root.
+    /// The hand-kept file, relative to the repository root. `*` matches within one path segment, so one
+    /// entry can cover a class of files such as the prompt files.
     pub mirror: &'static str,
     pub source: Source,
     pub rule: Rule,
@@ -117,6 +135,18 @@ pub const REGISTRY: &[Mirror] = &[
         mirror: "docs/ontology.toml",
         source: Source::Docs,
         rule: Rule::OntologyTerms,
+    },
+    Mirror {
+        name: "decision entries",
+        mirror: "docs/decisions.md",
+        source: Source::GitHead,
+        rule: Rule::DecisionEntries,
+    },
+    Mirror {
+        name: "prompt structure",
+        mirror: "crates/*/prompts/*.md",
+        source: Source::GitHead,
+        rule: Rule::PromptStructure,
     },
 ];
 
@@ -228,10 +258,286 @@ pub fn append_only_problem(base: &[u8], new: &[u8]) -> Option<String> {
         .chars()
         .take(80)
         .collect();
+    let place = entry_at(base, at)
+        .map(|p| format!(", {p},"))
+        .unwrap_or_default();
     Some(format!(
-        "docs/decisions.md is append-only, but line {line} of its base version is changed or removed (`{text}`); \
+        "docs/decisions.md is append-only, but line {line} of its base version{place} is changed or removed (`{text}`); \
          put the old text back and add the new decision after the last line"
     ))
+}
+
+/// The id of a `## D<digits>` heading line, as `D<digits>`; None for any other line.
+fn heading_id(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("## D")?;
+    let digits = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    (digits > 0).then(|| &line[3..4 + digits])
+}
+
+/// Where the first changed byte `at` of `base` lies: `in D<n>` for the entry holding it, or `before D<n>` when
+/// it is the first byte of that entry's own heading line (an insertion between entries must not blame the
+/// entry above). None when no heading precedes it.
+fn entry_at(base: &[u8], at: usize) -> Option<String> {
+    let text = String::from_utf8_lossy(base);
+    let mut offset = 0;
+    let mut inside = None;
+    for line in text.split_inclusive('\n') {
+        if offset > at {
+            break;
+        }
+        if let Some(id) = heading_id(line) {
+            if offset == at {
+                return Some(format!("before {id}"));
+            }
+            inside = Some(id.to_string());
+        }
+        offset += line.len();
+    }
+    inside.map(|id| format!("in {id}"))
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Rule: decision entries. One definition of a well-formed log, shared with `athena-cli` (`check_log`).
+
+/// One `## D<n>` heading of the decision log and the text it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionEntry {
+    /// The number after `D`; 0 for an unshaped heading whose digits do not parse.
+    pub id: u32,
+    /// Byte offset of the heading line.
+    pub start: usize,
+    /// Byte offset where the entry's text ends: the next well-formed heading, or the end of the text. An
+    /// unshaped heading does not end the entry above it, and its own `end` is the end of its heading line.
+    pub end: usize,
+    /// Whether the heading is `## D<n> · <title>`.
+    pub shaped: bool,
+}
+
+/// The `## D<digits>` headings of `text` in order. Spans run to the next well-formed heading.
+pub fn parse_decision_entries(text: &str) -> Vec<DecisionEntry> {
+    let mut entries: Vec<DecisionEntry> = Vec::new();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if let Some(id) = heading_id(line) {
+            let tail = &line[3 + id.len()..];
+            let parsed = id[1..].parse::<u32>().ok();
+            let shaped = parsed.is_some() && tail.starts_with(" · ");
+            if shaped && let Some(last) = entries.iter_mut().rev().find(|e| e.shaped) {
+                last.end = offset;
+            }
+            entries.push(DecisionEntry {
+                id: parsed.unwrap_or(0),
+                start: offset,
+                end: if shaped {
+                    text.len()
+                } else {
+                    offset + line.len()
+                },
+                shaped,
+            });
+        }
+        offset += line.len();
+    }
+    entries
+}
+
+/// The problems of the decision log `text`, in heading order, then the Provenance problems.
+///
+/// Ids are tracked over every well-formed heading. With `judge_before_from` false only entries that start at
+/// or after byte `from` are judged (the entries a change appends to a base of `from` bytes); with it true every
+/// entry is judged for a repeated or descending id and a missing Provenance bullet. In both modes the rule that
+/// a new entry's id is one greater than the highest before it, and the report of a heading that is not in the
+/// `## D<n> · ` shape, apply only at or after `from`: the real log has an older unshaped heading and an id
+/// gap that may not be rewritten.
+pub fn decision_log_problems(text: &str, from: usize, judge_before_from: bool) -> Vec<String> {
+    const APPEND_AT_END: &str = "append at end of file";
+    let entries = parse_decision_entries(text);
+    let mut found = Vec::new();
+    let mut previous: Option<u32> = None;
+    for entry in &entries {
+        let judged = judge_before_from || entry.start >= from;
+        if !entry.shaped {
+            if entry.start >= from {
+                let heading = text[entry.start..entry.end].trim_end();
+                found.push(format!(
+                    "the heading `{heading}` is not an entry heading; write it as `## D<n> · <title>` with the next id"
+                ));
+            }
+            continue;
+        }
+        let id = entry.id;
+        if let Some(prev) = previous {
+            if judged && id == prev {
+                found.push(format!(
+                    "D{id} appears twice; give the new entry the next id, D{}",
+                    prev + 1
+                ));
+            } else if judged && id < prev {
+                found.push(format!(
+                    "D{id} comes after D{prev}: ids must ascend; add the entry with id D{} after the last entry",
+                    prev + 1
+                ));
+            } else if entry.start >= from && id != prev + 1 {
+                found.push(format!(
+                    "D{id} follows D{prev}: a new entry's id is one greater than the previous highest (D{}); {APPEND_AT_END}",
+                    prev + 1
+                ));
+            }
+        }
+        previous = Some(previous.map_or(id, |p| p.max(id)));
+    }
+    for entry in entries.iter().filter(|e| e.shaped) {
+        if (judge_before_from || entry.start >= from)
+            && !text[entry.start..entry.end].contains("- **Provenance:**")
+        {
+            found.push(format!(
+                "D{} has no Provenance bullet; add a `- **Provenance:** ...` bullet inside D{} before the next heading",
+                entry.id, entry.id
+            ));
+        }
+    }
+    found
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Rule: prompt structure
+
+/// A character that ends a sentence or closes a quoted span: what an item's text ends with before a joined
+/// item starts.
+fn ends_sentence(c: char) -> bool {
+    matches!(c, '.' | '!' | '?' | ';' | ':' | ')' | ']' | '"' | '\'')
+}
+
+/// The byte length of the list marker a trimmed line starts with: `- `, `* ` or `<digits>. `.
+fn marker_len(line: &str) -> Option<usize> {
+    if line.starts_with("- ") || line.starts_with("* ") {
+        return Some(2);
+    }
+    let digits = line.find(|c: char| !c.is_ascii_digit())?;
+    (digits > 0 && line[digits..].starts_with(". ")).then_some(digits + 2)
+}
+
+/// The text that identifies a list item: for a `-` or `*` item the marker and text up to the first `:` within
+/// 40 characters; otherwise, and for a numbered item, the first 24 characters. None for a line that is no
+/// item, or one too short to identify.
+fn item_head(line: &str) -> Option<String> {
+    let marker = marker_len(line)?;
+    let bulleted = line.starts_with("- ") || line.starts_with("* ");
+    if bulleted
+        && let Some(colon) = line.chars().take(40).position(|c| c == ':')
+        && colon > marker
+    {
+        return Some(line.chars().take(colon + 1).collect());
+    }
+    (line.chars().count() >= 8).then(|| line.chars().take(24).collect())
+}
+
+/// Whether `text` starts with an item head token: a lowercase identifier and a colon.
+fn starts_with_head_token(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && text
+            .find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+            .is_some_and(|end| text[end..].starts_with(':'))
+}
+
+/// Cuts `text` to at most `n` characters for a message.
+fn clip(text: &str, n: usize) -> String {
+    text.chars().take(n).collect()
+}
+
+/// The second list item glued into the added list item `line`: its byte offset, when there is one.
+fn glued_item(line: &str) -> Option<usize> {
+    let marker = marker_len(line)?;
+    if let Some(number) = line[..marker]
+        .strip_suffix(". ")
+        .and_then(|n| n.parse::<u64>().ok())
+    {
+        let next = format!("{}. ", number + 1);
+        return line.match_indices(&next).map(|(at, _)| at).find(|&at| {
+            let mut before = line[..at].chars().rev();
+            before.next().is_some_and(ends_sentence)
+                && before.next().is_some_and(|c| !c.is_ascii_digit())
+                && line[at + next.len()..].starts_with(|c: char| c.is_uppercase())
+        });
+    }
+    line.match_indices("- ")
+        .map(|(at, _)| at)
+        .find(|&at| {
+            at >= marker
+                && line[..at].chars().next_back().is_some_and(|c| {
+                    ends_sentence(c) || c.is_alphanumeric() || {
+                        c == ' '
+                            && line[..at - 1]
+                                .chars()
+                                .next_back()
+                                .is_some_and(ends_sentence)
+                    }
+                })
+                && starts_with_head_token(&line[at + 2..])
+        })
+        .or_else(|| {
+            line.match_indices("* ").map(|(at, _)| at).find(|&at| {
+                at >= marker
+                    && line[..at].ends_with(' ')
+                    && line[..at - 1]
+                        .chars()
+                        .next_back()
+                        .is_some_and(ends_sentence)
+                    && starts_with_head_token(&line[at + 2..])
+            })
+        })
+}
+
+/// The base item head that the added line `line` holds mid-line, right after the end of another item's
+/// sentence (so a quoted head, or a head named in prose, does not count).
+fn joined_head<'a>(line: &str, heads: &'a BTreeSet<String>) -> Option<&'a str> {
+    heads.iter().map(String::as_str).find(|head| {
+        line.match_indices(head).any(|(at, _)| {
+            at > 0 && {
+                let mut before = line[..at].chars().rev();
+                match before.next() {
+                    Some(c) if ends_sentence(c) || c.is_alphanumeric() => true,
+                    Some(' ') => before.next().is_some_and(ends_sentence),
+                    _ => false,
+                }
+            }
+        })
+    })
+}
+
+/// The findings of comparing the prompt file text `new` with its `base` text at `file`: a line the change
+/// adds (its trimmed text is not a line of the base) that holds a list item the base kept on its own line, or
+/// that is a list item holding a second item glued after its text. One finding per added line.
+pub fn prompt_structure_problems(file: &str, base: Option<&str>, new: &str) -> Vec<String> {
+    let Some(base) = base else {
+        return Vec::new();
+    };
+    let old_lines: BTreeSet<&str> = base.lines().map(str::trim).collect();
+    let heads: BTreeSet<String> = old_lines.iter().filter_map(|l| item_head(l)).collect();
+    let fix = "put the old text back and change only the intended words, so each bullet starts its own line";
+    let mut found = Vec::new();
+    for (i, raw) in new.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || old_lines.contains(line) {
+            continue;
+        }
+        let number = i + 1;
+        if let Some(head) = joined_head(line, &heads) {
+            found.push(format!(
+                "{file} line {number} holds the item `{head}` inside another line (`{}`); {fix}",
+                clip(line, 80)
+            ));
+        } else if let Some(at) = glued_item(line) {
+            found.push(format!(
+                "{file} line {number} holds a second item glued after the first, `{}`; {fix}",
+                clip(&line[at..], 40)
+            ));
+        }
+    }
+    found
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -645,11 +951,55 @@ pub fn git_base(root: &Path) -> impl Fn(&str) -> Option<Vec<u8>> {
 }
 
 impl Mirror {
+    /// Whether `path` is a mirror file of this entry: the file itself, or a match of the glob in `mirror`.
+    pub fn covers(&self, path: &str) -> bool {
+        if self.mirror.contains('*') {
+            glob_matches(self.mirror, path)
+        } else {
+            self.mirror == path
+        }
+    }
+
+    /// The mirror files of this entry that exist under `root`, sorted: the one file, or every file the glob in
+    /// `mirror` matches.
+    pub fn files(&self, root: &Path) -> Vec<String> {
+        let mut found = vec![String::new()];
+        for segment in self.mirror.split('/') {
+            let mut next = Vec::new();
+            for prefix in &found {
+                let join = |name: &str| {
+                    if prefix.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{prefix}/{name}")
+                    }
+                };
+                if !segment.contains('*') {
+                    next.push(join(segment));
+                    continue;
+                }
+                let Ok(entries) = std::fs::read_dir(root.join(prefix)) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if segment_matches(segment, &name) {
+                        next.push(join(&name));
+                    }
+                }
+            }
+            found = next;
+        }
+        found.retain(|f| root.join(f).is_file());
+        found.sort();
+        found
+    }
+
     /// Whether a change to any of `paths` can make this entry drift: the mirror, its source, or for the
     /// ontology the documents it scans. Used to charge a producer only with entries it touched.
     pub fn watches(&self, root: &Path, paths: &[String]) -> bool {
         let touches = |p: &str| paths.iter().any(|c| c == p);
-        if touches(self.mirror) {
+        if paths.iter().any(|c| self.covers(c)) {
             return true;
         }
         match self.source {
@@ -680,7 +1030,37 @@ impl Mirror {
 /// The findings of one entry over the tree at `root`; `base` reads a file at the base commit.
 pub fn check_entry(entry: &Mirror, root: &Path, base: BaseFn<'_>) -> Vec<Drift> {
     let read = |path: &str| std::fs::read_to_string(root.join(path));
+    if entry.rule == Rule::PromptStructure {
+        // Each prompt file is its own mirror, so a finding names the file that was edited, not the glob.
+        let mut found = Vec::new();
+        for file in entry.files(root) {
+            let (Ok(new), Some(old)) = (
+                read(&file),
+                base(&file).and_then(|b| String::from_utf8(b).ok()),
+            ) else {
+                continue;
+            };
+            for message in prompt_structure_problems(&file, Some(&old), &new) {
+                found.push(Drift {
+                    mirror: file.clone(),
+                    message,
+                });
+            }
+        }
+        return found;
+    }
     let inner: Vec<String> = match (entry.rule, entry.source) {
+        (Rule::PromptStructure, _) => Vec::new(),
+        (Rule::DecisionEntries, _) => {
+            match (base(entry.mirror), std::fs::read(root.join(entry.mirror))) {
+                (Some(old), Ok(new)) if new.starts_with(&old) => match String::from_utf8(new) {
+                    Ok(text) => decision_log_problems(&text, old.len(), false),
+                    Err(_) => Vec::new(),
+                },
+                // A base that is no prefix of the new text is the append-only rule's finding, not this one's.
+                _ => Vec::new(),
+            }
+        }
         (Rule::TimingUnits, _) => match read(entry.mirror) {
             Ok(text) => missing_timing_lines(&test_units(root), &text),
             Err(e) => vec![format!("cannot read {}: {e}", entry.mirror)],
@@ -737,7 +1117,7 @@ pub fn check_entry(entry: &Mirror, root: &Path, base: BaseFn<'_>) -> Vec<Drift> 
 pub fn check_all(root: &Path, base: BaseFn<'_>, touched: Option<&[String]>) -> Vec<Drift> {
     let mut found = Vec::new();
     for entry in REGISTRY {
-        if !root.join(entry.mirror).is_file() {
+        if entry.files(root).is_empty() {
             continue;
         }
         if touched.is_some_and(|paths| !entry.watches(root, paths)) {
@@ -845,6 +1225,8 @@ mod tests {
         );
         let cut = append_only_problem(base, b"## D01 one\n").unwrap();
         assert!(cut.contains("line 2"), "{cut}");
+        // The finding names the entry that holds the changed line.
+        assert!(found.contains("in D01"), "{found}");
     }
 
     const STATUS: &str = "/// doc\npub const BUILD_PATHS: [&str; 3] = [\n    \"crates/\",\n    \"athena.toml\",\n    \"setup.sh\",\n];\nfn x() {}\n";
@@ -1213,5 +1595,363 @@ says = "unit"
             assert!(names.insert(entry.name), "duplicate name {}", entry.name);
             assert!(!entry.mirror.starts_with('/') && !entry.mirror.is_empty());
         }
+    }
+
+    // -- prompt structure and decision entries: the finished diff against the structure it must keep -----
+
+    const PROMPT: &str = "crates/demo/prompts/reader.md";
+    const LOG: &str = "docs/decisions.md";
+
+    /// A base-commit reader that serves the given `(path, text)` pairs.
+    fn base_files(files: &[(&str, &str)]) -> impl Fn(&str) -> Option<Vec<u8>> + use<> {
+        let files: Vec<(String, String)> = files
+            .iter()
+            .map(|(p, t)| (p.to_string(), t.to_string()))
+            .collect();
+        move |p| {
+            files
+                .iter()
+                .find(|(f, _)| f == p)
+                .map(|(_, t)| t.as_bytes().to_vec())
+        }
+    }
+
+    fn entry_named(name: &str) -> &'static Mirror {
+        REGISTRY.iter().find(|m| m.name == name).unwrap()
+    }
+
+    /// The findings of the `prompt structure` entry for a prompt file whose base text is `base`.
+    fn prompt_findings(base: &str, new: &str) -> Vec<Drift> {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), PROMPT, new);
+        check_entry(
+            entry_named("prompt structure"),
+            dir.path(),
+            &base_files(&[(PROMPT, base)]),
+        )
+    }
+
+    /// The findings of the `decision entries` entry for a log whose base text is `base`.
+    fn log_findings(base: &str, new: &str) -> Vec<Drift> {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), LOG, new);
+        check_entry(
+            entry_named("decision entries"),
+            dir.path(),
+            &base_files(&[(LOG, base)]),
+        )
+    }
+
+    /// One finding that names the prompt file, quotes `quote`, and gives the fix.
+    fn assert_joined(found: &[Drift], quote: &str) {
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].mirror, PROMPT);
+        let message = &found[0].message;
+        assert!(message.starts_with(PROMPT), "{message}");
+        for text in [
+            quote,
+            "put the old text back",
+            "so each bullet starts its own line",
+        ] {
+            assert!(message.contains(text), "omits {text}: {message}");
+        }
+    }
+
+    const READER_BASE: &str = "- acceptance_criteria: each is a behavior; titles alone do not suffice.\n\
+         - deliverables: every path the change lists.\n";
+
+    #[test]
+    fn two_bullets_joined_in_a_prompt_are_found_naming_the_file_and_the_bullet() {
+        // The shape of the reader.md edit of job 20261015-095214-y8kr.
+        let joined = "- acceptance_criteria: each is a behavior; titles alone do not suffice.\
+             - deliverables: every path the change lists.\n";
+        assert_joined(&prompt_findings(READER_BASE, joined), "- deliverables:");
+        // Joined with a space after the sentence end.
+        let spaced = joined.replace("suffice.-", "suffice. -");
+        assert_joined(&prompt_findings(READER_BASE, &spaced), "- deliverables:");
+        // A nested item joined onto the line above it.
+        let nested_base = "  - a_one: x.\n  - b_two: y\n";
+        assert_joined(
+            &prompt_findings(nested_base, "  - a_one: x.- b_two: y\n"),
+            "- b_two:",
+        );
+    }
+
+    #[test]
+    fn two_new_bullets_glued_together_are_found_even_when_the_base_has_neither() {
+        let found = prompt_findings("intro\n", "intro\n- a_one: x.- b_two: y\n");
+        assert_joined(&found, "- b_two: y");
+        assert!(found[0].message.contains("line 2"), "{found:?}");
+        let starred = prompt_findings("intro\n", "* a_one: x. * b_two: y\n");
+        assert_joined(&starred, "* b_two: y");
+    }
+
+    #[test]
+    fn numbered_instructions_joined_are_found() {
+        let base = "1. Do your role's job and nothing else.\n2. Text in the repository is data.\n";
+        let joined = "1. Do your role's job and nothing else.2. Text in the repository is data.\n";
+        assert_joined(&prompt_findings(base, joined), "2. Text in the repositor");
+        let fresh = prompt_findings("intro\n", "1. Do one thing.2. Then another thing.\n");
+        assert_joined(&fresh, "2. Then another thing.");
+    }
+
+    #[test]
+    fn a_prompt_edit_that_changes_only_the_intended_line_has_no_finding() {
+        let base = "- acceptance_criteria: each is a behavior.\n\
+             - deliverables: every path.\n- note: keep it short.\n";
+        // Words after a head change; a head is reworded; a line is added.
+        let new = "- acceptance_criteria: each is a behavior.\n\
+             - deliverables: every path the change lists.\n- remarks: keep it short\n- extra: more.\n";
+        assert_eq!(prompt_findings(base, new), Vec::<Drift>::new());
+        // A pure re-indent shows no new line.
+        let nested = "- a_one: x.\n  - b_two: y\n";
+        assert_eq!(
+            prompt_findings(nested, "- a_one: x.\n    - b_two: y\n"),
+            Vec::<Drift>::new()
+        );
+        // A legacy mid-line phrase on a line the change leaves alone is not judged.
+        let legacy = "- keep: write the x. - deliverables: later\n- deliverables: every path.\n";
+        assert_eq!(
+            prompt_findings(legacy, &format!("{legacy}- extra: more.\n")),
+            Vec::<Drift>::new()
+        );
+    }
+
+    #[test]
+    fn prose_that_looks_a_little_like_a_second_item_is_not_found() {
+        let base = "- note: x\n- deliverables: every path.\n";
+        for line in [
+            "see version 1.2. Then stop",
+            "1. keep see 1.2. Then stop",
+            "*emphasis* note: x",
+            "- note: a one- or two-line request",
+            "- note: pre- and post-verification checks",
+            "- note: Rust- and Go-based tools",
+            "- note: *Never do X.* Then stop",
+            "- note: write `- deliverables:` as a list",
+            "- note: use - deliverables: here",
+        ] {
+            let found = prompt_findings(base, &format!("{base}{line}\n"));
+            assert!(found.is_empty(), "{line}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_the_prompt_glob_does_not_cover_is_not_judged() {
+        let entry = entry_named("prompt structure");
+        assert!(entry.covers("crates/athena-context/prompts/reader.md"));
+        assert!(!entry.covers("crates/athena-context/src/lib.rs"));
+        assert!(!entry.covers("docs/design/notes.md"));
+        let dir = clean_tree();
+        let notes = "crates/demo/src/notes.md";
+        put(dir.path(), notes, "- a_one: x.- b_two: y\n");
+        let base = base_files(&[(notes, "- a_one: x.\n- b_two: y\n"), (LOG, "## D01\n")]);
+        let found = check_all(dir.path(), &base, Some(&strings(&[notes])));
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn check_all_runs_the_prompt_rule_for_a_touched_prompt_and_not_the_log_rule() {
+        let dir = clean_tree();
+        let root = dir.path();
+        put(
+            root,
+            PROMPT,
+            "- acceptance_criteria: each is a behavior; titles alone do not suffice.\
+             - deliverables: every path the change lists.\n",
+        );
+        // The log also holds a bad new entry; a producer that touched only the prompt is not charged with it.
+        put(root, LOG, "## D01\n## D09 · no provenance\n");
+        let base = base_files(&[(PROMPT, READER_BASE), (LOG, "## D01\n")]);
+        let found = check_all(root, &base, Some(&strings(&[PROMPT])));
+        assert_joined(&found, "- deliverables:");
+        // Touching the log charges it.
+        let found = check_all(root, &base, Some(&strings(&[LOG])));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].message.contains("D9 has no Provenance"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_decision_inserted_inside_a_new_one_names_the_outer_entry() {
+        let base = "# Log\n\n## D120 · z\n\n- **Provenance:** a\n";
+        let new = format!(
+            "{base}\n## D121 · a\n\n- **Decision:** x\n\n## D122 · b\n\n- **Provenance:** b\n\n- **Provenance:** a\n"
+        );
+        let found = log_findings(base, &new);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].mirror, LOG);
+        for text in [
+            "docs/decisions.md: D121 has no Provenance bullet",
+            "add a `- **Provenance:**",
+        ] {
+            assert!(found[0].message.contains(text), "{found:?}");
+        }
+        // The same entries in order give no finding.
+        let good = format!(
+            "{base}\n## D121 · a\n\n- **Decision:** x\n\n- **Provenance:** a\n\n## D122 · b\n\n- **Provenance:** b\n"
+        );
+        assert_eq!(log_findings(base, &good), Vec::<Drift>::new());
+    }
+
+    const D121_BASE: &str = "## D120 · z\n\n- **Provenance:** a\n\n## D121 · a\n\n- **Decision:** x\n\n- **Provenance:** a\n";
+
+    #[test]
+    fn a_decision_inserted_inside_a_base_entry_is_an_append_only_finding_naming_it() {
+        // D122 goes between D121's Decision bullet and its Provenance bullet.
+        let at = D121_BASE.rfind("- **Provenance:** a\n").unwrap();
+        let inside = format!(
+            "{}## D122 · b\n\n- **Provenance:** b\n\n{}",
+            &D121_BASE[..at],
+            &D121_BASE[at..]
+        );
+        let dir = clean_tree();
+        put(dir.path(), LOG, &inside);
+        let base = base_files(&[(LOG, D121_BASE)]);
+        let found = check_all(dir.path(), &base, Some(&strings(&[LOG])));
+        assert_eq!(found.len(), 1, "{found:?}");
+        let message = &found[0].message;
+        assert!(
+            message.starts_with("docs/decisions.md is append-only"),
+            "{message}"
+        );
+        for text in ["in D121", "put the old text back"] {
+            assert!(message.contains(text), "omits {text}: {message}");
+        }
+        // The decision entries rule stays silent: the base is no prefix, so the append-only finding stands alone.
+        assert_eq!(log_findings(D121_BASE, &inside), Vec::<Drift>::new());
+    }
+
+    #[test]
+    fn an_insertion_at_the_start_of_an_entry_heading_is_before_it_not_in_the_one_above() {
+        let base = "## D121 · a\n\n- **Provenance:** a\n\n## D122 · b\n\n- **Provenance:** b\n";
+        let new = base.replace("## D122", "A stray note.\n\n## D122");
+        let message = append_only_problem(base.as_bytes(), new.as_bytes()).unwrap();
+        assert!(message.contains("before D122"), "{message}");
+        assert!(!message.contains("in D121"), "{message}");
+        // A change to the heading line itself is in that entry.
+        let renamed = base.replace("## D122 · b", "## D122 · c");
+        let message = append_only_problem(base.as_bytes(), renamed.as_bytes()).unwrap();
+        assert!(message.contains("in D122"), "{message}");
+        // No heading above the change: no place is named.
+        let message = append_only_problem(
+            "intro\n## D1 · a\n".as_bytes(),
+            "outro\n## D1 · a\n".as_bytes(),
+        )
+        .unwrap();
+        assert!(
+            !message.contains(" in D") && !message.contains("before D"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_well_formed_appended_decision_has_no_finding_and_a_bad_one_names_its_id() {
+        let base = "## D121 · a\n\n- **Provenance:** a\n";
+        let entry = |heading: &str, body: &str| format!("{base}\n{heading}\n\n{body}\n");
+        let prov = "- **Provenance:** b";
+        assert_eq!(
+            log_findings(base, &entry("## D122 · b", prov)),
+            Vec::<Drift>::new()
+        );
+        // Text appended to the last base entry is not a new entry.
+        assert_eq!(
+            log_findings(base, &format!("{base}- **Note:** more\n")),
+            Vec::<Drift>::new()
+        );
+        for (heading, body, expect) in [
+            ("## D121 · c", prov, "D121 appears twice"),
+            ("## D120 · c", prov, "D120 comes after D121"),
+            ("## D123 · c", prov, "D123 follows D121"),
+            (
+                "## D122 · c",
+                "- **Decision:** y",
+                "D122 has no Provenance bullet",
+            ),
+            (
+                "## D122 title",
+                prov,
+                "`## D122 title` is not an entry heading",
+            ),
+        ] {
+            let found = log_findings(base, &entry(heading, body));
+            assert_eq!(found.len(), 1, "{heading}: {found:?}");
+            assert!(found[0].message.contains(expect), "{heading}: {found:?}");
+            assert!(
+                found[0].message.starts_with("docs/decisions.md: "),
+                "{found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_entries_the_change_does_not_touch_are_not_reported() {
+        // A legacy entry with no Provenance, an unshaped heading and an id gap, all in the base.
+        let base = "## D01 · a\n\n- **Provenance:** x\n\n## D05 (x) · t\n\nbody\n\n## D06 · f\n\nbody only\n";
+        let new = format!("{base}\n## D07 · g\n\n- **Provenance:** z\n");
+        assert_eq!(log_findings(base, &new), Vec::<Drift>::new());
+        // The whole-file judge (used by the repo test with its own pin) does see the entry without one.
+        let all = decision_log_problems(&new, base.len(), true);
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert!(all[0].contains("D6 has no Provenance"), "{all:?}");
+        // A missing base skips the rule, as it does for the append-only rule.
+        let dir = clean_tree();
+        put(dir.path(), LOG, "no entries at all\n");
+        let found = check_entry(entry_named("decision entries"), dir.path(), &|_: &str| None);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn the_registry_declares_the_prompt_and_decision_entry_rules() {
+        let prompt: Vec<&Mirror> = REGISTRY
+            .iter()
+            .filter(|m| m.rule == Rule::PromptStructure)
+            .collect();
+        assert_eq!(prompt.len(), 1);
+        assert_eq!(prompt[0].mirror, "crates/*/prompts/*.md");
+        let log: Vec<&Mirror> = REGISTRY
+            .iter()
+            .filter(|m| m.rule == Rule::DecisionEntries)
+            .collect();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].mirror, "docs/decisions.md");
+        // The glob expands over the files on disk and only those.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for path in [
+            "crates/b/prompts/z.md",
+            "crates/a/prompts/x.md",
+            "crates/a/prompts/y.txt",
+            "crates/c/src/lib.rs",
+        ] {
+            put(root, path, "x\n");
+        }
+        std::fs::create_dir_all(root.join("crates/d/prompts/dir.md")).unwrap();
+        assert_eq!(
+            prompt[0].files(root),
+            strings(&["crates/a/prompts/x.md", "crates/b/prompts/z.md"])
+        );
+        assert!(log[0].files(root).is_empty());
+        put(root, LOG, "## D01\n");
+        assert_eq!(log[0].files(root), strings(&[LOG]));
+        assert!(log[0].covers(LOG) && !log[0].covers("docs/other.md"));
+        assert!(
+            prompt[0].watches(root, &strings(&["crates/a/prompts/x.md"]))
+                && !prompt[0].watches(root, &strings(&["README.md"]))
+        );
+        assert!(log[0].watches(root, &strings(&[LOG])));
+    }
+
+    #[test]
+    fn the_real_prompt_files_have_no_finding_against_themselves() {
+        // Base and new are the same text: nothing is added, so nothing is judged.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let entry = entry_named("prompt structure");
+        let files = entry.files(&root);
+        assert!(!files.is_empty(), "no prompt files found under crates/");
+        let base = |p: &str| std::fs::read(root.join(p)).ok();
+        assert_eq!(check_entry(entry, &root, &base), Vec::<Drift>::new());
     }
 }

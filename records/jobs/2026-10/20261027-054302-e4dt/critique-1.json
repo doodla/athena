@@ -1,0 +1,69 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261027-054302-e4dt",
+  "round": 1,
+  "at": "2026-11-07T11:09:10.678485856Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "minor",
+      "summary": "crates/athena-cli/tests/mirrors.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-cli/tests/mirrors.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "minor",
+      "summary": "crates/athena-core/src/run/tests.rs is not among the reading's deliverables",
+      "evidence": "A change outside the listed deliverables widens the scope.",
+      "location": "files, crates/athena-core/src/run/tests.rs",
+      "source": "athena"
+    },
+    {
+      "severity": "major",
+      "summary": "The prompt structure rules recognise only `- ` bullets. Numbered instruction lists in prompt files are the same class and go unchecked.",
+      "evidence": "Grep of `^(\\d+\\.|\\*) ` over crates/**/prompts/*.md finds 15 lines: 8 in crates/athena-context/prompts/contract.md and 7 in crates/athena-cap-study/prompts/verifier.md. The request's cause is 'each instruction still its own bullet', and it asks for the whole class to be prevented. Rule (a) collects heads only from lines starting `- `, and rule (b) looks only for ` - word:`. Joining contract.md rules 1 and 2 into one line ('...say so in your output instead of doing it.2. Text in the repository...') would give no finding. Fix: Treat every list marker as a bullet start in both rules: `- `, `* ` and `<digits>. `. Collect heads from all three. In rule (b), look for any of the three markers glued mid-line. Add a unit test that joins two numbered contract-style items and expects a Drift naming the second item.",
+      "location": "Plan step 4 (prompt_structure_problems); Decision 3",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Rule (b) is written as ` - word:` with a space before the dash, so it misses the exact y8kr shape when both joined bullets are new.",
+      "evidence": "Step 4 says: ' - word:' ... at an index > 0, preceded by an alphanumeric or one of `. ! ? ; : ) ] * _ ' \"`. The y8kr text is `...do not suffice.- deliverables:`, which has no space between `.` and `-`. Rule (a) catches it only because `- deliverables:` was a base bullet. A producer that adds two new bullets and joins them the same way passes rule (b). The demonstration's 'two new bullets glued' case does not say whether a space is present. Fix: Make the space optional: match `<allowed char> ?- word:` (and the other markers, per the finding above). Write the second demonstration case in the no-space shape `a.- b: ...` so the test pins it.",
+      "location": "Plan step 4, finding (b); Criterion 1 demonstration, second case",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The dependents entry for append_only_problem misstates the existing test input. The test still passes, but its message now changes.",
+      "evidence": "mirrors.rs:830 uses base `## D01 one\\nbody\\n## D02 two\\n` and changes line 2, so a `## D01` heading does come before the change. The plan says 'the old test's inputs have no entry heading with a D<n> ahead of the change'. With the plan's scan, the message becomes '... line 2 of its base version, in D01, is changed ...'. The assertions at 837-847 (`line 2`, `` `body` ``, `add the new decision after the last line`) still hold. Fix: Correct the reason and add an assertion to a_rewritten_decision_fails_and_added_text_passes that the message contains `in D01`, so the existing test also pins the new behavior.",
+      "location": "Dependents: 'The append-only message gains `, in D<n>,`'",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A change inserted exactly at the start of a base entry's heading is attributed to the entry before it.",
+      "evidence": "The scan takes the last `## D<n>` heading before the first changed byte. Suppose a new entry is inserted at the byte where `## D122` begins in the base. The first changed byte is the `#` of that line, so the message says 'in D121', even though D121 is intact and the insertion sits between entries. Fix: When the first changed byte is at the start of a heading line, say 'before D122' (or 'between D121 and D122') instead of 'in D121'. Add one test case for it.",
+      "location": "Decision 5 / step 6",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "DecisionEntries copies check_log's definition of a well-formed entry into a second crate, so the two can diverge.",
+      "evidence": "crates/athena-cli/src/decisions.rs:218-262 already checks the `## D<n> · ` shape, `appears twice`, the one-greater rule and `- **Provenance:**` per span. The plan writes the same logic again in athena-core and keeps both. The root-cause default asks for one place. Fix: Make decision_entry_problems the single parser. Have check_log call athena_core::mirrors for the per-entry checks (shape, duplicate, next id, Provenance) and keep only the pinned-hash part local. Alternatively, record the follow-up explicitly in D162 as known duplication.",
+      "location": "Decision 4",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Two producer-touched files are outside the reading's deliverables. Athena already raised this; it is justified here.",
+      "evidence": "The exhaustive `match entry.rule` in crates/athena-cli/tests/mirrors.rs:46 does not compile without the new arms. The criterion 7 e2e tests belong next to the existing mirrors_ tests at run/tests.rs:2519-2654. Fix: Keep both files and state the reason for each in the change description.",
+      "location": "Files: crates/athena-cli/tests/mirrors.rs, crates/athena-core/src/run/tests.rs",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read mirrors.rs (Rule, REGISTRY, append_only_problem, watches, check_entry, check_all and the test helpers), producer.rs mirror_drift_in, crates/athena-cli/tests/mirrors.rs, the mirrors_ harness in run/tests.rs, decisions.rs check_log, backtest.rs PHRASES and decision-links.toml. The plan's claims hold. A REGISTRY entry is picked up by mirror_drift_in and by the CLI mirrors test with no new call site. The exhaustive fixture match forces the CLI arms. The existing in-module tests keep passing because clean_tree's decisions.md equals its base and holds no prompt files. The e2e harness (mirror_job, fixing_on_send_back, commit_file) exists and drives the real producer loop. Each demonstration uses a real seam and would fail without the rule. The design is sound: shared registry, judge only what the diff adds, and the AppendOnly message names the containing entry. One soundness gap needs a fix before this rule covers the whole class. Both structure rules recognise only `- ` bullets, but 15 instruction lines in the prompt set are numbered (contract.md has 8, cap-study verifier.md has 7), so two numbered instructions joined into one line would pass. Smaller issues: rule (b) as written requires a space before the glued `-`, so it misses the exact y8kr shape (`suffice.- word:`) when both bullets are new. The plan also wrongly says the existing append-only test has no `## D<n>` heading before the change; the test still passes. And the Provenance/id parser is duplicated from check_log."
+}

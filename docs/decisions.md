@@ -4502,3 +4502,42 @@ should replace those estimates with its figures.
   `governance_is_covered`), `crates/athena-core/tests/refusal_corpus.rs`, the recorded request text of jobs
   20261014-082328-g6vy, 20261014-174815-7bf8 and 20261017-173508-0wtc. Measured: the replay test, 1 of the 3 cited
   requests refused. Counted: 29 of 1045 request records hold a delivery word.
+
+## D162 · The mirror registry compares the finished diff of a prompt file and of the decision log with the structure they must keep
+
+- **Case:** Two jobs failed for one cause. In job 20261015-095214-y8kr an edit to a prompt file joined two bullets
+  into one line ("...suffice.- deliverables: ..."). In job 20261025-034452-wqp8 a new decision was inserted inside
+  the entry above it and left that entry without its Provenance bullet. Root cause: nothing in the job compared the
+  finished diff with the structure the file must keep. A prompt file is edited as free text and the decision log was
+  checked for its shape only in a test, so both breaks were found at the final verdict, a stage after the producer
+  could have fixed them.
+- **Decision:** Amends D158 in prose only: D158 says the registry has four rules, and it now has six. The new
+  rules are entries of `REGISTRY` in `crates/athena-core/src/mirrors.rs`, so the producer loop and the candidate
+  gate run them with no new call site. `PromptStructure` covers `crates/*/prompts/*.md`, each file its own mirror
+  (`Mirror::files`, `Mirror::covers`). It compares the new text with the base text and judges only lines the
+  change adds: a list item the base kept on its own line must not sit inside another line, and an added list item
+  must not hold a second item glued after its text, where an item head (`name:` or the next number) follows the
+  second marker, so hyphens in prose are not found. `DecisionEntries` judges only entries that start after the end
+  of the base, when the base is an exact prefix of the new text: a `## D<n> · ` heading, the id one greater than
+  the highest before it, and a Provenance bullet inside the entry's own text. The decision log has one definition
+  of a well-formed log, `decision_log_problems`, which the `athena-cli` log guard calls too. The append-only
+  finding now names the entry that holds the first changed line, or the entry it was inserted before. The rules
+  judge structure, not intent: the job carries no machine-readable intended edit, so a wrong word on the right
+  line is not found. Other file classes, such as the design documents, and the truth of a changelog claim are not
+  covered.
+- **Alternatives:** A check after handover in the verifier's snapshot, where a break can be excused as old: the
+  late stage is the failure. A registry entry per prompt file: a new role adds a file and nothing would notice a
+  missing entry. A second copy of the log rules in `athena-cli`: the two can diverge. A threshold on changed lines:
+  it flags honest rewrites and misses a one-line join.
+- **Tradeoff:** A prompt edit that writes a base item head right after the end of a sentence is sent back once and
+  must be reworded. The glob entry makes `Mirror::mirror` a pattern for one rule, so code that reads it as a path
+  uses `files` and `covers`. Three files outside the request's listed deliverables changed because the change
+  needs them: the `athena-cli` mirrors test (an exhaustive match on the rule), the producer-step tests in
+  `crates/athena-core/src/run/tests.rs`, and `crates/athena-cli/src/decisions.rs` (the single log definition).
+- **Reversal cost:** Low. Remove the two entries, the two rule variants and their functions, and restore the log
+  guard's own parse. Nothing recorded depends on them.
+- **Provenance:** Stated: the two introspections and the failure class. Read: `crates/athena-core/src/mirrors.rs`,
+  `crates/athena-core/src/run/producer.rs`, `crates/athena-cli/src/decisions.rs`,
+  `crates/athena-cli/tests/mirrors.rs`, D158, D160. Measured: `cargo test -p athena-core mirrors` on the shapes of
+  both jobs, joined bullets and a decision inside another, and on prose that must not be found. Not measured: how
+  many future edits break structure in a way these rules cannot see.

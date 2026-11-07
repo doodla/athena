@@ -1,0 +1,417 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261027-054302-e4dt",
+  "round": 3,
+  "at": "2026-11-07T11:15:30.893383382Z",
+  "invocation_seq": 6,
+  "approach": "Root cause: the pre-verification mirror registry (crates/athena-core/src/mirrors.rs, run at the producer step by mirror_drift_in in run/producer.rs:75 through check_all) never compared a finished prompt file or new decision-log entry with the structure it must keep. Job 20261015-095214-y8kr (two bullets joined in reader.md) and job 20261025-034452-wqp8 (D122 inserted inside D121) were found only at the final verdict. Fix it in the registry, so the producer loop and the candidate gate run it with no new call site. Add two Rule variants and two REGISTRY entries. (1) `PromptStructure`, mirror glob `crates/*/prompts/*.md`, source GitHead, via new `Mirror::files` and `Mirror::covers`. Per file it compares trimmed base and new lines and judges only new lines absent from the base. Rule (a): a base list-item head that now sits mid-line (after non-whitespace text) in a new line, with a guarded preceding character. Rule (b): a new line that is itself a list item and holds a second list marker glued after text, where the marker is followed by a real item head (`<lowercase_token>:` for `-`/`*`, or the next number for numbered items). Revision change: rule (b) now requires an item head after the marker, so ordinary prose such as `one- or two-line`, `pre- and post-verification` and `*Never do X.* Then` is not flagged. (2) `DecisionEntries`, mirror docs/decisions.md, source GitHead. When the base is a byte prefix of the new text it judges only entries and headings that start at or after the end of the base: heading shape, no repeated or descending id, id one greater, and a Provenance bullet inside the entry's own span. One function pair in mirrors.rs (`parse_decision_entries`, `decision_log_problems`) is also called by the athena-cli `check_log`, so the log has a single definition. `append_only_problem` also names the entry holding the first changed base line (`in D121`), or says `before D122` when the change starts at a heading. The rules judge structure, not intent: the job carries no machine-readable intended edit. Prompt files are not edited.",
+  "decisions": [
+    {
+      "choice": "Declare the checks as REGISTRY entries (new Rule variants) in mirrors.rs.",
+      "reason": "mirror_drift_in (run/producer.rs:75) already calls check_all with the producer's changed paths before the verifier and sends a drift back once through append_mirror_drift. The athena-cli `mirrors` test runs every entry unfiltered over the real tree. An entry needs no new call site and covers the whole class of prompt and decision-log files (criterion 4).",
+      "rejected": [
+        {
+          "option": "A new check in run/checks.rs or a hook in run_check",
+          "why": "It runs after handover in the verifier's snapshot, where a break can be excused as pre-existing; D158 rejected this for the same reason."
+        },
+        {
+          "option": "Only a test in athena-cli",
+          "why": "That is the late stage where both failures were found."
+        },
+        {
+          "option": "A new call site in producer.rs",
+          "why": "Duplicates mirror_drift_in and leaves the candidate gate unprotected."
+        }
+      ]
+    },
+    {
+      "choice": "Allow a glob in Mirror.mirror: add `Mirror::files(root)` (expands `*` per path segment with std::fs::read_dir and the existing segment_matches at mirrors.rs:619; otherwise the one file if it is a file) and `Mirror::covers(path)` (glob_matches at mirrors.rs:609 for a pattern, else equality). check_all (mirrors.rs:737, which today tests `root.join(entry.mirror).is_file()`) skips an entry with no files; `watches` (mirrors.rs:650) uses `covers`. PromptStructure is handled before the inner-message match in check_entry (mirrors.rs:681) and builds each Drift with the concrete file as `mirror`, because check_entry otherwise stamps `entry.mirror` and would prefix the glob.",
+      "reason": "A prompt file is its own mirror and roles are added over time; a fixed list would go stale and registration is prose-only. Findings must name the edited file.",
+      "rejected": [
+        {
+          "option": "One REGISTRY entry per prompt file",
+          "why": "New roles add prompt files and nothing would notice a missing entry."
+        },
+        {
+          "option": "Source::Globs with a placeholder mirror",
+          "why": "The finding must name the edited file, and `watches` charges a producer only for entries it touched."
+        }
+      ]
+    },
+    {
+      "choice": "Prompt rules work on lines with leading whitespace trimmed. A list marker is `- `, `* ` or `<digits>. ` at the start of the trimmed line. 'Mid-line' means at an index above 0 of the trimmed line, that is after non-whitespace text. 'New line' means its trimmed text is not among the trimmed base lines. Heads: for a `-`/`*` item, the marker plus text up to and including the first `:` within 40 chars; otherwise, and for numbered items, the first 24 chars of the trimmed line when it has at least 8. Answers finding 6: indentation changes alone make no new line and no finding; a joined nested item is found.",
+      "reason": "Markdown lists nest by indentation; the cause is 'each instruction still its own bullet'. Contract.md and the cap-study verifier.md hold 15 numbered lines (read), and many prompt bullets have no colon head (read: critic.md, verifier.md, producer.md), so the head forms cover them.",
+      "rejected": [
+        {
+          "option": "Dash bullets only",
+          "why": "Leaves numbered instruction lists unchecked, the same class."
+        },
+        {
+          "option": "Compare untrimmed lines",
+          "why": "A pure re-indent would show as a changed line and could be reported as joined."
+        }
+      ]
+    },
+    {
+      "choice": "Rule (a) (a base head found mid-line in a new line) requires a guarded character before the matched marker: a sentence-end char (`. ! ? ; : ) ] \" '`) directly before it, or an alphanumeric char directly before it (glued), or a space whose preceding char is a sentence-end char. A backtick, a quote opener or a space after a plain word does not qualify. Answers finding 5: the Risks line and the decisions now say the same thing. A new line that quotes a base head (`write `- deliverables:` as a list`, or `use - deliverables: here`) is not flagged.",
+      "reason": "A joined item always follows the end of the previous item's sentence, glued or spaced; a quoted example does not.",
+      "rejected": [
+        {
+          "option": "No guard before the head",
+          "why": "Any prose that quotes a base head would be sent back."
+        }
+      ]
+    },
+    {
+      "choice": "Rule (b) fires only when the new line is itself a list item (starts with a marker after trim) and holds a second marker that is followed by an item head. For `-`: the marker is `-` plus a space, preceded directly by an alphanumeric or sentence-end char (glued, which covers the y8kr shape `suffice.- deliverables:`) or by a space after a sentence-end char; the text after it must start with a head token `[a-z][a-z0-9_]*:`. For `*`: only `<sentence-end> * <head token>:` (a space before the star, none after a word). For a numbered line `N. ...`: the glued marker must be exactly `N+1. ` preceded directly by a sentence-end char that is not itself preceded by a digit, followed by an uppercase letter. Answers finding 4: `one- or two-line notes`, `pre- and post-verification`, `Rust- and Go-based` (the char after `- ` is a word with no colon after it), `*Never do X.* Then` (a star glued after the sentence-end char, no head token), `*emphasis* note:` (star preceded by a letter), `see 1.2. Then` (the `.` is preceded by a digit; not N+1 either) are all not flagged.",
+      "reason": "Requiring the item head after the marker is the discriminator the critic proposed. The two real shapes still match: `suffice.- deliverables:` and `else.2. Text`. The tests pin both the catches and the prose.",
+      "rejected": [
+        {
+          "option": "Flag any glued or spaced ` - word` mid-line",
+          "why": "Flags suspended hyphens (README.md:3 'one- or two-line') and em-dash prose."
+        },
+        {
+          "option": "Allow any head up to a colon within 40 chars after the marker",
+          "why": "` or two-line notes:` would qualify; the head token must be a single lowercase identifier."
+        }
+      ]
+    },
+    {
+      "choice": "Judge only what the diff adds. Prompt rules (a) and (b) look at new lines not in the base. The log rule looks at entries and headings starting at or after the end of the base, only when the base is an exact byte prefix of the new text; when it is not, AppendOnly already reports, so findings are not doubled.",
+      "reason": "The job holds no machine-readable intended edit, so intent cannot be compared; the broken structures are checkable. Legacy text must not newly fail (the real log has an unshaped heading at D145, comment at crates/athena-cli/src/decisions.rs ~216).",
+      "rejected": [
+        {
+          "option": "Make the producer declare the intended lines",
+          "why": "Needs a new plan or record field and a brief change; out of scope and the briefs have no token headroom."
+        },
+        {
+          "option": "Judge the whole file every run",
+          "why": "Legacy lines and entries would fail and charge the producer with drift it did not make."
+        },
+        {
+          "option": "A changed-line-count threshold",
+          "why": "Arbitrary: it flags legitimate rewrites and misses a one-line join."
+        }
+      ]
+    },
+    {
+      "choice": "One parser for the decision log: `parse_decision_entries(text) -> Vec<DecisionEntry{id, start, end, shaped}>` and `decision_log_problems(text, from, judge_before_from) -> Vec<String>` in mirrors.rs. athena-cli `check_log` (crates/athena-cli/src/decisions.rs ~218) keeps the pinned-hash/length part and the 'no decision entries found' test, and calls these for ids, shape and Provenance, returning the first problem as Err (from = pinned_len, judge_before_from = true). Message wording keeps the old fragments: `D<n> appears twice`, `D<n> comes after D<p>: ids must ascend`, `D<n> follows D<p>: a new entry's id is one greater than the previous highest (D<p+1>); append at end of file` (still ending so), `D<n> has no Provenance bullet`, each with a fix clause added after the old text (except the next-id one). Unshaped `## D<digits>` headings are reported only at or after `from`, and do not split entry spans.",
+      "reason": "One definition of a well-formed log; the two definitions cannot diverge. athena-cli depends on athena-core (Cargo.toml line 19) and `pub mod mirrors` is exported (lib.rs:101). The existing check_log tests keep their asserted fragments.",
+      "rejected": [
+        {
+          "option": "Keep a second copy in athena-cli",
+          "why": "The two definitions can diverge, which is the kind of cause this change removes."
+        },
+        {
+          "option": "Move all of check_log including the pin into mirrors.rs",
+          "why": "The pinned hash is a test-time constant of the committed history; it stays local."
+        }
+      ]
+    },
+    {
+      "choice": "append_only_problem names the containing entry: `line N of its base version, in D<n>, is changed or removed (...)`, using the last `## D<digits>` heading line before the first changed byte; when the first changed byte is the first byte of a base line that is a `## D<digits>` heading, say `before D<n>`. Add an `in D01` assertion to a_rewritten_decision_fails_and_added_text_passes (base `## D01 one\\nbody\\n## D02 two\\n`, changed line 2).",
+      "reason": "When the base already holds D121 and D122 is inserted inside it, the base prefix breaks, so AppendOnly fires and DecisionEntries stays silent; the message must name D121. An insertion between entries must not blame the entry before it.",
+      "rejected": [
+        {
+          "option": "Make DecisionEntries also judge when the prefix is broken",
+          "why": "Double reports and meaningless offsets."
+        },
+        {
+          "option": "Always blame the last heading before the change",
+          "why": "Misattributes an insertion between entries to the intact entry before it."
+        }
+      ]
+    },
+    {
+      "choice": "Record the change as D162 stating `Amends D158 in prose only`, with one [[link]] in docs/decision-links.toml whose `line` is the line of that phrase.",
+      "reason": "D158 states that the registry has four rules; this adds two. backtest parse (crates/athena-cli/src/backtest.rs:79-81) reads every `amends`, `supersedes`, `superseded by`, and each hit must be listed. D162 follows D161 as the guard requires.",
+      "rejected": [
+        {
+          "option": "Edit D158",
+          "why": "The log is append-only."
+        },
+        {
+          "option": "No decision entry",
+          "why": "Each registry change has one (D158, D160)."
+        }
+      ]
+    },
+    {
+      "choice": "Keep three files outside the reading's deliverables (answers findings 1-3, all minor), each forced by a criterion or by the single-parser decision, all under crates/ as the brief's Files line allows: crates/athena-cli/tests/mirrors.rs, crates/athena-core/src/run/tests.rs, crates/athena-cli/src/decisions.rs. The change description and CHANGELOG state this and why.",
+      "reason": "(1) crates/athena-cli/tests/mirrors.rs has an exhaustive `match entry.rule` (line ~46) that does not compile without arms for the new variants, and it asserts `drift.mirror == entry.mirror`, false for a glob; the athena-cli test target breaks without the edit. (2) mirror_drift_in is a private fn in producer.rs with no test module (Grep: only line 75 matches), and the existing mirrors_ end-to-end tests that show the producer step sending a finding back (criterion 7) live in run/tests.rs (~2519-2654, helpers athena_source_repo at 2462 and mirror_job at 2501); the new tests need that harness. (3) decisions.rs holds the second definition of a well-formed log; leaving it would keep two definitions.",
+      "rejected": [
+        {
+          "option": "Put the producer-step tests in mirrors.rs only",
+          "why": "They would call check_all, not the producer loop, so they would not show the send-back at the producer step (criterion 7)."
+        },
+        {
+          "option": "Leave decisions.rs alone",
+          "why": "Two log definitions that can diverge."
+        },
+        {
+          "option": "Skip the cli fixture arms",
+          "why": "The athena-cli test target would not compile."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/mirrors.rs",
+      "action": "modify",
+      "purpose": "Add Rule::PromptStructure and Rule::DecisionEntries, the two REGISTRY entries, Mirror::files/covers, glob-aware check_all/watches/check_entry, prompt_structure_problems (trim, heads, rule (a) with preceding-char guard, rule (b) with item-head requirement), parse_decision_entries and decision_log_problems (single log parser), the entry name in append_only_problem, a header-comment update and unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Unreleased `### Added` entry: root cause, both job ids, the two rules and their limits, the shared log parser, why three files outside the listed deliverables changed, pointer to D162.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/producer.rs",
+      "action": "modify",
+      "purpose": "Comment changes only (about lines 71-74, 188-192, 355-356) listing prompt files and decision entries among the files checked. No logic change, no new call site.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D162 after D161 with Case, Decision (starting `Amends D158 in prose only: ...`), Alternatives, Tradeoff, Reversal cost and Provenance bullets; state the limits (intent not checked, other file classes not covered).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decision-links.toml",
+      "action": "modify",
+      "purpose": "Add one [[link]]: older D158, newer D162, status amended, line = line of the `Amends D158` phrase in the final docs/decisions.md.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "xtask/shard-timings.txt",
+      "action": "modify",
+      "purpose": "Listed deliverable but expected unchanged: no new test file is added. Edit only if a test file is created (add its line).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/decisions.rs",
+      "action": "modify",
+      "purpose": "Outside the listed deliverables (finding 1): check_log keeps the pin and 'no entries' check and calls athena_core::mirrors for shape, ids and Provenance, so the log has one definition. Existing tests stay; one test added.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/mirrors.rs",
+      "action": "modify",
+      "purpose": "Outside the listed deliverables (finding 2): the exhaustive `match entry.rule` does not compile without arms for the new variants; add clean and drifted fixtures for both and glob-aware assertions (entry.covers(&drift.mirror)).",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/run/tests.rs",
+      "action": "modify",
+      "purpose": "Outside the listed deliverables (finding 3): end-to-end mirrors_ tests showing a structural break is sent back at the producer step (criterion 7), next to the existing mirrors_ tests and their harness.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "Read mirrors.rs where touched: Rule/Mirror/REGISTRY (lines 33-121), append_only_problem (213), glob_matches/segment_matches (609-631), watches/check_entry/check_all (647-749), and the test helpers (put, clean_tree, base_of, strings). Read crates/athena-cli/tests/mirrors.rs and crates/athena-cli/src/decisions.rs ~209-266 again.",
+    "In mirrors.rs add the Rule variants PromptStructure and DecisionEntries with doc comments; update the module header (six rules; prompt files and new log entries compared by structure with the base).",
+    "Add Mirror::files(root) (a pattern with `*` expanded segment by segment with std::fs::read_dir and segment_matches, sorted; otherwise the one file when is_file) and Mirror::covers(path) (glob_matches for a pattern, else equality). Use them in check_all (skip an entry with no files) and at the top of watches.",
+    "Write prompt_structure_problems(file, base: Option<&str>, new) -> Vec<String>: trim each line; collect heads from base items (`- `, `* `, `<digits>. `); judge only new lines whose trimmed text is not among the trimmed base lines. Rule (a): a base head at index above 0 with the guarded preceding char. Rule (b): the line is a list item and holds a second marker with an item head (`-`: glued or after sentence-end+space, then `[a-z][a-z0-9_]*:`; `*`: sentence-end, space, `* `, head; numbered: exactly N+1 after a sentence-end char not preceded by a digit, then an uppercase letter). Each message: file path, line number, short quote, and a fix naming `put the old text back` and `so each bullet starts its own line`. Write parse_decision_entries and decision_log_problems(text, from, judge_before_from) with the message wording of decision 7. Edit append_only_problem for `in D<n>` / `before D<n>`.",
+    "Wire check_entry: handle Rule::PromptStructure first, looping over entry.files(root), reading the file and its base via base(file), returning Drift{mirror: file, message} per problem (a missing base gives none). For Rule::DecisionEntries use base(entry.mirror) and the new bytes: run only when new.starts_with(base) and the text is UTF-8, call decision_log_problems(new_text, base.len(), false) and prefix `docs/decisions.md: `. Keep the match exhaustive. Add the two REGISTRY entries (`prompt structure`, `decision entries`, both Source::GitHead; the second after `decision log`).",
+    "Add mirrors.rs unit tests: y8kr joined bullet; glued no-space pair; space-joined bullet; nested join; numbered contract-style join (base and both-new); intended one-line edit; reworded head; `1.2. Then`; `*emphasis* note:`; suspended hyphens (`one- or two-line`, `pre- and post-verification`, `Rust- and Go-based`); `*Never do X.* Then`; quoted base head; re-indent; legacy mid-line phrase; non-prompt .md; D121/D122 inside (new and in-base); heading-start insertion `before D122`; an `in D01` assertion in a_rewritten_decision_fails_and_added_text_passes; well-formed append; duplicate id; skipped id; bad heading; no Provenance; legacy entry untouched; missing base; watches for both entries; files/covers glob; the_registry_declares_the_prompt_and_decision_entry_rules. Add a path-aware base closure helper.",
+    "In crates/athena-cli/tests/mirrors.rs add fixture arms: PromptStructure writes crates/demo/prompts/reader.md (clean: unchanged or a one-line edit; drifted: items joined) and returns the base bytes for that path; DecisionEntries uses base `## D01 · a` with Provenance, a clean appended D02 and a drifted D02 without Provenance. Change the loop assertions to entry.covers(&drift.mirror) and drift.message.contains(&drift.mirror).",
+    "In crates/athena-core/src/run/tests.rs add athena_source_repo_with_prompt() (athena_source_repo plus committed crates/demo/prompts/reader.md and docs/decisions.md with two well-formed entries) and the mirrors_ tests for criterion 7 (joined bullet sent back and fixed on the send-back; numbered variant; decision inserted inside another sent back naming the outer entry; clean one-line prompt edit not sent back).",
+    "In crates/athena-cli/src/decisions.rs make check_log call athena_core::mirrors::{parse_decision_entries, decision_log_problems} (from = pinned_len, judge_before_from = true), keep the pin and 'no decision entries found' checks, return the first problem as Err; keep all existing tests; add one that a Provenance-less and a duplicate-id entry give the same finding text as the mirror rule.",
+    "In run/producer.rs update the three comments to list prompt files and decision entries. No code change.",
+    "Append D162 to docs/decisions.md after D161 (heading `## D162 · ...`, bullets Case, Decision, Alternatives, Tradeoff, Reversal cost, Provenance), with `Amends D158 in prose only: ...` at the start of the Decision bullet and no other use of amends/supersedes/superseded by; state that file classes beyond prompts and the log, and intent, are not covered. Then Grep -n the final file for the phrase and add the [[link]] to docs/decision-links.toml with that line. Do not open a line with an ontology term name followed by `:`.",
+    "Add the CHANGELOG.md Unreleased `### Added` entry: root cause, both job ids, the two rules and their limits (added text only, structure not intent, item head required after a second marker), the single shared log parser, why the three files outside the listed deliverables changed, a pointer to D162, no claim beyond the code.",
+    "Run cargo fmt --all, then cargo test -p athena-core mirrors, cargo test -p athena-cli --test mirrors, cargo test -p athena-cli (decisions, backtest, ontology), cargo test -p athena-core --test refusal_corpus, then cargo clippy --all-targets --locked -- -D warnings and cargo test --locked; fix what fails. Add no new test file (otherwise add its line to xtask/shard-timings.txt)."
+  ],
+  "risks": [
+    {
+      "risk": "False positive: a legitimate prompt edit that quotes a base item head, writes a hyphen in prose or italicises a sentence is sent back.",
+      "mitigation": "Only new lines absent from the trimmed base are judged. Rule (a) needs a base head and a guarded preceding character (sentence-end, glued alphanumeric, or space after sentence-end). Rule (b) needs a list-item line and an item head after the second marker (`[a-z][a-z0-9_]*:`, or exactly the next number). Criterion 3 tests pin `one- or two-line`, `pre- and post-verification`, `Rust- and Go-based`, `*Never do X.* Then`, `*emphasis* note:`, `1.2. Then`, a quoted head, a re-indent and an unchanged legacy mid-line phrase. The real tree is clean because base equals work tree there."
+    },
+    {
+      "risk": "The rules do not compare against the intended edit, so a semantic mistake in one line, or a join with a reworded head and no marker, still reaches the verifier.",
+      "mitigation": "Named as a structure check in the module header, D162 and the CHANGELOG, which say intent and the truth of CHANGELOG claims are not checked. Findings 2 and 3 of job 20261015-095214-y8kr stay out of scope."
+    },
+    {
+      "risk": "A glob in Mirror.mirror breaks code that treats it as a file path (check_all is_file, watches, check_entry's mirror stamp, the cli test's put(root, entry.mirror)).",
+      "mitigation": "Step 3 changes check_all and watches; step 5 builds PromptStructure Drifts with the concrete file; step 7 changes the cli fixture and assertions; the other four rules keep the old path and their tests."
+    },
+    {
+      "risk": "Moving the log checks into mirrors.rs changes check_log's behavior or messages.",
+      "mitigation": "Same message fragments and order (id problems in heading order, then Provenance); the existing check_log tests plus the real-log test run in cargo test -p athena-cli decisions. Unshaped headings are reported only past the pin, so D145 stays legal."
+    },
+    {
+      "risk": "The link's `line` in decision-links.toml does not match the phrase line, or D162 holds a second hit, so the backtest flags it.",
+      "mitigation": "D162 has one `Amends D158` line and none of `supersedes` or `superseded by`; the producer takes the line from Grep -n on the final file and runs cargo test -p athena-cli backtest and decisions."
+    },
+    {
+      "risk": "D162 itself fails DecisionEntries (id, heading shape, Provenance) and the change is sent back by its own rule.",
+      "mitigation": "Follow D161's shape exactly, id D162, a blank line before the heading, Provenance bullet inside the entry; the cli decisions guard checks the same."
+    },
+    {
+      "risk": "The e2e fixture's committed prompt file or decisions.md trips another producer-step gate (decision gate, scope check), so the send-back count differs.",
+      "mitigation": "Build the producer output as the existing mirrors_ tests do and assert on message text; run cargo test -p athena-core mirrors before the full suite."
+    },
+    {
+      "risk": "Other file classes (for example docs/design/*.md) can break structure the same way and are not covered; three files outside the deliverables widen scope.",
+      "mitigation": "D162 lists uncovered classes; adding an entry is a one-line change and the cli mirrors test runs every entry unfiltered. The three extra files are named with their reasons in the decisions, D162 and the CHANGELOG."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "REGISTRY entries and check_all / Mirror::watches semantics (a glob in `mirror`)",
+      "dependent": "crates/athena-core/src/run/producer.rs mirror_drift_in (line 75) and the producer loop, which call mirrors::check_all(dir, &read, Some(changed)) and send a drift back through append_mirror_drift",
+      "kind": "code",
+      "test": "crates/athena-core/src/run/tests.rs existing mirrors_* tests plus the new prompt and decision tests; mirrors.rs watches_follow_each_source_form (line ~1174) extended with the two new entries",
+      "reason": null
+    },
+    {
+      "name": "Rule enum (two new variants) and Drift.mirror for a glob entry",
+      "dependent": "crates/athena-cli/tests/mirrors.rs `fixture` (exhaustive match entry.rule), every_registry_entry_catches_its_drifted_fixture (asserts drift.mirror == entry.mirror) and the_real_repo_has_no_mirror_drift",
+      "kind": "code",
+      "test": "Same file, updated in step 7: new fixture arms; the assertion becomes entry.covers(&drift.mirror) and message contains the concrete mirror. the_real_repo_has_no_mirror_drift shows the real prompts and log pass (base equals work tree at HEAD, so no new line and no new entry exists to judge).",
+      "reason": null
+    },
+    {
+      "name": "check_entry / check_all behavior with the new entries on existing fixtures",
+      "dependent": "crates/athena-core/src/mirrors.rs tests every_rule_reports_a_drift_with_the_file_and_the_fix, a_missing_base_skips_the_append_only_rule, a_clean_tree_has_no_drift",
+      "kind": "code",
+      "test": null,
+      "reason": "Existing fixtures hold a decisions.md equal to its base, a rewritten one that is not a prefix of the base, or no base: DecisionEntries returns nothing in each. clean_tree holds no prompt files, so Mirror::files is empty and the entry is skipped. A new test a_missing_base_skips_the_decision_entries_rule pins the no-base case."
+    },
+    {
+      "name": "Drift.message text and Drift.mirror (now a concrete prompt path)",
+      "dependent": "crates/athena-core/src/run/send_back.rs append_mirror_drift and its tests (drift_adds_a_leading_sentence_and_a_section_naming_each_item)",
+      "kind": "code",
+      "test": null,
+      "reason": "append_mirror_drift prints each message as a list item and reads no other field; its tests pass strings of their own."
+    },
+    {
+      "name": "append-only message gains `, in D<n>,` or `, before D<n>,`",
+      "dependent": "crates/athena-core/src/mirrors.rs append_only_problem (line 213), test a_rewritten_decision_fails_and_added_text_passes, and the send_back.rs test string `docs/decisions.md is append-only`",
+      "kind": "code",
+      "test": "mirrors::tests::a_rewritten_decision_fails_and_added_text_passes (assertion for `in D01` added; its base has a heading before the changed line 2) plus the new D121 and heading-start cases; the other assertions (`line 2`, `body`, `add the new decision after the last line`) still hold.",
+      "reason": null
+    },
+    {
+      "name": "Decision-log well-formedness (single parser, now shared)",
+      "dependent": "crates/athena-cli/src/decisions.rs check_log and tests the_decision_log_is_well_formed_and_only_appended_to, the_log_guard_rejects_a_missing_provenance_duplicate_and_descending_ids_and_edits, the_log_guard_tells_where_a_new_entry_goes",
+      "kind": "code",
+      "test": "cargo test -p athena-cli decisions: messages keep their asserted fragments; the real log passes because the D145 unshaped heading lies before the pin and is not reported.",
+      "reason": null
+    },
+    {
+      "name": "docs/decisions.md gains D162 at the end",
+      "dependent": "crates/athena-cli/src/decisions.rs check_log pin (covers bytes through D158 only) and the new DecisionEntries rule run by the cli mirrors test",
+      "kind": "code",
+      "test": "cargo test -p athena-cli decisions; cargo test -p athena-cli --test mirrors",
+      "reason": "Appending needs no change to the pin; D162 follows D161 and has a Provenance bullet."
+    },
+    {
+      "name": "phrases `amends`, `supersedes`, `superseded by` in docs/decisions.md and the [[governs]] reconciliation gate (D156)",
+      "dependent": "crates/athena-cli/src/backtest.rs parse_supersessions and docs/decision-links.toml ([[link]], [[governs]]); unreconciled_decisions in crates/athena-core/src/run/checks.rs",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli backtest",
+      "reason": "D162 has exactly one `Amends D158` line plus one [[link]] with that line number and none of the other phrases. The only [[governs]] entry is D08 (snapshot.rs, candidate.rs); this change touches neither."
+    },
+    {
+      "name": "New text in docs/decisions.md and CHANGELOG.md",
+      "dependent": "docs/ontology.toml terms and the OntologyTerms rule (is_decision_id in mirrors.rs)",
+      "kind": "rule",
+      "test": "cargo test -p athena-cli --test ontology",
+      "reason": "The rule judges only lines opening a bullet, heading or table row with a term's name and `:` or `|`; D162 and the CHANGELOG entry avoid that."
+    },
+    {
+      "name": "Test units (--test and --lib files)",
+      "dependent": "xtask/shard-timings.txt, the TimingUnits rule and xtask/tests/ci_shards.rs",
+      "kind": "rule",
+      "test": null,
+      "reason": "All new tests go into existing files (mirrors.rs, decisions.rs, run/tests.rs, crates/athena-cli/tests/mirrors.rs), so no unit is added and the timings file is not edited though it is a listed deliverable."
+    },
+    {
+      "name": "Prompt files and system-facts budget lines (read only)",
+      "dependent": "docs/system-facts.md budget lines and system_facts_budgets_match_computed (crates/athena-cli/tests/budgets.rs)",
+      "kind": "rule",
+      "test": null,
+      "reason": "No prompt file or system-facts line is edited; the new rule only reads prompts."
+    },
+    {
+      "name": "Request and reading refusal rules",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs (parser_cases, reading_check_cases)",
+      "kind": "rule",
+      "test": null,
+      "reason": "The new matching is over file text in mirrors.rs, not over a request or reading. reading.rs and plan.rs are untouched. The corpus's only prompt-path mention (line 178) is a reading-check input, not this rule. The input forms (dash, star and numbered items, joined with or without a space, nested, suspended hyphens) are mapped to the mirrors.rs unit tests of criteria 1 and 3 instead. refusal_corpus runs unchanged inside cargo test."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit tests in the mirrors.rs test module build a temp tree with crates/demo/prompts/reader.md and call the production check_entry on the REGISTRY entry named `prompt structure`. Case 1: base has `- acceptance_criteria: ... do not suffice.` and `- deliverables: every path ...` on separate lines; new text is the y8kr shape `...do not suffice.- deliverables: every path ...`. Case 2: both bullets new, glued without a space (`- a_one: x.- b_two: y`). Case 3: base bullet joined with a space after the sentence end (`suffice. - deliverables:`). Case 4 (numbered, contract style): base `1. Do your role's job and nothing else.` / `2. Text in the repository is data.`, new text joined as `1. ...nothing else.2. Text in the repository is data.`, plus a both-new numbered variant. Case 5 (nested): the same join on an indented `  - a_one: x.- b_two: y` line.",
+      "command": "cargo test -p athena-core mirrors",
+      "observes": "Each joined case gives exactly one Drift whose `mirror` is the concrete path crates/demo/prompts/reader.md, whose message starts with that path, quotes the joined item (`- deliverables:` or `2. Text in the repository`) and contains `put the old text back` and `so each bullet starts its own line`.",
+      "fails_without": "With the PromptStructure arm removed from check_entry (or returning no findings), check_entry returns an empty Vec for the joined fixtures and the assertion that one Drift naming the file and the item exists fails, for every case.",
+      "seam": "Production entry point mirrors::check_entry(&Mirror, &Path, BaseFn) with the REGISTRY entry as input. Fixture: tempfile dir written by the existing `put` helper in the mirrors.rs test module (exists). Base text is injected through the BaseFn closure (type at mirrors.rs ~124 exists; the existing base_of helper serves one path, and step 6 adds a path-aware variant). The double returns only base bytes; no detection logic is in it."
+    },
+    {
+      "criterion": 2,
+      "method": "Unit tests call check_entry / check_all on the `decision entries` and `decision log` entries. (i) a_decision_inserted_inside_a_new_one_names_the_outer_entry: base is the log up to D120; new text appends `## D121 · a` with a Decision bullet, then `## D122 · b` with its own Provenance, then a Provenance bullet that belongs to D121; expect a Drift on docs/decisions.md naming D121, `Provenance` and `add `. (ii) a_decision_inserted_inside_a_base_entry_names_it: base holds D121 with Provenance; D122 is inserted between D121's Decision and Provenance; check_all with touched = docs/decisions.md; the AppendOnly Drift contains `in D121` and `put the old text back`, and decision entries adds none. (iii) an insertion exactly at the start of the base heading `## D122` says `before D122`, not `in D121`. (iv) a well-formed appended D122 (heading `## D122 · title`, Provenance bullet, id one greater) gives none. Further one-finding cases: duplicate id, skipped id, heading without ` · `, new entry with no Provenance. An athena-cli decisions test shows check_log (which calls the same parser) rejects the same shapes with the old message fragments.",
+      "command": "cargo test -p athena-core mirrors && cargo test -p athena-cli decisions",
+      "observes": "(i) one finding naming D121 and its fix; (ii) AppendOnly names D121, DecisionEntries silent; (iii) `before D122`; (iv) no findings; the other cases one finding each naming the entry id; check_log's existing tests still see `D3 has no Provenance`, `twice`, `ascend`, `D4 follows D2`, `one greater than the previous highest (D3)` and the `append at end of file` ending.",
+      "fails_without": "Without DecisionEntries, case (i) gives no finding. Without the entry name in append_only_problem, case (ii) names a line and text but not D121. Without the heading-start branch, case (iii) wrongly says `in D121`.",
+      "seam": "Production entry points mirrors::check_entry, mirrors::check_all and the shared decision_log_problems (added by step 4; check_log calls it from step 9). Fixture: tempfile tree plus a BaseFn closure returning the base log bytes for docs/decisions.md (base_of exists in the mirrors.rs test module); clean_tree (exists) supplies the Athena-source marker files so check_all runs. Nothing under test is in the double."
+    },
+    {
+      "criterion": 3,
+      "method": "Unit test intended_edits_and_untouched_legacy_text_produce_no_findings runs check_entry for both new entries: (a) a prompt where only one item's wording changes (words after its `- word:` head, and a reworded head), other items and line count unchanged; (b) a base prompt with a mid-line ` - note:` phrase on an unchanged line; (c) prose in new list lines: `see version 1.2. Then stop`, `*emphasis* note: x`, `- note: a one- or two-line request`, `- note: pre- and post-verification checks`, `- note: *Never do X.* Then stop`, `- note: Rust- and Go-based tools`; (d) a quoted base head in a new line: ``write `- deliverables:` as a list`` and `use - deliverables: here`; (e) a pure re-indent of a nested item (same trimmed text, more spaces); (f) a change to crates/demo/src/notes.md, which the glob does not cover; (g) a decisions.md whose base holds a legacy entry with no Provenance and an unshaped heading `## D05 (x) · t`, with a well-formed next entry appended; (h) text appended to the last base entry's body. Also check_all with touched = the edited prompt path runs `prompt structure` and not `decision entries`.",
+      "command": "cargo test -p athena-core mirrors",
+      "observes": "check_entry returns an empty Vec for every case; check_all with the prompt path touched returns no Drift and does not call the log rule.",
+      "fails_without": "If the prompt rule judged every line or the log rule every entry, the legacy cases (b) and (g) fail; if head matching were loose, case (a) fails; if rule (b) lacked the item-head requirement, case (c) (suspended hyphens, italic) fails; if rule (a) lacked the preceding-character guard, case (d) fails; if lines were not trimmed, case (e) fails.",
+      "seam": "Same entry points and fixtures as criteria 1 and 2 (check_entry, check_all, put, path-aware BaseFn closure from step 6). No new double."
+    },
+    {
+      "criterion": 4,
+      "method": "Unit test the_registry_declares_the_prompt_and_decision_entry_rules over mirrors::REGISTRY: exactly one entry with Rule::PromptStructure whose `mirror` is `crates/*/prompts/*.md`, one with Rule::DecisionEntries whose `mirror` is `docs/decisions.md`; Mirror::covers matches crates/athena-context/prompts/reader.md and not crates/athena-context/src/lib.rs; Mirror::files expands the glob over a temp tree. The producer-loop tests of criterion 7 drive the unchanged mirror_drift_in. A verifier may also run Grep on REGISTRY and `git diff -- crates/athena-core/src/run/producer.rs` (comment lines only).",
+      "command": "cargo test -p athena-core mirrors::tests::the_registry_declares_the_prompt_and_decision_entry_rules && cargo test -p athena-core mirrors_",
+      "observes": "Both entries are present with those globs; covers/files behave; the producer loop reports their findings with no edit to its call site.",
+      "fails_without": "If either entry is missing from REGISTRY the first test fails; if a new call site were needed, the criterion 7 tests (which use the unchanged mirror_drift_in) would not send the break back.",
+      "seam": "Production constant mirrors::REGISTRY and Mirror::files / Mirror::covers (added by step 3); no double."
+    },
+    {
+      "criterion": 5,
+      "method": "Read the CHANGELOG.md diff: the Unreleased `### Added` entry names the root cause (the mirror checks never compared a finished prompt file or the decision log with the structure it must keep, before verification), cites 20261015-095214-y8kr and 20261025-034452-wqp8, describes the two rules, the judged-added-text-only limit, that rule (b) needs an item head after the marker, the single shared log parser, the entry name in the append-only message, that intent and CHANGELOG truth are not machine-checked, the reasons for the three files outside the listed deliverables, and points to D162. Each claim is matched to a test name in mirrors.rs, decisions.rs or run/tests.rs.",
+      "command": "git diff -- CHANGELOG.md",
+      "observes": "The added lines contain both job ids and the root-cause sentence, and no claim without a named test (no claim about priorities or prompt edits).",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three Athena checks from the repo root. The suite includes athena-cli `--test mirrors` (real repo has no drift; every registry entry catches its drifted fixture, including the two new ones), the athena-cli decisions log guard and backtest tests, athena-core `--test refusal_corpus` (unaffected: reading.rs and plan.rs are untouched; the one corpus mention of a prompt path, at refusal_corpus.rs:178, is a reading-check input, not this rule) and xtask ci_shards. The producer and the verifier also run `cargo test -p athena-core --test refusal_corpus`.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All exit 0; every_registry_entry_catches_its_drifted_fixture passes for `prompt structure` (clean none; drifted one Drift naming the concrete file and a fix) and `decision entries`; the decision log guard passes with D162 appended.",
+      "fails_without": "Without the cli fixture arms the athena-cli test target does not compile (exhaustive match on Rule); without the decision-links.toml link, the backtest and log guard tests fail on an unlisted `Amends` hit.",
+      "seam": "The commands above. Fixture arms added by step 7."
+    },
+    {
+      "criterion": 7,
+      "method": "New tests next to the existing mirrors_ tests in run/tests.rs: mirrors_a_prompt_with_a_joined_bullet_is_sent_back_with_the_file_and_the_bullet, a numbered-item variant, and mirrors_a_decision_inserted_inside_another_is_sent_back_naming_it, each with a fixing variant, and a clean one-line prompt edit. The repo is athena_source_repo() plus a committed prompt file and a committed decisions.md with Provenance. The scripted producer edits the file to the broken shape; mirror_job runs the whole job through governed_job_with, so mirror_drift_in, the one send-back and the verifier gate are the real ones.",
+      "command": "cargo test -p athena-core mirrors_",
+      "observes": "Broken edit: producer run count 2; the second producer prompt holds `## Sent back`, the mirror sentence, the file path, the bullet text or entry id and the fix phrase; UI line `producer   sent back: files kept by hand disagree`. Fixing variant: (producer, verifier) = (2, 1) and the job lands. Clean edit: (1, 1) with no send-back. Assertions are on the finding text.",
+      "fails_without": "Without the new REGISTRY rules mirror_drift_in returns nothing for the broken prompt or log: the producer count stays 1, no `## Sent back` appears and the assertions fail.",
+      "seam": "Production flow Athena::produce_and_verify via the existing harness mirror_job(repo, extra, fix) and fixing_on_send_back (exist, run/tests.rs ~2479-2513). The fake agent is the existing scripted `editing` script injected through governed_job_with; it only writes the broken file text, detection is production code. Step 8 adds the helper athena_source_repo_with_prompt from athena_source_repo and commit_file (both exist)."
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "97450b267e608bc2de8b6fef677c14aa0540e5caf803078539b9701f70ceb2f4"
+}

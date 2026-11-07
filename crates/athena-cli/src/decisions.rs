@@ -226,43 +226,21 @@ mod tests {
                 "the first {pinned_len} bytes changed: entries are append-only; {APPEND_AT_END}"
             ));
         }
-        let mut starts: Vec<(u32, usize)> = Vec::new();
-        let mut offset = 0;
-        for line in text.split_inclusive('\n') {
-            if let Some(rest) = line.strip_prefix("## D") {
-                let (digits, tail) =
-                    rest.split_at(rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(0));
-                if !digits.is_empty() && tail.starts_with(" · ") {
-                    let id: u32 = digits.parse().map_err(|_| format!("bad id in {line:?}"))?;
-                    if let Some(&(prev, _)) = starts.last() {
-                        if id == prev {
-                            return Err(format!("D{id} appears twice"));
-                        }
-                        if id < prev {
-                            return Err(format!("D{id} comes after D{prev}: ids must ascend"));
-                        }
-                        if offset >= pinned_len && id != prev + 1 {
-                            return Err(format!(
-                                "D{id} follows D{prev}: a new entry's id is one greater than the previous highest (D{}); {APPEND_AT_END}",
-                                prev + 1
-                            ));
-                        }
-                    }
-                    starts.push((id, offset));
-                }
-            }
-            offset += line.len();
-        }
-        if starts.is_empty() {
+        if !athena_core::mirrors::parse_decision_entries(text)
+            .iter()
+            .any(|e| e.shaped)
+        {
             return Err("no decision entries found".into());
         }
-        for (i, &(id, from)) in starts.iter().enumerate() {
-            let to = starts.get(i + 1).map_or(text.len(), |&(_, s)| s);
-            if !text[from..to].contains("- **Provenance:**") {
-                return Err(format!("D{id} has no Provenance bullet"));
-            }
+        // Shape, ids and Provenance are defined once, in the mirror rule `decision entries` that the producer
+        // step runs, so this test and that rule cannot disagree.
+        match athena_core::mirrors::decision_log_problems(text, pinned_len, true)
+            .into_iter()
+            .next()
+        {
+            Some(problem) => Err(problem),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     #[test]
@@ -329,6 +307,30 @@ mod tests {
         let error = check_log(&good[..good.len() - 1], good.len(), &hash).unwrap_err();
         assert!(error.contains("shorter"), "{error}");
         assert!(error.ends_with("append at end of file"), "{error}");
+    }
+
+    #[test]
+    fn the_log_guard_and_the_producer_step_rule_give_the_same_finding_text() {
+        // The same parser: a new entry with no Provenance and a repeated id read the same in both.
+        let base = "# t\n\n## D01 · a\n\n- **Provenance:** x\n";
+        let hash = athena_data::sha256_hex(base.as_bytes());
+        for (tail, expect) in [
+            (
+                "\n## D02 · b\n\n- **Decision:** z\n",
+                "D2 has no Provenance bullet",
+            ),
+            ("\n## D01 · b\n\n- **Provenance:** z\n", "D1 appears twice"),
+        ] {
+            let new = format!("{base}{tail}");
+            let guard = check_log(&new, base.len(), &hash).unwrap_err();
+            let rule = athena_core::mirrors::decision_log_problems(&new, base.len(), false);
+            assert!(guard.contains(expect), "{guard}");
+            assert_eq!(
+                rule,
+                vec![guard],
+                "the producer step rule and the guard differ"
+            );
+        }
     }
 
     #[test]

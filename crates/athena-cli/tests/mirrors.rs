@@ -36,6 +36,9 @@ fn put(root: &Path, path: &str, text: &str) {
     std::fs::write(full, text).unwrap();
 }
 
+/// The prompt file the `prompt structure` fixture writes and reads the base text of.
+const PROMPT_FIXTURE: &str = "crates/demo/prompts/reader.md";
+
 const KEY: &str =
     "          key: athena-bin-${{ runner.os }}-${{ hashFiles('crates/**', 'athena.toml') }}\n";
 
@@ -84,6 +87,32 @@ fn fixture(entry: &mirrors::Mirror, root: &Path, drifted: bool) -> Option<Vec<u8
             put(root, ci, &key);
             None
         }
+        Rule::PromptStructure => {
+            // The mirror is a glob: the fixture writes one concrete prompt file.
+            let base = "- acceptance_criteria: each is a behavior; titles alone do not suffice.\n\
+                 - deliverables: every path the change lists.\n";
+            let new = if drifted {
+                "- acceptance_criteria: each is a behavior; titles alone do not suffice.\
+                 - deliverables: every path the change lists.\n"
+            } else {
+                "- acceptance_criteria: each is a behavior; titles alone do not suffice.\n\
+                 - deliverables: every path the change lists, with its owner.\n"
+            };
+            put(root, PROMPT_FIXTURE, new);
+            Some(base.as_bytes().to_vec())
+        }
+        Rule::DecisionEntries => {
+            put(
+                root,
+                entry.mirror,
+                if drifted {
+                    "## D01 · a\n\n- **Provenance:** x\n\n## D02 · b\n\n- **Decision:** y\n"
+                } else {
+                    "## D01 · a\n\n- **Provenance:** x\n\n## D02 · b\n\n- **Provenance:** y\n"
+                },
+            );
+            Some("## D01 · a\n\n- **Provenance:** x\n".as_bytes().to_vec())
+        }
         Rule::OntologyTerms => {
             put(
                 root,
@@ -110,7 +139,7 @@ fn every_registry_entry_catches_its_drifted_fixture() {
     for entry in REGISTRY {
         let clean = tempfile::tempdir().unwrap();
         let base = fixture(entry, clean.path(), false);
-        let base_of = |p: &str| base.clone().filter(|_| p == entry.mirror);
+        let base_of = |p: &str| base.clone().filter(|_| entry.covers(p));
         let found = check_entry(entry, clean.path(), &base_of);
         assert!(
             found.is_empty(),
@@ -120,7 +149,7 @@ fn every_registry_entry_catches_its_drifted_fixture() {
 
         let broken = tempfile::tempdir().unwrap();
         let base = fixture(entry, broken.path(), true);
-        let base_of = |p: &str| base.clone().filter(|_| p == entry.mirror);
+        let base_of = |p: &str| base.clone().filter(|_| entry.covers(p));
         let found = check_entry(entry, broken.path(), &base_of);
         assert!(
             !found.is_empty(),
@@ -128,9 +157,15 @@ fn every_registry_entry_catches_its_drifted_fixture() {
             entry.name
         );
         for drift in &found {
-            assert_eq!(drift.mirror, entry.mirror);
+            // A glob entry names the concrete file that drifted.
             assert!(
-                drift.message.contains(entry.mirror),
+                entry.covers(&drift.mirror),
+                "{}: {} is no file of the entry",
+                entry.name,
+                drift.mirror
+            );
+            assert!(
+                drift.message.contains(&drift.mirror),
                 "{}: the message names the file: {drift}",
                 entry.name
             );
