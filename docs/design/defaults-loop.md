@@ -96,8 +96,8 @@ by id (the intervention remains the single counted unit, §7.1):
 | `earlier_cases` | Ids of earlier events in the same class, with job ids | **code** (§3.3); the model may not add ids |
 | `decisions_matched` | Ids of typed decisions whose signals the event matched (decision-sets §4, §5); empty if none | **code**; the model may not add ids |
 | `cause` | The cause beyond this instance: why the system allowed it, not what was wrong this time | language model |
-| `prevention_kind` | `default`, `code-check` or `design-change` | typed decision |
-| `prevention` | What exactly would have prevented it: the default text, the check and where it runs, or the design change | language model |
+| `prevention_kind` | `default`, `code-check`, `design-change`, `relax` or `remove` (the last two: a rule or check was wrong, §3.8) | typed decision |
+| `prevention` | What exactly would have prevented it: the default text, the check and where it runs, or the design change; for `relax` and `remove`, the gate and what to change in it | language model |
 | `proposed_request` | A complete next request, ready to submit | language model |
 | `evidence` | Models that answered, probabilities, confidence (§6), cost and tokens | code |
 | `status` | `recorded`, `failed`, or `acted-on` with the job that did | code |
@@ -159,7 +159,7 @@ ids in the **class registry** plus `new`; each criterion is the class's one-line
 top probability and the confidence as in §6.2. When the answer is `new` (or below threshold), a language model
 proposes a name and description; code assigns the id and adds the class to the registry as `proposed`; the user
 may rename or merge classes at review. The registry is a record store, not a file Athena edits in the
-repository. Choosing `prevention_kind` among its three values is also a `choice` question for Jev; writing the
+repository. Choosing `prevention_kind` among its five values is also a `choice` question for Jev; writing the
 prose is not.
 
 ### 3.5 Retries start from the record
@@ -215,6 +215,43 @@ wiring. Criteria that check the behavior:
    was constructed.
 3. The role's output contains or is derived from the fake client's reply; assert on that content, so a role that
    ignores the reply fails.
+
+### 3.8 A rule or check can be wrong: gate counts, `relax` and `remove`
+
+Every kind above asks for more protection. A check can also be the fault: it ends a job and a later try lands
+the same change anyway. Athena counts this from the job records alone (`crates/athena-core/src/gate_counts.rs`);
+nothing is stored, and nothing is counted from records outside the job records.
+
+- **Gate.** A failed check of a rejected job (`fmt`, `clippy`, `test`), the verifier when a job was rejected with
+  no failed check, or an admission rule that a rejected or failed job violated. A check that already failed on
+  the base commit, and a demonstration run with the fix reverted, are not gates.
+- **End.** The gate ended a job. A gate counts once per job.
+- **Disagreement ("overruled").** A later request job "try again on <job>" landed the same change as the job the
+  gate ended. At most one disagreement is counted for each ended job, so `disagreements <= ends`.
+- **The same change.** When both candidates were made on the same base fingerprint, their candidate
+  fingerprints must be equal. When the base moved, the whole-tree fingerprint differs as soon as any other job
+  lands, so the sorted, non-empty lists of changed files (path, status, mode, size) must be equal. The list has
+  no content hash, so two different edits of the same size to the same files read as the same change when the
+  base moved. The signal is an estimate of "the gate was wrong", not proof.
+
+`athena status` prints each gate with its end and disagreement counts, most overruled first, and the
+introspection prompt carries the same figures (`gate_counts`). The prompt says that a rule or check can be wrong.
+
+A model may answer `relax` (loosen a gate) or `remove` (drop it), and names the gate in the `gate` field of its
+answer. Code accepts the answer only for a gate with at least one end and at least one disagreement; any other
+answer is a failed record and queues nothing. The gate is kept at the start of `prevention` as `[gate: NAME] `,
+a stopgap until the record has a typed field for it (the record shape of `athena.introspection/1` is unchanged,
+so every existing record stays valid).
+
+Hestia's error review (`Athena::gate_review`) queues one normal-priority request for each such record. The
+request text names the gate on the line `Gate under review: NAME.`, cites the end and disagreement counts and the
+introspection, and asks for a reviewed change; it does not say the gate is wrong. At most one open request
+reviews a gate; a closed one does not stop a later review. Athena relaxes or removes no gate by itself.
+
+A `relax` or `remove` record is not a cause and not a case. `cause_key` leaves it out, so it never joins a
+root-cause request; `read_records` leaves it out of the cases that default proposals read; a retry is not seeded
+from it; and the producer's list of recurring failure classes does not count it. A producer is not invited to
+weaken the check it is judged by.
 
 ## 4. The loop in one view
 
@@ -379,7 +416,9 @@ pairwise, §5). Code counts distinct jobs, not records. A cluster of at least N 
 
 A candidate is **add** (no good match; a new id) or **amend** (a moderate match to an existing default; the
 draft widens or sharpens it and keeps the id). Introspections whose `prevention_kind` is `code-check` or
-`design-change` do not become candidates; they are listed (§9).
+`design-change` do not become candidates; they are listed (§9). Nor do those of kind `relax` or `remove`: they
+challenge a check rather than describe a missing protection, so `read_records` leaves them out of the cases that
+clustering reads (§3.8).
 
 ### 7.3 Drafting
 

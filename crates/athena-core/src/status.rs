@@ -1544,6 +1544,11 @@ pub struct StatusView {
     /// when no job ran a measured test check or the configuration cannot be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check_durations: Option<CheckDurations>,
+    /// Per gate (a failed check or an admission rule): the jobs it ended and how often a later try landed the
+    /// same change (`crate::gate_counts`). The most overruled gate comes first; absent when no gate has ended
+    /// a job.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gate_counts: Vec<crate::gate_counts::GateCount>,
     /// Landed jobs per day, median minutes per landed job by stage, idle time between jobs and time spent on
     /// jobs that did not land, computed from the job records; absent until a request job has landed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1708,6 +1713,8 @@ pub fn mistake_report(records: &Records) -> MistakeReport {
                 Some(PreventionKind::CodeCheck) => "check",
                 Some(PreventionKind::Default) => "knowledge",
                 Some(PreventionKind::DesignChange) => "design change",
+                Some(PreventionKind::Relax) => "relax a gate",
+                Some(PreventionKind::Remove) => "remove a gate",
                 None => "unknown",
             }
             .into(),
@@ -2309,6 +2316,7 @@ impl Athena {
             keep_rule: keep_rule(&records),
             producer_settings: producer_settings(&records),
             check_durations,
+            gate_counts: crate::gate_counts::gate_counts(&records),
             throughput: Throughput::compute(&records),
             build_measurement: build_measurement_line(BuildMeasurement::latest(
                 &records.build_measurements,
@@ -2581,6 +2589,40 @@ mod mistake_tests {
         let report = mistake_report(&records);
         assert_eq!(report.by_cause[NO_CAUSE], 1);
         assert!(report.proposals.is_empty());
+    }
+
+    #[test]
+    fn a_relax_or_remove_prevention_is_named_for_what_it_proposes() {
+        use InterventionCategory::Mistake;
+        let mut records = Records::default();
+        records.interventions = vec![
+            intervention(1, "docs", Mistake, "a"),
+            intervention(2, "docs", Mistake, "b"),
+        ];
+        records.introspections = vec![
+            introspection(
+                11,
+                1,
+                "The fmt check is too strict.",
+                PreventionKind::Relax,
+                "[gate: fmt] Loosen it.",
+            ),
+            introspection(
+                12,
+                2,
+                "The lint adds nothing.",
+                PreventionKind::Remove,
+                "[gate: lint] Drop it.",
+            ),
+        ];
+        let report = mistake_report(&records);
+        let kinds: BTreeMap<&str, &str> = report
+            .proposals
+            .iter()
+            .map(|p| (p.cause.as_str(), p.kind.as_str()))
+            .collect();
+        assert_eq!(kinds["The fmt check is too strict."], "relax a gate");
+        assert_eq!(kinds["The lint adds nothing."], "remove a gate");
     }
 
     #[test]

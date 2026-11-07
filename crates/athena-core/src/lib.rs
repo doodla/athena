@@ -34,6 +34,8 @@
 //!   over REST only when the opt-in setting is on;
 //! - [`introspect`]: the introspection record of an event, the class registry, and the reading code shared with
 //!   `athena backtest`;
+//! - [`gate_counts`]: per-gate counters read from the job records: how many jobs each check or rule ended, and
+//!   how often a later try landed the same change; shown by `athena status` and given to the introspection;
 //! - [`proposals`]: proposed defaults from repeated introspections, their validation, and the apply-as-a-job
 //!   check; `defaults.toml` is never written by Athena;
 //! - [`labeled`]: the labeled set of reviewed introspections and the scoring of Jev's recorded shadow answers
@@ -89,6 +91,7 @@ pub mod commits;
 pub mod disk;
 pub mod evidence_labels;
 pub mod fake;
+pub mod gate_counts;
 pub mod gh;
 pub mod hestia;
 pub mod host_rules;

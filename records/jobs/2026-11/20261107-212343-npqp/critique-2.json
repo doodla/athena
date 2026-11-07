@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-212343-npqp",
+  "round": 2,
+  "at": "2026-11-07T21:36:08.052092162Z",
+  "invocation_seq": 6,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The docs claim that relax and remove introspections do not become default candidates is not enforced in code, so they would feed default proposals.",
+      "evidence": "read_records pushes a CaseRow for every Recorded introspection with a failure_class, whatever its prevention_kind (introspect.rs:392-412). proposals::generate groups records.cases by failure_class and proposes a default once a class spans REPEAT_THRESHOLD jobs (proposals.rs:265-282), never reading prevention_kind. Grep finds PreventionKind in proposals.rs, evidence_labels.rs and labeled.rs only in test literals. Step 7 changes code only 'if the selection code names kinds'; it does not, so nothing would change. The doc would then state a false rule, and a model's 'this check is wrong' answer would push toward a new default, the opposite direction. The dependent's test (existing proposals tests pass) cannot fail. Fix: Leave Relax and Remove introspections out of records.cases in read_records (or in generate), and add a test that generate makes no proposal from a class whose cases are relax/remove introspections. Otherwise drop the docs claim and state what actually happens.",
+      "location": "Plan Decision 6 / Step 7 / Dependent 'Rule: relax/remove introspections do not become default candidates'; crates/athena-core/src/introspect.rs:392-412; crates/athena-core/src/proposals.rs:274",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "retry_cause puts a relax/remove prevention into the retry seed, which could steer a retry producer to loosen a gate. The plan's test for this dependent does not cover it.",
+      "evidence": "retry_cause formats 'kind: prevention' for the job's introspection and for its earlier cases (reading.rs:1444-1447, 1459-1462, 1479-1482). A relax record would put 'relax: [gate: test] ...' into the seed for 'try again on <job>', inviting the producer to weaken the check inside an ordinary retry. Relaxing gates is out of scope, and the plan sends it to a Hestia review request instead. The dependent's listed test (cargo test --test review) never calls retry_cause. Fix: Decide how retry_cause treats Relax and Remove: leave them out of the seed, or render them explicitly as a proposal under review that the retry must not act on. Add a reading:: test with a relax introspection on the retried job.",
+      "location": "Plan Dependents 'PreventionKind::as_str output' (test: review listing only); crates/athena-core/src/reading.rs:1444-1482",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The gate request is deduplicated per introspection id, not per gate, so every rejection by one gate can queue another loosening request. Other readers of repeated_causes are also missing from the dependents list.",
+      "evidence": "Step 6(c) skips only when addressing_request(&records, &[id]) finds a request citing that introspection id. Each newly rejected job gets a new introspection, so a model that keeps answering 'relax test' queues one gate request per job. A gate-keyed marker check already exists (open_request_with_marker, hestia.rs:1651). Separately, cause_key feeds repeated_causes, which is also read by improvement_of (hestia.rs:419), the open causes in athena status (status.rs:2227) and plan_backfill (hestia.rs:1250). The dependents entry for cause_key omits improvement_of and status.rs:2227. Fix: Put a fixed 'Gate: <name>' line in the gate request and skip queuing when an open request already carries that marker (use open_request_with_marker), while keeping the id check. Test it with two relax introspections for the same gate in two jobs: exactly one request. Add improvement_of and status.rs:2227 to the dependents list, with a test that a relax introspection does not appear in status open causes or improvement items.",
+      "location": "Plan Decision 3 / Step 6(c); crates/athena-core/src/hestia.rs:282, 419, 1250, 1651; crates/athena-core/src/status.rs:2227",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "A gate with ends but 0 disagreements counts as 'a gate that has counts', so Hestia can queue a loosening request with no disagreement as evidence.",
+      "evidence": "apply_answer accepts any gate in gate_counts output, and gate_counts lists every gate with ends >= 1. In case (b), fmt has 5 ends and 0 disagreements, yet a relax for fmt would be accepted and queued, citing 'overruled 0'. Fix: Accept relax or remove only for a gate with disagreements >= 1 (or record the answer and queue nothing otherwise), and add a test for the 0-disagreement case.",
+      "location": "Plan Step 3 (apply_answer gate validation) / Risk 'Hestia queues loosening requests from thin evidence'",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is well grounded. Every function and record field it names exists (retried_job reading.rs:1522, cause_key hestia.rs:264, addressing_request :282, error_review :2347, mistake_report status.rs:1682, Records::load_dir store.rs:353, Candidate.base_fingerprint and changes records.rs:779/785). Its base-independent rule for \"same change\" answers the earlier fingerprint problem, and keeping relax and remove out of cause_key correctly scopes the gate request. Three problems remain. First, step 7 would write a docs rule (relax and remove do not become default candidates) that no code enforces: read_records makes every recorded introspection with a failure class into a case, and proposals::generate groups cases by class without looking at the kind. A \"loosen this check\" introspection would therefore count toward proposing a new default. Second, retry_cause puts a relax prevention into the retry's seed, which could steer a producer to weaken a gate (out of scope), and the plan's only test for that dependent is the review listing. Third, the duplicate check is keyed on the introspection id, not the gate, so every job a gate rejects could queue another loosening request for that same gate. The dependents list also omits the other readers of repeated_causes (improvement_of, the open causes in athena status). Each of these can be fixed within this plan."
+}

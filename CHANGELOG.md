@@ -9,26 +9,54 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
-- A reading check for structural request terms, `reading::check_defined_terms`, run as a `step!` in
-  `refusing_check` right after `check_environment_reach`. Root cause: readings are not checked against the
-  outcome the user observes, so structural terms stay undefined. Job 20261014-174815-7bf8 asked for roles and
-  "a ladder of requirements", the reading never said what the ladder was, and the work was built on a guess;
-  job 20261017-173508-0wtc, an ontology decision, is the same class. The check refuses a reading that does not
-  define a structural term (ladder, rung, tier, layer) the request itself uses, as a whole word in its plain
-  prose; the reading defines a term with an assumption that starts `Term ladder:` and may cite the file that
-  defines it. A quoted or cited mention is not a use: quoted and backtick spans, a parenthesised list of
-  examples, paths and identifiers, `stepladder` and `delayer`, and the text Athena's own generators write or
-  copy (the earlier introspections in a root-cause request, and the rung line, proposal line and copied
-  sections of an approved-work request) do not count. check_defined_terms covers 1 of the 3 cited jobs,
-  20261014-174815-7bf8, and replaying the recorded requests shows 20261014-082328-g6vy is caught by
-  `check_outcome_state` and 20261017-173508-0wtc by no check: its Hermes term and terms outside the list are
-  not covered. This check refuses more readings; the higher refusal rate is intended: expected 3% of newly
+- Per-gate counters, the `relax` and `remove` prevention kinds, and Hestia's review of a gate
+  (`crates/athena-core/src/gate_counts.rs`, `docs/design/defaults-loop.md` section 3.8). A gate is a failed check
+  of a rejected job, the verifier when no check failed, or an admission rule that ended a rejected or failed job.
+  `gate_counts` reads the job records alone and counts, for each gate, the jobs it ended and the times a later
+  "try again on <job>" request landed the same change (a disagreement; at most one for each ended job). The
+  same change means equal candidate fingerprints when both candidates were made on the same base fingerprint,
+  and otherwise equal, non-empty lists of changed files (path, status, mode, size); the list has no content
+  hash, so equal-size edits to the same files read as the same change when the base moved. `athena status`
+  prints each gate's counts, most overruled first (field `gate_counts` in `--json`, left out when no gate has
+  ended a job). The introspection prompt carries the counts as `gate_counts` and says that a rule or check can
+  be wrong. `prevention_kind` gains `relax` and `remove`, with a nullable `gate` answer field: code accepts
+  these only for a gate with at least one end and one disagreement, and keeps the gate as `[gate: NAME] ` at
+  the start of `prevention`; any other answer is a failed record. Records of the three earlier kinds parse and
+  serialize as before. Hestia's error review queues one normal-priority request for such a record, with the
+  line `Gate under review: NAME.` and the gate's counts, and at most one open request for each gate. A
+  `relax` or `remove` record is left out of `cause_key` (so it never joins a root-cause request), out of the
+  cases that default proposals read, out of retry seeds, and out of the producer's list of recurring failure
+  classes. Nothing relaxes or removes any gate by itself.
+- A reading check for structural request terms and ambiguous ontology names, `reading::check_defined_terms`,
+  run as a `step!` in `refusing_check` right after `check_environment_reach`. Root cause: readings are not
+  checked against the outcome the user observes, so structural terms stay undefined, and so do ambiguous
+  ontology names such as Hermes. Job 20261014-174815-7bf8 asked for roles and "a ladder of requirements", the
+  reading never said what the ladder was, and the work was built on a guess; job 20261017-173508-0wtc, an
+  ontology decision, named Hermes Agent, a name `docs/ontology.toml` records with two senses (the studied
+  agent, and the Orchestration god), and was built on one guess at it. The check refuses a reading that does
+  not define a structural term (ladder, rung, tier, layer) or an ambiguous name (the `AMBIGUOUS_NAMES` list,
+  today Hermes) the request itself uses, as a whole word in its plain prose; the reading defines a term with an
+  assumption that starts `Term ladder:` or `Term Hermes:` and may cite the file that defines it. The repair
+  line is `Term Hermes: <meaning of at least three words>`, and for an ambiguous name the refusal asks the line
+  to say which recorded sense applies and to cite `docs/ontology.toml`. A quoted or cited mention is not a use:
+  quoted and backtick spans, a parenthesised list of examples, paths and identifiers, `stepladder`, `delayer`
+  and `hermeshub`, and the text Athena's own generators write or copy (the earlier introspections in a
+  root-cause request, and the rung line, proposal line and copied sections of an approved-work request) do not
+  count. Which check covers which cited job: `check_outcome_state` and `check_governance_coverage` cover
+  20261014-082328-g6vy; check_defined_terms covers 2 of the 3 cited jobs, 20261014-174815-7bf8 and
+  20261017-173508-0wtc, as the replay of the recorded requests shows. The list cannot drift from the shared
+  vocabulary: a test in `reading.rs` requires every `[[term]]` of `docs/ontology.toml` to be in exactly one of
+  `AMBIGUOUS_NAMES` and `UNGATED_TERMS` (each ungated term with a reason), and every listed name to be an
+  ontology term, so a term added to the ontology fails the build until someone decides whether readings must
+  define it. A name is added to the list only after it caused a misread. Limits: terms outside the list, and
+  the sense of an ambiguous name: the check forces a restatement but cannot verify that it matches the
+  recorded senses. This check refuses more readings; the higher refusal rate is intended: expected 2% of newly
   refused readings, an estimate over hand-written requests and not a measurement; the share the loop replay
   measures is recorded in the job's replay record at verification. Terms the repository defines (ladder, rung)
   are refused until the reading restates them, and so are plain technical uses of tier (priority tiers) and
   layer (a caching layer). A proposed request read before this change whose plain prose uses a term is held
   until a person runs `athena go`: the queue re-checks its stored reading and leaves it out. The reader sees a
-  rule line for it and the refusal text, as recorded in D164.
+  rule line for it and the refusal text, as recorded in D164 and revised in D165.
 - A reading check for landing, history and attribution rules, `reading::check_history_fixture`, run as a
   `step!` in `refusing_check` right after `check_code_survey`. Root cause: rules about landing, history and
   attribution were derived from the happy-path commit shape, the job's own commits, and not from every shape
@@ -113,7 +141,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   HTTP client are not delivery. Scope, measured by `delivery_verb_replay_over_the_cited_jobs` over the recorded
   request text of the three cited jobs: the check covers 1 of the 3 cited jobs, 20261014-082328-g6vy. The other
   two, 20261014-174815-7bf8 (a ladder of requirements) and 20261017-173508-0wtc (an ontology decision), contain
-  no delivery verb, are another class (figurative or structural terms that need a glossary) and are not caught.
+  no delivery verb, are another class (structural terms and ambiguous names that need a definition) and are not
+  caught by this check; `check_defined_terms` covers them.
   This check refuses more readings; the higher refusal rate is intended: expected 5% of newly refused readings.
   The 5% is an estimate, not a measurement; the only count is that 29 of the 1045 recorded requests contain one
   of the four words anywhere, most as the noun "share". The existing governance tests and the corpus case

@@ -1409,7 +1409,8 @@ pub fn earlier_attempt_with(
 }
 
 /// The job's own introspection of its rejection or failure that can seed a retry: the latest recorded
-/// one with a proposed request.
+/// one with a proposed request. A proposal to relax or remove a gate never seeds a retry: it is for the
+/// review Hestia queues, and a producer must not be invited to weaken the check it is judged by.
 pub(crate) fn retry_introspection<'a>(
     records: &'a Records,
     job: &JobRecords,
@@ -1421,6 +1422,7 @@ pub(crate) fn retry_introspection<'a>(
                 IntrospectionTrigger::Rejection | IntrospectionTrigger::Failure
             )
             && i.status == IntrospectionStatus::Recorded
+            && !i.prevention_kind.is_some_and(PreventionKind::loosens)
             && i.proposed_request.is_some()
             && i.cause.is_some()
             && i.prevention.is_some()
@@ -1464,7 +1466,11 @@ fn retry_cause(
     ];
     let mut cases = Vec::new();
     for id in &record.earlier_cases {
-        let Some(case) = records.introspections.iter().find(|c| &c.id == id) else {
+        let Some(case) = records
+            .introspections
+            .iter()
+            .find(|c| &c.id == id && !c.prevention_kind.is_some_and(PreventionKind::loosens))
+        else {
             continue;
         };
         let what = case
@@ -3658,8 +3664,8 @@ fn names_outcome_state(criterion: &str) -> bool {
 /// was read as "a page file exists", the criteria passed on the file, and nothing asked whether anyone could
 /// reach the page. Job 20261014-082328-g6vy failed that way. This check covers 1 of the 3 cited jobs, that
 /// one; the other two, 20261014-174815-7bf8 (a ladder of requirements) and 20261017-173508-0wtc (an ontology
-/// decision), contain no delivery verb, are another class (structural terms that need a definition) and are
-/// outside the check: [`check_defined_terms`] catches the first of them, and no check catches the second; all
+/// decision), contain no delivery verb, are another class (structural terms and ambiguous names that need a
+/// definition) and are outside the check: [`check_defined_terms`] catches both of them; all
 /// three recorded requests are replayed in `delivery_verb_replay_over_the_cited_jobs` in
 /// `crates/athena-core/tests/refusal_corpus.rs`, which asserts the count. The check reads only the request and the reading, costs no model call and, like the governance check,
 /// skips a reading with no capability, a question, or no deliverable. A verb is one of `publish`, `deploy`,
@@ -3722,6 +3728,47 @@ pub fn check_outcome_state(reading: &Reading, request: &str) -> Result<()> {
 /// The structural words a request can use that a reader must define before building on them
 /// ([`check_defined_terms`]). Each is matched as a whole word, in the singular, the plural and the possessive.
 const STRUCTURAL_TERMS: [&str; 4] = ["ladder", "rung", "tier", "layer"];
+
+/// The names in `docs/ontology.toml` that a request can use and that a reader must restate before building on
+/// them ([`check_defined_terms`]): a name that carries more than one recorded sense and has caused a misread.
+/// Each is the `[[term]]` name exactly as the ontology writes it, and is matched as a whole word in the exact
+/// form and the possessive (`Hermes`, `hermes`, `Hermes's`), with no plural. Policy: a name is added only after
+/// it caused a misread, as the ontology itself requires. Every ontology term is either in this list or in
+/// `UNGATED_TERMS`, which only the test build holds; a test fails when a term is in neither, when it is in both,
+/// or when a listed name is not an ontology term, so this list cannot drift from the shared vocabulary.
+const AMBIGUOUS_NAMES: [&str; 1] = ["Hermes"];
+
+/// The ontology terms that [`check_defined_terms`] does not require a `Term <name>:` line for, each with the
+/// reason. The test `ambiguous_and_ungated_terms_cover_the_ontology` requires every `[[term]]` of
+/// `docs/ontology.toml` to be in exactly one of this list and [`AMBIGUOUS_NAMES`], so adding a term to the
+/// ontology fails the build until someone decides whether readings must define it.
+#[cfg(test)]
+const UNGATED_TERMS: [(&str, &str); 6] = [
+    (
+        "planning",
+        "a common word that most requests use in its plain sense",
+    ),
+    (
+        "job",
+        "a common word that most requests use in its plain sense",
+    ),
+    (
+        "landed",
+        "a common word that most requests use in its plain sense",
+    ),
+    (
+        "Athena",
+        "the name of the system itself, which nearly every request uses",
+    ),
+    (
+        "Sri",
+        "a naming convention for the owner, not a word a reading must define",
+    ),
+    (
+        "product versus system",
+        "a phrase of several words that the single-word matcher cannot match",
+    ),
+];
 
 /// The sentence with which Athena's root-cause request opens its body (`hestia::root_cause_request`). A line of
 /// that request that carries the words of earlier introspections is skipped only when this sentence is present.
@@ -3882,16 +3929,23 @@ fn plain_request_prose(request: &str) -> String {
     kept.join("\n")
 }
 
-/// The structural term a lowercase word is, in its singular, plural or possessive form.
-fn structural_term(word: &str) -> Option<&'static str> {
+/// The term a lowercase word is that the reading must define: a structural term in its singular, plural or
+/// possessive form, or an ambiguous name ([`AMBIGUOUS_NAMES`]) in its exact or possessive form. A name comes
+/// back as the list writes it (`Hermes`), so the error and the `Term Hermes:` line use the ontology's spelling.
+fn named_term(word: &str) -> Option<&'static str> {
     let word = word.strip_suffix("'s").unwrap_or(word);
     STRUCTURAL_TERMS
         .into_iter()
         .find(|term| word == *term || word.strip_suffix('s') == Some(*term))
+        .or_else(|| {
+            AMBIGUOUS_NAMES
+                .into_iter()
+                .find(|name| name.to_lowercase() == word)
+        })
 }
 
-/// The structural terms the reading defines: an assumption that starts `Term <word>:` and gives at least
-/// three words of meaning after the colon, as the reader writes a `Code survey:` line.
+/// The terms the reading defines: an assumption that starts `Term <word>:` and gives at least three words of
+/// meaning after the colon, as the reader writes a `Code survey:` line.
 fn defined_terms(reading: &Reading) -> BTreeSet<&'static str> {
     reading
         .assumptions
@@ -3900,36 +3954,43 @@ fn defined_terms(reading: &Reading) -> BTreeSet<&'static str> {
             let lower = assumption.trim().to_lowercase().replace('\u{2019}', "'");
             let (word, meaning) = lower.strip_prefix("term ")?.split_once(':')?;
             (meaning.split_whitespace().count() >= 3)
-                .then(|| structural_term(word.trim()))
+                .then(|| named_term(word.trim()))
                 .flatten()
         })
         .collect()
 }
 
-/// Refuses a reading that does not define a structural term (`ladder`, `rung`, `tier` or `layer`) the request
-/// itself uses. Root cause this check removes: readings are not checked against the outcome the user observes,
-/// so structural terms stay undefined. A request for "a ladder of requirements" was read as if the ladder were
+/// Refuses a reading that does not define a structural term (`ladder`, `rung`, `tier` or `layer`) or an
+/// ambiguous ontology name ([`AMBIGUOUS_NAMES`], today `Hermes`) the request itself uses. Root cause this check
+/// removes: readings are not checked against the outcome the user observes, so structural terms stay undefined,
+/// and so do ambiguous ontology names. A request for "a ladder of requirements" was read as if the ladder were
 /// understood, no assumption said what it was, and the work was built on a guess; job 20261014-174815-7bf8
-/// failed that way, and job 20261017-173508-0wtc (an ontology decision) is the same class. This check covers 1
-/// of the 3 cited jobs, 20261014-174815-7bf8. It reads only the request and the reading, costs no model call
-/// and, like [`check_outcome_state`], skips a reading with no capability, a question, or no deliverable. A use
-/// is a whole word (`ladder`, `rungs`, `tier's`) in the plain prose of the request: `stepladder`, `delayer`,
-/// `layer_count` and `ladder.md` are not uses, and neither are quoted spans, backtick spans, fenced code, a
-/// parenthesised list of examples (two or more commas, or an opening of `e.g.`, `i.e.`, `such as`, `for
-/// example` or `like`), paths and identifiers, or text Athena's own generators wrote or copied (the earlier
-/// introspections a root-cause request carries, and the rung line, proposal line and `## Source` onward of an
-/// approved-work request, each skipped only when the generator's own sentence is present). A term is defined
-/// by an assumption that starts `Term ladder:` (the plural and `'s` forms of the word are accepted) with at
-/// least three words of meaning; the line may cite the file that defines it. The error names the terms and the
-/// repair. Limits: quoted mentions, terms outside the list (milestone, glossary, ontology) and the Hermes term
-/// of 20261017-173508-0wtc, whose recorded request holds no word of the list, are not covered. This check
-/// refuses more readings; the higher refusal rate is intended. The declared share, expected 3% of newly
-/// refused readings, is an estimate and not a measurement, over hand-written requests; the share the loop
-/// replay measures is recorded in the job's replay record at verification. Terms the repository defines
-/// (ladder, rung) are refused until the reading restates them with a `Term ladder:` line, and so are plain
-/// technical uses of tier (priority tiers) and layer (a caching layer). A proposed request read before this
-/// check whose plain prose uses a term is held until a person runs `athena go`: [`crate::steward::queued_work`]
-/// re-checks its stored reading and leaves it out of the queue.
+/// failed that way. Job 20261017-173508-0wtc (an ontology decision) named Hermes Agent, a name that
+/// `docs/ontology.toml` records with two senses (the studied agent, and the Orchestration god), and was built on
+/// one guess at it. Job 20261014-082328-g6vy (a publish request) is the same cause for a delivery verb and is
+/// covered by [`check_outcome_state`] and [`check_governance_coverage`]. This check covers 2 of the 3 cited
+/// jobs, 20261014-174815-7bf8 and 20261017-173508-0wtc. It reads only the request and the reading, costs no
+/// model call and, like [`check_outcome_state`], skips a reading with no capability, a question, or no
+/// deliverable. A use is a whole word (`ladder`, `rungs`, `tier's`, `Hermes`, `hermes's`) in the plain prose of
+/// the request: `stepladder`, `delayer`, `hermeshub`, `layer_count` and `ladder.md` are not uses, and neither
+/// are quoted spans, backtick spans, fenced code, a parenthesised list of examples (two or more commas, or an
+/// opening of `e.g.`, `i.e.`, `such as`, `for example` or `like`), paths and identifiers, or text Athena's own
+/// generators wrote or copied (the earlier introspections a root-cause request carries, and the rung line,
+/// proposal line and `## Source` onward of an approved-work request, each skipped only when the generator's own
+/// sentence is present). A term is defined by an assumption that starts `Term ladder:` or `Term Hermes:` (the
+/// plural and `'s` forms of a structural word are accepted) with at least three words of meaning; the line may
+/// cite the file that defines it. For an ambiguous name the error asks the line to say which recorded sense
+/// applies and to cite `docs/ontology.toml`. The error names the terms and the repair. Limits: quoted
+/// mentions, terms outside the list (milestone, glossary, and every ontology term not in the ambiguous-name
+/// list) and the sense of an ambiguous name are not covered: the check forces a restatement of the name but
+/// cannot verify that the restatement matches the recorded senses, so a line that names one of two senses
+/// passes. This check refuses more readings; the higher refusal rate is intended. The declared share, expected
+/// 2% of newly refused readings, is an estimate and not a measurement, over hand-written requests; the share
+/// the loop replay measures is recorded in the job's replay record at verification. Terms the repository
+/// defines (ladder, rung) are refused until the reading restates them with a `Term ladder:` line, and so are
+/// plain technical uses of tier (priority tiers) and layer (a caching layer). A proposed request read before
+/// this check whose plain prose uses a term is held until a person runs `athena go`:
+/// [`crate::steward::queued_work`] re-checks its stored reading and leaves it out of the queue.
 pub fn check_defined_terms(reading: &Reading, request: &str) -> Result<()> {
     if reading.capability.is_none() || reading.question.is_some() || reading.deliverables.is_empty()
     {
@@ -3938,7 +3999,7 @@ pub fn check_defined_terms(reading: &Reading, request: &str) -> Result<()> {
     let defined = defined_terms(reading);
     let mut undefined: Vec<&'static str> = Vec::new();
     for word in request_words(&plain_request_prose(request)) {
-        if let Some(term) = structural_term(&word.text)
+        if let Some(term) = named_term(&word.text)
             && !defined.contains(term)
             && !undefined.contains(&term)
         {
@@ -3949,10 +4010,12 @@ pub fn check_defined_terms(reading: &Reading, request: &str) -> Result<()> {
         return Ok(());
     };
     bail!(
-        "the reading was refused because the request uses {} as a structural term but the reading does not \
-         define {}, so the work would be built on a guess at what it means. Repair: add an assumption that \
-         starts `Term {first}:` (one per term) saying what the term means in this job, and cite the file that \
-         defines it if there is one; a quoted or cited mention needs no definition",
+        "the reading was refused because the request uses {} as a structural term or an ambiguous name but the \
+         reading does not define {}, so the work would be built on a guess at what it means. Repair: add an \
+         assumption that starts `Term {first}:` (one per term) saying what the term means in this job, in at \
+         least three words, and cite the file that defines it if there is one; for an ambiguous name say which \
+         of its recorded senses applies and cite docs/ontology.toml; a quoted or cited mention needs no \
+         definition",
         undefined.join(" and "),
         if undefined.len() == 1 { "it" } else { "them" }
     )
@@ -5747,6 +5810,76 @@ mod tests {
         let mut records = Records::default();
         records.jobs.insert(job.id().as_str().to_string(), job);
         records
+    }
+
+    fn introspection_of(
+        job: &JobRecords,
+        n: u32,
+        kind: PreventionKind,
+        prevention: &str,
+    ) -> IntrospectionRecord {
+        IntrospectionRecord {
+            id: athena_data::RecordId::parse(&format!("20261012-0900{n:02}-1abc")).unwrap(),
+            at: format!("2026-10-12T09:00:{n:02}Z").parse().unwrap(),
+            trigger: IntrospectionTrigger::Rejection,
+            job: Some(job.id().clone()),
+            intervention: None,
+            class_of_work: "code".into(),
+            category: "rejected".into(),
+            what_happened: Some("The job was rejected.".into()),
+            failure_class: None,
+            new_class: false,
+            earlier_cases: Vec::new(),
+            decisions_matched: Vec::new(),
+            cause: Some("A cause.".into()),
+            prevention_kind: Some(kind),
+            prevention: Some(prevention.into()),
+            proposed_request: Some("Do the thing.".into()),
+            evidence: None,
+            status: IntrospectionStatus::Recorded,
+            failure: None,
+            flags: Vec::new(),
+            dropped_ids: Vec::new(),
+            planning_stopped: false,
+            from_jev: false,
+            jev: None,
+        }
+    }
+
+    #[test]
+    fn retry_seed_skips_relax_and_remove_introspections() {
+        let redactor = Redactor::new(&athena_gate::builtin_config()).unwrap();
+        let job = job_with_checks(vec![check("test", false, "failed")]);
+        let mut records = records_with(job.clone());
+
+        // A relax or a remove record alone seeds nothing.
+        for kind in [PreventionKind::Relax, PreventionKind::Remove] {
+            records.introspections = vec![introspection_of(
+                &job,
+                1,
+                kind,
+                "[gate: test] Loosen the check.",
+            )];
+            assert!(retry_introspection(&records, &job).is_none(), "{kind:?}");
+            assert!(!has_retry_introspection(&records, &job), "{kind:?}");
+            assert!(retry_cause(&records, &job, &redactor).unwrap().is_none());
+        }
+
+        // An older code-check record still seeds, and the newer relax record is not what is carried.
+        let older = introspection_of(&job, 1, PreventionKind::CodeCheck, "Add a check.");
+        let newer = introspection_of(&job, 2, PreventionKind::Relax, "[gate: test] Loosen it.");
+        records.introspections = vec![older.clone(), newer.clone()];
+        assert_eq!(retry_introspection(&records, &job).unwrap().id, older.id);
+        let cause = retry_cause(&records, &job, &redactor).unwrap().unwrap();
+        assert_eq!(cause.introspection, older.id.to_string());
+        assert!(!cause.prevention.contains("Loosen"), "{}", cause.prevention);
+
+        // A relax record cited as an earlier case of the seed is not carried either.
+        let mut seed = older.clone();
+        seed.earlier_cases = vec![newer.id.clone()];
+        records.introspections = vec![seed, newer];
+        let cause = retry_cause(&records, &job, &redactor).unwrap().unwrap();
+        assert!(cause.earlier_cases.is_empty(), "{:?}", cause.earlier_cases);
     }
 
     fn kept_plan(job: &JobRecords, round: u32) -> athena_data::records::JobPlan {
@@ -10851,13 +10984,13 @@ mod tests {
     fn defined_terms_refusal_is_declared_intended() {
         let declared = replay_declaration(
             &[Criterion {
-                text: "The change refuses more readings: expected 3% of newly refused readings"
+                text: "The change refuses more readings: expected 2% of newly refused readings"
                     .into(),
                 kind: CriterionKind::Behavior,
             }],
             &[],
         );
-        assert_eq!(declared.share, Some(3));
+        assert_eq!(declared.share, Some(2));
         let doc = defined_terms_doc();
         let changelog = include_str!("../../../CHANGELOG.md")
             .split_whitespace()
@@ -10870,6 +11003,18 @@ mod tests {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
+        // D164 keeps the share it declared; the doc comment and the changelog carry the current one (D165).
+        assert!(decisions.contains("expected 3% of newly refused readings"));
+        for (label, text) in [("the doc comment", &doc), ("the changelog", &changelog)] {
+            assert!(
+                text.contains("expected 2% of newly refused readings"),
+                "{label} lacks the current share"
+            );
+            assert!(
+                !text.contains("expected 3% of newly refused readings"),
+                "{label} still holds the share of D164"
+            );
+        }
         for (label, text) in [
             ("the doc comment", &doc),
             ("the changelog", &changelog),
@@ -10877,7 +11022,6 @@ mod tests {
         ] {
             for needle in [
                 "This check refuses more readings; the higher refusal rate is intended",
-                "expected 3% of newly refused readings",
                 "estimate",
                 "hand-written requests",
                 "(ladder, rung) are refused until the reading restates them",
@@ -10929,6 +11073,238 @@ mod tests {
             !outcome_doc.contains("which does not catch them"),
             "{outcome_doc}"
         );
+    }
+
+    const HERMES_DEFINED: &str = "Term Hermes: a studied agent, not Athena";
+
+    #[test]
+    fn defined_terms_refuses_an_ambiguous_ontology_name() {
+        // A plain-prose use of the name is refused: the exact word, the possessive, another case, a bullet.
+        for request in [
+            "Compare Hermes with Athena.",
+            "Hermes's skills differ.",
+            "Hermes\u{2019}s skills differ.",
+            "Fix the hermes note.",
+            "Fix the HERMES note.",
+            "Acceptance:\n- Hermes Agent is described in the guide",
+            "Hermes",
+        ] {
+            let error =
+                terms_error(request, &[]).unwrap_or_else(|| panic!("{request:?}: accepted"));
+            assert!(
+                error.starts_with("the reading was refused because"),
+                "{error}"
+            );
+            assert!(error.contains("uses Hermes as"), "{request:?}: {error}");
+            assert!(error.contains("`Term Hermes:"), "{error}");
+            assert!(error.contains("ambiguous name"), "{error}");
+            assert!(!error.contains('\n'), "{error}");
+            assert_eq!(
+                refuser_for(&terms_reading(&[]), request),
+                Some("check_defined_terms"),
+                "{request:?}"
+            );
+        }
+        // Quotes, backticks, example lists, fenced code, paths, identifiers and other words are not uses, and
+        // neither is a request with no listed name.
+        for request in [
+            "Rename \"Hermes\" in the guide.",
+            "Rename `Hermes` in the guide.",
+            "Rename \u{201C}Hermes\u{201D} in the guide.",
+            "Rename 'Hermes' in the guide.",
+            "Compare the studies (firstmate, Hermes, Athena) in the guide.",
+            "Compare the studies (e.g. Hermes) in the guide.",
+            "Keep the code block:\n```\nlet agent = Hermes;\n```\nOnly.",
+            "Edit docs/hermes.md and hermes_notes.",
+            "Call Hermes::new.",
+            "Rename the hermeshub helper.",
+            "Fix the Hermesian note.",
+            "Update the guide so that it lists the status flag.",
+        ] {
+            assert_eq!(terms_error(request, &[]), None, "{request:?}");
+        }
+        // A `Term Hermes:` line of three or more words defines it, in any case; fewer words do not.
+        let request = "Compare Hermes with Athena.";
+        for defined in [
+            HERMES_DEFINED,
+            "term hermes: a studied agent, not Athena",
+            "  TERM HERMES: the Orchestration god of the Olympus Pantheon, per docs/ontology.toml",
+        ] {
+            assert_eq!(terms_error(request, &[defined]), None, "{defined}");
+        }
+        for weak in [
+            "Term Hermes: agent",
+            "Term Hermes: a studied",
+            "Hermes: a studied agent here",
+            "Terms Hermes: a studied agent here",
+            "Term Zeus: a studied agent here",
+        ] {
+            assert!(terms_error(request, &[weak]).is_some(), "{weak}");
+        }
+        // A definition of the name leaves a structural term undefined, and the reverse.
+        let error = terms_error("Compare the ladder with Hermes.", &[HERMES_DEFINED]).unwrap();
+        assert!(error.contains("uses ladder as"), "{error}");
+        assert!(!error.contains("Hermes"), "{error}");
+        let error = terms_error("Compare the ladder with Hermes.", &[LADDER_DEFINED]).unwrap();
+        assert!(error.contains("uses Hermes as"), "{error}");
+        assert!(!error.contains("ladder"), "{error}");
+        let both = terms_error("Compare the ladder with Hermes.", &[]).unwrap();
+        assert!(both.contains("ladder and Hermes"), "{both}");
+        assert!(both.contains("define them"), "{both}");
+        assert_eq!(
+            terms_error(
+                "Compare the ladder with Hermes.",
+                &[LADDER_DEFINED, HERMES_DEFINED]
+            ),
+            None
+        );
+        // The gate gives the same text.
+        let gate = check_reading_acceptance(&terms_reading(&[]), request, None, &[], None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(Some(gate), terms_error(request, &[]));
+        // A reading with no capability, a question or no deliverable is skipped, as for a structural term.
+        let mut asking = terms_reading(&[]);
+        asking.question = Some("Which Hermes?".into());
+        check_defined_terms(&asking, request).unwrap();
+    }
+
+    /// Problems in how the two lists classify the ontology terms: a name in neither list, in both, a listed name
+    /// that is not an ontology term, an empty list or an ungated entry with a reason of fewer than three words.
+    /// Names are compared exactly, with case.
+    fn ontology_problems_for(
+        listed: &[&str],
+        ungated: &[(&str, &str)],
+        ontology: &[String],
+    ) -> Vec<String> {
+        let mut found = Vec::new();
+        if listed.is_empty() {
+            found.push("AMBIGUOUS_NAMES is empty".to_string());
+        }
+        for name in ontology {
+            let gated = listed.contains(&name.as_str());
+            let free = ungated.iter().any(|(n, _)| n == name);
+            if !gated && !free {
+                found.push(format!(
+                    "{name} is a term of docs/ontology.toml in neither AMBIGUOUS_NAMES nor UNGATED_TERMS; add it \
+                     to AMBIGUOUS_NAMES if a reading must define it, or to UNGATED_TERMS with a reason"
+                ));
+            }
+            if gated && free {
+                found.push(format!(
+                    "{name} is in both AMBIGUOUS_NAMES and UNGATED_TERMS"
+                ));
+            }
+        }
+        for name in listed {
+            if !ontology.iter().any(|n| n == name) {
+                found.push(format!(
+                    "{name} is in AMBIGUOUS_NAMES but is not a [[term]] name of docs/ontology.toml"
+                ));
+            }
+        }
+        for (name, reason) in ungated {
+            if !ontology.iter().any(|n| n == name) {
+                found.push(format!(
+                    "{name} is in UNGATED_TERMS but is not a [[term]] name of docs/ontology.toml"
+                ));
+            }
+            if reason.split_whitespace().count() < 3 {
+                found.push(format!("the reason for {name} is shorter than three words"));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn ambiguous_and_ungated_terms_cover_the_ontology() {
+        let terms =
+            crate::mirrors::parse_ontology(include_str!("../../../docs/ontology.toml")).unwrap();
+        let ontology: Vec<String> = terms.into_iter().map(|t| t.name).collect();
+        let listed: Vec<&str> = AMBIGUOUS_NAMES.to_vec();
+        let ungated: Vec<(&str, &str)> = UNGATED_TERMS.to_vec();
+        assert_eq!(
+            ontology_problems_for(&listed, &ungated, &ontology),
+            Vec::<String>::new()
+        );
+        assert!(listed.contains(&"Hermes"));
+        // Every gated name is one word, so the word matcher can see it, and it comes back as written.
+        for name in &listed {
+            assert!(name.chars().all(char::is_alphabetic), "{name}");
+            assert_eq!(named_term(&name.to_lowercase()), Some(*name));
+        }
+        // Controls: each fault is reported.
+        let with = |extra: &str| -> Vec<String> {
+            let mut names = ontology.clone();
+            names.push(extra.to_string());
+            names
+        };
+        let unclassified = ontology_problems_for(&listed, &ungated, &with("Zeus"));
+        assert_eq!(unclassified.len(), 1, "{unclassified:?}");
+        assert!(
+            unclassified[0].contains("Zeus") && unclassified[0].contains("UNGATED_TERMS"),
+            "{unclassified:?}"
+        );
+        let mut more = listed.clone();
+        more.push("Zeus");
+        let missing = ontology_problems_for(&more, &ungated, &ontology);
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert!(missing[0].contains("Zeus") && missing[0].contains("not a [[term]]"));
+        let mut more = ungated.clone();
+        more.push(("Zeus", "a god of the Olympus"));
+        let missing = ontology_problems_for(&listed, &more, &ontology);
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        let mut both = ungated.clone();
+        both.push(("Hermes", "also named in the other list"));
+        let twice = ontology_problems_for(&listed, &both, &ontology);
+        assert_eq!(twice.len(), 1, "{twice:?}");
+        assert!(twice[0].contains("both"), "{twice:?}");
+        let mut short = ungated.clone();
+        short[0].1 = "common";
+        assert_eq!(ontology_problems_for(&listed, &short, &ontology).len(), 1);
+        // The comparison is exact: a name in another case is a different name.
+        let lowercase = ontology_problems_for(&["hermes"], &ungated, &ontology);
+        assert_eq!(lowercase.len(), 2, "{lowercase:?}");
+        assert_eq!(ontology_problems_for(&[], &ungated, &ontology).len(), 2);
+    }
+
+    #[test]
+    fn ambiguous_name_doc_and_error_text() {
+        let doc = defined_terms_doc();
+        for needle in [
+            "readings are not checked against the outcome the user observes",
+            "20261014-082328-g6vy",
+            "20261014-174815-7bf8",
+            "20261017-173508-0wtc",
+            "covers 2 of the 3 cited jobs",
+            "expected 2% of newly refused readings",
+            "AMBIGUOUS_NAMES",
+            "docs/ontology.toml",
+            "cannot verify that the restatement matches the recorded senses",
+            "This check refuses more readings; the higher refusal rate is intended.",
+        ] {
+            assert!(doc.contains(needle), "the doc comment lacks {needle:?}");
+        }
+        for stale in [
+            "whose recorded request holds no word of the list",
+            "covers 1 of the 3 cited jobs",
+            "no check catches",
+        ] {
+            assert!(!doc.contains(stale), "the doc comment still says {stale:?}");
+        }
+        let error = terms_error("Compare Hermes with Athena.", &[]).unwrap();
+        for needle in [
+            "ambiguous name",
+            "`Term Hermes:",
+            "which of its recorded senses applies",
+            "cite docs/ontology.toml",
+            "at least three words",
+        ] {
+            assert!(error.contains(needle), "{needle:?}: {error}");
+        }
+        // The error of a structural term alone names no ambiguous name.
+        let error = terms_error("Add a caching layer.", &[]).unwrap();
+        assert!(!error.contains("Hermes"), "{error}");
     }
 
     /// Asserts the reading is refused by the history fixture check, then accepted once the fixture criterion

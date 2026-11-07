@@ -1,0 +1,41 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-212343-z26k",
+  "round": 5,
+  "at": "2026-11-07T21:59:45.899363932Z",
+  "invocation_seq": 11,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The 'not taken by the host' test is guessed from whether a link file exists and a landing record is missing. The link file already stores whether the host merged the job.",
+      "evidence": "`PrLink` has `state: LinkState` with Open, Landed and MergedUnverified (pr.rs:23-51). `check_merged` sets it to Landed or MergedUnverified when it sees the merge (pr.rs:360, 364), and the drain's lander already trusts `report.link.state == LinkState::Landed` (drain.rs:3274). The plan reads the link only for `Some`/`None` and asks `records.landings` whether the host took the job. `Records::landings` is read from the tree and from the local records branch, and 'a missing branch reads as none' (store.rs:260-262). On a clone or machine without that branch, and for jobs that landed by pull request before landing records existed but kept their pr-link.json, every such job counts as unlanded. Because the plan also stops these jobs from closing their text line, a re-ask of old landed work joins its line, and two such jobs hold it. That is a false positive on exactly the jobs the rule should ignore. Fix: Count a Closed(Landed) job as unlanded only when its link (own or early) exists, its `state` is not `LinkState::Landed`, and no landing record names it. Either source saying 'landed' takes the job out of the set. Add a watcher_tests case: link stored with state Landed and no landing record gives a job not in the set. CollidingLander keeps storing state Open. Update the risks and the changelog wording to match.",
+      "location": "Decision 1 / Step 3 (`Athena::unlanded_jobs`)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The in-loop hold also refuses the free landing retry of the item's own blocked job.",
+      "evidence": "A blocked job comes back as `RunStep::Failed` with `passed` still None (drain.rs:1911-1924). The next iteration runs `go` on the same blocked job, which only retries the landing (`JobState::Blocked => retry_landing`, run/mod.rs:450-453) and costs no agent. With the new check at the top of the iteration (after the pause check at 1875), an item whose own first attempt was blocked on a line that already has one counted attempt ends as Awaiting. Its cheap landing retry never runs, and the reason says 'awaiting diagnosis' when the remedy is to clear the local edits and run `athena go`. Fix: Skip the in-loop hold when the next attempt only re-runs the item's own blocked or proposed job, that is, when no new read or retry job would be made (`!retry && item.read`). Alternatively, state this behaviour and why in the plan and the changelog.",
+      "location": "Step 6 (check at the top of each `Drain::attempts` iteration)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The list leaves out the production callers of RealSteps in main.rs.",
+      "evidence": "crates/athena-cli/src/main.rs:1317 and 1344 build `drain::RealSteps::live(&athena, &Terminal)` for `athena drain` and `athena plan`. The dependents entry lists only the test files (tests/drain.rs, focus.rs, job_plan.rs). Fix: Add main.rs:1317/1344 to the entry. Its coverage is the RealSteps drain::drain and drain::plan tests, since main.rs only wires them.",
+      "location": "Dependents: '`RealSteps::awaiting` now runs in every RealSteps drain or plan'",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "Some cited line numbers are off.",
+      "evidence": "`Drain::finish` is at drain.rs:2545, not 2629. `close.rs` is at crates/athena-core/src/run/close.rs, not a top-level path. Fix: Correct the citations so the producer finds the code directly.",
+      "location": "Steps 5-6 line citations",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan matches the request and the accepted reading. The functions it names exist where it says, with small line drift: group_lines at 122, line_attempts at 161, verdict_of at 544, request_records at 616, line_pause at 784, Steps::paused/flagged at 703/711, Drain::prepare at 2084 with the paused map at 2126, and the attempts loop at 1855. The grouping change (a job that has not landed on the host does not close its text line) is necessary and correctly limited to the hold's grouping; the signal callers keep the wrapper. The demonstrations use real seams: production drain::drain and drain::plan, production hold_reason inside the Stub, RealSteps.lander (drain.rs:4033) for CollidingLander, and the helpers it cites (all exist). One soundness problem needs revising. The plan decides whether the host took a job from the existence of a pull-request link plus the absence of a landing record. It ignores the link's own `state` field, which records whether the host merged the job (pr.rs:26-35, set at pr.rs:360). Landing records come from the local records branch and read as empty when that branch is missing (store.rs:260-262), so jobs that did land can be counted as unlanded. Two smaller issues: the check at the top of each loop iteration would also refuse the free landing retry of the item's own blocked job, and the dependents list leaves out the production RealSteps callers in main.rs."
+}

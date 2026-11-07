@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-212343-z26k",
+  "round": 4,
+  "at": "2026-11-07T21:50:37.313612715Z",
+  "invocation_seq": 9,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "blocker",
+      "summary": "The plan says a verified job whose pull request did not land is left Dispatched with no closing record. The code says otherwise: by the time the drain calls `land`, `go` has already committed outcome Landed. So the collision case the hold is built for reads as Accepted, and the hold never fires for it in production.",
+      "evidence": "Read in crates/athena-core/src/run/close.rs:105-128 and 323-372: on a passing verification `go` goes through `land_or_block`, which commits `outcome.json` with OutcomeState::Landed (\"verified and landed\") together with the verification. drain.rs:1647-1650 turns run outcome `Some(OutcomeState::Landed)` into `RunStep::Passed`, and only after that does the drain call `land` (drain.rs:1929). `Athena::land_pr` (gh/landing.rs:772, 55-75) needs that local landed commit, the one that added outcome.json, or it fails with 'run `athena go` first'. So after Landing::NotLanded or Landing::Waiting the job's state() is Closed(Landed), and `verdict_of` (scope_guard.rs:546) maps that to Verdict::Accepted. Three results: (1) under the plan's rule 'a line with an Accepted attempt counts 0', a line with two pull-request collisions is never held; (2) `interrupted_work` (steward.rs:458) never returns such a job, because it only lists Dispatched jobs, so the 'finding 1' interrupted-X chain does not happen; (3) a passing verification is committed only in the closing commit (the `Closing` struct, run/mod.rs:119-136; `hold_for_disk` commits only before the verifier), so 'Dispatched with a passing verification' looks unreachable in real records. In real records, only Blocked jobs would set the flag. Fix: Re-derive 'verified but not landed' from what the records actually hold. A job closed Landed with no landing record for it in `Records::landings` (store.rs:260-262; each `history::Landing` lists its commits with their jobs) has not landed on the host. Blocked covers the local-edits collision. Count these for the hold only. Do not change `verdict_of`, `done` or `counted`, so T1 to T5 stay untouched. The rule 'a line with an Accepted attempt counts 0' must then use host landing, not outcome Landed, and the plan must say how a repository that lands without pull requests is told apart. Drop the Dispatched-with-Pass branch and the interrupted-X tests unless the planner can name a code path that produces that state.",
+      "location": "Approach; Decision 1; Step 1 (`verified_unlanded` = Blocked or Dispatched with a passing verification); Dependents entry 'jobs Dispatched with a passing verification'",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "Criterion 2 is shown only over RequestRecord literals and in-memory edits of a state that the real flow does not produce. The demonstration therefore tests a double of the world, not the behavior.",
+      "evidence": "Cases (b) case 2, (c) and (d) feed `verified_unlanded` Dispatched jobs through `Stub.records`. The rig test sets `outcome.state` to Blocked and then removes the outcome in memory. Per the blocker above, a real not-landed pull request leaves outcome Landed and no landing record. These tests would pass while a real drain still retries a line with two pull-request collisions. No RealSteps test drives a lander that returns `Landing::NotLanded` (tests/drain.rs has NotLanded only in the Stub, line 276). Fix: Add a RealSteps drain test that runs real `go` with a `RecordingLander`-style lander returning `Landing::NotLanded`, or `Landing::Waiting`, for two jobs on one line. Then queue 'try again on <job>' and assert the item is passed over as awaiting diagnosis and `fx.head()` is unchanged. Keep one Blocked case built through the real local-edits path, or keep the rig derivation over a Blocked outcome as a unit test.",
+      "location": "Demonstrations, Criterion 2 (cases a to d, rig derivation test)",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The risks, the open question to the user and the changelog text are built on the same wrong premise: that a waiting or not-landed job is re-offered as an interrupted item and now gets one retry instead of two.",
+      "evidence": "`interrupted_work` lists only JobState::Dispatched jobs (steward.rs:458). A job whose pull request is waiting or not landed is Closed(Landed) locally (close.rs:323-372). The drain's module doc (drain.rs:131-138) says a waiting job 'is not tried again' and that `athena land --pr` merges it later. The changelog would therefore describe behavior the code does not have, which criterion 6 forbids ('states only what the diff does'). Fix: Rewrite the risk, the question and the changelog bullet after re-deriving the signal. State the real cases: a Blocked job, and a job closed Landed whose pull request has no landing record.",
+      "location": "Risks 1 and 3; Open questions 1; Step 7 (changelog: 'including a job it would retry after an interruption')",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The dependents list leaves out two other test files that build RealSteps and run `drain::drain` or `drain::plan`. Both will now exercise `RealSteps::awaiting`.",
+      "evidence": "Grep shows crates/athena-cli/tests/focus.rs:159 (`drain::plan` with RealSteps) and crates/athena-cli/tests/job_plan.rs:173-185 (`drain::drain` with RealSteps). Neither is listed. Their lines have no non-landed attempts, so they should pass, and the whole-workspace `cargo test --locked` in criterion 4 covers them. Fix: Add both files to the dependents entry, with criterion 4's workspace test named as their coverage.",
+      "location": "Dependents: new default method `Steps::awaiting` / RealSteps-based tests",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "After a fresh item's two failed attempts in one run, it is still reported as 'flagged' or 'failed twice', not 'awaiting diagnosis', although its line is now held.",
+      "evidence": "The end path asks paused, then flagged, then Failed. T1 already flags at two counted attempts (t1_retries, scope_guard.rs:237-243), so the item is passed over as flagged. The hold wording appears only on the next run. Fix: Optionally ask `awaiting_reason` before `flagged_reason` at the end path, or state in the plan that the hold text shows from the next run.",
+      "location": "Step 5 (hold asked only at the top of an iteration); drain.rs:1942-1955",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "The plan is shaped well. It counts through `group_lines` and `line_attempts`, uses a pure `hold_reason` plus a `Steps::awaiting` hook, asks the hold before the planning read loop, carries the cause to dependents, and leaves T1 to T5 alone. What I checked against the code: `prepare`'s read loop and held map (drain.rs:2126-2223), the `attempts` loop (1855-1957), `finish` (2629), the `Steps` implementers, the `RequestRecord` literals, and the `rejected_twice` and `vague` helpers. All exist as the plan says. But its central fact about collisions is wrong. The plan says a verified job whose pull request did not land stays Dispatched with a passing verification and comes back to the drain as interrupted. I read close.rs and gh/landing.rs: `go` commits outcome Landed before the drain calls `land`, and `land_pr` needs that local landed commit. So a not-landed or waiting job is Closed(Landed), which `verdict_of` maps to Accepted. Under the plan's own 'Accepted line counts 0' rule, the collision case of criterion 2 is never held in production. The Dispatched-with-Pass state the tests model seems not to occur, and the stub and rig tests would pass anyway. The risks, the open question and the changelog text inherit the same error. The planner should derive 'verified but not landed' from Blocked, and from outcome Landed with no entry in `Records::landings`, without touching `verdict_of`, `done` or `counted`. Then add a RealSteps test with a lander that returns NotLanded. Verdict: revise."
+}

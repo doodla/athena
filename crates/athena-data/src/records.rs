@@ -1328,27 +1328,41 @@ impl IntrospectionTrigger {
     }
 }
 
-/// What kind of prevention would have stopped the class.
+/// What kind of prevention would have stopped the class. `Relax` and `Remove` are the two kinds for a rule or
+/// check that was wrong: they propose loosening a gate, not adding a protection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PreventionKind {
     Default,
     CodeCheck,
     DesignChange,
+    /// A gate was too strict: loosen it.
+    Relax,
+    /// A gate should not exist: remove it.
+    Remove,
 }
 
 impl PreventionKind {
-    pub const ALL: [PreventionKind; 3] = [
+    pub const ALL: [PreventionKind; 5] = [
         PreventionKind::Default,
         PreventionKind::CodeCheck,
         PreventionKind::DesignChange,
+        PreventionKind::Relax,
+        PreventionKind::Remove,
     ];
     pub fn as_str(self) -> &'static str {
         match self {
             PreventionKind::Default => "default",
             PreventionKind::CodeCheck => "code-check",
             PreventionKind::DesignChange => "design-change",
+            PreventionKind::Relax => "relax",
+            PreventionKind::Remove => "remove",
         }
+    }
+    /// True for the kinds that propose loosening a gate. Such a record is evidence about a check, not a case
+    /// for a new default or a warning to a producer.
+    pub fn loosens(self) -> bool {
+        matches!(self, PreventionKind::Relax | PreventionKind::Remove)
     }
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|k| k.as_str() == text)
@@ -3345,6 +3359,91 @@ mod tests {
                 Err(RecordError::Invalid { .. })
             ));
         }
+    }
+
+    fn sample_introspection(kind: &str) -> String {
+        format!(
+            r#"{{
+  "schema": "athena.introspection/1",
+  "id": "20261010-153012-k7q2",
+  "at": "2026-10-10T15:30:12Z",
+  "trigger": "rejection",
+  "job": "20261010-153012-k7q2",
+  "intervention": null,
+  "class_of_work": "code",
+  "category": "rejected",
+  "what_happened": "the job was rejected",
+  "failure_class": "20261010-153012-k7q2",
+  "new_class": false,
+  "earlier_cases": [],
+  "decisions_matched": [],
+  "cause": "a cause",
+  "prevention_kind": "{kind}",
+  "prevention": "a prevention",
+  "proposed_request": "a request",
+  "evidence": null,
+  "status": "recorded",
+  "failure": null,
+  "flags": [],
+  "dropped_ids": [],
+  "from_jev": false
+}}
+"#
+        )
+    }
+
+    #[test]
+    fn introspections_of_the_three_old_kinds_still_parse_and_keep_their_bytes() {
+        for (text, kind) in [
+            ("default", PreventionKind::Default),
+            ("code-check", PreventionKind::CodeCheck),
+            ("design-change", PreventionKind::DesignChange),
+        ] {
+            let bytes = sample_introspection(text);
+            let path = "records/introspections/2026-10/20261010-153012-k7q2.json";
+            let checked = check_record_file(path, bytes.as_bytes())
+                .unwrap()
+                .expect("a record");
+            let AnyRecord::Introspection(i) = &checked else {
+                panic!("not an introspection");
+            };
+            assert_eq!(i.prevention_kind, Some(kind));
+            assert_eq!(kind.as_str(), text);
+            assert!(!kind.loosens());
+            let back = AnyRecord::parse(path, checked.to_json().as_bytes()).unwrap();
+            assert_eq!(back, checked);
+            assert_eq!(checked.to_json().trim_end(), bytes.trim_end(), "{text}");
+        }
+    }
+
+    #[test]
+    fn relax_and_remove_introspections_round_trip_and_only_they_loosen() {
+        for (text, kind) in [
+            ("relax", PreventionKind::Relax),
+            ("remove", PreventionKind::Remove),
+        ] {
+            let bytes = sample_introspection(text);
+            let path = "records/introspections/2026-10/20261010-153012-k7q2.json";
+            let checked = check_record_file(path, bytes.as_bytes())
+                .unwrap()
+                .expect("a record");
+            let AnyRecord::Introspection(i) = &checked else {
+                panic!("not an introspection");
+            };
+            assert_eq!(i.prevention_kind, Some(kind));
+            assert_eq!(PreventionKind::parse(text), Some(kind));
+            assert!(kind.loosens());
+            assert_eq!(checked.to_json().trim_end(), bytes.trim_end(), "{text}");
+        }
+        assert_eq!(PreventionKind::parse("loosen"), None);
+        assert!(
+            check_record_file(
+                "records/introspections/2026-10/20261010-153012-k7q2.json",
+                sample_introspection("loosen").as_bytes()
+            )
+            .is_err()
+        );
+        assert_eq!(PreventionKind::ALL.len(), 5);
     }
 
     fn sample_candidate() -> Candidate {
