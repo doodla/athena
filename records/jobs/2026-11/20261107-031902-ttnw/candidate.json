@@ -1,0 +1,184 @@
+{
+  "schema": "athena.candidate/2",
+  "job": "20261107-031902-ttnw",
+  "base_commit": "5aec315ccdae0f1a7ad1b0f1e41ca758757635e5",
+  "base_fingerprint": "sha256:cf558f83b04f94d9cfddbbb4855e37c03bd4ddc03af2ba5be07faef3a979ef1b",
+  "previous_job": "20261106-194635-cg5z",
+  "candidate_commit": "d1b6a5e67a5099661c7246d01074b9eaa1f7b5cf",
+  "candidate_tree": "39a77b2212e43da66c8ac4702003b4a7a600aec2",
+  "changes": [
+    {
+      "path": "CHANGELOG.md",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 352719
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 90084
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 302125
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 92570
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 336239
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 217568
+    },
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 97828
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "status": "modified",
+      "mode": "100644",
+      "bytes": 97068
+    }
+  ],
+  "fingerprint": "sha256:ededa0b875cd295880b7f6b28adf0a46446c19c0d2af760fdc510ec89e2867d2",
+  "violations": [],
+  "producer_report": {
+    "summary": "Athena's own improvement requests (the Steward's and Hestia's) now get a guaranteed turn in the drain, and a request whose cause is in three or more distinct jobs counts as urgent.\n\n**Root cause.** The drain ordered by priority alone, so a person's urgent and high requests always sorted ahead of Athena's own requests.\n\n**How it works.** `Plan::build_improving` in `plan.rs` wraps `build_capped`.\n- It raises a request whose cause is in three or more distinct jobs to urgent, in memory only. This happens before `[priority_caps]`, so a full urgent tier can demote it again. A priority a person set is never changed.\n- It then walks the order once. While a ready improvement request is queued, at most two other items run in a row. The best-ranked ready one moves into the place that is due.\n- A request that is refused, held, or has an unmet dependency is skipped. The skipped request is never a candidate.\n- A moved request becomes a group of its own, so a parallel wave cannot start ahead of it.\n- `priority_violations` no longer reports a moved request as a priority contradiction.\n- With no improvement item among the entries, the result is exactly the `build_capped` result.\n\n**Which requests count.** `hestia::improvement_of` finds them by recorded links, never by title:\n- open requests on the `steward` channel (`steward::improvement_requests`);\n- the open request that cites a repeated cause's introspections, together with the number of distinct jobs for that cause;\n- the `request_job` of a throughput proposal;\n- the open request holding a `Spec requirement: <id>` line, using a helper shared with `spec_request_is_open`.\n\nThe throughput slowdown request is not covered, because no record links it.\n\n**Drain.** `Steps::improvement()` is a new default method. The drain counts consecutive other dispatches (`since_turn`) so each replan after a dispatch keeps the gap. The report gains `improvement_turns`.\n\n**Display.** `athena plan` prints a `turn` line for each turn and a `promoted` line for each raised request, with the demotion that followed if there was one. `athena drain` prints an `improvement` line for each turn taken. The help text of both commands is updated.\n\n**Tests added.**\n- Six urgent requests plus two Steward requests: a Steward request is within the first three, at positions 3 and 6.\n- A cause in three distinct jobs is urgent; in two it is not, and a person-set priority is never changed.\n- With no improvement requests, the result equals `build_capped`.\n- Refused, held and unready requests get no turn.\n- The plan text names each turn, and the drain report lists them.\n- Run order equals the printed plan order.\n- Under `drain_concurrent`, a Steward request starts among the first three.\n\nI did not touch `athena.toml`, `defaults.toml`, the two-job filing threshold, or the caps.",
+    "files": [
+      "CHANGELOG.md",
+      "crates/athena-core/src/plan.rs",
+      "crates/athena-core/src/hestia.rs",
+      "crates/athena-core/src/steward.rs",
+      "crates/athena-cli/src/drain.rs",
+      "crates/athena-cli/src/display.rs",
+      "crates/athena-cli/src/main.rs",
+      "crates/athena-cli/tests/drain.rs"
+    ],
+    "checks_run": [
+      {
+        "command": "cargo test -p athena-core --locked --lib -- improvement_of improvement_turn repeat_urgent",
+        "result": "pass",
+        "note": "14 tests: plan.rs, hestia.rs"
+      },
+      {
+        "command": "cargo test -p athena-core --locked --lib plan::tests -- improvement repeat_urgent build_improving (and steward::tests::improvement_requests...)",
+        "result": "pass",
+        "note": "run before the last fix to the order-check test; the later run re-covered it"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --lib -- display::tests",
+        "result": "pass",
+        "note": "21 tests, including the two new display tests"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --test drain -- improvement the_plan_text the_drain_dispatches with_no_improvement a_group_of_urgent",
+        "result": "pass",
+        "note": "5 new tests"
+      },
+      {
+        "command": "cargo fmt --all --check",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo clippy --all-targets --locked -- -D warnings",
+        "result": "pass",
+        "note": null
+      },
+      {
+        "command": "cargo test -p xtask --locked --test policy",
+        "result": "pass",
+        "note": "17 tests; also grepped the changed files for the banned words: none"
+      },
+      {
+        "command": "cargo test -p athena-cli --locked --test mirrors",
+        "result": "pass",
+        "note": "4 tests"
+      },
+      {
+        "command": "cargo test --locked",
+        "result": "pass",
+        "note": "Run once. The output was too large to display and the harness blocked reading its saved copy, so I could not count the results line by line. The tool reported no failing exit code, unlike my earlier failing runs, which showed 'Exit code 101'."
+      }
+    ],
+    "criteria_check": [
+      {
+        "criterion": "Run `cargo test -p athena-core`: a new test queues six person-filed urgent requests and two Steward requests, builds the plan, and asserts the first three dispatched items include at least one Steward request.",
+        "status": "met",
+        "evidence": "plan.rs test `improvement_turn_puts_a_steward_request_among_the_first_three_dispatches` queues six urgent entries and two Steward entries and calls `Plan::build_improving`. It asserts `order[..3]` has an id starting with 's', the exact order u1 u2 s1 u3 u4 s2 u5 u6, and the turns at positions 3 and 6. It also asserts that `build_capped` puts s1 and s2 last. It runs once without caps and once with caps 3/10 and the six ids person-set. Passes in `cargo test -p athena-core --lib -- improvement_turn`. The drain-level checks are tests/drain.rs `a_group_of_urgent_items_does_not_start_ahead_of_the_improvement_turn` and `the_drain_dispatches_in_the_order_the_plan_showed_and_reports_the_turns_it_took`."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-core`: a new test gives a Hestia request whose failure class appears in introspections of three distinct jobs and asserts it is ordered as urgent; a companion case with two distinct jobs asserts it is not promoted.",
+        "status": "met",
+        "evidence": "hestia.rs `improvement_of_feeds_the_plan_so_a_three_job_request_is_ordered_as_urgent` files the request through the real `error_review` path. With introspections in jobs a, b, c it asserts the request is first in the order, `plan.promoted[0].jobs == 3` and the capped priority is Urgent. With jobs a, b it asserts the request sits behind the older person request, `promoted` is empty and the priority is Normal. `improvement_of_counts_the_distinct_jobs_of_the_cause_a_request_addresses` asserts counts of 3, 2 and 2 (two introspections of one job count once). plan.rs `repeat_urgent_*` tests cover 3 and 7 jobs promoted, 2 jobs not, person-set and already-urgent not promoted, and promotion followed by demotion when the urgent tier is full. All pass."
+      },
+      {
+        "criterion": "Run `cargo test`: a new test with no Steward or Hestia requests queued asserts the plan order is identical to the order before the change, and the existing plan tests still pass.",
+        "status": "met",
+        "evidence": "plan.rs `build_improving_without_improvement_items_equals_build_capped` asserts the whole result (plan and entries) equals `Plan::build_capped`. It covers a mixed set (urgent, high, normal, low, dependencies, overlapping touches, a refused and a held item) with unlimited and 3/10 caps, for no improvement items, an id not among the entries, and improvement ids that are refused. tests/drain.rs `with_no_improvement_request_queued_the_order_and_the_report_are_unchanged` asserts the plain order and that the run order equals the plan order. The existing plan and drain tests are untouched and the full `cargo test --locked` run was started and showed no failure exit code."
+      },
+      {
+        "criterion": "Run `cargo test -p athena-cli`: a test of the `athena plan` output (display::plan or the CLI drain test) asserts it names each item that takes the improvement turn, and that the drain report lists them.",
+        "status": "met",
+        "evidence": "tests/drain.rs `the_plan_text_names_each_item_that_takes_the_improvement_turn_and_each_promotion` runs `drain::plan` with the Stub and asserts `turn` lines for h1 at dispatch 3 and s1 at dispatch 6 (and exactly two), plus the `promoted` line for h1. `the_drain_dispatches_in_the_order_the_plan_showed_and_reports_the_turns_it_took` asserts the run order equals the printed plan order, `report.improvement_turns` is [(h1,3),(s1,6)], and `display::drain` has the two `improvement` lines. display.rs unit tests `the_plan_names_each_item_that_takes_the_improvement_turn_and_each_promotion` and `the_drain_report_lists_the_items_that_took_the_improvement_turn` cover the text, the demotion suffix, and no lines when empty. All pass."
+      },
+      {
+        "criterion": "An improvement request whose reading fails (missing goal, rung or acceptance) or whose dependency is unmet is not given a turn; a test or the diff in plan.rs shows the turn is taken only from ready, passing entries.",
+        "status": "met",
+        "evidence": "plan.rs `build_improving` walks `plan.order`, which holds only planned entries, so a refused or held id is never a candidate. A candidate must also have every in-plan dependency tried or before the slot. Tests `improvement_turn_skips_a_request_whose_reading_fails_and_takes_a_ready_one` (no acceptance, refused: not in the order or turns; a failed dependency holds it; with nothing ready, no turns and the plain order) and `improvement_turn_skips_a_request_whose_dependency_is_not_yet_dispatched` (a dependency at a later place delays the turn, every dependency precedes its dependent, and it moves once the dependency is dispatched). Both pass."
+      },
+      {
+        "criterion": "Run `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` and `cargo test`: all pass.",
+        "status": "met",
+        "evidence": "left to Athena's checks. I also ran `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all --check` (both clean) and `cargo test --locked` once (it showed no failure exit code)."
+      },
+      {
+        "criterion": "CHANGELOG.md has an entry for the guaranteed improvement turn, the three-job urgent promotion and the plan and report display, and each claim matches the diff, with nothing claimed beyond it.",
+        "status": "met",
+        "evidence": "One entry under Unreleased / Added. It names the root cause, `Plan::build_improving`, the skip rules, the singleton group, the `priority_violations` change, the four request kinds found by `improvement_of`, the uncovered slowdown request, the `REPEAT_URGENT_JOBS` promotion (in memory, before `[priority_caps]`, never over a person's priority), the unchanged threshold, text and caps, the `turn` and `promoted` lines, the `improvement_turns` report field and the `Steps::improvement` default. I checked each sentence against the diff. JSON wording is limited to 'when not empty' for the plan, because those fields are skipped when empty."
+      },
+      {
+        "criterion": "The changed files are limited to the ordering and planning code, the plan display, tests and CHANGELOG.md, with no change to athena.toml or defaults.toml.",
+        "status": "met",
+        "evidence": "`git status --short` lists only CHANGELOG.md, crates/athena-cli/src/{display,drain,main}.rs, crates/athena-cli/tests/drain.rs and crates/athena-core/src/{hestia,plan,steward}.rs. main.rs holds help text only. No athena.toml, defaults.toml or workflow change."
+      }
+    ],
+    "open_issues": [
+      "The throughput slowdown request gets no guaranteed turn. No record links it: only its title prefix and the free text of the review note identify it. Covering it needs a job field on `ThroughputReview`, which changes records and filing and is out of scope. It is named as not covered in the `improvement_of` doc comment and the CHANGELOG, and a hestia.rs test asserts it is not listed.",
+      "The three-job promotion is made before `[priority_caps]`, as the plan decided. When person-set urgent items fill the urgent tier, a promoted request is demoted to high. The `promoted` line in `athena plan` shows this, and a plan.rs test covers it. The guaranteed turn still applies in that case.",
+      "A person's own request that cites a repeated cause's introspection ids, or holds a `Spec requirement:` line, counts as an improvement request, because the link is by citation and not by author. This is stated in the doc comment and the CHANGELOG.",
+      "I could not read the saved output of the full `cargo test --locked` run, because the harness blocked reading outside the working directory. The tool reported no failure exit code; Athena's own run is the authority for that criterion."
+    ],
+    "mistakes": [
+      "My first version of the order-check test swapped the first and last places. That did not create a violation, because the moved item is skipped as the earlier item. I rewrote it to move a normal item to the front.",
+      "I tried a cargo test filter with two test paths, which cargo rejected; I reran it with the filters after `--`."
+    ],
+    "learnings": [
+      "The Steward channel marker alone misses Hestia: every Hestia request is queued on channel `cli`. So `improvement_of` finds Hestia's requests by their recorded links: the `RepeatedCause.request` link, `ThroughputProposal.request_job`, and the `Spec requirement:` body line.",
+      "`build_capped` ranks tiers by each entry's own priority, not its effective priority. A promotion has to be applied to the entries before `build_capped` for the caps to see it.",
+      "`batches_for` puts items with no plan entry ahead of planned ones. They still advance `since_turn`, so the next planned dispatch is the improvement turn.",
+      "Under `drain_concurrent` a whole plan group starts at once. A moved turn item therefore has to be its own group, or a group of six independent urgent items would still start ahead of it.",
+      "`cargo test -p xtask --test policy` and `-p athena-cli --test mirrors` both pass; neither needed a timings-file edit because no test file was added."
+    ],
+    "desires": [
+      "A way to read the saved output of a large test run (the harness blocked reading it), so I could confirm the per-target result lines.",
+      "A rendered example of `athena plan` output against real records, to see how the turn and promoted lines read next to the item blocks."
+    ]
+  }
+}

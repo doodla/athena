@@ -1,0 +1,48 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261106-180606-ymst",
+  "round": 1,
+  "at": "2026-11-06T18:13:55.781469424Z",
+  "invocation_seq": 3,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "The wrapper waits for build_wait_s (1800 s by default), which is longer than the agent's Bash timeouts. In real runs the Bash tool kills the waiting wrapper before it can exit 75, write the note or hold the job.",
+      "evidence": "config.rs:166 sets the build_wait_s default to 1800, and athena.toml does not override it. athena.toml:64-65 sets bash_default_timeout_ms = 600000 (600 s) and bash_max_timeout_ms = 1200000 (1200 s). env.rs:82-87 passes both into the agent's environment. So a producer cargo command that waits for a slot is killed by Claude Code at 600 s (1200 s at most). The exit-75 path, the wait note and hold_for_slot_wait never run. The agent only sees a Bash timeout and the job is never held. Criterion 3 passes in the test only because the test sets wait_s=1 by hand. Fix: Have the wrapper wait for the smaller of build_wait_s and the agent's Bash timeout minus a margin. Pass this value through install_cargo_shim (it already has the Agents config), or read BASH_DEFAULT_TIMEOUT_MS from the wrapper's own environment. Add a unit test that the wait install_cargo_shim computes is below the Bash timeout, and state the cap in the design doc, whose section 4 currently quotes 1800 s. If the planner keeps 1800 s on purpose, the plan must say that the held-not-failed path cannot be reached with the default settings.",
+      "location": "Plan Decision 5 / Step 4 (wrapper wait = pipeline build_wait_s); athena.toml:64-65; crates/athena-data/src/config.rs:166",
+      "source": "critic"
+    },
+    {
+      "severity": "major",
+      "summary": "The new integration tests inherit ATHENA_SLOT_HELD from the process that runs them. When a later producer runs `cargo test` through the shim, every gated test runs without a slot and fails.",
+      "evidence": "Under the plan, the wrapper sets ATHENA_SLOT_HELD on the real cargo, so the test binaries inherit it. A wrapper that finds it set runs with no slot (Decision 4). install_cargo_shim sets the ATHENA_SLOT_* settings but not ATHENA_SLOT_HELD, so a test that adds the shim's env on top of the inherited one still carries the outer HELD value. Its spawned `<shim>/cargo build` then takes no slot, and the 'second blocks', 'try_acquire is None while running' and exit-75 assertions fail. This job's own producer will not notice, because its environment has no shim yet. Every later producer on this repository will, and may try to 'fix' the tests. Fix: In every slot_exec integration test, start the child from a cleared environment (env_clear plus the env that install_cargo_shim builds), or at least remove ATHENA_SLOT_HELD and the outer ATHENA_SLOT_* variables. Add one case that sets ATHENA_SLOT_HELD in the test's parent environment and still sees the slot held. List this under Dependents (the repository's own tests running under the producer shim).",
+      "location": "Decision 4 (ATHENA_SLOT_HELD) and Demonstrations 1-4 (crates/athena-cli/tests/slot_exec.rs)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The plan leaves as an open question something the code answers.",
+      "evidence": "crates/athena-agent/src/claude.rs:4 says the driver spawns `claude -p` in a new process group. claude.rs:383-394 calls kill_group(pgid, GRACE) on a deadline, a stall or the kill switch. A waiting wrapper is a descendant in that group, so it is stopped together with its agent. Fix: Replace the open question with this finding. Optionally have the wrapper's acquire `stop` closure check the kill switch, rather than `|| Ok(())`.",
+      "location": "Open questions (process group on Bash timeout / athena stop)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "The existing hold text says a slot-wait hold resumes 'from its kept candidate' and happens 'at the checks'. A producer-stage hold has no candidate.",
+      "evidence": "mod.rs:485 says 'A drain resumes it from its kept candidate when a build slot is free'. The hold_for_slot_wait doc at close.rs:191 says 'at the checks ... resumes the job from its kept candidate'. hold_for_disk's doc (close.rs:170-172) already words the before-producer case differently: 'no candidate yet ... the next drain retries from the start'. Fix: Update the hold_for_slot_wait doc, and the `go` message if needed, to cover the producer-stage case, as hold_for_disk's doc does. Add these two lines to the dependents entry.",
+      "location": "Dependents: SlotWait hold marker text; crates/athena-core/src/run/mod.rs:484-486, run/close.rs:191-196",
+      "source": "critic"
+    },
+    {
+      "severity": "nit",
+      "summary": "The Verify/Read half of the env.rs test only shows that `build` is unchanged, which holds trivially.",
+      "evidence": "install_cargo_shim is a separate function and `build` is not modified. Checking that `build` for Side::Verify and Side::Read adds no shim cannot fail under any version of the plan. The real check is run/tests.rs (b). Fix: Keep (b) as the criterion-8 demonstration. Drop the Verify/Read half of (a) or describe it as a regression guard.",
+      "location": "Demonstration 8(a)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "Verdict: revise, for two major findings. I checked the plan against the snapshot with Read and Grep. What the plan names exists: CARGO_GLOBAL_FLAGS (policy.rs:477), check_cargo (policy.rs:616-645), the argv[0] hook dispatch (main.rs:572-580), SlotQueue::new/acquire/try_acquire/waiting and Class::Producer (slots.rs), hold_for_slot_wait (close.rs:198), producer_loop (producer.rs:193) with its single caller (mod.rs:1770), the FakeAgentDriver script closure (fake.rs:43), and the shard-timings order. The snapshot holds no earlier candidate: a Grep for CargoShim and slot_exec finds only the design doc and a slots.rs doc line. So rebuilding on the tip fits the reading. The design is sound in shape: it shares the flag list, uses an argv[0] symlink, guards nested cargo, carries the wait through a note file and reuses the hold path. First major finding: the wrapper waits build_wait_s (1800 s by default), which is longer than the agent's Bash timeouts (600 s default, 1200 s at most, athena.toml:64-65). In production the agent's Bash tool kills the wrapper first, so the exit-75 and held-not-failed path behind criterion 3 never runs. Second major finding: the new integration tests inherit ATHENA_SLOT_HELD when a later producer runs `cargo test` through the shim. They would then run without a slot and fail for every later producer on this repository. Two minor findings: the process-group question is answered by claude.rs:4 and :394, and the existing hold text says 'kept candidate', which a producer-stage hold does not have. The plan adds no athena.toml field, touches no governance file, and fits one producer run."
+}

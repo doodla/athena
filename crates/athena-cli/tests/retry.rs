@@ -1,8 +1,9 @@
 //! `athena retry <job>` (`docs/design/defaults-loop.md` section 3.5, build order step 2), on fixture
 //! records in temporary directories: a retry is seeded from the job's introspection record, shows earlier
-//! cases of the same class and the preventions already tried, refuses a job that is not rejected or
-//! failed, and falls back to "try again on" when the job has no usable introspection. No model is called:
-//! scripted fakes answer the reader and the introspection prompts.
+//! cases of the same class and the preventions already tried, refuses a job that is not rejected, failed,
+//! timed out, stale or interrupted, accepts a stale job, and falls back to "try again on" when the job has
+//! no usable introspection. No model is called: scripted fakes answer the reader and the introspection
+//! prompts.
 
 mod common;
 
@@ -394,6 +395,95 @@ fn a_job_that_is_not_rejected_or_failed_is_refused() {
         "{error}"
     );
     assert_eq!(fx.head(), before, "nothing was recorded");
+}
+
+/// A hook for `Scenario::during_verification` that, once, commits a hand edit of `src/lib.rs` with an
+/// intervention record on the branch while the verifier works, so the job goes stale instead of landing.
+fn commit_a_hand_edit_once(root: &std::path::Path) -> Arc<dyn Fn() + Send + Sync> {
+    let root = root.to_path_buf();
+    let once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    Arc::new(move || {
+        if once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let record = r#"{
+  "schema": "athena.intervention/1",
+  "id": "20261010-170000-abcd",
+  "at": "2026-10-10T17:00:00Z",
+  "what": "Edited the library by hand",
+  "why": "Faster than asking",
+  "class_of_work": "code",
+  "category": "did-work-themselves",
+  "job": null,
+  "source": "user",
+  "with_staged_changes": true
+}
+"#;
+        write(
+            &root,
+            &[
+                ("src/lib.rs", "pub fn one() -> u32 {\n    1 // by hand\n}\n"),
+                (
+                    "records/interventions/2026-10/20261010-170000-abcd.json",
+                    record,
+                ),
+            ],
+        );
+        let git = athena_git::Git::at(&root);
+        git.run(["add", "-A"]).unwrap();
+        git.run([
+            "commit",
+            "-q",
+            "-m",
+            "Edit by hand\n\nAthena-Intervention: 20261010-170000-abcd",
+        ])
+        .unwrap();
+    })
+}
+
+#[test]
+fn a_stale_job_can_be_retried() {
+    let model = Model::default();
+    let fx = Fixture::new();
+    let scenario = Scenario {
+        during_verification: Some(commit_a_hand_edit_once(fx.root())),
+        ..Scenario::default()
+    };
+    let athena = fx.athena(model.script(scenario.script()));
+    let proposal = athena.ask("add a greeting", &Lines::default()).unwrap();
+    let job = proposal.job.to_string();
+    match athena
+        .go(&job, AcceptedBy::User, &Lines::default())
+        .unwrap()
+    {
+        GoResult::Finished(f) => assert_eq!(f.state, OutcomeState::Stale, "{}", f.reason),
+        other => panic!("expected a finished job, got {other:?}"),
+    }
+    let producers_before = *model.producers.lock().unwrap();
+
+    // A stale job is tried again: the retry is a proposal, not an error, and nothing is run.
+    let (retry, seeded) = athena.retry(&job, &Lines::default()).unwrap();
+    assert!(!seeded, "a stale job has no introspection to seed from");
+    assert_eq!(retry.reader_error, None);
+    assert!(retry.reading.is_some());
+    assert_eq!(*model.producers.lock().unwrap(), producers_before);
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    let new_job = &records.jobs[retry.job.as_str()];
+    assert_eq!(new_job.state(), JobState::Proposed);
+    assert_eq!(
+        new_job.request.as_ref().unwrap().text,
+        format!("try again on {job}")
+    );
+    assert_eq!(
+        records.jobs[&job].state(),
+        JobState::Closed(OutcomeState::Stale),
+        "the stale job keeps its outcome"
+    );
+    // The reader is told the job went stale, not that it was rejected.
+    let brief = model.last_brief();
+    assert!(brief.contains("which went stale"), "{brief}");
+    assert!(!brief.contains("was rejected"), "{brief}");
+    assert!(brief.contains("merges it onto the branch tip"), "{brief}");
 }
 
 /// A job that was dispatched and has no closing record, as after a machine restart: it is read and run

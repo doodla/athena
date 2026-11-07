@@ -367,6 +367,25 @@ fn reread_changed_scope(job: &JobRecords) -> bool {
         && !job.corrections.iter().any(|c| c.n == previous.n)
 }
 
+/// The ids of the open requests the steward queued (channel [`REQUEST_CHANNEL`]): the ones waiting to be
+/// worked, in state queued or proposed. The drain gives these a guaranteed turn ([`crate::plan::Improvement`]).
+/// A request on any other channel, and one that is running or closed, is not listed. Ordered by job id.
+pub fn improvement_requests(records: &Records) -> Vec<String> {
+    let mut ids: Vec<String> = records
+        .jobs
+        .values()
+        .filter(|j| matches!(j.state(), JobState::Queued | JobState::Proposed))
+        .filter(|j| {
+            j.request
+                .as_ref()
+                .is_some_and(|r| r.channel == REQUEST_CHANNEL)
+        })
+        .map(|j| j.id().as_str().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
 /// The open requests of the drained channels (the steward's and `ask --later`'s), oldest first, ties by job
 /// id. A request stays open until it is run or closed, so one that `athena plan` or a person has already read
 /// is listed too: reading does not take it out of the queue. A request that no capability fits (declined),
@@ -2091,6 +2110,50 @@ mod tests {
         );
         assert!(!without.contains("- git-log: GIT-LOG.txt"));
         assert!(without.contains("No class of work"));
+    }
+
+    #[test]
+    fn improvement_requests_are_the_open_steward_channel_requests_only() {
+        let mut records = Records::default();
+        let mut add = |id: &str, channel: &str, closed: bool| {
+            let job = JobId::parse(id).unwrap();
+            let at: Timestamp = "2026-11-01T12:00:00Z".parse().unwrap();
+            let outcome = closed.then(|| athena_data::records::Outcome {
+                job: job.clone(),
+                state: athena_data::records::OutcomeState::Abandoned,
+                reason: "closed".into(),
+                at,
+                totals: None,
+                branch: None,
+                base_commit: None,
+                candidate_commit: None,
+                after_blocked: false,
+                through_commit: None,
+            });
+            records.jobs.insert(
+                id.to_string(),
+                crate::store::JobRecords {
+                    id: Some(job.clone()),
+                    request: Some(Request {
+                        job,
+                        text: format!("Do {id}."),
+                        received_at: at,
+                        channel: channel.into(),
+                    }),
+                    outcome,
+                    ..Default::default()
+                },
+            );
+        };
+        add("20261101-120000-bbbb", REQUEST_CHANNEL, false);
+        add("20261101-120000-aaaa", REQUEST_CHANNEL, false);
+        add("20261101-120000-cccc", USER_QUEUE_CHANNEL, false);
+        add("20261101-120000-dddd", REQUEST_CHANNEL, true);
+        assert_eq!(
+            improvement_requests(&records),
+            ["20261101-120000-aaaa", "20261101-120000-bbbb"],
+            "the open steward-channel requests; not the cli one, not the closed one"
+        );
     }
 
     #[test]

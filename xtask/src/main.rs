@@ -832,7 +832,7 @@ mod tests {
 
     fn stand_in_claude(dir: &Path, output: &str) -> PathBuf {
         let path = dir.join("claude");
-        athena_git::script_writer::write_executable(&path, format!("#!/bin/sh\necho '{output}'\n"));
+        athena_testkit::write_executable(&path, format!("#!/bin/sh\necho '{output}'\n"));
         path
     }
 
@@ -1017,7 +1017,7 @@ mod tests {
         let fake = dir.path().join("gitleaks");
         // Missing: install.
         assert!(!gitleaks_present(&fake, "8.1.0"));
-        athena_git::script_writer::write_executable(&fake, "#!/bin/sh\necho 8.1.0\n");
+        athena_testkit::write_executable(&fake, "#!/bin/sh\necho 8.1.0\n");
         // Present and the pinned version: skip.
         assert!(gitleaks_present(&fake, "8.1.0"));
         // Present but another version: install.

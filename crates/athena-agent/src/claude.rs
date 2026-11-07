@@ -636,7 +636,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"durat
 
     fn stand_in(dir: &Path) -> PathBuf {
         let path = dir.join("claude");
-        athena_git::script_writer::write_executable(&path, STAND_IN);
+        athena_testkit::write_executable(&path, STAND_IN);
         path
     }
 

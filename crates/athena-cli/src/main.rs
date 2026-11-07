@@ -5,7 +5,7 @@
 //! `drain`, 0 means the target was met after a landing, and 2 any other stop.
 
 use anyhow::Result;
-use athena_cli::{display, drain, hooks, wiring};
+use athena_cli::{display, drain, hooks, slot_exec, wiring};
 use athena_core::reading::Proposal;
 use athena_core::run::GoResult;
 use athena_core::{Athena, Ui};
@@ -41,8 +41,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Try a rejected or failed job again, starting from its introspection record (the proposed next
-    /// request, the cause and the prevention) and shown as `ask` shows a reading; Enter runs it.
+    /// Try a rejected, failed, timed out, stale or interrupted job again, starting from its introspection
+    /// record (the proposed next request, the cause and the prevention) and shown as `ask` shows a reading;
+    /// Enter runs it. A stale job keeps its verified candidate: the retry merges it onto the branch tip. A
+    /// clean merge is checked and verified again with no planner or producer run; a conflict starts a producer
+    /// from the conflicted merge. The retry starts from the base when the candidate cannot be merged (it is
+    /// gone, or the branch no longer holds its base).
     Retry {
         job: String,
         /// Run without waiting at the prompt (the reading is printed, but its acceptance stays unresolved).
@@ -280,6 +284,13 @@ request whose own words leave the plan incomplete is read first (within the budg
 reading. An item whose plan still lacks a goal, a rung or acceptance is not worked and is reported with the \
 reason. `athena plan` prints this plan without working anything.
 
+Improvement turn: requests of Athena's own (the steward's, and Hestia's: the error review's request for a repeated \
+cause, the throughput design request and the spec review's request) are guaranteed a turn. While one is ready, \
+at most two other items run before it, however many requests a person marked urgent or high; it must have a \
+complete plan and no unmet dependency, and `athena plan` prints a `turn` line for each. A request whose cause is \
+recorded in three or more distinct jobs is raised to urgent for the plan (a `promoted` line), unless a person set \
+its priority; the raise is made before `[priority_caps]` apply. The report has an `improvement` line for each turn taken.
+
 One drain runs per repository. It writes its pid file (`drain.pid` in the state directory) when it starts and \
 removes it when it ends, and a second `athena drain` while one is running is refused. It also refuses to start, \
 and dispatches nothing, when this build is older than the landed code (the message says to run ./setup.sh). To see, stop or restart a drain use `athena drain-status`, `athena drain-stop --wait` \
@@ -306,7 +317,10 @@ Exit code: 0 only when the target was met; 2 for any other stop; 1 when Athena i
     /// call, capped by `[budget] reader_usd` each and by --budget in all, with no run reserved); `--budget 0` reads
     /// nothing. A request it reads stays queued for `athena drain`. At most `[priority_caps]` items (default 3
     /// urgent, 10 high) keep their tier: the rest are demoted one tier for this plan only, each reported on a
-    /// `note` line, and an item whose priority a person set with `athena priority` is never demoted.
+    /// `note` line, and an item whose priority a person set with `athena priority` is never demoted. Requests of
+    /// Athena's own (the steward's and Hestia's) get a guaranteed turn, at least one dispatch in three while one is
+    /// ready: a `turn` line names each item that takes it, and a `promoted` line each request raised to urgent
+    /// because its cause is recorded in three or more distinct jobs.
     Plan {
         /// The most to spend reading unread requests, in US dollars.
         #[arg(long, value_name = "USD", default_value_t = 2.0, value_parser = parse_read_budget)]
@@ -573,6 +587,10 @@ fn main() -> ExitCode {
         .unwrap_or_default();
     if name == "pre-commit" || name == "commit-msg" {
         return ExitCode::from(hooks::git_hook(&name, &args[1..]) as u8);
+    }
+    // The producer's `cargo`: this binary linked as `cargo` takes a build slot, then runs the real one.
+    if name == "cargo" {
+        return ExitCode::from(slot_exec::run(&args[1..], &|key| std::env::var(key).ok()));
     }
     let version: &'static str =
         Box::leak(wiring::version_string(&wiring::build_info()).into_boxed_str());
@@ -1837,6 +1855,28 @@ mod tests {
             .render_help()
             .to_string();
         assert!(sub.contains("worktrees"), "{sub}");
+    }
+
+    #[test]
+    fn retry_help_names_stale_jobs_the_merge_and_the_base_fallback() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("retry")
+            .expect("a retry subcommand")
+            .render_long_help()
+            .to_string();
+        // Wrapping in the rendered help must not matter.
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        for needle in [
+            "stale",
+            "merges it onto the branch tip",
+            "checked and verified again with no planner or producer run",
+            "a conflict starts a producer from the conflicted merge",
+            "The retry starts from the base when the candidate cannot be merged",
+        ] {
+            assert!(help.contains(needle), "{needle:?} missing from:\n{help}");
+        }
+        assert!(!help.contains("a rejected or failed job again"), "{help}");
     }
 
     /// The long help of `athena drain` as a person reads it.

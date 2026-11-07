@@ -1,0 +1,350 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-031902-ttnw",
+  "round": 1,
+  "at": "2026-11-07T03:28:16.946983669Z",
+  "invocation_seq": 2,
+  "approach": "Fix the ordering where it starts, at the plan sort. Add `Plan::build_improving` in plan.rs. It takes an `Improvement` input: the queued steward-channel request ids, each one's distinct-job count for its cause, the dispatches since the last improvement turn, and the ids already tried. It does two things. (1) It raises an improvement request whose cause is recorded in 3 or more distinct jobs to urgent, in memory, before `build_capped` runs. (2) After `build_capped` it applies the slot rule. Over the untried items, if none of the first `3 - min(since_turn, 2)` is an improvement item, the best-ranked ready, passing improvement item is moved into the last slot of that window, and the groups are split to match. The drain keeps a per-run counter of dispatches since the last improvement item, so the replanned window slides without starving the item. With no improvement items the function delegates to `build_capped`, so ordering is byte-for-byte unchanged. The plan records `turns` and `promoted`. `athena plan` prints them, and the drain `Report` lists the items that took the turn. Hestia gets a pure helper that counts the distinct jobs of the repeated cause a request text cites. Steward gets a helper that lists steward-channel requests. `Steps::improvement()` is a new default-empty trait method, so existing doubles compile unchanged.\n\nFacts read:\n- Steward requests and Hestia root-cause requests both use channel `steward`: `steward.rs` REQUEST_CHANNEL, line 332, and `RequestQueue::apply`, line 654.\n- Hestia text cites introspection ids: `hestia.rs` `root_cause_request_at`, lines 414-424. The same cite-by-`contains` rule is used by `addressing_request`, line 292.",
+  "decisions": [
+    {
+      "choice": "A new `Plan::build_improving(entries, history, caps, person_set, &Improvement)` wraps `build_capped`. With no improvement items it returns exactly `build_capped`'s result. `Drain::prepare` (drain.rs ~2196) switches to it.",
+      "reason": "The fault is the plan sort, which only ever ranks by priority, then rung, then age. Wrapping leaves every existing `build_with` and `build_capped` caller and test untouched, which is how criterion 3 (unchanged order) is shown.",
+      "rejected": [
+        {
+          "option": "Add an `improvement` field to `PlanEntry`",
+          "why": "`PlanEntry` is built by struct literal in about 12 places (plan.rs, drain.rs unit tests, tests/drain.rs), so every one would change for a flag that is only meaningful to the drain."
+        },
+        {
+          "option": "Raise each Steward request's priority so it sorts first",
+          "why": "Rejected by the root-cause default. It would be a per-request patch, and it would let improvement requests starve person-filed ones instead of giving a fixed share."
+        }
+      ]
+    },
+    {
+      "choice": "The slot rule is stateful: the drain counts dispatches since the last improvement item in this run (`since_turn`) and the ids already tried. The window is `3 - min(since_turn, 2)` untried items, and the improvement item goes in its last slot.",
+      "reason": "The drain rebuilds the plan before every wave (drain.rs ~2986-2990). A stateless 'first three of the plan' rule would push the improvement item back to slot 3 on every replan and it would never run. The counter guarantees at most two non-improvement dispatches between improvement ones. Ignoring tried items keeps the window honest when a tried item stays in the queue (a failed or held item).",
+      "rejected": [
+        {
+          "option": "Stateless rule: place an improvement item at index 2 on every build",
+          "why": "Starves on replan, as above."
+        },
+        {
+          "option": "A fixed interleave of the whole order, such as every third entry",
+          "why": "It would reshuffle the entire plan, break the groups and priority tiers, and cost more than a single guaranteed slot."
+        }
+      ]
+    },
+    {
+      "choice": "Only the best-ranked ready improvement item moves. It is ready when it is in `plan.order` (so its reading passed and no dependency holds it) and each in-plan dependency is tried or sits before the target slot. A candidate that fails this is skipped for the next one.",
+      "reason": "Criterion 5. `build_with` already drops items that lack a goal, rung or acceptance, and items held by a failed dependency, into `refused`, so a refused item is never a candidate. The slot test keeps a dependent from running before what it needs.",
+      "rejected": [
+        {
+          "option": "Pull an item's dependencies forward with it",
+          "why": "Larger change with its own ordering risks. A skipped candidate simply gets its turn once its dependency has run."
+        }
+      ]
+    },
+    {
+      "choice": "Urgent promotion for a cause seen in 3 or more distinct jobs is applied in memory, before the tier caps, and only to improvement items not in `person_set`. It is never a lowering. A new constant `REPEAT_URGENT_JOBS = 3` lives in plan.rs; `hestia::REPEAT_JOBS = 2` is untouched.",
+      "reason": "Out of scope: the 2-job filing threshold, the `[priority_caps]` semantics and person-set semantics. Promoting before the caps means the caps still apply to promoted items, as to any urgent item. A person's explicit priority record is left alone, since 'urgent' is for a person to set.",
+      "rejected": [
+        {
+          "option": "Promote after the caps so promoted items are exempt",
+          "why": "This would change cap semantics, which is out of scope."
+        },
+        {
+          "option": "Write the promoted priority to a record",
+          "why": "The request says nothing about persisting it. A derived in-memory tier keeps records and the round-trip tests unaffected."
+        }
+      ]
+    },
+    {
+      "choice": "'Improvement request' means a queued job whose request channel is `steward` (`steward::improvement_requests`). Steward and Hestia are not told apart.",
+      "reason": "Both file on that channel (steward.rs:654; Hestia's backfill uses `StewardRequest` and `RequestQueue`). One marker covers both and needs no change to how they file, which is out of scope.",
+      "rejected": [
+        {
+          "option": "Match titles such as 'Fix the root cause of a repeated failure'",
+          "why": "Fragile text matching. Channel is a recorded fact."
+        }
+      ]
+    },
+    {
+      "choice": "`Plan::priority_violations` ignores an item the slot rule moved ahead. It skips ids in `turns` that have `moved` true when it looks for the earlier, worse-priority item.",
+      "reason": "`prepare` turns each contradiction into a note (drain.rs ~2202). Without this, every guaranteed turn would print a false 'plan order contradicts priority' note.",
+      "rejected": [
+        {
+          "option": "Leave the check unchanged and filter the notes in drain.rs",
+          "why": "The check belongs with the ordering rule, and a filter in the drain would duplicate the knowledge of who was moved."
+        }
+      ]
+    },
+    {
+      "choice": "The 'took the turn' record is the one improvement item holding the guaranteed window slot after the rule runs. `ImprovementTurn { id, position, moved }` is stored in `Plan.turns`. `Plan.promoted` holds `RepeatPromotion { id, jobs, from }`. Both are `skip_serializing_if` empty. The drain copies a dispatched item's id into `Report.improvement_turns` when it matches `turns` of the plan it was dispatched from.",
+      "reason": "The plan and the report then show the same fact: the plan before the run, the report after it. Empty vectors keep plans without improvement items equal to the old ones.",
+      "rejected": [
+        {
+          "option": "Mark every dispatched steward item as a turn",
+          "why": "An item that ranked first on its own did not need the guarantee. 'Took the turn' should mean the slot, not the channel."
+        }
+      ]
+    },
+    {
+      "choice": "No refusal or matching rule in the parser sense is added, so no refusal_corpus case is planned. Channel equality and the introspection-id substring test reuse the existing `addressing_request` convention (hestia.rs:292).",
+      "reason": "The change reorders ready work and refuses no reading, so no refusal-rate figure is needed.",
+      "rejected": [
+        {
+          "option": "Add a corpus case",
+          "why": "The corpus covers readings and request text parsing, and none of those paths changes."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/plan.rs",
+      "action": "modify",
+      "purpose": "Add `IMPROVEMENT_WINDOW` (3), `REPEAT_URGENT_JOBS` (3) and the `Improvement`, `ImprovementTurn` and `RepeatPromotion` types. Add `Plan.turns` and `Plan.promoted`, which are skipped when empty. Add `Plan::build_improving` with the promotion, the slot rule and a `move_to` helper that splits groups. Change `priority_violations` to ignore moved items. Add unit tests for the 8-item case, the sliding window, the tried-item case, the unready and refused cases, the person-set case, the cap interaction, and equality with `build_capped` when there is no improvement item.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "purpose": "Add `cause_jobs_cited(causes, text)`: the most distinct jobs of any repeated cause whose introspection ids the request text cites. Add tests with 3 jobs and 2 jobs. `REPEAT_JOBS` is untouched.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/src/steward.rs",
+      "action": "modify",
+      "purpose": "Add `improvement_requests(records)`: the ids of open jobs whose request channel is `REQUEST_CHANNEL`. Add a test with a steward and a cli channel job.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "purpose": "Add `Steps::improvement()` (default empty). Implement it in `RealSteps` from `steward::improvement_requests`, `hestia::repeated_causes` and `hestia::cause_jobs_cited`. Add `since_turn`, `improvement_ids` and `improvement_turns` to `State` and its constructor. `prepare` fills `since_turn` and `tried` and calls `Plan::build_improving`. `drain_with` records each dispatched wave right after `tried.extend`. Add `Report.improvement_turns`. Update the module docs. Add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "purpose": "`plan()` prints a `turn` line and a `promoted` line for each entry of `plan.turns` and `plan.promoted`, with title and reason. `drain()` prints an `improvement` line for each item in `improvement_turns`, with its job. Both print nothing when empty. Add unit tests.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/src/main.rs",
+      "action": "modify",
+      "purpose": "Help text of `athena drain` (Order paragraph) and `athena plan`: state the guaranteed improvement turn, the 3-job urgent promotion, and the new `turn`/`promoted` plan lines and the `improvement` report line. Help text only.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "purpose": "Add an `improvement` field and `Steps::improvement` override to `Stub`. Add tests: the drain-level run order across replans with `max_jobs` 3, the `athena plan` text for `turn` and `promoted`, the drain report line, and unchanged order with no improvement items.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "One entry under [Unreleased] / Added: states the root cause (ordering by person priority alone), the guaranteed one-in-three turn, the 3-distinct-job urgent promotion with its limits, and the plan and report display. Claims nothing beyond the diff.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "plan.rs: add the consts, `Improvement { items, cause_jobs, since_turn, tried }` (Default), `ImprovementTurn`, `RepeatPromotion`, and the `turns` and `promoted` fields on `Plan` (skip when empty).",
+    "plan.rs: write `Plan::build_improving`. With no ids in `items`, return `build_capped`. Otherwise clone the entries, raise each non-person-set improvement entry with `cause_jobs >= REPEAT_URGENT_JOBS` to urgent and record it, then call `build_capped` on those entries. Then find the window over untried order positions, using `w = 3 - min(since_turn, 2)`. If an untried improvement item is in it, record it as a turn with `moved` false. Otherwise pick the first improvement item in `order` that is untried and ready (in-plan dependencies tried or before the slot) and `move_to` the slot, recording it with `moved` true. Return the plan and the capped entries.",
+    "plan.rs: write `move_to` (remove the id from its group, drop an empty group, insert a singleton group at the boundary, splitting a group that spans it, then rebuild `order` from the groups). Make `priority_violations` skip moved turn ids. Add the unit tests listed under criteria 1, 2, 3 and 5.",
+    "hestia.rs: add `pub fn cause_jobs_cited(causes: &[RepeatedCause], text: &str) -> usize` and tests that build in-memory `Records` with the existing helpers (3 jobs gives 3, 2 jobs gives 2).",
+    "steward.rs: add `pub fn improvement_requests(records: &Records) -> Vec<String>` (channel equals REQUEST_CHANNEL) and a test.",
+    "drain.rs: add the default `Steps::improvement`; implement it in `RealSteps`. Add the `State` fields and wire them in `Drain::new`. In `prepare`, fill `since_turn` and `tried` from the state, store `improvement_ids`, and call `Plan::build_improving` where `build_capped` is now. In `drain_with`, call a `note_dispatch(&wave, &plan)` after `tried.extend`: it resets `since_turn` for an improvement id, otherwise adds one, and pushes ids found in `plan.turns` to `improvement_turns`. Add `Report.improvement_turns` and fill it. Update the module docs and add unit tests.",
+    "display.rs: add the `turn` and `promoted` lines to `plan()` and the `improvement` line to `drain()`. Add unit tests.",
+    "main.rs: update the help text of `athena drain` and `athena plan`.",
+    "tests/drain.rs: add the `Stub.improvement` field and override. Add the four tests from criterion 4 and the no-improvement case from criterion 3.",
+    "CHANGELOG.md: add the Unreleased/Added entry, checking each sentence against the diff.",
+    "Run `cargo fmt --all`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix until all pass."
+  ],
+  "risks": [
+    {
+      "risk": "Promoted items count toward `[priority_caps]` (3 urgent). If person-set urgent items fill the tier, a promoted request is demoted to high. 'Treated as urgent' then holds only when there is room.",
+      "mitigation": "The guaranteed turn does not depend on priority, so the request still runs within three dispatches. The behaviour is tested and written in the CHANGELOG. Changing the caps is out of scope."
+    },
+    {
+      "risk": "The slot rule and the group split could break the plan invariants: dependents after their dependencies, and disjoint-touch groups.",
+      "mitigation": "A candidate is moved only when every in-plan dependency is tried or sits before the target slot. Splitting a group only yields subsets of a disjoint group. A test runs `priority_violations` and checks that every dependency precedes its dependent on the moved plan."
+    },
+    {
+      "risk": "The window counts dispatches, but `batches_for` puts items with no plan entry ahead of the planned ones (drain.rs 2843-2853). Several unplanned items could dispatch ahead of the improvement turn.",
+      "mitigation": "Unplanned dispatches still advance `since_turn`, so the next planned dispatch is the improvement item. Unplanned items are an existing rare case and are not changed here."
+    },
+    {
+      "risk": "A wave in `drain_concurrent` dispatches a whole group at once, so the 'one in three' is counted per item, not per wave.",
+      "mitigation": "The improvement item is placed in its own singleton group at the window slot, so the group before it holds at most two items. `note_dispatch` counts every item of a wave."
+    },
+    {
+      "risk": "`repeated_causes` is O(introspections x groups) and runs on every replan.",
+      "mitigation": "It runs once per `prepare` through `RealSteps::improvement`, not once per request. The cost is small against a model-backed run."
+    },
+    {
+      "risk": "Hestia and Steward requests are one channel, so a Steward request that cites an introspection id of a 3-job cause is also promoted. This is arguably correct, as its cause is the same.",
+      "mitigation": "State it in the CHANGELOG as 'an improvement request that cites'. A test covers a steward request with no cited id (not promoted)."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "Plan::build_capped (behavior for callers without improvement items)",
+      "dependent": "crates/athena-core/src/plan.rs tests (five_urgent_items_keep_three_urgent..., a_person_set_item_is_never_demoted..., twelve_high_items_keep_ten..., line 1409-1413 equality with Plan::build)",
+      "kind": "code",
+      "test": "cargo test -p athena-core. `build_capped` is unchanged and `build_improving` with an empty Improvement returns it as is. The new equality test covers this.",
+      "reason": null
+    },
+    {
+      "name": "Plan::build_with / Plan::build (not changed)",
+      "dependent": "crates/athena-core/src/reading.rs tests (lines 5168-5660) and tests/drain.rs",
+      "kind": "code",
+      "test": null,
+      "reason": "Not modified. The new rule runs only in `build_improving`, after `build_capped`."
+    },
+    {
+      "name": "Drain::prepare is the single call site of the plan build for `athena plan` and `athena drain` (serial, `drain_concurrent`, read-ahead)",
+      "dependent": "crates/athena-cli/src/drain.rs prepare (~2196), plan() (3131), drain_with (2869), run_serial, run_parallel",
+      "kind": "code",
+      "test": "cargo test -p athena-cli (tests/drain.rs and the drain.rs unit tests). `plan()` and every drain mode call `prepare`, so they get the same ordering. The `later` batches for read-ahead come from the same plan through `batches_for`, which is not changed. The serial and parallel paths are covered by the existing drain tests. The new drain test covers replan.",
+      "reason": null
+    },
+    {
+      "name": "Plan::priority_violations (now skips items the slot rule moved)",
+      "dependent": "crates/athena-cli/src/drain.rs prepare (note_once 'plan order contradicts priority')",
+      "kind": "code",
+      "test": "A plan.rs test asserts a moved improvement item produces no violation. Existing violation tests stay as they are.",
+      "reason": null
+    },
+    {
+      "name": "Steps trait (new default method `improvement`)",
+      "dependent": "Every Steps implementor: drain.rs RealSteps (~3975-4200) and the test doubles at drain.rs ~4633, ~5698, ~6757 and tests/drain.rs (Stub, Unaccepted, Replay, WithRealCheck, Shared, Rebasing)",
+      "kind": "code",
+      "test": null,
+      "reason": "The default returns an empty Improvement, so the doubles compile unchanged and behave as before. Only RealSteps and the new Stub field override it."
+    },
+    {
+      "name": "drain::Report and PlanReport JSON (new fields `improvement_turns`, `plan.turns`, `plan.promoted`)",
+      "dependent": "crates/athena-cli/src/main.rs (`--json` for drain and plan, line ~1331-1341), crates/athena-cli/src/display.rs, crates/athena-cli/tests/focus.rs plan_text",
+      "kind": "code",
+      "test": "cargo test -p athena-cli; tests/focus.rs still passes.",
+      "reason": "The new Plan vectors skip serialization when empty. `Report.improvement_turns` is a new key. No test reads the Report keys by exact set (grep of plan_group_sizes found no consumer outside drain.rs and display.rs)."
+    },
+    {
+      "name": "hestia::REPEAT_JOBS = 2 and root-cause request filing (not changed)",
+      "dependent": "crates/athena-core/src/hestia.rs repeated_causes, root_cause_request, error_review, error_review_backfill",
+      "kind": "code",
+      "test": "The existing hestia tests (the backfill and error_review tests near hestia.rs:2985-3470) stay green.",
+      "reason": "The new helper only reads `repeated_causes` and a separate `REPEAT_URGENT_JOBS` in plan.rs. Filing, request text and the 2-job threshold are not touched."
+    },
+    {
+      "name": "[priority_caps] (urgent 3, high 10)",
+      "dependent": "crates/athena-data/src/config.rs priority_caps (777), RealSteps::priority_caps (drain.rs 4170), Plan::build_capped",
+      "kind": "rule",
+      "test": "The plan.rs test shows a promoted item is demoted if the urgent tier is full of person-set items. The existing cap tests stay green.",
+      "reason": "Promoted items are counted by the caps like any urgent item, and the person-set protection is unchanged. The cap config and semantics are not modified."
+    },
+    {
+      "name": "Person-set priority (`athena priority` records)",
+      "dependent": "RealSteps::person_set (drain.rs 4183), Plan::build_capped",
+      "kind": "rule",
+      "test": "A plan.rs test covers a person-set steward item.",
+      "reason": "A person-set item is never promoted or lowered by the new rule. It is also never moved: the slot rule moves only improvement items, and one of these in `person_set` still counts as an improvement item for the window."
+    },
+    {
+      "name": "Queue channel filter (steward / cli, DRAINED_CHANNELS) and the 'steward' request channel",
+      "dependent": "crates/athena-core/src/steward.rs queued_work (383), interrupted_work (428), RequestQueue::apply (641)",
+      "kind": "code",
+      "test": "A steward.rs test with a steward-channel job and a cli-channel job.",
+      "reason": "Read only. The new `improvement_requests` filters on REPEAT of REQUEST_CHANNEL and changes neither function."
+    },
+    {
+      "name": "Records and the record schema",
+      "dependent": "check_record_file, AnyRecord, the round-trip test (crates/athena-data/src/records.rs)",
+      "kind": "code",
+      "test": null,
+      "reason": "No record or data file is added or changed. The promoted priority is a derived in-memory value."
+    },
+    {
+      "name": "athena.toml, defaults.toml, workflows and the prompt budgets in docs/system-facts.md",
+      "dependent": "`system_facts_budgets_match_computed` (crates/athena-cli/tests/budgets.rs)",
+      "kind": "host_setting",
+      "test": "cargo test (budgets.rs).",
+      "reason": "No configuration, brief or always-loaded prompt text changes, so the computed budgets and the system-facts lines stay as they are. The one-in-three window is a code constant."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Unit test in plan.rs. It builds 6 entries at `Priority::Urgent`, standing for the person-filed requests, and 2 normal entries whose ids are named in the `Improvement` input. It calls `Plan::build_improving` with `since_turn` 0, then asserts that `plan.order[..3]` holds a steward id and that `plan.turns` names it. A second case with `since_turn` 2 asserts the improvement item is first. A third case asserts a tried item is not counted in the window.",
+      "command": "cargo test -p athena-core improvement_turn",
+      "observes": "At least one of the first three dispatched ids is a steward request. The same inputs through `Plan::build_capped` put both steward ids last (positions 7 and 8). A cli test in tests/drain.rs also runs `drain::drain` with `max_jobs` 3 and shows `run` log entries including a steward item, across replans.",
+      "fails_without": "Without the slot rule the order is the 6 urgent ids and then the steward ids, so the first-three assertion fails. Without the `since_turn` counter the drain-level test fails, because the item is pushed back on every replan.",
+      "seam": "Production entry point `Plan::build_improving` in crates/athena-core/src/plan.rs. Plan step 1 adds it. The `Improvement` value is passed as a plain argument, with no double and no logic in the fixture. For the drain case, `drain::drain` (exists) is driven by the `Stub` in crates/athena-cli/tests/drain.rs, which gets a new `improvement` field and `Steps::improvement` impl (steps 4 and 7). The Stub only reports which ids are steward requests; the ordering is production code."
+    },
+    {
+      "criterion": 2,
+      "method": "Two tests. In hestia.rs, an in-memory `Records::default()` gets a class and introspections from the existing `class` and `introspection` helpers, in 3 distinct jobs ('a','b','c') for one test and 2 for the companion. `repeated_causes(&records)` feeds `cause_jobs_cited(&causes, text)`, where `text` cites an introspection id the way `root_cause_request` does. It must return 3 and 2. In plan.rs, a normal Hestia-style item with that count of 3 and an older normal item are passed to `Plan::build_improving`. The item is urgent in the returned entries and listed in `plan.promoted`, and it sorts ahead of the older item. The 2-job count leaves it normal and the order is by age.",
+      "command": "cargo test -p athena-core repeat_urgent",
+      "observes": "With 3 jobs: `capped[id].priority == Urgent`, `plan.promoted` holds `{jobs: 3, from: Normal}`, and it is ordered first. With 2 jobs: priority stays normal, `promoted` is empty and the order is by age. A third case: a `person_set` item is not promoted.",
+      "fails_without": "Without the promotion the 3-job request stays normal and sorts after the older item, so the urgent assertion fails. A threshold of 2 would fail the companion case.",
+      "seam": "Production entry points `hestia::cause_jobs_cited` and `hestia::repeated_causes` (exists, hestia.rs:341) and `Plan::build_improving` (step 1). Fixtures are plain `Records` values built with the existing hestia test helpers `class` and `introspection` (they exist, hestia.rs:2508-2552), injected by value. Step 2 adds the helper."
+    },
+    {
+      "criterion": 3,
+      "method": "A plan.rs test builds a mixed entry set (urgent, high, normal, low, with dependencies and touches) and asserts that `Plan::build_improving` with `Improvement::default()` is `==` `Plan::build_capped`, for both default caps and `UNLIMITED`. A second case passes improvement ids that are not among the entries and asserts the same. The full `cargo test` run keeps every existing plan, drain and display test passing unchanged. A tests/drain.rs case drives `drain::drain` with a Stub that has no improvement items and asserts the existing run order.",
+      "command": "cargo test",
+      "observes": "The plan, order, groups, refused list and demoted list are equal to the old results. The `turns` and `promoted` fields are empty.",
+      "fails_without": "If the new code reordered non-improvement work, the equality assertion and the existing tests (`items_are_worked_in_plan_order_not_oldest_first`, `five_urgent_items_keep_three_urgent...`) would fail.",
+      "seam": "`Plan::build_capped` (exists) is the reference, and `Plan::build_improving` (step 1) is the code under test. The existing `Stub` in tests/drain.rs implements `Steps` and gets the default `improvement()`, which returns an empty value. No double holds any ordering logic."
+    },
+    {
+      "criterion": 4,
+      "method": "In tests/drain.rs, a `Stub` has 3 person-filed urgent items and 2 steward items, one of them with a cause count of 3. `drain::plan(&stub, 5.0, &Quiet)` returns the `PlanReport`, and `display::plan(&report)` is asserted to contain a `turn` line and a `promoted` line, each naming the item id and title. A second test runs `drain::drain` with `max_jobs` 3, asserts `report.improvement_turns` names the steward item that ran, and asserts `display::drain(&report)` has an `improvement` line naming it. A display.rs unit test checks the plan text with a hand-built `PlanReport` having a non-empty `plan.turns`.",
+      "command": "cargo test -p athena-cli improvement",
+      "observes": "The plan text contains `turn        <id> · <title> takes the improvement turn`. The drain text names the item and its job. With no improvement items neither line appears, and the existing plan-text needles in `the_plan_prints_...` still match.",
+      "fails_without": "Without the display and report fields the text has no such lines and `report.improvement_turns` does not exist.",
+      "seam": "Production entry points `drain::plan`, `drain::drain`, `display::plan` and `display::drain` (all exist). Injection is the existing `Stub` with the new `improvement` field and `Steps::improvement` override (steps 4 and 7); only the improvement ids and cause counts come from the Stub."
+    },
+    {
+      "criterion": 5,
+      "method": "Plan.rs tests. (a) A steward item with no acceptance, so `missing()` is non-empty, ranks best among the improvement items. A ready steward item ranks after it. (b) A steward item depends on a job that `history` shows failed with no landed retry. (c) A steward item depends on an in-plan item that would sit after the target slot. In each case the turn goes to the ready one, or to none if none is ready. The unready item is in `refused` (a, b) or skipped (c), and never in `turns`.",
+      "command": "cargo test -p athena-core improvement_turn_skips",
+      "observes": "`plan.turns` never names a refused, held or unready item. If no improvement item is ready, `turns` is empty and the order equals the `build_capped` order.",
+      "fails_without": null
+    },
+    {
+      "criterion": 6,
+      "method": "Run the three gate commands over the workspace.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three exit 0. That includes the existing `system_facts_budgets_match_computed` test and the plan, drain, hestia and steward tests.",
+      "fails_without": "A new `Steps` method or a new field on `Plan` or `Report` that was not wired through the struct literals would fail to compile or fail clippy. The `Report` literal in `drain_with` (drain.rs:3057) and the `State` literal in `Drain::new` (drain.rs:2399) are the two places to wire.",
+      "seam": "The cargo toolchain over the whole workspace; it exists."
+    },
+    {
+      "criterion": 7,
+      "method": "Read the `## [Unreleased]` `### Added` entry with `git diff` and check each claim against the diff. The entry states: the guaranteed one-in-three improvement turn; the 3-distinct-job urgent promotion for requests; that it applies before `[priority_caps]` and never to a person-set priority; the `turn` and `promoted` lines in `athena plan`; the improvement line in the drain report; and the new `Steps::improvement` method. It claims nothing about the filing threshold, Hestia or Steward text, or caps.",
+      "command": "git diff CHANGELOG.md",
+      "observes": "Each sentence maps to a changed function or test in the diff, and nothing is claimed beyond the diff.",
+      "fails_without": null
+    },
+    {
+      "criterion": 8,
+      "method": "List the changed paths and compare them with the deliverables.",
+      "command": "git status",
+      "observes": "Only crates/athena-core/src/{plan,hestia,steward}.rs, crates/athena-cli/src/{drain,display,main}.rs, crates/athena-cli/tests/drain.rs and CHANGELOG.md changed. athena.toml, defaults.toml and workflows are not touched.",
+      "fails_without": null
+    }
+  ],
+  "open_questions": [],
+  "producer_section_sha256": "2cc7bf6d69c880c7491f3dcc4f0a2c4e3588012c4bcd7b656b363211e1e3e0b4"
+}
