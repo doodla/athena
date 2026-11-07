@@ -1,0 +1,34 @@
+{
+  "schema": "athena.critique/1",
+  "job": "20261107-182419-pg2d",
+  "round": 3,
+  "at": "2026-11-07T18:44:08.586554788Z",
+  "invocation_seq": 7,
+  "agent_verdict": "revise",
+  "final_verdict": "revise",
+  "findings": [
+    {
+      "severity": "major",
+      "summary": "An Athena generator the plan omits writes 'rung' and 'ladder' in plain prose into every approve-work request. The new check would refuse those readings and break athena-cli tests.",
+      "evidence": "`approve_request` builds every approved-proposal request with the line \"Rung of the requirements ladder: {rung}.\" (work_decisions.rs:290). It then inlines the cited source and evidence under '## Source' and '## Evidence'. `approve_work` passes this text to `self.ask` (line 331), so it reaches `check_reading_acceptance` (reading.rs:663). The fake reader's default reading (athena-cli/tests/common/mod.rs:317-327, 360) has capability \"change\", one deliverable and the assumption \"English is fine.\", with no Term line. These tests call approve_work through it: `approving_queues_a_job_whose_request_carries_the_cited_content` (athena-cli/tests/work_decisions.rs:96-103, which asserts JobState::Proposed), plus drain.rs:5328, 6210 and 6276. The plan's step-(a) skip only covers hestia shapes. Its Dependents entry says 'the gate sees only request text and the reading, so these identifiers do not reach it' and that athena-cli tests run 'unchanged'. Neither holds for this text. In production, every approval would also be refused on its first read, and replayed past approvals would count toward the 8% limit. Fix: Treat approve_request's generated text as generated or cited, the way the plan treats hestia's. Skip the 'Rung of the requirements ladder: ' line only when the request also holds that generator's opening sentence ('A person approved this proposal from the steward role.'). Treat the '## Source' and '## Evidence' sections as cited content. Add a corpus case built from the real `work_decisions::approve_request`, using a temporary git repository as the athena-cli test does, plus a shapes test. Add approve_request/approve_work and the athena-cli tests work_decisions.rs:96 and drain.rs:5324/6210/6276 to Dependents, with `cargo test -p athena-cli` as their test. Grep the other request builders again (steward `from_change`, audience, introspection `proposed_request`) and list each one that inserts fixed text.",
+      "location": "Dependents ('Words tier, ladder, rung and layer in other modules'); Decision 2; crates/athena-core/src/work_decisions.rs:285-298",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Step 8's 'at or under 8%' send-back branch can never run, and the 'over 8%, narrow false refusals' branch conflicts with the fixed word list.",
+      "evidence": "The loop only sends work back when the replay is held (`held = loop_replay.filter(|l| l.run.held)`, run/producer.rs:371, 398-400). `replay_problem` reports only shares 'over the {limit}% limit' (producer.rs:61-68). So the producer never sees a measured share at or under 8%. Decision 7 says the brief fixes the list, yet step 8 tells the producer to narrow false refusals when the share is over 8%. Fix: Drop the at-or-under-8% branch. For a held send-back, say exactly what the producer may change: only the prose pre-pass, such as the code-token or generated-line skips, never the four words. It should report the share and leave the tier/layer decision to the user, as D164 says.",
+      "location": "Step 8; Risks (first bullet)",
+      "source": "critic"
+    },
+    {
+      "severity": "minor",
+      "summary": "Soundness: 'tier' and 'layer' are common technical words, so this rule has known false positives. The plan states them openly, but its 3% estimate does not count Athena's own generated text.",
+      "evidence": "The accepted reading fixes the four words, so this is not a planner error. However, the estimate leaves out generated requests that use the words in plain prose, such as approve_request's rung line. Those could push the replay share past declared+5. Fix: After handling the generated text (first finding), say in D164 which Athena generators were checked and excluded. Then the 3% estimate covers only hand-written requests.",
+      "location": "Decision 7; Risks (3% estimate)",
+      "source": "critic"
+    }
+  ],
+  "request_reading_mismatch": null,
+  "summary": "I read the code; I ran nothing. The plan checks out against the snapshot in most places. `refusing_check` and its `step!` lines are at reading.rs:3228-3254, and `check_outcome_state` skips readings the same way (3681). `hestia::root_cause_request` is public and builds the line shapes the plan relies on (hestia.rs:453-507). `store::Records` derives Default (store.rs:213). `READING_RULES` and its 2600-byte bound match (briefs.rs:2225, 4423-4438), and the reading rules are outside the reader budget set (athena-cli/tests/budgets.rs:34-39). The demonstrations run the real gate and would fail without the step line. One serious gap remains. The plan treats hestia as the only generator of request text that carries structural words, and its Dependents entry says athena-cli tests are unaffected because only identifiers use these words. That is wrong. `work_decisions::approve_request`, which `athena approve-work` uses, writes the plain line \"Rung of the requirements ladder: {rung}.\" into every approved work-item request. It also pastes the source and evidence the item cites into the text. The new check would refuse every approve-work reading that has no Term lines. The fake reader's default reading has capability \"change\", a deliverable and no Term line, so athena-cli tests that call `approve_work` and assert the job is Proposed would fail. Criterion 9 (cargo test passes) would then fail. The plan needs to handle this generator and list its tests."
+}

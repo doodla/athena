@@ -1,0 +1,539 @@
+{
+  "schema": "athena.job-plan/1",
+  "job": "20261107-182419-pg2d",
+  "round": 5,
+  "at": "2026-11-07T18:54:10.482673514Z",
+  "invocation_seq": 10,
+  "approach": "Add `check_defined_terms(reading, request)` to crates/athena-core/src/reading.rs as one `step!` in `refusing_check`, after `check_environment_reach` and before `check_boundary_and_repo_files`. It returns Ok for a reading with no capability, a question or no deliverable, as `check_outcome_state` does (reading.rs:3681). Otherwise it reduces the request to plain prose and finds the whole words ladder, rung, tier and layer (plural and possessive too). It refuses when a used term has no `Term <word>:` assumption. Plain prose leaves out: (1) hestia's generated root-cause lines, skipped by exact shape and anchor sentence; (2) the text `work_decisions::approve_request` generates (the 'Rung of the requirements ladder: ' line, the 'Proposal: ... (key ... queued at ...' line, and everything from the '## Source' line on), skipped only when the anchor sentence 'A person approved this proposal from the steward role.' is present; (3) quoted spans; (4) parenthesised example lists; (5) code-like tokens containing `/`, `_` or `::`. Tests build the accepted cases from the real generators (`hestia::root_cause_request`, `work_decisions::approve_request` against a temporary git repository) and pin each generator's line shapes. Revision (round 5): (finding 1) `steward::queued_work` re-checks the stored reading of every proposed request with `check_reading_text`, so a request already read under the old rules whose plain prose uses a term is left out of the drain queue until a person runs `athena go`. This is the existing, documented behavior for any new reading rule (steward.rs:394-399). The plan declares it intended, lists `queued_work` and its caller drain.rs:4202 as dependents, adds a public-path corpus test with a proposed request using 'tier' (left out with no Term line, listed read with one), and states the hold in D164 and the CHANGELOG. (finding 2) When a held send-back reports a measured share, the producer also writes it into the doc comment, CHANGELOG and D164, labelled 'measured by the loop replay', next to the 3% estimate. The declared figure stays 3. (finding 3) D164 names the general fix as follow-up: generators mark cited content with a shared delimiter or constant that reading.rs reads. It is outside this job because hestia.rs and work_decisions.rs are not deliverables.",
+  "decisions": [
+    {
+      "choice": "Match structural words in plain request prose only: a `plain_request_prose` pre-pass, then the existing `request_words` tokenizer (reading.rs:3507), then whole-word comparison (term, term+s, trailing `'s` stripped first).",
+      "reason": "`request_words` splits all text and ignores quoting, and its tokens keep `'` between letters, so \"ladder's\" would match nothing. The 7bf8 request quotes 'a ladder of requirements' and also uses the term in plain prose, so the pre-pass must drop the first and keep the second. Whole-word tokens keep stepladder, delayer, `ladder.md` and `layer_count` out.",
+      "rejected": [
+        {
+          "option": "Run `request_words` over the whole request",
+          "why": "It ignores quoting, so generated requests that only quote the words would be refused."
+        },
+        {
+          "option": "Substring match",
+          "why": "It refuses stepladder and delayer, which criterion 3 requires to pass."
+        },
+        {
+          "option": "Treat every parenthesised span as a non-use",
+          "why": "It hides real uses such as '(the ladder, which ranks requirements)'."
+        }
+      ]
+    },
+    {
+      "choice": "Skip hestia's generated lines by exact shape. An `Introspection ` line is skipped only if it also holds ' (job ' and '); prevention it proposed:' (hestia.rs:486-488). `Failure class: `, `Cause: ` and `Fix the root cause of a repeated failure: ` lines are skipped only when the request also holds 'The same cause has produced failures in more than one job.' (hestia.rs:467).",
+      "reason": "Those lines carry free prose from earlier introspections. Bare prefixes would drop a hand-written 'Introspection of the ladder is needed.' or 'Cause: the ladder has no rung'. The anchor sentence ties the skip to text Athena generated.",
+      "rejected": [
+        {
+          "option": "Skip any line that starts with introspection, cause: or failure class:",
+          "why": "Case-insensitive bare prefixes drop hand-written lines that use a term."
+        },
+        {
+          "option": "Rely on quote stripping alone",
+          "why": "The generated Cause and prevention text is free prose, not quoted."
+        },
+        {
+          "option": "Export the anchor and prefixes as pub consts from hestia.rs, or add a shared cited-content delimiter now",
+          "why": "hestia.rs and work_decisions.rs are not listed deliverables. A test built from the real generator gives the same protection today. The general fix is named in D164 as follow-up work (finding 3)."
+        }
+      ]
+    },
+    {
+      "choice": "Treat `work_decisions::approve_request` text as generated and cited. Anchor: 'A person approved this proposal from the steward role.' (work_decisions.rs:287). When the anchor is present, skip lines starting 'Rung of the requirements ladder: ' (line 290), the 'Proposal: ' line holding ' (key ' and ' queued at ' (line 289), and every line from the first line equal to '## Source' to the end (lines 291-306). The first line (the title) and the sentences between stay plain prose and count.",
+      "reason": "`approve_request` is the only Athena generator that writes a structural word as fixed text. Its output reaches the gate through `approve_work` (work_decisions.rs:330-331). The fake reader's default reading has capability change, one deliverable and no Term line, so without the skip every approval is refused and the athena-cli approval tests fail. Content copied from files and jobs is a citation, not the request's own use. The anchor and exact line shapes keep a hand-written 'Rung of the requirements ladder: x' or '## Source' heading counted.",
+      "rejected": [
+        {
+          "option": "Edit approve_request to reword the rung line",
+          "why": "work_decisions.rs is not a listed deliverable, and the line tells the reader the rung of the work. Changing generated text to suit a check moves the fault."
+        },
+        {
+          "option": "Skip the whole request when it holds the anchor",
+          "why": "The title is the steward's own wording and is a real use."
+        },
+        {
+          "option": "Skip any '## Source' heading and 'Rung of the requirements ladder:' line with no anchor",
+          "why": "A hand-written request with those lines would escape the check."
+        }
+      ]
+    },
+    {
+      "choice": "Quote and parenthesis handling: remove straight and curly double-quoted spans, backtick pairs and single-quoted spans (opener after start/whitespace/`(` and before a letter or digit; closer after a non-space and before a non-alphanumeric; an unclosed opener stays as text). Scan per line. Remove a parenthesised span only if it has two or more commas or opens with e.g., i.e., such as, for example or like. Replace whitespace-delimited tokens containing `/`, `_` or `::` with a space.",
+      "reason": "A single-comma parenthetical such as '(the ladder, which ranks requirements)' is a real use and stays counted; '(ladder, layer, tier)' has two commas and is dropped. Per-line scanning means a stray apostrophe cannot swallow the rest of the request.",
+      "rejected": [
+        {
+          "option": "Drop any parenthesised span that holds a comma",
+          "why": "It hides a real use with a single comma."
+        }
+      ]
+    },
+    {
+      "choice": "A term is defined by an assumption that, trimmed and lowercased, starts `term <word>:` followed by at least 3 words. A trailing `s` or `'s` on the word is dropped when the base is in STRUCTURAL_TERMS. The line may cite the defining file.",
+      "reason": "This copies the `Code survey:` convention (`code_surveys`, reading.rs:3832), which the reader already knows, and needs no new reading field.",
+      "rejected": [
+        {
+          "option": "Read docs/ontology.toml",
+          "why": "Out of scope in the brief."
+        },
+        {
+          "option": "Also require a behavior criterion naming the term",
+          "why": "A second condition for little gain; criterion 1's accepted case carries one anyway."
+        },
+        {
+          "option": "Accept a definition in the summary",
+          "why": "The summary has no fixed label, so a check on it would be lexical guessing."
+        }
+      ]
+    },
+    {
+      "choice": "Skip conditions match the sibling checks: Ok when `reading.capability.is_none()`, `reading.question.is_some()` or `reading.deliverables.is_empty()`.",
+      "reason": "A reading that changes nothing is not asked for term definitions. The doc comment states the condition.",
+      "rejected": [
+        {
+          "option": "Check readings with no deliverables too",
+          "why": "It differs from both sibling checks and refuses readings that make no change."
+        }
+      ]
+    },
+    {
+      "choice": "Place the step after `check_environment_reach` (reading.rs:3252) and before `check_boundary_and_repo_files`.",
+      "reason": "Existing tests pin governance then outcome_state, and outcome_state then environment_reach. The new check reads only the reading and request, so it belongs before the file-comparing checks. `an_extra_check_with_no_case_is_reported` anchors on `check_reading_references`, which is unaffected.",
+      "rejected": [
+        {
+          "option": "Right after check_outcome_state",
+          "why": "It breaks the environment_reach adjacency test."
+        },
+        {
+          "option": "Last",
+          "why": "A missing file would be reported first and the cheaper check would run last."
+        }
+      ]
+    },
+    {
+      "choice": "Keep the four-word list fixed by the brief and state the false-refusal classes as intended: priority tiers, a caching layer, the repo's own ladder and rung, and a steward-written approval title that uses a term are refused until a `Term` line restates them. Pin the classes with refusing corpus cases. D164 asks the user to decide whether to narrow tier and layer if the share recorded at verification is above 8%.",
+      "reason": "Narrowing the list is a user decision the brief already made. Stating and pinning the limit makes any later narrowing a visible change.",
+      "rejected": [
+        {
+          "option": "Drop 'tier' and 'layer'",
+          "why": "The brief fixes the list."
+        },
+        {
+          "option": "Leave the false-refusal class unstated",
+          "why": "The refusal rate would be understated to the reader and the verifier."
+        }
+      ]
+    },
+    {
+      "choice": "Build the criterion 2 accept cases from the real generators: `generated_root_cause_request(sentence)` calls `athena_core::hestia::root_cause_request` (pub, hestia.rs:453); `generated_approval_request(title, source_text)` calls `athena_core::work_decisions::approve_request` (pub, work_decisions.rs:279) with a `WorkItem`, `Records::default()` and a temporary git repository (`athena_git::Git::at`, as the work_decisions.rs:480-504 helper does). Shapes tests assert the anchors, fixed lines and headings so a rewording in hestia.rs or work_decisions.rs fails visibly.",
+      "reason": "A hand-copied helper (refusal_corpus.rs:236-254) lacks the anchor sentence and fixed lines, so it never exercises the anchor-gated skips. `athena_git` and `tempfile` are normal dependencies of athena-core.",
+      "rejected": [
+        {
+          "option": "Keep the hand-copied helper for the criterion 2 case",
+          "why": "It does not change when the generators do."
+        },
+        {
+          "option": "Unit tests inside hestia.rs and work_decisions.rs",
+          "why": "Those files are not listed deliverables."
+        },
+        {
+          "option": "Hand-copy the generators' strings into the test",
+          "why": "Same stale-copy fault."
+        }
+      ]
+    },
+    {
+      "choice": "D164 lists every Athena request builder checked for fixed text with a structural word, and the 3% estimate is stated to cover hand-written requests only. Checked by grep over crates/athena-core/src: `approve_request` (work_decisions.rs:290) is the only builder with a fixed term, handled by the skip. `hestia::root_cause_request` carries the words only in earlier introspections' free text (skip by shape). `spec_request`, `throughput_request`, `slowdown_request` (hestia.rs:691, 1611, 1735), the code_health builders (code_health.rs:550, 684), `steward::blind_spot_request` (steward.rs:754), `proposals::accept_request` (proposals.rs:442) and defaults.toml hold none. `StewardRequest::from_change` (steward.rs:597) is the model's own words. `audience::work_item` (audience.rs:98) reaches the gate through `approve_request`. A corpus test runs the public `steward::blind_spot_change` request through the gate and expects acceptance.",
+      "reason": "The replay share is measured over past requests, including generated ones. Naming what was checked and excluded makes the estimate honest.",
+      "rejected": [
+        {
+          "option": "Claim no generator is affected without listing them",
+          "why": "That was the fault an earlier finding named."
+        },
+        {
+          "option": "Count the generated approvals in the 3%",
+          "why": "They are skipped by design, so they do not add to the share."
+        }
+      ]
+    },
+    {
+      "choice": "Measurement path (round-5 revision, finding 2). The doc comment, CHANGELOG and D164 declare 'expected 3% of newly refused readings' as an estimate and say the measured share is recorded in the job's replay record at verification. The producer sees a share only in a held send-back (`replay_problem`, run/producer.rs:61-68, 370-399), sent only above declared+5 = 8%. When a send-back arrives, the producer (a) may change only `plain_request_prose`, never STRUCTURAL_TERMS, and (b) writes the measured percentage from the send-back into the check_defined_terms doc comment, the CHANGELOG entry and D164, in a sentence labelled 'measured by the loop replay' beside the 3% estimate. The declared figure in the reading stays 3. No test asserts a measured figure; the tests keep requiring the 'estimate' wording, which stays.",
+      "reason": "The send-back text carries the measured percentage, so the producer has the figure in the one case it can know, and criterion 7 asks for it in the docs. At or under 8% no send-back arrives and the figure lives in the replay record, which the doc states.",
+      "rejected": [
+        {
+          "option": "Report the measured share only in the producer output",
+          "why": "Criterion 7 asks for it in the doc comment and D164; the producer output is not read by later readers."
+        },
+        {
+          "option": "Producer writes a measured figure when at or under 8%",
+          "why": "That branch can never run; no figure reaches the producer."
+        },
+        {
+          "option": "Narrow the word list when over 8%",
+          "why": "The brief fixes the list; the choice is the user's."
+        },
+        {
+          "option": "A test needle for the measured share",
+          "why": "The producer cannot know the share in advance, so a test cannot be satisfied reliably."
+        }
+      ]
+    },
+    {
+      "choice": "Queued requests read before this change (round-5 revision, finding 1). `steward::queued_work` (steward.rs:402-440) re-checks the latest stored reading of each proposed request with `check_reading_text` and leaves the request out when it fails (steward.rs:420-425, doc 394-399). The plan accepts that behavior and does not edit steward.rs: a proposed request whose plain prose uses a term and whose stored reading has no Term line is held out of `athena plan` and the drain (drain.rs:4202) until a person runs `athena go`, which re-reads it with the refusal text and the READING_RULES line. The hold applies equally to the existing text-only rules whenever one is added. A new test in refusal_corpus.rs drives the public `queued_work` with a hand-built `Records` and shows both sides. D164 and the CHANGELOG state the hold.",
+      "reason": "The hold is the documented design for a stored reading that fails a reading check, so no new mechanism is needed. A request that is queued but never read, and one approved after this change, are checked at their own first read, so the hold touches only proposals read earlier. Making it visible in D164 and CHANGELOG, with a test, satisfies the finding.",
+      "rejected": [
+        {
+          "option": "Re-read held proposals automatically or list them as unread",
+          "why": "It changes steward.rs and the drain (not deliverables), and spends reader cost on every proposal after each rule change; named as a possible follow-up for the user."
+        },
+        {
+          "option": "Say nothing and rely on the existing doc",
+          "why": "The finding shows no test or note tells anyone that the new check shrinks the queue."
+        }
+      ]
+    },
+    {
+      "choice": "Add an eighth line to `READING_RULES` in briefs.rs, at most 220 characters, and raise the size bound in its test to just above the printed length.",
+      "reason": "The rule list is outside the budgeted reader prompt set, so no prompt budget changes. The reader learns the rule before its first read.",
+      "rejected": [
+        {
+          "option": "Rely on the refusal text only",
+          "why": "It costs a refused first read, and the brief asks for the READING_RULES test to be updated."
+        },
+        {
+          "option": "Edit the reader prompt",
+          "why": "It has 3 tokens of room and prompt changes are out of scope."
+        }
+      ]
+    },
+    {
+      "choice": "Update `delivery_verb_replay_over_the_cited_jobs` in place and add `defined_terms_replay_over_the_cited_jobs`. Leave D161 and the old CHANGELOG entry untouched.",
+      "reason": "The old test asserts the 7bf8 outcome is None (refusal_corpus.rs:516-518), which the new check makes false. D161 is append-only. The old wording 'covers 1 of the 3 cited jobs' for check_outcome_state stays true.",
+      "rejected": [
+        {
+          "option": "Edit D161",
+          "why": "The decision log is append-only."
+        },
+        {
+          "option": "Delete the old replay test",
+          "why": "It is the measured proof for check_outcome_state."
+        }
+      ]
+    },
+    {
+      "choice": "Rest criterion 4 on gate-level tests: a reading.rs test helper `refuser_for(reading, request)` (the existing `gate_refuser` fixes the request, reading.rs:10279-10281) asserted equal to Some(\"check_defined_terms\").",
+      "reason": "Without the `step!` line, `refusing_check` returns None for the undefined-ladder reading, so the gate tests fail.",
+      "rejected": [
+        {
+          "option": "Source-doctoring test on READING_SOURCE",
+          "why": "It tests the extractor, not the gate."
+        }
+      ]
+    },
+    {
+      "choice": "Name the general fix in D164 as follow-up (round-5 revision, finding 3): generators that copy or quote text mark it with a shared delimiter or constant (for example one begin/end marker pair, or shared anchor and prefix constants in a module that hestia.rs, work_decisions.rs and reading.rs all import), and `plain_request_prose` reads that marker instead of hard-coded shapes. It sits under Alternatives (rejected for this job: needs edits to non-deliverable files) and Reversal cost (the hard-coded skips are deleted once the marker exists). The shapes tests and the D164 generator audit are the stand-in until then.",
+      "reason": "Every new generator that cites text would otherwise need a new hand-written skip in reading.rs. Naming the fix keeps the debt visible, and the work is outside this job's deliverables.",
+      "rejected": [
+        {
+          "option": "Implement the shared marker in this job",
+          "why": "hestia.rs, work_decisions.rs and other builders are not listed deliverables, and the brief asks for one focused change."
+        },
+        {
+          "option": "Leave the coupling unmentioned",
+          "why": "The next generator that quotes a term would fail silently as a false refusal."
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "crates/athena-core/src/reading.rs",
+      "action": "modify",
+      "purpose": "Add STRUCTURAL_TERMS, `plain_request_prose` (hestia and approve_request generated-text skips, quotes, parentheses, code tokens), `defined_terms`, `check_defined_terms` with its doc comment, and the `step!` line after check_environment_reach. Add the doc-order mention in `check_reading_acceptance`, rewrite the check_outcome_state doc sentence, and add unit tests and the `refuser_for` helper.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-core/tests/refusal_corpus.rs",
+      "action": "modify",
+      "purpose": "Add the shared 7bf8 const, the real-generator helpers with shapes tests, the new cases, four INPUT_FORMS tags, the updated cited-jobs replay, `defined_terms_replay_over_the_cited_jobs`, `defined_terms_decision_and_changelog`, the new `queued_work_holds_a_proposed_request_whose_stored_reading_leaves_a_term_undefined` test, and the module-doc line.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "purpose": "Add an Unreleased/Added entry naming the root cause and `check_defined_terms`, the 1-of-3 coverage, the 3% estimate over hand-written requests, the false-refusal classes, the skipped generated approval text, the hold of already-read proposed requests until `athena go`, and where the measured share is recorded.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "docs/decisions.md",
+      "action": "modify",
+      "purpose": "Append D164 after D163 with Case, Decision, Alternatives (including the shared cited-content marker as follow-up), Tradeoff (refusal rate, repo-defined terms, tier and layer, limits, generators audit, queued-request hold, measured-share recording and the user's narrowing decision), Reversal cost and Provenance.",
+      "governance": false,
+      "exists": true
+    },
+    {
+      "path": "crates/athena-context/src/briefs.rs",
+      "action": "modify",
+      "purpose": "Add the eighth READING_RULES line for `Term ladder:` and `check_defined_terms`, change the array length to 8, and update its test.",
+      "governance": false,
+      "exists": true
+    }
+  ],
+  "steps": [
+    "reading.rs, new check. Add `STRUCTURAL_TERMS: [&str; 4] = [\"ladder\", \"rung\", \"tier\", \"layer\"]`. Add `plain_request_prose(request) -> String`. (a) Generated text, case-sensitive and anchor-gated. Hestia: skip an `Introspection ` line only if it also holds ' (job ' and '); prevention it proposed:'; if the request contains 'The same cause has produced failures in more than one job.', also skip lines starting `Failure class: `, `Cause: ` or `Fix the root cause of a repeated failure: `. Approval: if the request contains 'A person approved this proposal from the steward role.', skip lines starting 'Rung of the requirements ladder: ', skip a 'Proposal: ' line that holds ' (key ' and ' queued at ', and drop every line from the first line equal to '## Source' to the end. (b) Per line, remove straight and curly double-quoted spans, backtick pairs, and single or curly single-quoted spans (opener after start, whitespace or `(` and before a letter or digit; closer after a non-space and before a non-alphanumeric; an unclosed opener stays as text). (c) Remove parenthesised spans that hold two or more commas or begin with `e.g.`, `i.e.`, `such as`, `for example` or `like`. (d) Replace whitespace-delimited tokens containing `/`, `_` or `::` with a space. Add `defined_terms(reading) -> BTreeSet<String>`: trimmed assumptions that lowercase-start with `term <word>:` and have at least 3 words after the colon; drop a trailing `s` or `'s` from the word when the base is in STRUCTURAL_TERMS. Add `pub fn check_defined_terms(reading, request) -> Result<()>`: Ok when `capability` is None, `question` is Some or `deliverables` is empty. Otherwise tokenise `plain_request_prose` with `request_words`, strip a trailing `'s`, find tokens equal to a term or term+`s` in order of first use, and bail when any is undefined with one line: 'the reading was refused because the request uses {terms} as a structural term but the reading does not define {it/them}; ...add an assumption that starts `Term ladder:` (one per term) saying what it means in this job, and cite the file that defines it if there is one'.",
+    "reading.rs, doc comment and wiring. Write the doc comment on check_defined_terms as one `///` paragraph with no blank `///` lines. It names the root cause ('readings are not checked against the outcome the user observes, so structural terms stay undefined'), cites 20261014-174815-7bf8 and 20261017-173508-0wtc, says the check skips a reading with no capability, a question, or no deliverable, and says 'This check refuses more readings; the higher refusal rate is intended.' It gives 'expected 3% of newly refused readings' as an estimate over hand-written requests and says the measured share is recorded in the job's replay record at verification. It says repo-defined terms (ladder, rung) are refused until restated with a `Term ladder:` line that may cite the defining file, and plain technical uses of tier (priority tiers) and layer (a caching layer) are refused too. It says the text of Athena's own generators (root-cause requests, approved-work requests and the content they copy) is cited content and not a use. It says a proposed request read before this check and using a term is left out of the queue by `steward::queued_work` until a person runs `athena go`. It lists what is not covered: quoted mentions, terms outside the list, and the Hermes term of 0wtc. Add `step!(check_defined_terms(reading, request));` after `step!(check_environment_reach(reading));` in `refusing_check`, add `[`check_defined_terms`]` to the doc order of `check_reading_acceptance`, and rewrite the check_outcome_state sentence at reading.rs:3659-3660: 7bf8 is caught by [`check_defined_terms`], 0wtc by no check. Keep 'covers 1 of the 3 cited jobs' and 'outside the check'; delete 'which does not catch them'.",
+    "reading.rs, tests. Add the helper `refuser_for(reading, request)` beside `gate_refuser`. In `mod tests` add: `defined_terms_refuses_each_undefined_structural_term` (all four terms, a plural, a possessive, one defined and one not, `Term layers:` defining layer); `defined_terms_ignores_generated_lines_quotes_and_parentheses` (hestia shapes and the approve_request shape with the anchor); `defined_terms_keeps_hand_written_lines_and_single_comma_parentheticals` ('Introspection of the ladder is needed.', anchorless 'Cause: the ladder is undefined', anchorless 'Rung of the requirements ladder: x.' and '## Source' heading, an approval-shaped request whose first line says 'Fix the ladder ordering', '(the ladder, which ranks requirements)'); `defined_terms_matches_whole_words_only`; `defined_terms_skips_declines_questions_and_no_deliverables`; `defined_terms_has_one_step_line_after_environment_reach`; `defined_terms_refusal_needs_the_step_line` (via `refuser_for`); `defined_terms_doc_and_changelog_name_the_cause`; `defined_terms_refusal_is_declared_intended` (`replay_declaration` gives Some(3); the doc, CHANGELOG and D164 carry the sentence, the estimate, the hand-written-only scope, the repo-defined-term and tier/layer statements, the replay-record statement and the queued-request hold ('held until', 'athena go'); D164 carries 'decide whether to narrow', 'approve_request', 'accept_request' and 'shared delimiter'; no measured-figure needle). Update the needles of `check_outcome_state_doc_names_root_cause_and_scope` to include 'check_defined_terms' and exclude 'which does not catch them'.",
+    "refusal_corpus.rs, cases. Extract the 7bf8 request text into a const shared with `CITED_REQUESTS`. Add `generated_root_cause_request(sentence: Option<&str>) -> String`: build a `hestia::RepeatedCause` and a `store::Records` with two `IntrospectionRecord` values (copy the field list of hestia.rs:2842-2867), call `athena_core::hestia::root_cause_request(..).unwrap()`, and splice the sentence in with `replace(\"do not work around one instance.\", ...)`. Add `generated_approval_request(title: &str, source_text: &str) -> String`: make a temporary git repository (tempfile and `athena_git::Git::at`, config lines as work_decisions.rs:480-504), commit `docs/guide.md` holding `source_text`, build a `WorkItem` (fields as work_decisions.rs:401-413), and call `athena_core::work_decisions::approve_request(&item, &Records::default(), &git, &head)` with `head` from `git.run([\"rev-parse\", \"HEAD\"])`. Add tests `generated_request_has_the_generators_shapes` and `approve_request_has_the_generators_shapes`. Add a `defined_terms_cases()` group to `cases()`: `structural-term-ladder-undefined-in-7bf8-request` (Refuse check_defined_terms, 0 bullets); `structural-term-ladder-defined-and-named-by-a-behavior-criterion-accepted` (Accept); `structural-term-quoted-or-cited-mentions-are-accepted` (3 bullets, Accept); `structural-term-plain-use-beside-quoted-mentions-is-refused`; `structural-term-introspection-line-in-the-corpus-copy-is-accepted`; `structural-term-possessive-use-is-refused`; `structural-term-priority-tier-is-refused` (also an 'add a caching layer' request; source says it pins a known, intended false refusal); `structural-term-inside-other-words-is-accepted`; `structural-term-approve-request-generated-text-is-accepted`; `structural-term-approve-request-title-use-is-refused`; `structural-term-blind-spot-request-is-accepted` (the request of `steward::blind_spot_change(\"github\", \"x\")`). If a first run shows an earlier check refusing a generated case, fix the fixture, not the check. Add `structural-term-plain-prose`, `structural-term-quoted-or-cited`, `structural-term-defined` and `structural-term-generated-approval` to INPUT_FORMS (34 becomes 38). Update the module doc. Do not add a source-doctoring test.",
+    "refusal_corpus.rs, queued requests (finding 1). Add `queued_work_holds_a_proposed_request_whose_stored_reading_leaves_a_term_undefined`: copy the `Reading` literal of steward.rs `stored_reading` (2244-2293) and the `JobRecords` shape of `proposed_with` (2298-2326) into a local helper `proposed_records(job_id, request_text, assumptions)` using public items only (`athena_core::store::{JobRecords, Records}`, `athena_core::steward::USER_QUEUE_CHANNEL`, `athena_data::records::{Request, Reading, ...}`). Cases: (a) base text 'Add a greeting.\\n\\nAcceptance:\\n- the greeting prints\\n\\nFiles: src/a.rs' plus 'Show it in the top tier.' and no Term assumption: assert `state()` is `JobState::Proposed`, then `queued_work` is empty; (b) the same with assumption 'Term tier: the priority tier a work item sits in.': listed with `read == true`; (c) the base text without the tier sentence: listed with `read == true` (this control also shows `check_reading_text` accepts the stored reading apart from the term).",
+    "refusal_corpus.rs, replay. Edit `delivery_verb_replay_over_the_cited_jobs`: `caught` by check_outcome_state stays [g6vy], and the loop expects g6vy to be check_outcome_state, 7bf8 check_defined_terms and 0wtc None. Add `defined_terms_replay_over_the_cited_jobs` (caught by check_defined_terms == [7bf8]; 0wtc's text holds none of the four words; the CHANGELOG contains 'check_defined_terms covers 1 of the 3 cited jobs' and the three job ids, and does not contain '3 of the 3 cited jobs'). Add `defined_terms_decision_and_changelog` (D164 heading, Alternatives, Provenance, check_defined_terms, the root-cause sentence, the replay-record statement).",
+    "briefs.rs. Add the eighth `READING_RULES` line, for example 'Terms: define each structural request term (ladder, rung, tier, layer) in an assumption `Term ladder: <meaning>`; quoted or cited mentions need none (`check_defined_terms`).' Change the array length to 8. Update the test: length 8, `check_defined_terms` in the check list, an assertion that a line names `Term ladder:` and the check, the 'seven rule lines' comment, and the size bound set from the printed length.",
+    "CHANGELOG.md and docs/decisions.md. Add the CHANGELOG entry at the top of Unreleased/Added: the root cause, `reading::check_defined_terms` as a step after `check_environment_reach`, 'check_defined_terms covers 1 of the 3 cited jobs, 20261014-174815-7bf8', 0wtc not caught, ladder and rung refused until restated, tier (priority tiers) and layer (caching layer) refused too, the approved-work request text skipped as cited content, 'This check refuses more readings; the higher refusal rate is intended: expected 3% of newly refused readings' as an estimate over hand-written requests, the measured share recorded in the job's replay record at verification, and that proposed requests read before this change and using a term are held until a person runs `athena go`. Append `## D164 · A reading must define each structural term its request uses, or the request only quotes it; the check covers 1 of the 3 cited jobs` after D163 with Case, Decision, Alternatives (whole-text matching, substring matching, ontology file, criterion-only definition, reader prompt line, bare-prefix line skipping, shared constants in hestia.rs, rewording the approve_request line, and the general fix: generators mark cited content with a shared delimiter or constant that reading.rs reads, proposed as follow-up because hestia.rs and work_decisions.rs are outside this job; re-reading held proposals unread as another follow-up), Tradeoff (refusal rate, repo-defined terms, tier and layer, limits, the audit of Athena's request builders from decision 10, the `queued_work` hold, where the measured share is recorded, and 'If the share recorded at verification is above 8%, the user decides whether to narrow tier and layer'), Reversal cost (including deleting the hard-coded generator skips once the shared marker exists), and Provenance (files read and the request texts replayed).",
+    "Run `cargo fmt --all`, then `cargo test -p athena-core --test refusal_corpus`, `cargo test -p athena-core`, `cargo test -p athena-context`, `cargo test -p athena-cli`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked`. Fix the briefs.rs size bound from the printed length. Leave the 3% estimate and the replay-record statement as written. If a held send-back arrives, the measured share is over 8%: change only `plain_request_prose` (never STRUCTURAL_TERMS or the declared figure), and add the measured percentage from `replay_problem` to the check_defined_terms doc comment, the CHANGELOG entry and D164 in a sentence labelled 'measured by the loop replay' beside the 3% estimate; also report it in the output. Leave the tier/layer decision to the user as D164 says."
+  ],
+  "risks": [
+    {
+      "risk": "The 3% figure is an estimate. The planner cannot see records/, the producer cannot run the loop replay, and the real share of past requests that use these words in plain prose is unknown. Tier and layer are common words.",
+      "mitigation": "The text labels 3% an estimate over hand-written requests and says the measured share is recorded in the replay record at verification. If a held send-back reports a share over 8%, the producer may change only `plain_request_prose`, writes the measured share into the doc comment, CHANGELOG and D164 labelled 'measured by the loop replay', and never edits STRUCTURAL_TERMS. D164 hands the tier and layer decision to the user."
+    },
+    {
+      "risk": "Proposed requests already read under the old rules whose prose uses a term drop out of `athena plan` and the drain through `steward::queued_work` with no notice (finding 1).",
+      "mitigation": "The behavior is the documented one (steward.rs:394-399), is covered by a public-path test with both sides, and is stated in D164 and the CHANGELOG as 'held until a person runs `athena go`'. The user is asked in open_questions whether a re-read should replace the hold."
+    },
+    {
+      "risk": "Quote handling over-strips (a stray apostrophe swallows a use) or under-strips (a quoted mention is counted).",
+      "mitigation": "Scan per line and leave an unclosed opener as text. Unit tests cover apostrophes in \"Sri's\" and \"don't\", an unclosed quote, curly quotes, backticks, possessive \"ladder's\" (counted), and a plain use beside quotes (companion corpus case, refused)."
+    },
+    {
+      "risk": "A generated-line skip drops a hand-written line, or fails to skip a generated one (hestia lines, approve_request lines). Hard-coded shapes in reading.rs couple it to hestia.rs and work_decisions.rs (finding 3).",
+      "mitigation": "Skip by exact shape and only when the generator's anchor sentence is present. Accepted corpus cases are built from the real generators; shapes tests assert the anchors and lines, so a rewording fails a test. D164 names the shared-delimiter follow-up that removes the coupling. Unit cases pin the hand-written forms in both directions."
+    },
+    {
+      "risk": "A real approval is refused in production or in athena-cli tests because approve_request text uses the words.",
+      "mitigation": "The anchor-gated skip of the rung line, the proposal line and the '## Source' onward text. `cargo test -p athena-cli` runs the four approval tests end to end; the corpus case uses the real generator. The title stays checked, a known and documented class."
+    },
+    {
+      "risk": "The corpus tests build an `IntrospectionRecord` (about 24 fields) and a `Reading` by hand, which breaks if a record type gains a field.",
+      "mitigation": "A compile error names the field, and hestia's and steward's own test helpers (hestia.rs:2836-2868, steward.rs:2244-2293) change at the same time, so the repair is a copy of that update."
+    },
+    {
+      "risk": "The approve_request helper needs a git repository in an integration test; a git setup problem (signing, hooks) fails the test for the wrong reason.",
+      "mitigation": "Copy the config lines of work_decisions.rs:480-504 (user.name, user.email, commit.gpgsign false, core.hooksPath /dev/null). The shapes test fails first with a clear message if the text was not built."
+    },
+    {
+      "risk": "A parenthesised list with a single comma, such as '(ladder, layer)', is counted as a use, and a long parenthetical with two commas that holds a real use is dropped.",
+      "mitigation": "The rule is stated in the doc comment and covered by unit cases for each shape. The residual error is a false refusal, which the reader repairs with a Term line, not a silent acceptance of a main use."
+    },
+    {
+      "risk": "The rules section in briefs.rs exceeds the 2600-byte bound with an eighth line (about 2570 bytes is an estimate, not a measurement).",
+      "mitigation": "Run `cargo test -p athena-context`. The failure prints the actual section length; the producer sets the bound just above it. The new line stays at or under 220 characters."
+    },
+    {
+      "risk": "The old cited-jobs replay asserts the 7bf8 request is accepted, which now fails, and old CHANGELOG/D161 wording could break.",
+      "mitigation": "Edit the replay test in step 6. Leave D161 and the old CHANGELOG line unchanged so 'covers 1 of the 3 cited jobs' still holds for check_outcome_state."
+    },
+    {
+      "risk": "0wtc could be wrongly claimed as caught or not caught, because the real recorded request may differ from the text in CITED_REQUESTS.",
+      "mitigation": "The 0wtc assertion is `outcome.is_none()` on the text at refusal_corpus.rs:467-472, plus a scan that the text holds none of the four words. The doc comment and D164 state that the Hermes term is not covered."
+    },
+    {
+      "risk": "A new corpus case is refused first by an earlier check (an unknown path, a bullet count mismatch), so it fails for the wrong reason.",
+      "mitigation": "The producer runs the `refusal_corpus` target, which prints each mismatch with the case id. The generated root-cause request has 3 acceptance bullets (hestia.rs:3620-3625). The approval text has no bullets, so its case sets 0 bullets and the repo files it names. If an earlier check refuses a generated case, fix the fixture (`referenced`, `repo_files()`), not the check."
+    },
+    {
+      "risk": "The queued_work test builds a proposed job by hand and could pass because the job is in the wrong state or the stored reading fails another check.",
+      "mitigation": "The test asserts `JobRecords::state()` is Proposed and that a control record with no structural word is listed read, so only the term differs between the held and listed records."
+    }
+  ],
+  "dependents": [
+    {
+      "name": "refusing_check gains a step, so reading acceptance refuses more readings",
+      "dependent": "crates/athena-core/src/reading.rs `refusing_check` and callers: `Athena::read_for` (about reading.rs:663, one immediate re-read with the refusal text), `check_reading_text` (reading.rs:4755, used by `athena check-reading`, the replay and `steward::queued_work`), the loop replay (`loop_replay`, run/mod.rs about 2250) and the hold at verification (`replay_stage`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core --test refusal_corpus (`the_wrapper_agrees_with_refusing_check_on_every_case`, `corpus_cases_get_the_expected_outcome`). The loop replay records its measured share at verification; `replay_problem` sends work back above declared+5 = 8%.",
+      "reason": null
+    },
+    {
+      "name": "Stored readings of proposed requests are re-checked by check_reading_text (finding 1)",
+      "dependent": "crates/athena-core/src/steward.rs `queued_work` (402-440; the re-check at 420-425; doc 394-399 says a stored reading that fails a check is left out until a person runs `athena go`). Callers: crates/athena-cli/src/drain.rs:4202 (drain queue), tests in crates/athena-cli/tests/drain.rs (4230, 4249, 4385, 5052). Unit tests in steward.rs 2329-2427 (`a_proposed_request_with_a_passing_stored_reading_is_listed_read`, `a_stored_reading_that_fails_a_reading_check_is_left_for_a_person`) use a request with no structural word.",
+      "kind": "code",
+      "test": "New test `queued_work_holds_a_proposed_request_whose_stored_reading_leaves_a_term_undefined` in crates/athena-core/tests/refusal_corpus.rs, public path only: build `athena_core::store::Records` with one `JobRecords` (public fields `id`, `request` on channel `steward::USER_QUEUE_CHANNEL`, `readings` with one stored `athena_data::records::Reading` copied from steward.rs `stored_reading` 2244-2293 and `proposed_with` 2298-2326: capability change, one deliverable, content criterion, no assumptions), with request text 'Add a greeting.\\n\\nAcceptance:\\n- the greeting prints\\n\\nFiles: src/a.rs\\n\\nShow it in the top tier.'. Assert `JobRecords::state()` is `JobState::Proposed` first, then `steward::queued_work(&records)` is empty. A second record whose stored reading adds 'Term tier: the priority tier a work item sits in.' is listed with `read == true`. A third record with the same request without 'tier' is listed read, as a control. Existing steward.rs and athena-cli tests run unchanged and keep passing (cargo test -p athena-core, cargo test -p athena-cli). D164 and the CHANGELOG state the hold (needles in `defined_terms_refusal_is_declared_intended`).",
+      "reason": null
+    },
+    {
+      "name": "Request text built by approve_request (contains 'Rung of the requirements ladder: {rung}.', a 'Proposal: ... (key ...) queued at ...' line, and copied source/evidence under '## Source' and '## Evidence')",
+      "dependent": "crates/athena-core/src/work_decisions.rs `approve_request` (279-313), `Athena::approve_work` (326-331), `approve_in_limit` (358-369); callers crates/athena-cli/src/main.rs:1092 (`athena approve-work`) and crates/athena-cli/src/drain.rs:4283; `audience::work_item` (audience.rs:98) items are approved through the same path",
+      "kind": "code",
+      "test": "cargo test -p athena-cli: tests/work_decisions.rs `approving_queues_a_job_whose_request_carries_the_cited_content` (line 96, asserts JobState::Proposed), tests/drain.rs lines 5328, 6210, 6276; cargo test -p athena-core: work_decisions.rs `approve_work_succeeds_on_a_proposal_whose_text_holds_a_boundary_word` (line 534) and the new corpus case `structural-term-approve-request-generated-text-is-accepted` built from the real `approve_request`, with `approve_request_has_the_generators_shapes`.",
+      "reason": null
+    },
+    {
+      "name": "Fake reader's default reading in athena-cli tests (capability change, one deliverable, assumption 'English is fine.', no Term line)",
+      "dependent": "crates/athena-cli/tests/common/mod.rs (about 317-327, 360), used by every athena-cli test that calls `ask`, `approve_work` or `plan`",
+      "kind": "code",
+      "test": "cargo test -p athena-cli. Requests in those tests are short hand-written strings without the four words, or the approve_request text covered above. drain.rs lines naming 'ladder rung' (583, 624, 703, 708) are plan-display strings, not requests that reach the gate.",
+      "reason": null
+    },
+    {
+      "name": "Other Athena request builders (grep for ladder, rung, tier, layer over crates/athena-core/src)",
+      "dependent": "hestia.rs `spec_request` (691), `throughput_request` (1611), `slowdown_request` (1735), `root_cause_request` (453); code_health.rs StewardRequest builders (550, 684); steward.rs `blind_spot_request` (754) and `StewardRequest::from_change` (597); proposals.rs `accept_request` (442, reached from proposals.rs:642); audience.rs `work_item` (98)",
+      "kind": "code",
+      "test": "The new corpus case on `steward::blind_spot_change` (public) is accepted by the gate; `root_cause_request` is covered by the generator-built cases; the others hold no structural word in fixed text (grep over hestia.rs finds only a test line at 5918, code_health.rs none, proposals.rs none, defaults.toml none) and their free-text parts are counted like hand-written text and covered by the 3% estimate. D164 lists this audit and names the shared-delimiter follow-up (finding 3).",
+      "reason": null
+    },
+    {
+      "name": "check_outcome_state doc sentence about the other two jobs",
+      "dependent": "crates/athena-core/src/reading.rs tests `check_outcome_state_doc_names_root_cause_and_scope` and `outcome_state_refusal_is_declared_intended`, which read the check_outcome_state doc comment",
+      "kind": "code",
+      "test": "The same tests with updated needles: they keep 'covers 1 of the 3 cited jobs', the three job ids, 'outside the check', the intended-rate sentence and 'estimate', and add 'check_defined_terms' and the absence of 'which does not catch them'.",
+      "reason": null
+    },
+    {
+      "name": "Step order in refusing_check",
+      "dependent": "reading.rs tests `environment_reach_has_one_step_line` (about 8838) and `check_outcome_state_doc_names_root_cause_and_scope`; refusal_corpus.rs `an_extra_check_with_no_case_is_reported` (anchored on `step!(check_reading_references(`)",
+      "kind": "code",
+      "test": "cargo test -p athena-core (`environment_reach_has_one_step_line`, `history_fixture_has_one_step_line`, `an_extra_check_with_no_case_is_reported`, new `defined_terms_has_one_step_line_after_environment_reach`).",
+      "reason": null
+    },
+    {
+      "name": "Corpus mechanism: every step line needs a refusing case, every listed input form needs a case",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `every_acceptance_check_has_a_refusing_corpus_case` and `corpus_covers_the_listed_input_forms`",
+      "kind": "rule",
+      "test": "Step 4 adds refusing cases for check_defined_terms and four INPUT_FORMS tags (34 becomes 38). Both tests run under `cargo test -p athena-core --test refusal_corpus`.",
+      "reason": null
+    },
+    {
+      "name": "Outcome of the 7bf8 request through the gate (accepted before, refused by check_defined_terms now)",
+      "dependent": "crates/athena-core/tests/refusal_corpus.rs `delivery_verb_replay_over_the_cited_jobs` (reads CITED_REQUESTS and CHANGELOG.md)",
+      "kind": "code",
+      "test": "The test is edited and `defined_terms_replay_over_the_cited_jobs` is added. The CHANGELOG keeps 'covers 1 of the 3 cited jobs' for check_outcome_state and gains no '3 of the 3 cited jobs'.",
+      "reason": null
+    },
+    {
+      "name": "READING_RULES grows from 7 to 8 lines",
+      "dependent": "crates/athena-context/src/briefs.rs `READING_RULES`, `reader_brief` (about 2417-2421), test `the_reader_brief_names_each_reading_rule_in_one_short_line` (about 4401), and the reader prompt budget (`BudgetSet::Reader`, lib.rs about 175 and 279-283)",
+      "kind": "rule",
+      "test": "cargo test -p athena-context, with the updated length, check list and size bound. The rule list is part of the brief, outside the budgeted reader prompt set, so the `budget` lines in docs/system-facts.md and `system_facts_budgets_match_computed` are unaffected. `the_reader_brief_tells_the_reader_to_write_a_code_survey` still holds because CODE_SURVEY_GUIDE is unchanged.",
+      "reason": null
+    },
+    {
+      "name": "hestia's generated root-cause lines skipped by exact shape",
+      "dependent": "crates/athena-core/src/hestia.rs `root_cause_request_at` (lines 458-507); hestia.rs is not edited",
+      "kind": "code",
+      "test": "Corpus case `structural-term-quoted-or-cited-mentions-are-accepted` is built from the real `hestia::root_cause_request`; `generated_request_has_the_generators_shapes` fails if hestia rewords a line; `defined_terms_ignores_generated_lines_quotes_and_parentheses` covers each shape on strings. Hand-written 'Introspection of the ladder is needed.' and anchorless 'Cause: the ladder is undefined' stay refused.",
+      "reason": null
+    },
+    {
+      "name": "Public hestia and work_decisions API used by new corpus helpers (`root_cause_request`, `RepeatedCause`, `store::Records`, `approve_request`)",
+      "dependent": "hestia tests (hestia.rs:2384, 3400, 3620) and work_decisions tests (work_decisions.rs:534) that call them",
+      "kind": "code",
+      "test": null,
+      "reason": "The plan only calls these from a test and changes none of them; cargo test -p athena-core runs those tests unchanged."
+    },
+    {
+      "name": "Declared share 'expected 3% of newly refused readings'",
+      "dependent": "crates/athena-core/src/reading.rs `replay_declaration` / `ReplayDeclaration` (about 4964) and `replay_limit_percent` (about 5005), plus run/producer.rs:61-68 and 370-399 (`replay_problem` held send-back) and `replay_stage`",
+      "kind": "rule",
+      "test": "`defined_terms_refusal_is_declared_intended` asserts `replay_declaration` returns Some(3). The limit is 3+5 = 8%. A measured share written into the docs after a send-back (decision 11) does not change the declared figure, so the declaration, limit and `replay_problem` are unaffected.",
+      "reason": null
+    },
+    {
+      "name": "D164 appended to docs/decisions.md",
+      "dependent": "docs/decisions.md decision-log mirror rules ('decision log' append-only and 'decision entries', mirrors.rs about 121-144 and 346) and `docs/ontology.toml` ('ontology' mirror)",
+      "kind": "rule",
+      "test": "cargo test -p athena-core mirrors (decision-entry rules) and `defined_terms_decision_and_changelog`. D164 is appended after D163 with a `## D164 · title` heading and a Provenance bullet. docs/ontology.toml and D109 are not edited.",
+      "reason": null
+    },
+    {
+      "name": "Words tier, ladder, rung and layer as Rust identifiers and plan wording elsewhere",
+      "dependent": "crates/athena-core/src/plan.rs, drain.rs, config.rs, display.rs, steward.rs, roles.rs and crates/athena-cli/tests",
+      "kind": "code",
+      "test": null,
+      "reason": "The gate sees only request text and the reading, so identifiers in source do not reach it. The matcher also skips tokens that hold `_`, `/` or `::`. The one generated text that carries the words (approve_request) is handled by the anchor-gated skip. Hand-written requests using 'tier' or 'layer' in plain prose are refused until a Term line, pinned by `structural-term-priority-tier-is-refused`; cargo test --locked runs the athena-cli tests unchanged."
+    }
+  ],
+  "demonstrations": [
+    {
+      "criterion": 1,
+      "method": "Run the real gate `refusing_check` on two corpus cases built from the recorded 7bf8 request (shared const `REQUEST_7BF8`, extracted from `CITED_REQUESTS`, refusal_corpus.rs:456). Case A `structural-term-ladder-undefined-in-7bf8-request`: `base_reading`, one deliverable, no Term line, expects a refusal by check_defined_terms. Case B `structural-term-ladder-defined-and-named-by-a-behavior-criterion-accepted`: adds an assumption `Term ladder: ...` citing docs/guide.md (in `repo_files()`) and a behavior criterion naming the ladder via `with_behavior`; expects acceptance. A reading.rs unit test also checks `Term ladders: ...` defines ladder.",
+      "command": "cargo test -p athena-core",
+      "observes": "Case A gives Some((\"check_defined_terms\", err)); the error starts 'the reading was refused because', names ladder and shows the `Term ladder:` repair. Case B gives None. `corpus_cases_get_the_expected_outcome` and `the_wrapper_agrees_with_refusing_check_on_every_case` pass. I read the test names and case structure and ran nothing.",
+      "fails_without": "Without `check_defined_terms` and its step line, Case A is accepted and `corpus_cases_get_the_expected_outcome` fails. If the check ignored the Term line, Case B is refused.",
+      "seam": "Production entry point `athena_core::reading::refusing_check` (exists, reading.rs:3228), reached through `check_reading_acceptance`. Fixture: the corpus `Case` struct, `base_reading` and `with_behavior`, injected through `cases()` (exist, refusal_corpus.rs:128-271). Step 4 adds the shared const and the two cases. Nothing is doubled."
+    },
+    {
+      "criterion": 2,
+      "method": "Run the real gate on requests built by Athena's real generators. (a) `generated_root_cause_request(Some(sentence))` calls `hestia::root_cause_request` with a constructed `RepeatedCause` and `Records` of two `IntrospectionRecord` values whose class, cause and prevention mention ladder, layer and tier; the spliced sentence adds a double-quoted word, a single-quoted word and '(ladder, layer, tier)'. Case `structural-term-quoted-or-cited-mentions-are-accepted`: `base_reading`, no Term lines, `referenced` as in `root-cause-cites-two-jobs-without-relying`, 3 bullets, expects acceptance. (b) `generated_approval_request(title, source_text)` calls `work_decisions::approve_request` with a `WorkItem`, `Records::default()` and a temporary git repository, the source file holding 'The ladder has five rungs in this layer.'. Case `structural-term-approve-request-generated-text-is-accepted` expects acceptance with no Term lines. Companions that expect refusal by check_defined_terms: `structural-term-plain-use-beside-quoted-mentions-is-refused`, `structural-term-approve-request-title-use-is-refused` (title 'Fix the ladder ordering'), `structural-term-possessive-use-is-refused`, and a hand-written anchorless 'Rung of the requirements ladder: x.' with '## Source' (unit test). Shapes tests `generated_request_has_the_generators_shapes` and `approve_request_has_the_generators_shapes` pin the anchors and fixed lines. A case runs the public `steward::blind_spot_change` request through the gate and expects acceptance. INPUT_FORMS gains `structural-term-plain-prose`, `structural-term-quoted-or-cited`, `structural-term-defined`, `structural-term-generated-approval` (34 becomes 38). The athena-cli approval tests (work_decisions.rs:96, drain.rs:5328, 6210, 6276) are the end-to-end regression run.",
+      "command": "cargo test -p athena-core && cargo test -p athena-cli",
+      "observes": "Both generated, quoted-only requests give None from `refusing_check` with a reading that has no Term lines. The companions give Some(\"check_defined_terms\"). The shapes tests pass, so the accepted cases go through the anchor-gated skips. `corpus_covers_the_listed_input_forms` passes because each new tag has a case. In athena-cli, `approving_queues_a_job_whose_request_carries_the_cited_content` still ends in JobState::Proposed. I read the helpers and generators and ran nothing.",
+      "fails_without": "If quoted or generated mentions counted as uses, both accepted cases are refused and the athena-cli approval tests fail on `approve_work(..).unwrap()`. If a skip were blanket, the plain-use and title companions would be accepted and fail. If bare-prefix skipping came back, the hand-written Introspection, Cause and Rung unit cases fail. If hestia.rs or work_decisions.rs reworded their lines, the shapes tests fail.",
+      "seam": "`refusing_check` (exists). `hestia::root_cause_request`, `hestia::RepeatedCause`, `store::Records` and `athena_data::records::IntrospectionRecord` are public and exist (hestia tests build the record at hestia.rs:2842-2867). `work_decisions::approve_request` is public (exists, work_decisions.rs:279); `athena_git::Git` and `tempfile` are normal dependencies of athena-core (exist). Step 4 adds both helpers, the cases and the tags. The generators and the gate are real; nothing is doubled. The athena-cli tests use the existing fake reader and `Fixture` (exist)."
+    },
+    {
+      "criterion": 3,
+      "method": "Run the real gate on `structural-term-inside-other-words-is-accepted` ('Rename the stepladder helper and remove the delayer module.', existing form `trigger-word-inside-other-word`). `defined_terms_matches_whole_words_only` also checks a request with no structural word, `ladder.md`, `layer_count`, the path `crates/x/layer/mod.rs`, and a quoted 'layer'. Positive controls: 'the layers' and 'rungs' are refused when undefined.",
+      "command": "cargo test -p athena-core",
+      "observes": "Every ordinary request gives None from `refusing_check` and Ok from `check_defined_terms`; the positive controls give Err naming the terms.",
+      "fails_without": "A substring matcher would refuse the stepladder and delayer case. A tokenizer that split on `_` or `/` would refuse the identifier and path requests. A check that refused requests with no structural word would fail existing accepted corpus cases such as `steward-three-dash-bullets`.",
+      "seam": "`refusing_check` (exists) for the corpus case. `check_defined_terms` is a new `pub fn` (step 1), called directly in the unit test with `governed_reading` (exists in reading.rs tests). Nothing is doubled."
+    },
+    {
+      "criterion": 4,
+      "method": "`defined_terms_refusal_needs_the_step_line` (reading.rs, shaped like `history_fixture_refusal_needs_the_step_line`, reading.rs:10552-10567) asserts `refuser_for(reading, request) == Some(\"check_defined_terms\")` for an undefined-ladder reading and that the `refusing_check` body contains `step!(check_defined_terms(reading, request));`. `defined_terms_has_one_step_line_after_environment_reach` pins the position like `environment_reach_has_one_step_line`. The existing `every_acceptance_check_has_a_refusing_corpus_case` requires a refusing corpus case for every step line and passes through Case A of criterion 1.",
+      "command": "cargo test -p athena-core",
+      "observes": "The gate refuses the undefined-ladder reading under the name `check_defined_terms`. The body holds exactly one such step line. Every step line has a refusing corpus case. I read the existing tests and ran nothing.",
+      "fails_without": "With the `step!(check_defined_terms(..))` line removed, `refusing_check` returns None for the undefined-ladder reading, so `defined_terms_refusal_needs_the_step_line`, `defined_terms_has_one_step_line_after_environment_reach` and the corpus refusing case all fail. With the line present but no refusing corpus case, `every_acceptance_check_has_a_refusing_corpus_case` fails.",
+      "seam": "`refusing_check` (exists). The new helper `refuser_for(reading, request)` in reading.rs tests (step 3) takes the request, because `gate_refuser` fixes it. The `refusing_check` body is read with `include_str!(\"reading.rs\")` (pattern exists). Nothing is doubled."
+    },
+    {
+      "criterion": 5,
+      "method": "Edit `delivery_verb_replay_over_the_cited_jobs`: for each job in `CITED_REQUESTS` (refusal_corpus.rs:456), run `refusing_check` over `base_reading` and `repo_files()`. g6vy gives check_outcome_state, 7bf8 gives check_defined_terms, 0wtc gives None (its recorded text, refusal_corpus.rs:467-472, holds none of the four words; a word-scan over its plain prose asserts that, so a changed text fails loudly). Add `defined_terms_replay_over_the_cited_jobs`: the jobs caught by check_defined_terms are exactly [7bf8], and CHANGELOG.md contains 'check_defined_terms covers 1 of the 3 cited jobs' and the three job ids but not '3 of the 3 cited jobs'.",
+      "command": "cargo test -p athena-core --test refusal_corpus",
+      "observes": "Three real `refusing_check` runs on the cited request texts give check_outcome_state, check_defined_terms and None.",
+      "fails_without": "Without the check, 7bf8 is accepted and the assertion fails. If the check were too wide, 0wtc would be refused and the `is_none()` assertion fails. If check_outcome_state changed, the g6vy assertion fails.",
+      "seam": "`refusing_check` with `base_reading` and `repo_files()` (exist) over `CITED_REQUESTS` (exists). Step 6 changes the expected outcomes and adds the second test. CHANGELOG.md is read with `include_str!`, as the existing test does."
+    },
+    {
+      "criterion": 6,
+      "method": "Content test `defined_terms_doc_and_changelog_name_the_cause` in reading.rs, shaped like `history_fixture_doc_and_changelog_name_the_cause`. It takes the `///` block above `pub fn check_defined_terms(` (one paragraph, no blank `///` lines), collapses white space, and requires: 'readings are not checked against the outcome the user observes', 'structural terms', '20261014-174815-7bf8', '20261017-173508-0wtc', 'quoted', 'terms outside the list', 'Hermes', and 'no deliverable'.",
+      "command": "cargo test -p athena-core defined_terms_doc_and_changelog_name_the_cause",
+      "observes": "Each needle is found in the doc comment of the new function.",
+      "fails_without": "If the doc comment lacks the root-cause sentence, a job id, a not-covered item or the skip condition, the test fails with 'the doc comment lacks ...'.",
+      "seam": "Source text via `include_str!(\"reading.rs\")` (the pattern exists in `check_outcome_state_doc_names_root_cause_and_scope`). The comment is written in step 2 and the test in step 3."
+    },
+    {
+      "criterion": 7,
+      "method": "Test `defined_terms_refusal_is_declared_intended` in reading.rs, shaped like `outcome_state_refusal_is_declared_intended`. `replay_declaration` on 'expected 3% of newly refused readings' gives Some(3). The doc comment of `check_defined_terms`, CHANGELOG.md and D164 each contain 'This check refuses more readings; the higher refusal rate is intended.', 'estimate', that ladder and rung are refused until restated, that plain uses of tier (priority tiers) and layer (a caching layer) are refused too, that the 3% covers hand-written requests only, and that the measured share is recorded in the job's replay record at verification. CHANGELOG and D164 also contain 'held until' with 'athena go' for queued requests read before the change (finding 1). D164 also contains 'decide whether to narrow', 'approve_request', 'accept_request', and the follow-up 'shared delimiter' (finding 3). The check_outcome_state doc must contain 'check_defined_terms' and not 'which does not catch them', and keep 'covers 1 of the 3 cited jobs', the three job ids and 'outside the check'. The corpus case `structural-term-priority-tier-is-refused` pins the known false refusal. There is no needle for a measured figure; if a held send-back reports one, the producer adds it as 'measured by the loop replay' to the doc comment, CHANGELOG and D164 and the tests still pass.",
+      "command": "cargo test -p athena-core",
+      "observes": "The declared figure parses to 3. Each document carries the sentence, the estimate, the false-refusal, scope, generators, recording, held-queue and narrowing statements. The old 'outside any check' wording is gone. The priority-tier and caching-layer requests are refused.",
+      "fails_without": "If the doc comment, CHANGELOG or D164 omits the sentence, the limits, the generators list, the recording path, the held-queue note or the narrowing question, the test fails. If the check_outcome_state doc still says the other two jobs are outside any check, the guard fails. If a later change narrowed 'tier' or 'layer', the pinning case fails.",
+      "seam": "`replay_declaration` (exists, reading.rs:4964). Source text via `include_str!` of reading.rs, CHANGELOG.md and docs/decisions.md. `refusing_check` for the pinning case. The docs are written in steps 2 and 8, the tests in steps 3 and 4."
+    },
+    {
+      "criterion": 8,
+      "method": "Update the READING_RULES test `the_reader_brief_names_each_reading_rule_in_one_short_line` in briefs.rs: length 7 becomes 8, `check_defined_terms` joins the list of checks that need a rule line, a line must name `Term ladder:` and the check, and the 'seven rule lines' comment and `section.len()` bound are set from the printed length. The new line stays at or under 220 characters. In refusal_corpus.rs, `defined_terms_decision_and_changelog` requires in CHANGELOG.md and docs/decisions.md: '## D164 ·', 'check_defined_terms', '**Alternatives:**', a Provenance bullet, and the root-cause sentence. The mirror rule 'decision entries' (mirrors.rs about 346) also checks D164.",
+      "command": "cargo test -p athena-context the_reader_brief_names_each_reading_rule_in_one_short_line && cargo test -p athena-core --test refusal_corpus defined_terms_decision_and_changelog",
+      "observes": "The brief lists 8 rule lines of at most 220 characters, one naming the check. CHANGELOG.md has the entry and docs/decisions.md has D164 with its alternatives.",
+      "fails_without": "Without the eighth rule line, the length assertion and the 'no rule for check_defined_terms' assertion fail. Without D164 or the CHANGELOG entry, the content test fails.",
+      "seam": "`reader_brief` with `reader_inputs` in briefs.rs tests (exists). The READING_RULES array is changed in step 7. Markdown is read with `include_str!`, as the existing corpus tests do."
+    },
+    {
+      "criterion": 9,
+      "method": "Run the three Athena checks over the whole workspace, so the athena-cli integration tests (approve-work and drain tests that reach the gate through `approve_request`, and the drain tests over `queued_work`) and athena-context are covered. No landing, history or attribution rule changes, so no commit-shape table or branch fixture applies.",
+      "command": "cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked",
+      "observes": "All three commands exit 0.",
+      "fails_without": "Any formatting, clippy or test failure fails the run. Without the approve_request skip, `approving_queues_a_job_whose_request_carries_the_cited_content` and the three drain.rs approval tests fail. Without the test updates, the old 7bf8 `is_none()` assertion, the READING_RULES length and size assertions and the check_outcome_state doc needles fail.",
+      "seam": "The cargo commands. Nothing is doubled."
+    }
+  ],
+  "open_questions": [
+    "User: If the replay at verification records more than 8% of newly refused readings (the declared 3% plus the 5-point margin), should the list drop 'layer' or 'tier', or should the declared share rise through a revised reading? The planner cannot see records/, and the producer can neither run the replay nor change the accepted reading's declared figure. D164 records this as the user's decision.",
+    "User: Should hand-written requests that use 'tier' (Athena's priority tiers) or 'layer' (a caching layer) in a plain technical sense, requests about the repo's own ladder and rung, and a steward-written approval title that uses a term, stay refused until the reading restates them with a Term line? This plan says yes and pins it with corpus cases, as the brief fixes the list.",
+    "User: Is it acceptable that proposed requests already read under the old rules and using a term in plain prose are held out of the drain queue until a person runs `athena go` (the documented behavior of steward::queued_work for any failing stored reading), or should a follow-up job re-read them unread instead? This plan accepts the hold and records it in D164."
+  ],
+  "producer_section_sha256": "16f9a960708a90d1581a5edf4e3289ba059f7c76761507e6586f1fb6781b3fb5"
+}

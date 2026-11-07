@@ -19,6 +19,12 @@
 //! request text of the three jobs the check cites through the gate: it refuses 1 of the 3, the real publish
 //! misread, and the changelog must state that count.
 //!
+//! Structural terms (`check_defined_terms`): `defined_terms_cases` holds requests that use `ladder`, `rung`,
+//! `tier` or `layer` in plain prose (refused until the reading defines the term), requests that only quote or
+//! cite those words (accepted), and requests built by Athena's own generators, `hestia::root_cause_request` and
+//! `work_decisions::approve_request`, whose copied text is cited content. `defined_terms_replay_over_the_cited_jobs`
+//! runs the three cited requests through the gate: 1 of the 3, the ladder request, is caught.
+//!
 //! What the mechanism covers, and what it does not:
 //! - Every `check_*` step in `refusing_check` must have a case in which that check refuses
 //!   (`every_acceptance_check_has_a_refusing_corpus_case`), so a new reading check cannot land without a case.
@@ -38,11 +44,14 @@
 use anyhow::Error;
 use athena_context::briefs::EarlierAttempt;
 use athena_core::reading::{refusing_check, request_text_acceptance};
-use athena_data::JobId;
+use athena_core::store::{JobRecords, JobState, Records};
 use athena_data::records::{
-    Criterion, CriterionKind, Deliverable, DeliverableAction, Forecast, Forecasts, Quantiles,
-    Reading,
+    Criterion, CriterionKind, Deliverable, DeliverableAction, Forecast, Forecasts,
+    IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger, PreventionKind, Quantiles,
+    Reading, Reference, Request, WorkItem, WorkItemKind,
 };
+use athena_data::roles::Ladder;
+use athena_data::{JobId, RecordId};
 use std::collections::BTreeSet;
 
 /// What the gate must do with a case.
@@ -72,7 +81,7 @@ struct Case {
 
 /// The input forms the corpus must hold. A form no case carries fails `corpus_covers_the_listed_input_forms`;
 /// a case tag outside this list fails it too, so a typo cannot hide a gap.
-const INPUT_FORMS: [&str; 34] = [
+const INPUT_FORMS: [&str; 38] = [
     "dash-bullet",
     "star-bullet",
     "number-dot-parts",
@@ -107,6 +116,10 @@ const INPUT_FORMS: [&str; 34] = [
     "realistic-branch-fixture",
     "landing-word-without-commit-shape",
     "landing-source-path-without-commit-shape",
+    "structural-term-plain-prose",
+    "structural-term-quoted-or-cited",
+    "structural-term-defined",
+    "structural-term-generated-approval",
 ];
 
 const RETRIED_JOB: &str = "20261030-060751-5389";
@@ -261,6 +274,7 @@ fn cases() -> Vec<Case> {
     out.extend(request_citing_cases());
     out.extend(reading_check_cases());
     out.extend(delivery_cases());
+    out.extend(defined_terms_cases());
     out
 }
 
@@ -452,17 +466,18 @@ fn delivery_cases() -> Vec<Case> {
     out
 }
 
+/// The recorded request of job 20261014-174815-7bf8, verbatim: it quotes "a ladder of requirements" from an
+/// addendum and then uses the ladder in plain prose.
+const REQUEST_7BF8: &str = "Build what the BRIEF.md addendum '2026-10-14: A loop that steers Athena, roles, and a ladder of \
+     requirements' asks for, starting small: roles as recorded definitions (A9, A10), and a first role \
+     that runs every 5 tasks in parallel with other work, looks at everything Athena has done, and queues \
+     work items, including one for anything it could not see. Record only what would otherwise be lost; \
+     pull the rest from where it lives. Use the ladder to decide what it may change itself.";
+
 /// The recorded requests of the three jobs the change cites, verbatim from their request records.
 const CITED_REQUESTS: [(&str, &str); 3] = [
     ("20261014-082328-g6vy", G6VY_REQUEST),
-    (
-        "20261014-174815-7bf8",
-        "Build what the BRIEF.md addendum '2026-10-14: A loop that steers Athena, roles, and a ladder of \
-         requirements' asks for, starting small: roles as recorded definitions (A9, A10), and a first role \
-         that runs every 5 tasks in parallel with other work, looks at everything Athena has done, and queues \
-         work items, including one for anything it could not see. Record only what would otherwise be lost; \
-         pull the rest from where it lives. Use the ladder to decide what it may change itself.",
-    ),
+    ("20261014-174815-7bf8", REQUEST_7BF8),
     (
         "20261017-173508-0wtc",
         "From Sri's decision sheet of 2026-10-17 (relay note in BRIEF.md, addendum \"2026-10-17: Olympus\"), \
@@ -495,7 +510,8 @@ fn delivery_verb_replay_over_the_cited_jobs() {
         .collect();
     let total = CITED_REQUESTS.len();
     // The check refuses exactly the real delivery-verb misread. The ladder-of-requirements request and the
-    // ontology request hold no delivery verb: they are another class and are not caught.
+    // ontology request hold no delivery verb: they are another class, which `check_defined_terms` covers for
+    // the first of them (see `defined_terms_replay_over_the_cited_jobs`) and no check covers for the second.
     assert_eq!(
         caught,
         ["20261014-082328-g6vy"],
@@ -513,6 +529,10 @@ fn delivery_verb_replay_over_the_cited_jobs() {
             let (name, error) = outcome.expect("the publish request is refused");
             assert_eq!(name, "check_outcome_state");
             assert!(error.to_string().contains("reachable URL"), "{error}");
+        } else if job == "20261014-174815-7bf8" {
+            let (name, error) = outcome.expect("the ladder request is refused");
+            assert_eq!(name, "check_defined_terms");
+            assert!(error.to_string().contains("ladder"), "{error}");
         } else {
             assert!(outcome.is_none(), "{job}: {:?}", outcome.map(|(n, _)| n));
         }
@@ -529,6 +549,511 @@ fn delivery_verb_replay_over_the_cited_jobs() {
         assert!(changelog.contains(job), "the changelog does not name {job}");
     }
     assert!(!changelog.contains("3 of the 3 cited jobs"));
+}
+
+#[test]
+fn defined_terms_replay_over_the_cited_jobs() {
+    // Each reading is the file-only reading `base_reading` builds, with no `Term` line, so a request is
+    // refused by `check_defined_terms` only when its plain prose uses a structural word.
+    let caught: Vec<&str> = CITED_REQUESTS
+        .iter()
+        .filter(|(_, request)| {
+            matches!(
+                refusing_check(
+                    &base_reading(request),
+                    request,
+                    None,
+                    &[],
+                    Some(&repo_files())
+                ),
+                Some(("check_defined_terms", _))
+            )
+        })
+        .map(|(job, _)| *job)
+        .collect();
+    assert_eq!(caught, ["20261014-174815-7bf8"], "caught {caught:?} of 3");
+    // The ontology request is outside the class: its text holds none of the four words, so no check
+    // refuses it, and its Hermes term is not covered.
+    let (_, ontology) = CITED_REQUESTS
+        .iter()
+        .find(|(job, _)| *job == "20261017-173508-0wtc")
+        .unwrap();
+    for word in ontology
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+    {
+        assert!(
+            !["ladder", "rung", "tier", "layer"].contains(&word),
+            "the ontology request holds {word:?}"
+        );
+    }
+    assert!(
+        refusing_check(
+            &base_reading(ontology),
+            ontology,
+            None,
+            &[],
+            Some(&repo_files())
+        )
+        .is_none()
+    );
+    // The changelog states the same count and does not claim the other two.
+    let changelog = include_str!("../../../CHANGELOG.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let claim = format!(
+        "check_defined_terms covers {} of the 3 cited jobs",
+        caught.len()
+    );
+    assert!(changelog.contains(&claim), "the changelog lacks {claim:?}");
+    for job in CITED_REQUESTS.iter().map(|(job, _)| job) {
+        assert!(changelog.contains(job), "the changelog does not name {job}");
+    }
+    assert!(!changelog.contains("3 of the 3 cited jobs"));
+}
+
+#[test]
+fn defined_terms_decision_and_changelog() {
+    let decisions = include_str!("../../../docs/decisions.md");
+    let (_, d164) = decisions
+        .split_once("## D164 · ")
+        .expect("docs/decisions.md holds D164");
+    let d164: String = d164.split_whitespace().collect::<Vec<_>>().join(" ");
+    for needle in [
+        "**Alternatives:**",
+        "**Provenance:**",
+        "check_defined_terms",
+        "readings are not checked against the outcome the user observes, so structural terms stay undefined",
+        "replay record at verification",
+        "20261014-174815-7bf8",
+        "20261017-173508-0wtc",
+    ] {
+        assert!(d164.contains(needle), "D164 lacks {needle:?}");
+    }
+    let changelog = include_str!("../../../CHANGELOG.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "reading::check_defined_terms",
+        "readings are not checked against the outcome the user observes, so structural terms stay undefined",
+        "replay record at verification",
+    ] {
+        assert!(changelog.contains(needle), "the changelog lacks {needle:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Structural terms (`check_defined_terms`). The accepted generated requests are built by the real generators,
+// so a rewording in `hestia.rs` or `work_decisions.rs` shows here.
+
+/// A recorded introspection `n` about job `of`, whose prevention text is `prevention`.
+fn introspection(n: u32, of: char, prevention: &str) -> IntrospectionRecord {
+    IntrospectionRecord {
+        id: RecordId::parse(&format!("20261027-09{:02}{:02}-1abc", n / 60, n % 60)).unwrap(),
+        at: format!("2026-10-27T09:{:02}:{:02}Z", n / 60, n % 60)
+            .parse()
+            .unwrap(),
+        trigger: IntrospectionTrigger::Rejection,
+        job: Some(cause_job(of)),
+        intervention: None,
+        class_of_work: "code".into(),
+        category: "rejected".into(),
+        what_happened: Some("the job was rejected".into()),
+        failure_class: None,
+        new_class: false,
+        earlier_cases: Vec::new(),
+        decisions_matched: Vec::new(),
+        cause: Some("the ladder has no rung in this layer".into()),
+        prevention_kind: Some(PreventionKind::CodeCheck),
+        prevention: Some(prevention.into()),
+        proposed_request: Some("Add the check".into()),
+        evidence: None,
+        status: IntrospectionStatus::Recorded,
+        failure: None,
+        flags: Vec::new(),
+        dropped_ids: Vec::new(),
+        planning_stopped: false,
+        from_jev: false,
+        jev: None,
+    }
+}
+
+fn cause_job(letter: char) -> JobId {
+    JobId::parse(&format!(
+        "20261027-0800{:02}-{letter}bcd",
+        letter as u32 - 'a' as u32
+    ))
+    .unwrap()
+}
+
+/// The two earlier jobs the generated root-cause request cites as evidence.
+fn cause_jobs_referenced() -> Vec<EarlierAttempt> {
+    vec![
+        earlier(
+            cause_job('a').as_str(),
+            "Add parts coverage to reading acceptance",
+        ),
+        earlier(
+            cause_job('b').as_str(),
+            "Check that a cited prior job exists",
+        ),
+    ]
+}
+
+/// A root-cause request built by `hestia::root_cause_request` for a cause recorded by two introspections
+/// whose cause, class and prevention text use `ladder`, `layer` and `tier`. `sentence` is added to the
+/// request's own first paragraph.
+fn generated_root_cause_request(sentence: Option<&str>) -> String {
+    let first = introspection(
+        10,
+        'a',
+        "Add a ladder check for every layer; a tier list is wrong.",
+    );
+    let second = introspection(20, 'b', "Name each rung of the ladder in the reading.");
+    let cause = athena_core::hestia::RepeatedCause {
+        key: "cause:ladder".into(),
+        class: Some("Ladder of tiers (20261027-090500-1abc)".into()),
+        cause: "the ladder has no rung in this layer".into(),
+        introspections: vec![first.id.to_string(), second.id.to_string()],
+        jobs: vec![
+            cause_job('a').as_str().to_string(),
+            cause_job('b').as_str().to_string(),
+        ],
+        request: None,
+    };
+    let records = Records {
+        introspections: vec![first, second],
+        ..Records::default()
+    };
+    let text = athena_core::hestia::root_cause_request(&cause, &records).unwrap();
+    match sentence {
+        None => text,
+        Some(sentence) => text.replacen(
+            "do not work around one instance.",
+            &format!("do not work around one instance. {sentence}"),
+            1,
+        ),
+    }
+}
+
+/// An approved-work request built by `work_decisions::approve_request` for a work item titled `title`, whose
+/// source is `docs/guide.md` holding `source_text`, in a temporary repository.
+fn generated_approval_request(title: &str, source_text: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let git = athena_git::Git::at(dir.path());
+    git.run(["init", "-q", "-b", "main"]).unwrap();
+    for (key, value) in [
+        ("user.name", "Test User"),
+        ("user.email", "noreply@example.com"),
+        ("commit.gpgsign", "false"),
+        ("core.hooksPath", "/dev/null"),
+    ] {
+        git.run(["config", key, value]).unwrap();
+    }
+    std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/guide.md"), source_text).unwrap();
+    git.run(["add", "-A"]).unwrap();
+    git.run(["commit", "-q", "-m", "Start"]).unwrap();
+    let head = git.run(["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let item = WorkItem {
+        id: RecordId::parse("20261015-003903-khz6").unwrap(),
+        at: "2026-10-15T00:00:00Z".parse().unwrap(),
+        role: "steward".into(),
+        kind: WorkItemKind::Proposal,
+        key: "k".into(),
+        title: title.into(),
+        rung: Ladder::DesignDecisions,
+        source: Reference::path("docs/guide.md"),
+        evidence: vec![Reference::path("docs/")],
+        brief: None,
+    };
+    athena_core::work_decisions::approve_request(&item, &Records::default(), &git, &head).unwrap()
+}
+
+#[test]
+fn generated_request_has_the_generators_shapes() {
+    // `check_defined_terms` skips these lines by shape; this fails if `hestia.rs` rewords one.
+    let text = generated_root_cause_request(None);
+    for needle in [
+        "The same cause has produced failures in more than one job.",
+        "\nFailure class: ",
+        "\nCause: ",
+        "Fix the root cause of a repeated failure: ",
+    ] {
+        assert!(text.contains(needle), "{needle:?} is not in:\n{text}");
+    }
+    let introspections: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("Introspection "))
+        .collect();
+    assert_eq!(introspections.len(), 2, "{text}");
+    for line in introspections {
+        assert!(line.contains(" (job "), "{line}");
+        assert!(line.contains("); prevention it proposed: "), "{line}");
+    }
+    // The words the check must not count are in the generated text.
+    let lower = text.to_lowercase();
+    for word in ["ladder", "layer", "tier", "rung"] {
+        assert!(lower.contains(word), "{word} is not in:\n{text}");
+    }
+}
+
+#[test]
+fn approve_request_has_the_generators_shapes() {
+    let text = generated_approval_request(
+        "Change the thing",
+        "The ladder has five rungs in this layer.\n",
+    );
+    assert!(text.starts_with("Change the thing\n\n"), "{text}");
+    for needle in [
+        "A person approved this proposal from the steward role.",
+        "\nRung of the requirements ladder: design-decisions.\n",
+        "\n## Source\n",
+        "The ladder has five rungs in this layer.",
+    ] {
+        assert!(text.contains(needle), "{needle:?} is not in:\n{text}");
+    }
+    let proposal = text
+        .lines()
+        .find(|l| l.starts_with("Proposal: "))
+        .unwrap_or_else(|| panic!("no Proposal line in:\n{text}"));
+    assert!(proposal.contains(" (key k)"), "{proposal}");
+    assert!(proposal.contains(" queued at "), "{proposal}");
+    // The copied source comes after the heading, and the rung line before it.
+    let source = text.find("\n## Source\n").unwrap();
+    assert!(text.find("Rung of the requirements ladder: ").unwrap() < source);
+    assert!(text.find("The ladder has five rungs").unwrap() > source);
+}
+
+/// Cases for `check_defined_terms`: the ladder request of job 20261014-174815-7bf8 and its companions.
+fn defined_terms_cases() -> Vec<Case> {
+    const SRC_7BF8: &str = "job 20261014-174815-7bf8, its recorded request, verbatim; the reading is the file-only reading `base_reading` builds";
+    const OWN: &str = "this retry, job 20261107-182419-pg2d; text built by the real generator";
+    const BRIEF: &str =
+        "the request in the brief of job 20261107-182419-pg2d; rebuilt, not a recorded request";
+    let refuse = "check_defined_terms";
+    let mut out: Vec<Case> = Vec::new();
+
+    // The recorded request uses the ladder in plain prose and its reading defines nothing.
+    out.push(case(
+        "structural-term-ladder-undefined-in-7bf8-request",
+        SRC_7BF8,
+        &["structural-term-plain-prose"],
+        REQUEST_7BF8,
+        0,
+        Expected::Refuse(refuse),
+    ));
+    // The same reading with a definition that cites the file, and a behavior criterion that names the ladder.
+    let mut c = with_behavior(
+        case(
+            "structural-term-ladder-defined-and-named-by-a-behavior-criterion-accepted",
+            SRC_7BF8,
+            &["structural-term-defined"],
+            REQUEST_7BF8,
+            0,
+            Expected::Accept,
+        ),
+        &["Run `cargo test -p athena-core`: a requirement on the ladder is ranked by its rung"],
+    );
+    c.reading.assumptions = vec![
+        "Term ladder: the ordered levels of requirements, from the owner's goals down to the code, as docs/guide.md lists them"
+            .into(),
+    ];
+    out.push(c);
+
+    // A root-cause request built by the real generator: the words are in earlier introspections' lines, in a
+    // parenthesised list and in quotes only, so the reading needs no Term line.
+    let quoted_only = generated_root_cause_request(Some(
+        "Keep the names (ladder, layer, tier) and the words \"ladder\" and 'tier' as they are.",
+    ));
+    let mut c = case(
+        "structural-term-quoted-or-cited-mentions-are-accepted",
+        OWN,
+        &[
+            "dash-bullet",
+            "cites-job-without-relying",
+            "structural-term-quoted-or-cited",
+        ],
+        &quoted_only,
+        3,
+        Expected::Accept,
+    );
+    c.referenced = cause_jobs_referenced();
+    out.push(c);
+    // The same request with one plain use beside the quoted ones.
+    let mut c = case(
+        "structural-term-plain-use-beside-quoted-mentions-is-refused",
+        OWN,
+        &[
+            "dash-bullet",
+            "cites-job-without-relying",
+            "structural-term-plain-prose",
+        ],
+        &generated_root_cause_request(Some(
+            "Keep the names (ladder, layer, tier). Also fix the ladder.",
+        )),
+        3,
+        Expected::Refuse(refuse),
+    );
+    c.referenced = cause_jobs_referenced();
+    out.push(c);
+    // The corpus copy of a root-cause request: an Introspection line that uses the words is cited content.
+    let mut c = case(
+        "structural-term-introspection-line-in-the-corpus-copy-is-accepted",
+        "job 20261030-170757-gev8's request plus an introspection line that uses the words; rebuilt from the job brief",
+        &["dash-bullet", "structural-term-quoted-or-cited"],
+        &root_cause_request(&[
+            "Introspection 20261031-000000-abcd (job 20261029-111202-2bpc); prevention it proposed: a ladder of tiers for each layer.",
+        ]),
+        3,
+        Expected::Accept,
+    );
+    c.referenced = vec![
+        earlier(OTHER_JOB, "Add parts coverage to reading acceptance"),
+        earlier(RETRIED_JOB, "Check that a cited prior job exists"),
+    ];
+    out.push(c);
+
+    // Uses in plain prose are refused in every form: possessive, a priority tier, a caching layer. The last
+    // two pin a known, intended false refusal: a technical use of the word is refused until a Term line.
+    for (id, source, request) in [
+        (
+            "structural-term-possessive-use-is-refused",
+            BRIEF,
+            "Move the ladder's order into the guide.",
+        ),
+        (
+            "structural-term-priority-tier-is-refused",
+            "a known, intended false refusal: Athena's priority tiers are a technical use of the word; rebuilt, not a recorded request",
+            "Order the work items by priority tier.",
+        ),
+        (
+            "structural-term-caching-layer-is-refused",
+            "a known, intended false refusal: a caching layer is a technical use of the word; rebuilt, not a recorded request",
+            "Add a caching layer to the guide builder.",
+        ),
+    ] {
+        out.push(case(
+            id,
+            source,
+            &["structural-term-plain-prose"],
+            request,
+            0,
+            Expected::Refuse(refuse),
+        ));
+    }
+    // The words inside other words are not uses.
+    out.push(case(
+        "structural-term-inside-other-words-is-accepted",
+        BRIEF,
+        &["trigger-word-inside-other-word"],
+        "Rename the stepladder helper and remove the delayer module.",
+        0,
+        Expected::Accept,
+    ));
+    out.push(case(
+        "structural-term-no-structural-word-is-accepted",
+        BRIEF,
+        &["structural-term-plain-prose"],
+        "Update the guide so that it lists the status flag.",
+        0,
+        Expected::Accept,
+    ));
+
+    // The request text of an approved work item, built by the real generator: the rung line and the copied
+    // source hold the words and are cited content.
+    let approval = generated_approval_request(
+        "Change the thing",
+        "The ladder has five rungs in this layer.\n",
+    );
+    out.push(case(
+        "structural-term-approve-request-generated-text-is-accepted",
+        OWN,
+        &["structural-term-generated-approval"],
+        &approval,
+        0,
+        Expected::Accept,
+    ));
+    // The title is the steward's own wording, and a use in it counts.
+    out.push(case(
+        "structural-term-approve-request-title-use-is-refused",
+        OWN,
+        &[
+            "structural-term-generated-approval",
+            "structural-term-plain-prose",
+        ],
+        &generated_approval_request("Fix the ladder ordering", "A note.\n"),
+        0,
+        Expected::Refuse(refuse),
+    ));
+    // The blind-spot request the steward queues is built by Athena and holds none of the words.
+    out.push(case(
+        "structural-term-blind-spot-request-is-accepted",
+        "athena_core::steward::blind_spot_change, the public builder of the steward's blind-spot request",
+        &["dash-bullet", "structural-term-generated-approval"],
+        &athena_core::steward::blind_spot_change("jobs", "the job index is cut").request,
+        3,
+        Expected::Accept,
+    ));
+    out
+}
+
+/// A proposed request of the user's queue: its stored reading is `base_reading`, with these assumptions.
+fn proposed_records(entries: &[(&str, &str, &[&str])]) -> Records {
+    let mut records = Records::default();
+    for (job_id, text, assumptions) in entries {
+        let job = JobId::parse(job_id).unwrap();
+        let mut reading = base_reading(text);
+        reading.job = job.clone();
+        reading.assumptions = assumptions.iter().map(|a| a.to_string()).collect();
+        records.jobs.insert(
+            job_id.to_string(),
+            JobRecords {
+                id: Some(job.clone()),
+                request: Some(Request {
+                    job,
+                    text: text.to_string(),
+                    received_at: "2026-10-16T12:00:00Z".parse().unwrap(),
+                    channel: athena_core::steward::USER_QUEUE_CHANNEL.into(),
+                }),
+                readings: vec![reading],
+                ..Default::default()
+            },
+        );
+    }
+    records
+}
+
+#[test]
+fn queued_work_holds_a_proposed_request_whose_stored_reading_leaves_a_term_undefined() {
+    const BASE: &str = "Add a greeting.\n\nAcceptance:\n- the greeting prints\n\nFiles: src/a.rs";
+    let with_tier = format!("{BASE}\n\nShow it in the top tier.");
+    let records = proposed_records(&[
+        ("20261016-120000-aaaa", &with_tier, &[]),
+        (
+            "20261016-120001-bbbb",
+            &with_tier,
+            &["Term tier: the priority tier a work item sits in."],
+        ),
+        ("20261016-120002-cccc", BASE, &[]),
+    ]);
+    for job in records.jobs.values() {
+        assert_eq!(job.state(), JobState::Proposed, "{}", job.id());
+    }
+    let queued = athena_core::steward::queued_work(&records);
+    let listed: Vec<(&str, bool)> = queued.iter().map(|w| (w.job.as_str(), w.read)).collect();
+    // The request that uses `tier` with no definition is held out until a person runs `athena go`; the
+    // one that defines it, and the control with no structural word, are listed read.
+    assert_eq!(
+        listed,
+        [
+            ("20261016-120001-bbbb", true),
+            ("20261016-120002-cccc", true)
+        ],
+        "{listed:?}"
+    );
 }
 
 /// Request parser shapes, each with a reading the gate accepts.

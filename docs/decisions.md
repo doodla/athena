@@ -4620,3 +4620,76 @@ should replace those estimates with its figures.
   and the real-tree scan; the retry tests (success after busy errors, the 21-call bound, other errors passing
   through, and a file held open for writing that is released after 100 ms). Not measured: how often the race
   recurs in the field, or how many future wrappers escape the text scan.
+
+## D164 · A reading must define each structural term its request uses, or the request only quotes it; the check covers 1 of the 3 cited jobs
+
+- **Case:** Job 20261014-174815-7bf8 asked for roles and "a ladder of requirements". The accepted reading never said
+  what the ladder was, and the work was built on a guess. Job 20261017-173508-0wtc (an ontology decision) is the same
+  class. Root cause: readings are not checked against the outcome the user observes, so structural terms stay
+  undefined. D161 found the three cited jobs were two classes; this entry is the second class, the one D161 left
+  open. A first attempt at this check (job 20261107-110049-k8c2) failed in planning: its matcher split the whole
+  request text and ignored quoting, so a root-cause request that only quotes the words in earlier introspections
+  would have been refused.
+- **Decision:** `reading::check_defined_terms` is a `step!` in `refusing_check`, after `check_environment_reach` and
+  before `check_boundary_and_repo_files`. It reads only the request and the reading, and skips a reading with no
+  capability, a question, or no deliverable, as `check_outcome_state` does. The terms are `ladder`, `rung`, `tier`
+  and `layer`, matched as whole words (singular, plural, possessive) in the plain prose of the request. Plain prose
+  leaves out: lines Athena's generators write or copy; quoted spans (double, curly, backtick, single) and fenced
+  code; a parenthesised list of examples (two or more commas, or an opening of `e.g.`, `i.e.`, `such as`, `for
+  example` or `like`); and tokens that hold `/`, `_` or `::`. `stepladder`, `delayer` and `ladder.md` are not uses.
+  A term is defined by an assumption that starts `Term ladder:` with at least three words after the colon, as the
+  reader already writes `Code survey:`; the line may cite the file that defines it. The generated text skipped is
+  the root-cause request of `hestia::root_cause_request` (an `Introspection ... (job ...); prevention it
+  proposed:` line always, and the `Failure class:`, `Cause:` and `Fix the root cause of a repeated failure:` lines
+  when the sentence "The same cause has produced failures in more than one job." is present) and the request of
+  `work_decisions::approve_request` (the `Rung of the requirements ladder:` line, the `Proposal:` line with its key
+  and time, and everything from the `## Source` heading on, when "A person approved this proposal from the steward
+  role." is present). A hand-written line that starts the same way, with no anchor sentence, still counts. The
+  reader learns the rule from a line in `READING_RULES` and from the refusal text. Scope: the check covers 1 of the
+  3 cited jobs, 20261014-174815-7bf8; replaying the recorded requests (test
+  `defined_terms_replay_over_the_cited_jobs`) shows 20261014-082328-g6vy is caught by `check_outcome_state` and
+  20261017-173508-0wtc by no check, since its text holds none of the four words (its Hermes term, and terms outside
+  the list, are not covered).
+- **Alternatives:** Match the whole request text, quoted or not: refuses a request that only quotes the words.
+  Match by substring: refuses `stepladder` and `delayer`. Treat every parenthesised span as a non-use: hides
+  "(the ladder, which ranks requirements)". Skip any line that starts with `Introspection`, `Cause:` or `Failure
+  class:`: drops a hand-written line that uses a term. Read `docs/ontology.toml` for the definitions: out of scope,
+  and the ontology is not wired into agent contexts. Also require a behavior criterion that names the term: a second
+  condition for little gain. Accept the definition in the summary: it has no fixed label, so a check would guess.
+  Put the rule in the reader prompt only: the prompt has 3 tokens of room. Share constants for the anchor sentences
+  from `hestia.rs` and `work_decisions.rs`: neither file is part of this change. Reword the `approve_request` rung
+  line to avoid the word: moves the fault, and the line tells the reader the rung of the work. Re-read held proposals
+  unread (see the Tradeoff): changes `steward.rs` and the drain, and spends reader cost after every rule change;
+  named as a follow-up. The general fix, named as follow-up work: every generator that copies or quotes text marks
+  it with a shared delimiter, or shared anchor and prefix constants in one module that `hestia.rs`,
+  `work_decisions.rs` and `reading.rs` import, and `plain_request_prose` reads that mark instead of hard-coded
+  line shapes. It is not done here because those generators are outside this change.
+- **Tradeoff:** This check refuses more readings; the higher refusal rate is intended: expected 3% of newly refused
+  readings, an estimate and not a measurement, over hand-written requests; the share the loop replay measures is
+  recorded in the job's replay record at verification. Terms the repository defines (ladder, rung) are refused until
+  the reading restates them with a `Term ladder:` line, which may cite the defining file, and so are plain technical
+  uses of tier (priority tiers) and layer (a caching layer); the corpus case `structural-term-priority-tier-is-refused`
+  pins that known false refusal, and a steward-written approval title that uses a term is refused the same way. If the
+  share recorded at verification is above 8%, the user must decide whether to narrow tier and layer; the list is fixed by
+  the request, and the replay holds the work only above the declared share plus 5 points. A proposed request read
+  before this check whose plain prose uses a term is held until a person runs `athena go`: `steward::queued_work`
+  re-checks the stored reading of every proposed request and leaves out one that fails, the documented behavior for
+  any new reading rule; the test `queued_work_holds_a_proposed_request_whose_stored_reading_leaves_a_term_undefined`
+  shows both sides. The Athena request builders were checked for fixed text that holds a term: `approve_request` is
+  the only one (handled by the skip); `root_cause_request` carries the words only in earlier introspections' free
+  text; `spec_request`, `throughput_request`, `slowdown_request`, the code-health builders,
+  `steward::blind_spot_request` and `accept_request` hold none, and `StewardRequest::from_change` is the model's own
+  words. The 3% estimate covers hand-written requests only; generated approvals are skipped by design and add
+  nothing to it. Limits: quoted mentions, terms outside the list, an example list with fewer than two commas, a real
+  use inside a long parenthetical with two commas, and a false refusal for `tier-1` or `multi-layer`.
+- **Reversal cost:** Low. Delete the step line, the function, its helpers and constants, the rule line in
+  `READING_RULES` and the corpus cases; the hard-coded generator skips go as soon as the shared delimiter exists.
+  Nothing recorded depends on the check.
+- **Provenance:** Read: `crates/athena-core/src/reading.rs` (`refusing_check`, `request_words`,
+  `check_outcome_state`), `crates/athena-core/tests/refusal_corpus.rs`, `crates/athena-core/src/hestia.rs`
+  (`root_cause_request`), `crates/athena-core/src/work_decisions.rs` (`approve_request`),
+  `crates/athena-core/src/steward.rs` (`queued_work`), `crates/athena-context/src/briefs.rs`, D161, and the recorded
+  request text of jobs 20261014-082328-g6vy, 20261014-174815-7bf8 and 20261017-173508-0wtc. Measured: the corpus
+  replay of those three requests (g6vy by `check_outcome_state`, 7bf8 by `check_defined_terms`, 0wtc by none) and the
+  accepted cases built from the real generators. Not measured: the share of past readings newly refused; the loop
+  replay records it at verification.
