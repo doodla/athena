@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- A reading check for delivery verbs, `check_outcome_state` (`athena_core::reading`). Root cause: reading
+  acceptance turned a delivery verb (publish, deploy, share, release) into a narrow deliverable, a page written
+  or a file that exists, with no check against the state the user observes, such as being reachable at a URL;
+  jobs 20261014-082328-g6vy, 20261014-174815-7bf8 and 20261017-173508-0wtc were read that way. The check runs
+  in `refusing_check` after the governance check. When the request, or the earlier request of a retry, starts a
+  sentence, line or bullet with a delivery verb, the reading needs an acceptance criterion that names an
+  observable state (a URL, reachable, served, live at, downloadable, installable, a tag, a published release or
+  visible to), or an `out_of_scope` item that names the verb. Otherwise it is refused, and the error says which
+  words to add; the refusal reaches the reader through the one re-read of `Athena::read_for`. A verb in the
+  middle of a sentence and noun uses ("Release notes", "Share of") are not checked. The reader prompt and
+  `READING_RULES` are unchanged. The higher refusal rate is intended: it applies only to requests with a
+  delivery verb whose reading names no observable state, expected 5% of newly refused readings (an estimate,
+  not measured). The refusal corpus gains the `delivery-verb`, `delivery-verb-mid-sentence` and
+  `delivery-noun-use` input forms and their cases.
 - Planner and critic prompts now require landing, history-check and attribution rules to be derived from every
   commit shape the real branch holds. Root cause: such rules were derived from the happy-path commit shape, not
   from the full set of shapes, and demonstrated on an unrealistic fixture; introspections 20261024-154443-51wt,

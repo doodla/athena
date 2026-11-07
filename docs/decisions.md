@@ -4452,3 +4452,47 @@ should replace those estimates with its figures.
 - **Reversal cost:** Low; move the helper back, delete the crate and the scan.
 - **Provenance:** Read: D08, D156, D157, `crates/athena-git/src/snapshot.rs`. Measured: the stress test, 0 busy
   files over 800 helper cycles and a nonzero count for the in-process control.
+
+## D161 · Reading acceptance requires an observable outcome state for delivery-verb requests
+
+- **Case:** Three jobs turned a request word into a narrow deliverable. Job 20261014-082328-g6vy read "publish
+  a page" as writing a page; its governance-file miss is now caught by `check_governance_coverage`, but
+  nothing asked whether the page would be reachable at a URL. Job 20261014-174815-7bf8 read a structural term
+  (ladder) as a file change. Job 20261017-173508-0wtc read a term as a definition in one file and was rejected
+  for its content. Their introspections (20261014-082423-9m1q, 20261014-174922-2n9v, 20261017-174855-d7s1)
+  each proposed a different repair: observable outcomes in every reading, a definition and acceptance
+  criterion for figurative terms, and a glossary.
+- **Root cause:** Reading acceptance turned request wording into a reading and never compared it with the state
+  the user will observe. For a delivery verb (publish, deploy, share, release) the goal is a user-visible
+  state, such as being reachable at a URL, and a reading whose criteria say only that a file exists passed
+  every check. The fault is in the gate, where a reading is accepted, not in one job's output.
+- **Decision:** `check_outcome_state` in `crates/athena-core/src/reading.rs` runs as one `step!` line in
+  `refusing_check`, after `check_governance_coverage` (the governance refusal stays first, because it is the more
+  specific repair, and the tests that expect it keep their order). It applies when the reading has a capability, no question and a deliverable, and the
+  request, or the earlier request of a retry, starts a sentence, line or bullet with a delivery verb. It accepts
+  when a criterion of any kind names an observable state (url, reachable, served, live at, downloadable,
+  installable, tag, published release, visible to, or an `http://` or `https://` address), or when an
+  `out_of_scope` item names the verb. Otherwise it refuses, and the error says which words to add. The refusal
+  reaches the reader through the one re-read in `Athena::read_for`, so the reader prompt and `READING_RULES`
+  (6 rules, 3 tokens of headroom) are unchanged. The refusal corpus gains three input forms and cases for
+  each verb position, the retry and the noun and mid-sentence uses, as D148 requires for a new check (D156 is
+  not touched: no governed path changes). The higher refusal rate is intended; the declared share is "expected 5% of newly refused
+  readings".
+- **Alternatives:** (a) A seventh rule in `READING_RULES`: the briefs test asserts six, the reader prompt has no
+  room, and prose is not enforced. (b) A project glossary loaded into every reading step (introspection
+  d7s1): it is an ontology project that job 20261017-173508-0wtc already failed on, and it does not compare
+  the reading with an observable state. (c) Fix the three jobs' own outputs (Pages workflow, site task,
+  ontology file): that repairs instances and leaves the gate as it was. (d) Match the verbs anywhere in the
+  request: this job's own request names them mid-sentence and would be refused.
+- **Tradeoff:** The scan finds a verb only at the start of a sentence, line or bullet, so "Build the docs and
+  publish them" is not checked; a request that mentions a release or share as a noun is left alone by a small
+  list of following words. The state-word list is small, so a criterion may use a word it does not hold and be
+  refused until the reader adds a listed one. The check reads the words, not the truth: a negated use ("not
+  reachable") is accepted. A retry is covered only through the earlier request in the attempt record; a
+  follow-up that cites a job by id alone is not. Defining figurative terms such as ladder, layer or tier is left
+  to the ontology work.
+- **Reversal cost:** Low. Remove the `step!` line, the check and its helpers, and the corpus cases.
+- **Provenance:** Read: `crates/athena-core/src/reading.rs`, `crates/athena-core/tests/refusal_corpus.rs`,
+  `crates/athena-context/src/briefs.rs` (`READING_RULES`), D148, D156. Measured: `cargo test -p
+  athena-core --lib check_outcome_state` and `--test refusal_corpus`. Not measured: the 5% share, which is an
+  estimate; the replay of past readings runs at verification.
