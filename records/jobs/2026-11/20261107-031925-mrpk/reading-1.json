@@ -1,0 +1,175 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261107-031925-mrpk",
+  "n": 1,
+  "at": "2026-11-07T05:26:54.576501479Z",
+  "invocation_seq": 2,
+  "base_commit": "dff1bb79573f703803779d3a60dcb55614bc72fc",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Make the throughput review measure wasted work, not only landed time",
+  "summary": "Add attempts per landed change, spend on attempts that did not land, and first-attempt share to the throughput section (newest 20 landings vs the 20 before). Hestia's throughput review triggers on a rise in any of them, notes rather than skips on an open design request, and queues a request only when the change exceeds recent-window noise. Audience: the maintainer reading `athena status` and the review.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes in Rust."
+    },
+    {
+      "id": "tested",
+      "how": "New tests for each behavior; cargo test and clippy pass."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run tests asserting values 2.0 and 0.5, triggers and no-skip."
+    },
+    {
+      "id": "verified",
+      "how": "Status output exercised via test or cargo run."
+    },
+    {
+      "id": "small",
+      "how": "One focused change to the review, status and record."
+    },
+    {
+      "id": "outcome-check",
+      "how": "Checks that wasted work is seen and triggers the review."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and CHANGELOG written for outside readers."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Code survey: read crates/athena-core/src/hestia.rs: `throughput_due(landed, median, latest)` (~line 1341) is the trigger, called from the throughput review in `Athena::review_passes` (~line 1711); right after it, `open_throughput_request` (~line 1728) currently stops the review when a design request is open, so the order is: trigger check, then the open-request skip, then the model proposal, then slowdown/stage growth. Read crates/athena-core/src/status.rs: `Throughput::compute(&Records)` (~line 984) builds the section over `THROUGHPUT_WINDOW` = 20 newest landed jobs, already tracks `unlanded_jobs`/`unlanded_minutes`, and `Throughput::text()` is what `athena status` prints via crates/athena-cli/src/display.rs. The new measures are computed directly from job/attempt records and outcome totals (cost) in `Throughput::compute`, not through the minutes stand-in. Read crates/athena-data/src/records.rs: `ThroughputReview` (~line 2188) and `ThroughputTrigger` (Cadence, Worsened) are accepted by `AnyRecord::parse` / `check_record_file` (line 3111) via `AnyRecord::ThroughputReview(r) => r.validate()`; the change adds fields with serde defaults (so old records still parse) and new trigger variants, and is covered by `ThroughputReview::validate` plus a round-trip test through `AnyRecord::parse` in records.rs tests. No new record file type or allow-list entry is added.",
+    "Prior-window comparison reuses the previous review's stored measures (new defaulted fields on ThroughputReview) or recomputes the 20-before window from records; the producer picks the simpler one.",
+    "Noise is estimated as the spread (e.g. max-min or median absolute deviation) of the measure across recent 20-landing windows; a request is queued only when the change exceeds it, and the review note says whether it did.",
+    "Wasted spend = cost of attempts on jobs/attempts that did not land, from outcome totals; first-attempt share = landed changes with exactly one attempt / landed changes."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test -p athena-core`: a new status.rs test builds sample records where half of attempts in the window did not land and asserts attempts per landing == 2.0 and first-attempt share == 0.5.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a new hestia.rs test shows `throughput_due` (or its successor) returns a trigger when wasted spend rises beyond the previous review and noise while median minutes is unchanged; the same inputs without the rise return None.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a new hestia.rs test shows an open earlier design request no longer stops the review: the review runs, and its record note mentions the open request.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-core`: a test shows a change within the noise between recent windows queues no request and the note says it was within noise, while a larger change queues one.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test -p athena-cli` and `cargo run -- status` (or the status_snapshot test): the throughput output shows attempts per landed change, money spent on attempts that did not land, and first-attempt share.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`, `cargo clippy --all-targets` and `cargo fmt --check`: all pass; an old ThroughputReview JSON without the new fields still parses via `AnyRecord::parse`, and a new one round-trips.",
+      "kind": "behavior"
+    },
+    {
+      "text": "CHANGELOG.md has entries naming only what the diff does (the three measures, new triggers, open-request note, noise rule); no unrelated claims.",
+      "kind": "content"
+    },
+    {
+      "text": "The doc comment of hestia.rs and the Throughput review section of docs/design/hestia.md no longer say an open design request skips the review (Grep for the old wording finds none).",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-core/src/hestia.rs",
+      "action": "modify",
+      "p": 0.97
+    },
+    {
+      "path": "crates/athena-core/src/status.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-data/src/records.rs",
+      "action": "modify",
+      "p": 0.8
+    },
+    {
+      "path": "crates/athena-cli/src/display.rs",
+      "action": "modify",
+      "p": 0.3
+    },
+    {
+      "path": "crates/athena-cli/tests/status_snapshot.rs",
+      "action": "modify",
+      "p": 0.35
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "docs/design/hestia.md",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "crates/athena-core/src/snapshot.rs",
+      "action": "modify",
+      "p": 0.15
+    }
+  ],
+  "out_of_scope": [
+    "Changing the slowdown request's 25% rule or the stage-growth comparison beyond what the noise rule needs.",
+    "Changing athena.toml, defaults.toml, workflows or prompt files.",
+    "Rewriting existing records under records/."
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.68,
+      "p_verification_passes": 0.55,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.8,
+        "p50": 1.8,
+        "p90": 4.5
+      },
+      "wall_time_s": {
+        "p10": 700.0,
+        "p50": 2400.0,
+        "p90": 5000.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6712328767123288,
+      "p_user_intervenes": 0.07983539094650205,
+      "cost_usd": {
+        "p10": 0.559933412652465,
+        "p50": 1.384861042330255,
+        "p90": 4.461217770010495
+      },
+      "wall_time_s": {
+        "p10": 565.0338714274704,
+        "p50": 2039.3932710680006,
+        "p90": 4306.547983653162
+      }
+    }
+  },
+  "departures": "Larger than typical: touches trigger logic, the stored review record and status display, so cost and time are above the reference and verification is somewhat less likely.",
+  "hard_reason": "Changes the rule that triggers, holds or queues Hestia's throughput review (the open-request skip and a new noise threshold) and the review record it stores.",
+  "producer_effort": "high"
+}
