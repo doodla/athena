@@ -48,6 +48,16 @@
 //!   history is rebuilt through them on each run. Update the assertions that read the trailers
 //!   ([`CutoverFixture::trailers_of`] returns what the commit carries).
 //!
+//! # What the history does not hold
+//!
+//! The history above is made of job commits (the bootstrap, the old-way job, the cutover job and its squash)
+//! and the landing-record commits on `athena/records`. It holds no intervention commit and no retry-after-block
+//! landing. A reading for a landing, history or attribution rule that names this fixture as its realistic
+//! branch must also add those shapes through the writers, because `check_history_fixture` (in `reading.rs`)
+//! refuses such a reading unless a behavior criterion names a realistic-branch fixture with an intervention
+//! commit, a records-only commit and the job landing. A rule demonstrated on the job commits alone passes
+//! on the happy-path shape and can still be wrong on the others.
+//!
 //! Do not hand-build commits or records in a fixture for history tests: an earlier attempt did, and its
 //! history did not match what the writers make.
 
