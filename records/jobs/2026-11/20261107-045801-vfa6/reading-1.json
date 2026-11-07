@@ -1,0 +1,153 @@
+{
+  "schema": "athena.reading/1",
+  "job": "20261107-045801-vfa6",
+  "n": 1,
+  "at": "2026-11-07T04:58:45.343854405Z",
+  "invocation_seq": 2,
+  "base_commit": "1f84d2ff0e2ed3044ec4b35b064280ec843e87a8",
+  "config_sha256": "6d28c2e8327fabf1f5c62e2cb227ed66b35fbd96198230296dbf59fa672a7899",
+  "defaults_sha256": "76c247b0d80152ac8c1eeebc9761b648eb6268313d4795965b677f0b358aa4a2",
+  "defaults_version": 1,
+  "title": "Stop retrying a line after two attempts that did not land",
+  "summary": "Retry of job 20261107-031917-r96w, narrowed to its first piece: the drain stops retrying a line (grouped by the scope guard's group_lines) once it has two attempts that did not land, collisions included, and holds it as awaiting diagnosis. The diagnosis role, schema, line recording and status display are follow-up requests.",
+  "class_of_work": "code",
+  "capability": "change",
+  "decline_reason": null,
+  "producer_model": "claude-sonnet-5-5",
+  "verifier_model": "claude-opus-5-5",
+  "defaults_applied": [
+    {
+      "id": "rust",
+      "how": "All changes are Rust."
+    },
+    {
+      "id": "tested",
+      "how": "Tests added; cargo test and clippy must pass."
+    },
+    {
+      "id": "small",
+      "how": "One focused change; the rest is split into follow-up requests."
+    },
+    {
+      "id": "behavior-evidence",
+      "how": "Criteria run the real drain step over real records."
+    },
+    {
+      "id": "strangers",
+      "how": "Doc comments and CHANGELOG written for an outside reader."
+    },
+    {
+      "id": "outcome-check",
+      "how": "The check is that a twice-failed line is not retried again, not that code exists."
+    },
+    {
+      "id": "root-cause",
+      "how": "Collision attempts are counted, not just rejected or failed records."
+    },
+    {
+      "id": "changelog",
+      "how": "BRIEF.md asks for tagged releases and a changelog, so the change records itself in CHANGELOG.md."
+    }
+  ],
+  "assumptions": [
+    "Goal and audience: the operator wants fewer wasted retries; this job delivers only the stop rule, as the prior job 20261107-031917-r96w failed in planning (17 findings, no candidate, nothing kept) because its scope was too large for one run.",
+    "Code survey: read crates/athena-core/src/scope_guard.rs (group_lines at line 122, line_attempts at 161) and crates/athena-cli/src/drain.rs (Landing::NotLanded, LandStep::NotLanded at ~1781-1938, where failures are counted). No new record or data file is added, so check_record_file, AnyRecord and the round-trip test are unaffected.",
+    "Findings of job 20261107-031917-r96w addressed: 'did not land' counts Rejected, Failed and verified-but-not-landed attempts (LandStep::NotLanded), whatever the job's state; diagnosis-record totals, paused-line follow-ups, failed-diagnosis release, status display and the Role::Diagnosis variant matches no longer apply because the diagnosis run is out of scope.",
+    "Existing code: crates/athena-core/src/scope_guard.rs group_lines and line_attempts are reused for grouping; no second grouping implementation is added.",
+    "The stop is a hold in the drain's per-item decision, not a new record kind; the drain's existing environment-stop handling is unchanged and does not count toward the two attempts.",
+    "Test seam: drain tests use real records and the real drain step (as in crates/athena-cli/tests/drain.rs), not a fake that computes the count."
+  ],
+  "question": null,
+  "acceptance_criteria": [
+    {
+      "text": "Run `cargo test`: a drain test over real records shows a line with two attempts that did not land is not retried, and a second drain run still does not retry it.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a drain test shows a line with two verified-but-not-landed (collision) attempts, one with its job still open or blocked, is held and not retried.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`: a drain test shows a line with one failed attempt is retried as today, and an environment-cause stop does not count toward the two.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Run `cargo test`, `cargo clippy` and `cargo fmt --check`: all pass.",
+      "kind": "behavior"
+    },
+    {
+      "text": "Grep shows drain.rs uses group_lines or line_attempts from scope_guard.rs, and no second line-grouping function is added.",
+      "kind": "content"
+    },
+    {
+      "text": "CHANGELOG.md states only what the diff does: the drain holds a line after two non-landed attempts; it does not claim a diagnosis job, status display or line field.",
+      "kind": "content"
+    }
+  ],
+  "deliverables": [
+    {
+      "path": "crates/athena-cli/src/drain.rs",
+      "action": "modify",
+      "p": 0.95
+    },
+    {
+      "path": "crates/athena-core/src/scope_guard.rs",
+      "action": "modify",
+      "p": 0.4
+    },
+    {
+      "path": "crates/athena-cli/tests/drain.rs",
+      "action": "modify",
+      "p": 0.5
+    },
+    {
+      "path": "CHANGELOG.md",
+      "action": "modify",
+      "p": 0.9
+    }
+  ],
+  "out_of_scope": [
+    "Follow-up request: the diagnosis role brief (crates/athena-context/prompts/diagnosis.md), its output schema, and the five-category sort with one queued follow-up",
+    "Follow-up request: recording a line value on every job (crates/athena-data/src/records.rs) and the athena status display of open lines (status.rs, display.rs)",
+    "Follow-up request: running diagnosis under its own run id, a paused-line retry exception, and releasing a failed diagnosis by command",
+    "Changing scope guard signals T1 to T5 or thresholds; editing athena.toml, defaults.toml or workflows",
+    "Backfilling old records; editing shared contract, reader or verifier prompts",
+    "Prior job 20261107-031917-r96w's deliverables other than drain.rs, scope_guard.rs and CHANGELOG.md are dropped from this job (candidate was empty, so nothing is kept)"
+  ],
+  "forecasts": {
+    "reader": {
+      "p_reading_accepted": 0.72,
+      "p_verification_passes": 0.62,
+      "p_user_intervenes": 0.1,
+      "cost_usd": {
+        "p10": 0.5,
+        "p50": 1.4,
+        "p90": 4.0
+      },
+      "wall_time_s": {
+        "p10": 500.0,
+        "p50": 1900.0,
+        "p90": 3400.0
+      }
+    },
+    "reference": {
+      "p_reading_accepted": 0.7090909090909091,
+      "p_verification_passes": 0.6712328767123288,
+      "p_user_intervenes": 0.07983539094650205,
+      "cost_usd": {
+        "p10": 0.559933412652465,
+        "p50": 1.384861042330255,
+        "p90": 4.461217770010495
+      },
+      "wall_time_s": {
+        "p10": 565.0338714274704,
+        "p50": 2039.3932710680006,
+        "p90": 4306.547983653162
+      }
+    }
+  },
+  "departures": "Scope cut to the stop rule alone, so wall time p90 is held under the 3600s verifier timeout; the drain is a core flow with a code-answerable counting question, which keeps verification odds a little below the reference.",
+  "urgent_reason": "Stops repeated retries of work that keeps failing, cutting the wasted attempts and redo-work retries the request measured.",
+  "hard_reason": "Changes the drain's retry decision, a rule that holds work and the run pipeline's drain, so a mistake is costly or hard to see.",
+  "producer_effort": "high"
+}
