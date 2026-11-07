@@ -1,6 +1,7 @@
 //! What people see: the reading, the result of a run, the state of the work, and a job's trace
 //! (design §3.2, §3.4, §3.6). Agents use `--json` for the same views.
 
+use athena_core::gate_counts::GateCount;
 use athena_core::reading::Proposal;
 use athena_core::run::Finished;
 use athena_core::status::{
@@ -154,6 +155,24 @@ fn producer_settings_lines(settings: &[ProducerSettingStats]) -> String {
             pct(s.landed_share),
             s.landed,
             s.jobs
+        );
+    }
+    out
+}
+
+/// Each gate (a failed check or an admission rule) with the jobs it ended and the times a later try landed the
+/// same change it had ended, most overruled first (the order `gate_counts` returns).
+fn gate_counts_lines(gates: &[GateCount]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "gates       ended / overruled (a later try landed the same change), most overruled first"
+    );
+    for g in gates {
+        let _ = writeln!(
+            out,
+            "            {}: ended {} · overruled {}",
+            g.gate, g.ends, g.disagreements
         );
     }
     out
@@ -1199,6 +1218,9 @@ pub fn status(v: &StatusView) -> String {
     if let Some(durations) = &v.check_durations {
         let _ = writeln!(out, "{}", durations.text());
     }
+    if !v.gate_counts.is_empty() {
+        out.push_str(&gate_counts_lines(&v.gate_counts));
+    }
     if let Some(throughput) = &v.throughput {
         let _ = writeln!(out, "{}", throughput.text());
     }
@@ -2242,6 +2264,21 @@ mod tests {
             "{none}"
         );
         assert!(!none.contains("since the first"), "{none}");
+    }
+
+    #[test]
+    fn gate_counts_lines_print_each_gates_ends_and_overruled_count_in_the_order_given() {
+        let gate = |gate: &str, ends: u32, disagreements: u32| GateCount {
+            gate: gate.into(),
+            ends,
+            disagreements,
+        };
+        let text = gate_counts_lines(&[gate("test", 5, 5), gate("fmt", 2, 0)]);
+        assert!(text.starts_with("gates       ended / overruled"), "{text}");
+        assert!(text.contains("overruled (a later try landed the same change)"));
+        let test = text.find("test: ended 5 · overruled 5").expect(&text);
+        let fmt = text.find("fmt: ended 2 · overruled 0").expect(&text);
+        assert!(test < fmt, "{text}");
     }
 
     #[test]

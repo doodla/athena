@@ -377,6 +377,53 @@ fn status_counts_unreviewed_introspections_and_the_count_falls_after_a_review() 
     assert!(text.contains("unreviewed  0 introspection(s)"), "{text}");
 }
 
+/// `record` (an introspection) with this prevention kind and text.
+fn with_kind(record: AnyRecord, kind: PreventionKind, prevention: &str) -> AnyRecord {
+    let AnyRecord::Introspection(mut i) = record else {
+        panic!("not an introspection")
+    };
+    i.prevention_kind = Some(kind);
+    i.prevention = Some(prevention.into());
+    AnyRecord::Introspection(i)
+}
+
+#[test]
+fn a_relax_or_remove_introspection_is_listed_by_review_and_counted_as_unreviewed() {
+    let fx = Fixture::new();
+    commit(
+        &fx,
+        &[
+            class_record(CLASS, "Field with no use"),
+            with_kind(
+                introspection(1, Some(CLASS), None),
+                PreventionKind::Relax,
+                "[gate: test] Loosen the check.",
+            ),
+            with_kind(
+                introspection(2, Some(CLASS), None),
+                PreventionKind::Remove,
+                "[gate: fmt] Drop the check.",
+            ),
+        ],
+    );
+    let status = json(&athena(&fx, &["status", "--json"]));
+    assert_eq!(status["invalid_records"], serde_json::json!([]));
+    assert_eq!(status["unreviewed_introspections"], 2);
+    assert_eq!(unreviewed(&fx), 2);
+
+    let text = ok(&athena(&fx, &["review", &id(1), "--right"]));
+    assert!(
+        text.contains("relax: [gate: test] Loosen the check."),
+        "{text}"
+    );
+    let text = ok(&athena(&fx, &["review", &id(2), "--right"]));
+    assert!(
+        text.contains("remove: [gate: fmt] Drop the check."),
+        "{text}"
+    );
+    assert_eq!(unreviewed(&fx), 0);
+}
+
 /// Runs `args` and checks that it failed with `needle` in the error and wrote nothing: no commit, no changed
 /// or new file.
 fn refused(fx: &Fixture, args: &[&str], needle: &str) {

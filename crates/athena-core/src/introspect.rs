@@ -38,6 +38,7 @@
 
 use crate::capability::JobConfig;
 use crate::commits::{NewFile, message};
+use crate::gate_counts::{GateCount, gate_counts, mark_prevention};
 use crate::jev::{Answer as JevAnswer, Evaluate, Question};
 use crate::store::Records as GitRecords;
 use crate::watcher::{self, D87_SIGNAL, HostErrorSignal};
@@ -388,13 +389,15 @@ pub fn read_records(root: &Path) -> Result<Records> {
     for (path, bytes) in month_files(root, "introspections")? {
         match AnyRecord::parse(&path, &bytes)? {
             AnyRecord::Introspection(i) => {
-                // Only a written record in a class is a case; the fields kept are the listed ones.
+                // Only a written record in a class is a case; the fields kept are the listed ones. A proposal
+                // to relax or remove a gate is evidence about a check, not a case for a new default.
                 if let (IntrospectionStatus::Recorded, Some(class), Some(what), Some(cause)) = (
                     i.status,
                     i.failure_class.as_ref(),
                     i.what_happened.as_deref(),
                     i.cause.as_deref(),
-                ) {
+                ) && !i.prevention_kind.is_some_and(PreventionKind::loosens)
+                {
                     if let Some(intervention) = &i.intervention {
                         records
                             .case_interventions
@@ -875,6 +878,9 @@ struct Answer {
     decisions_matched: Vec<String>,
     cause: String,
     prevention_kind: String,
+    /// The gate a `relax` or `remove` answer is about; null for every other kind.
+    #[serde(default)]
+    gate: Option<String>,
     prevention: String,
     proposed_request: String,
 }
@@ -1011,9 +1017,13 @@ major findings, and failed checks; criteria and checks are different things, so 
 an unmet criterion. Choose the failure class: the id of a registry class that fits, or `new` with a name \
 and a one-line description when none fits. List the ids of earlier cases that are in the same class, and \
 the ids of listed decisions the event matched; use only ids you were given. Give the cause beyond this \
-instance: why the system allowed it, which must not restate what happened. Choose the prevention kind \
-(default, code-check or design-change), say exactly what would have prevented the whole class, and write a \
-complete next request, ready to submit.";
+instance: why the system allowed it, which must not restate what happened. Choose the prevention kind: \
+default, code-check or design-change when a protection was missing, or relax or remove when a rule or \
+check was wrong. A rule or check can be wrong. The input lists `gate_counts`: for each gate, the jobs it \
+ended (`ends`) and the times a later try landed the same change it had ended (`disagreements`). Choose \
+relax or remove only for a gate whose disagreements are 1 or more, name that gate in `gate`, and cite its \
+counts in `prevention`; for every other kind set `gate` to null. Say exactly what would have prevented the \
+whole class, and write a complete next request, ready to submit.";
 
 fn answer_schema() -> serde_json::Value {
     let text = json!({ "type": "string" });
@@ -1021,7 +1031,7 @@ fn answer_schema() -> serde_json::Value {
         "type": "object",
         "additionalProperties": false,
         "required": ["what_happened", "failure_class", "new_class", "earlier_cases", "decisions_matched",
-            "cause", "prevention_kind", "prevention", "proposed_request"],
+            "cause", "prevention_kind", "gate", "prevention", "proposed_request"],
         "properties": {
             "what_happened": text,
             "failure_class": text,
@@ -1034,7 +1044,8 @@ fn answer_schema() -> serde_json::Value {
             "earlier_cases": { "type": "array", "items": text },
             "decisions_matched": { "type": "array", "items": text },
             "cause": text,
-            "prevention_kind": { "type": "string", "enum": ["default", "code-check", "design-change"] },
+            "prevention_kind": { "type": "string", "enum": ["default", "code-check", "design-change", "relax", "remove"] },
+            "gate": { "type": ["string", "null"] },
             "prevention": text,
             "proposed_request": text
         }
@@ -1053,6 +1064,7 @@ fn user_prompt(
     classes: &[ClassRow],
     cases: &[&CaseRow],
     decisions: &[String],
+    gates: &[GateCount],
 ) -> String {
     let mut value = json!({
         "event": {
@@ -1067,6 +1079,7 @@ fn user_prompt(
         "class_registry": classes,
         "earlier_cases": cases,
         "decisions_that_may_be_matched": decisions,
+        "gate_counts": gates,
     });
     // A mistake (category `mistake`, or the legacy `other` with text starting "Mistake:") is asked for the check
     // or the knowledge that would have prevented it; mistakes with the same cause are then counted together.
@@ -1364,7 +1377,8 @@ impl Athena {
             from_jev: false,
             jev: None,
         };
-        let prompt = user_prompt(&event, &past.classes, &cases, &candidates);
+        let gates = gate_counts(&known);
+        let prompt = user_prompt(&event, &past.classes, &cases, &candidates, &gates);
         // Shadow: Jev sees the same fields the model sees. Its answers are stored beside the model's and are
         // read by nothing in this function.
         let jev_answers = self
@@ -1405,6 +1419,7 @@ impl Athena {
                             &past,
                             &passed,
                             &candidates,
+                            &gates,
                             &redactor,
                             ui,
                         );
@@ -1457,6 +1472,7 @@ impl Athena {
         past: &Records,
         passed_cases: &[String],
         passed_decisions: &[String],
+        gates: &[GateCount],
         redactor: &athena_gate::redact::Redactor,
         ui: &dyn Ui,
     ) -> Option<FailureClass> {
@@ -1483,7 +1499,7 @@ impl Athena {
         }
         let Some(kind) = PreventionKind::parse(&answer.prevention_kind) else {
             record.failure = Some(format!(
-                "the model chose prevention_kind {:?}, which is not default, code-check or design-change",
+                "the model chose prevention_kind {:?}, which is not default, code-check, design-change, relax or remove",
                 withheld_if_unclean(&answer.prevention_kind)
             ));
             return None;
@@ -1491,6 +1507,36 @@ impl Athena {
         if text.iter().any(String::is_empty) {
             record.failure = Some("the answer leaves a field empty".into());
             return None;
+        }
+        // A proposal to loosen a gate stands on the gate's own counts: it must name a gate that has ended jobs
+        // and that a later try overruled at least once. The gate goes at the start of `prevention`.
+        if kind.loosens() {
+            let named = answer
+                .gate
+                .as_deref()
+                .map(str::trim)
+                .filter(|g| !g.is_empty());
+            match named.and_then(|g| gates.iter().find(|c| c.gate == g)) {
+                Some(count) if count.ends >= 1 && count.disagreements >= 1 => {
+                    text[2] = mark_prevention(&count.gate, &text[2]);
+                }
+                Some(count) => {
+                    record.failure = Some(format!(
+                        "the model chose {} for gate {}, which no later try overruled",
+                        kind.as_str(),
+                        count.gate
+                    ));
+                    return None;
+                }
+                None => {
+                    record.failure = Some(format!(
+                        "the model chose {} but named no gate with counts ({:?})",
+                        kind.as_str(),
+                        withheld_if_unclean(named.unwrap_or(""))
+                    ));
+                    return None;
+                }
+            }
         }
         record.what_happened = Some(text[0].clone());
         record.cause = Some(text[1].clone());
@@ -1846,6 +1892,7 @@ mod tests {
             decisions_matched: Vec::new(),
             cause: format!("The {word}'s request was never read."),
             prevention_kind: "code-check".into(),
+            gate: None,
             prevention: format!("Add a check that reads what the {word} asked."),
             proposed_request: format!("Read the {word}'s request before the job starts."),
         }
@@ -1867,6 +1914,7 @@ mod tests {
                 &mut record,
                 answer,
                 &Records::default(),
+                &[],
                 &[],
                 &[],
                 &redactor,
@@ -1901,6 +1949,263 @@ mod tests {
         // The whole record, as it is committed, holds none either.
         let json = AnyRecord::Introspection(Box::new(record)).to_json();
         assert!(athena_context::briefs::boundary_scan(&json).is_empty());
+    }
+
+    fn gate(name: &str, ends: u32, disagreements: u32) -> GateCount {
+        GateCount {
+            gate: name.into(),
+            ends,
+            disagreements,
+        }
+    }
+
+    /// Applies an answer of this kind and gate to a new record, with `test` overruled 5 of 5 times and `fmt`
+    /// never overruled.
+    fn apply_loosening(kind: &str, gate_name: Option<&str>) -> IntrospectionRecord {
+        let (_dir, _state, athena) = athena_with(None);
+        let config = athena_data::Config::parse(include_str!("../../../athena.toml")).unwrap();
+        let redactor = athena.redactor(&config, None).unwrap();
+        let mut answer = boundary_answer("reviewer");
+        answer.prevention_kind = kind.into();
+        answer.gate = gate_name.map(String::from);
+        let mut record = blank_record();
+        let gates = [gate("test", 5, 5), gate("fmt", 2, 0)];
+        athena.apply_answer(
+            &mut record,
+            answer,
+            &Records::default(),
+            &[],
+            &[],
+            &gates,
+            &redactor,
+            &crate::Quiet,
+        );
+        record
+    }
+
+    #[test]
+    fn a_relax_or_remove_answer_for_an_overruled_gate_is_recorded_with_the_gate_at_the_start() {
+        for (kind, expected) in [
+            ("relax", PreventionKind::Relax),
+            ("remove", PreventionKind::Remove),
+        ] {
+            let record = apply_loosening(kind, Some("test"));
+            assert_eq!(
+                record.status,
+                IntrospectionStatus::Recorded,
+                "{kind}: {:?}",
+                record.failure
+            );
+            assert_eq!(record.prevention_kind, Some(expected));
+            let prevention = record.prevention.as_deref().unwrap();
+            assert!(prevention.starts_with("[gate: test] "), "{prevention}");
+            assert_eq!(
+                crate::gate_counts::gate_of_prevention(prevention),
+                Some("test")
+            );
+            // The record is one that the store accepts as written.
+            let json = AnyRecord::Introspection(Box::new(record)).to_json();
+            assert!(AnyRecord::parse("x", json.as_bytes()).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_relax_answer_without_a_gate_with_a_disagreement_is_a_failed_record() {
+        for (name, why) in [
+            (Some("fmt"), "which no later try overruled"),
+            (Some("lint"), "named no gate with counts"),
+            (None, "named no gate with counts"),
+            (Some("  "), "named no gate with counts"),
+        ] {
+            let record = apply_loosening("relax", name);
+            assert_eq!(record.status, IntrospectionStatus::Failed, "{name:?}");
+            let failure = record.failure.as_deref().unwrap();
+            assert!(failure.contains(why), "{name:?}: {failure}");
+            assert!(record.prevention.is_none() && record.prevention_kind.is_none());
+        }
+    }
+
+    #[test]
+    fn the_gate_of_an_answer_of_another_kind_is_ignored() {
+        let record = apply_loosening("code-check", Some("nonsense"));
+        assert_eq!(record.status, IntrospectionStatus::Recorded);
+        assert!(!record.prevention.as_deref().unwrap().starts_with("[gate: "));
+    }
+
+    #[test]
+    fn an_answer_with_no_gate_field_still_parses() {
+        let answer: Answer = serde_json::from_value(json!({
+            "what_happened": "w", "failure_class": "new", "new_class": null,
+            "earlier_cases": [], "decisions_matched": [], "cause": "c",
+            "prevention_kind": "default", "prevention": "p", "proposed_request": "r"
+        }))
+        .unwrap();
+        assert_eq!(answer.gate, None);
+    }
+
+    #[test]
+    fn the_system_prompt_lists_five_kinds_and_says_a_rule_or_check_can_be_wrong() {
+        assert!(
+            !SYSTEM_PROMPT.contains("(default, code-check or design-change)"),
+            "the old three-kind phrase is gone"
+        );
+        for kind in PreventionKind::ALL {
+            assert!(SYSTEM_PROMPT.contains(kind.as_str()), "{}", kind.as_str());
+        }
+        assert!(SYSTEM_PROMPT.contains("A rule or check can be wrong"));
+        assert!(SYSTEM_PROMPT.contains("disagreements are 1 or more"));
+        assert!(SYSTEM_PROMPT.contains("gate_counts"));
+    }
+
+    #[test]
+    fn the_schema_lists_every_prevention_kind_and_a_required_nullable_gate() {
+        let schema = answer_schema();
+        let kinds: Vec<&str> = schema["properties"]["prevention_kind"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|k| k.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            ["default", "code-check", "design-change", "relax", "remove"]
+        );
+        let all: Vec<&str> = PreventionKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(kinds, all);
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("gate"))
+        );
+        assert_eq!(
+            schema["properties"]["gate"]["type"],
+            json!(["string", "null"])
+        );
+    }
+
+    #[test]
+    fn the_prompt_carries_each_gates_counts() {
+        let event = Event {
+            trigger: IntrospectionTrigger::Rejection,
+            job: None,
+            intervention: None,
+            class_of_work: "code".into(),
+            category: "rejected".into(),
+            what: "w".into(),
+            why: "y".into(),
+            at: "2026-10-14T17:30:00Z".parse().unwrap(),
+            planning_stopped: false,
+        };
+        let gates = [gate("test", 5, 5), gate("fmt", 2, 0)];
+        let prompt = user_prompt(&event, &[], &[], &[], &gates);
+        let value: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+        assert_eq!(
+            value["gate_counts"],
+            json!([
+                { "gate": "test", "ends": 5, "disagreements": 5 },
+                { "gate": "fmt", "ends": 2, "disagreements": 0 }
+            ])
+        );
+        let none = user_prompt(&event, &[], &[], &[], &[]);
+        let value: serde_json::Value = serde_json::from_str(&none).unwrap();
+        assert_eq!(value["gate_counts"], json!([]));
+    }
+
+    // -------------------------------------------------------------------------------------------------
+    // Relax and remove are not cases for a new default.
+
+    const DEFAULTS: &str = "# header comment\nversion = 1\n\n[[default]]\nid = \"small\"\nstatement = \"Prefer one focused change.\"\napplies_to = [\"*\"]\nsource = \"user\"\n";
+
+    fn put_record(root: &Path, record: &AnyRecord) {
+        let path = root.join(record.canonical_path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, record.to_json()).unwrap();
+    }
+
+    fn put_class(root: &Path, class: &str, name: &str) {
+        put_record(
+            root,
+            &AnyRecord::FailureClass(FailureClass {
+                id: RecordId::parse(class).unwrap(),
+                at: "2026-10-01T00:00:00Z".parse().unwrap(),
+                name: name.into(),
+                description: "A check ends jobs it should not.".into(),
+                status: ClassStatus::Proposed,
+                proposed_by: RecordId::parse("20261001-000000-1abc").unwrap(),
+            }),
+        );
+    }
+
+    /// A recorded introspection of `kind` in `class`, in job `job`, on day `job`.
+    fn put_case(root: &Path, class: &str, kind: PreventionKind, job: u32) {
+        let day = job;
+        let mut record = blank_record();
+        record.id = RecordId::parse(&format!("202610{day:02}-000000-1abc")).unwrap();
+        record.at = format!("2026-10-{day:02}T00:00:00Z").parse().unwrap();
+        record.job = Some(JobId::parse(&format!("202610{day:02}-000000-j{job:03}")).unwrap());
+        record.what_happened = Some("The job was rejected.".into());
+        record.failure_class = Some(RecordId::parse(class).unwrap());
+        record.cause = Some("The check is stricter than the rule.".into());
+        record.prevention_kind = Some(kind);
+        record.prevention = Some("Change the check.".into());
+        record.proposed_request = Some("Change the check.".into());
+        record.status = IntrospectionStatus::Recorded;
+        put_record(root, &AnyRecord::Introspection(Box::new(record)));
+    }
+
+    #[test]
+    fn relax_and_remove_introspections_make_no_default_proposal() {
+        const RELAX_CLASS: &str = "20261001-000000-c001";
+        const REMOVE_CLASS: &str = "20261001-000000-c002";
+        const DEFAULT_CLASS: &str = "20261001-000000-c003";
+        let dir = tempfile::tempdir().unwrap();
+        put_class(dir.path(), RELAX_CLASS, "A check is too strict");
+        put_class(dir.path(), REMOVE_CLASS, "A check is not worth having");
+        put_class(dir.path(), DEFAULT_CLASS, "A field has no reader");
+        for job in [2, 3, 4] {
+            put_case(dir.path(), RELAX_CLASS, PreventionKind::Relax, job);
+        }
+        for job in [5, 6, 7] {
+            put_case(dir.path(), REMOVE_CLASS, PreventionKind::Remove, job);
+        }
+        let only_loosening = read_records(dir.path()).unwrap();
+        assert!(
+            only_loosening.cases.is_empty(),
+            "{:?}",
+            only_loosening.cases
+        );
+        assert!(only_loosening.case_interventions.is_empty());
+        let mut n = 0;
+        let generated = crate::proposals::generate(
+            DEFAULTS,
+            &only_loosening,
+            &Starts::new(),
+            "2026-10-20T00:00:00Z".parse().unwrap(),
+            || {
+                n += 1;
+                RecordId::parse(&format!("20261020-0000{n:02}-1abc")).unwrap()
+            },
+        )
+        .unwrap();
+        assert!(generated.proposals.is_empty() && generated.refusals.is_empty());
+
+        // The control: three default cases in another class do give one proposal.
+        for job in [8, 9, 10] {
+            put_case(dir.path(), DEFAULT_CLASS, PreventionKind::Default, job);
+        }
+        let with_default = read_records(dir.path()).unwrap();
+        assert_eq!(with_default.cases.len(), 3);
+        let generated = crate::proposals::generate(
+            DEFAULTS,
+            &with_default,
+            &Starts::new(),
+            "2026-10-20T00:00:00Z".parse().unwrap(),
+            || RecordId::parse("20261020-000059-1abc").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(generated.proposals.len(), 1);
+        assert_eq!(generated.proposals[0].failure_class.as_str(), DEFAULT_CLASS);
     }
 
     fn what_of(verification: Option<Verification>) -> String {

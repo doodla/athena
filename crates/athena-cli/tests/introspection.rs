@@ -16,8 +16,9 @@ use athena_core::run::GoResult;
 use athena_core::store::Records;
 use athena_core::{Athena, Ui};
 use athena_data::records::{
-    AcceptedBy, AnyRecord, ClassStatus, IntrospectionRecord, IntrospectionStatus,
-    IntrospectionTrigger, InvocationOutcome, OutcomeState,
+    AcceptedBy, AnyRecord, Candidate, ChangeEntry, ChangeStatus, CheckRun, ClassStatus,
+    IntrospectionRecord, IntrospectionStatus, IntrospectionTrigger, InvocationOutcome,
+    OutcomeState, PreventionKind, Request, Verdict, Verification,
 };
 use athena_data::{JobId, RecordId};
 use common::*;
@@ -1119,4 +1120,393 @@ fn the_fixture_ui_is_quiet_when_nothing_is_an_event() {
     // A job that is not closed is not an event.
     let id = JobId::parse("20261001-000000-aaaa").unwrap();
     assert!(athena.introspect_job(&id, &ui).is_none());
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Gate counts, and the relax and remove prevention kinds.
+
+fn chain_job(n: u32) -> JobId {
+    JobId::parse(&format!("20261001-10{:02}{:02}-k7q2", n / 60, n % 60)).unwrap()
+}
+
+fn chain_at(n: u32) -> jiff::Timestamp {
+    format!("2026-10-01T10:{:02}:{:02}Z", n / 60, n % 60)
+        .parse()
+        .unwrap()
+}
+
+fn chain_request(job: &JobId, text: &str, n: u32) -> AnyRecord {
+    AnyRecord::Request(Request {
+        job: job.clone(),
+        text: text.into(),
+        received_at: chain_at(n),
+        channel: "cli".into(),
+    })
+}
+
+fn chain_candidate(job: &JobId, tree: char, file: &str, bytes: u64) -> AnyRecord {
+    AnyRecord::Candidate2(Box::new(Candidate {
+        job: job.clone(),
+        base_commit: "0".repeat(40),
+        base_fingerprint: Some("a".repeat(64)),
+        previous_job: None,
+        candidate_commit: None,
+        candidate_tree: None,
+        changes: vec![ChangeEntry {
+            path: file.into(),
+            status: ChangeStatus::Added,
+            mode: Some("100644".into()),
+            bytes: Some(bytes),
+        }],
+        fingerprint: Some(tree.to_string().repeat(64)),
+        violations: vec![],
+        producer_report: None,
+    }))
+}
+
+fn chain_outcome(job: &JobId, state: OutcomeState, n: u32) -> AnyRecord {
+    AnyRecord::Outcome(Box::new(athena_data::records::Outcome {
+        job: job.clone(),
+        state,
+        reason: "ended".into(),
+        at: chain_at(n),
+        totals: Some(athena_core::scoring::totals(&[], None)),
+        branch: None,
+        base_commit: None,
+        candidate_commit: None,
+        after_blocked: false,
+        through_commit: None,
+    }))
+}
+
+/// Jobs from number `first`: `gate` rejected `ends` jobs; each of the first `overruled` was retried by a landed
+/// job that landed the same change, and each other one by a job that failed.
+fn gate_chain(gate: &str, first: u32, ends: u32, overruled: u32) -> Vec<AnyRecord> {
+    let mut records = Vec::new();
+    for i in 0..ends {
+        let (rejected, retry) = (chain_job(first + 2 * i), chain_job(first + 2 * i + 1));
+        let file = format!("src/{gate}-{i}.rs");
+        let failed_check = CheckRun {
+            name: gate.into(),
+            command: vec!["cargo".into(), gate.into()],
+            exit_code: Some(101),
+            passed: false,
+            tests_ran: None,
+            duration: athena_data::Quantity::measured(1.0, athena_data::Unit::Seconds, "test"),
+            output_tail: String::new(),
+            note: None,
+            failed_tests: vec![],
+            reused: false,
+            revert_for: vec![],
+            queued_s: None,
+        };
+        records.push(chain_request(&rejected, "Add a thing", first + 2 * i));
+        records.push(chain_candidate(&rejected, 'b', &file, 7));
+        records.push(AnyRecord::Verification(Box::new(Verification {
+            job: rejected.clone(),
+            candidate_commit: "0".repeat(40),
+            verified_fingerprint: "b".repeat(64),
+            tool_config_from_base: vec![],
+            checks: vec![failed_check],
+            check_cleanup: vec![],
+            verifier_invocation: None,
+            criteria: vec![],
+            findings: vec![],
+            request_reading_mismatch: None,
+            agent_verdict: None,
+            final_verdict: Verdict::Fail,
+            reasons: vec![],
+            inputs: vec![],
+            summary: None,
+        })));
+        records.push(chain_outcome(
+            &rejected,
+            OutcomeState::Rejected,
+            first + 2 * i,
+        ));
+        records.push(chain_request(
+            &retry,
+            &format!("try again on {rejected}"),
+            first + 2 * i + 1,
+        ));
+        let (state, tree) = if i < overruled {
+            (OutcomeState::Landed, 'b')
+        } else {
+            (OutcomeState::Failed, 'c')
+        };
+        records.push(chain_candidate(&retry, tree, &file, 7));
+        records.push(chain_outcome(&retry, state, first + 2 * i + 1));
+    }
+    records
+}
+
+fn commit_records(fx: &Fixture, records: &[AnyRecord]) {
+    for record in records {
+        write(fx.root(), &[(&record.canonical_path(), &record.to_json())]);
+    }
+    fx.git.run(["add", "-A"]).unwrap();
+    fx.git
+        .run(["commit", "-q", "-m", "Add fixture records"])
+        .unwrap();
+}
+
+/// A fixture where `test` ended five jobs and was overruled five times, and `fmt` ended two and never was.
+fn gate_fixture(model: &Model) -> (Fixture, Athena) {
+    let (fx, athena) = setup(Scenario::default(), model);
+    let mut records = gate_chain("test", 1, 5, 5);
+    records.extend(gate_chain("fmt", 20, 2, 0));
+    commit_records(&fx, &records);
+    (fx, athena)
+}
+
+/// The model answers a mistake with a loosening of `gate` (JSON null, or a name) of this kind.
+fn say_loosening(model: &Model, kind: &'static str, gate: Value) {
+    model.say_with(move |_| {
+        let mut answer = reply(
+            "new",
+            "The job was rejected by a check that is stricter than its rule.",
+            "The check ends jobs whose change a later try lands as it was.",
+        );
+        answer["prevention_kind"] = json!(kind);
+        answer["gate"] = gate.clone();
+        answer["prevention"] = json!("Loosen the check that the later tries overruled.");
+        answer
+    });
+}
+
+/// The ids of the request jobs whose text holds the review line for `gate`.
+fn gate_requests(fx: &Fixture, gate: &str) -> Vec<JobId> {
+    let line = format!("Gate under review: {gate}.");
+    Records::load(&fx.git, &fx.head())
+        .unwrap()
+        .request_jobs()
+        .iter()
+        .filter(|j| {
+            j.request
+                .as_ref()
+                .is_some_and(|r| r.text.lines().any(|l| l == line))
+        })
+        .map(|j| j.id().clone())
+        .collect()
+}
+
+fn gate_request_text(fx: &Fixture, job: &JobId) -> String {
+    let records = Records::load(&fx.git, &fx.head()).unwrap();
+    records.jobs[job.as_str()]
+        .request
+        .as_ref()
+        .unwrap()
+        .text
+        .clone()
+}
+
+#[test]
+fn a_relax_answer_for_an_overruled_gate_is_recorded_and_hestia_queues_a_review_with_the_counts() {
+    let model = Model::default();
+    say_loosening(&model, "relax", json!("test"));
+    let (fx, athena) = gate_fixture(&model);
+    let id = log(
+        &athena,
+        "Shipped with a check too strict",
+        "docs",
+        "mistake",
+    );
+
+    let [record] = introspections(&fx)
+        .try_into()
+        .unwrap_or_else(|_| panic!("one introspection"));
+    assert_eq!(
+        record.status,
+        IntrospectionStatus::Recorded,
+        "{:?}",
+        record.failure
+    );
+    assert_eq!(record.intervention.as_ref(), Some(&id));
+    assert_eq!(record.prevention_kind, Some(PreventionKind::Relax));
+    let prevention = record.prevention.as_deref().unwrap();
+    assert!(prevention.starts_with("[gate: test] "), "{prevention}");
+
+    // Hestia queued one request: it names the gate and cites its counts and the introspection.
+    let [queued] = gate_requests(&fx, "test")
+        .try_into()
+        .unwrap_or_else(|_| panic!("one review request"));
+    let text = gate_request_text(&fx, &queued);
+    assert!(
+        text.contains("ended 5 job(s), overruled 5 time(s)"),
+        "{text}"
+    );
+    assert!(text.contains(record.id.as_str()), "{text}");
+    assert!(text.contains("Proposal: relax."), "{text}");
+    assert!(gate_requests(&fx, "fmt").is_empty());
+
+    // The records still load as valid ones, and nothing but records was changed.
+    let status = athena.status().unwrap();
+    assert!(
+        status.invalid_records.is_empty(),
+        "{:?}",
+        status.invalid_records
+    );
+    assert_eq!(fx.file("athena.toml").unwrap(), test_config());
+}
+
+#[test]
+fn a_remove_answer_for_an_overruled_gate_is_accepted_and_queues_its_own_review() {
+    let model = Model::default();
+    say_loosening(&model, "remove", json!("test"));
+    let (fx, athena) = gate_fixture(&model);
+    log(
+        &athena,
+        "Shipped with a check not worth having",
+        "docs",
+        "mistake",
+    );
+    let [record] = introspections(&fx)
+        .try_into()
+        .unwrap_or_else(|_| panic!("one introspection"));
+    assert_eq!(record.status, IntrospectionStatus::Recorded);
+    assert_eq!(record.prevention_kind, Some(PreventionKind::Remove));
+    let [queued] = gate_requests(&fx, "test")
+        .try_into()
+        .unwrap_or_else(|_| panic!("one review request"));
+    let text = gate_request_text(&fx, &queued);
+    assert!(text.contains("Proposal: remove."), "{text}");
+    assert!(
+        text.contains("ended 5 job(s), overruled 5 time(s)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_loosening_for_no_gate_an_unknown_gate_or_a_gate_nothing_overruled_is_a_failed_record_with_no_request()
+ {
+    for (gate, why) in [
+        (Value::Null, "named no gate with counts"),
+        (json!("nothing"), "named no gate with counts"),
+        (json!("fmt"), "which no later try overruled"),
+    ] {
+        let model = Model::default();
+        say_loosening(&model, "relax", gate.clone());
+        let (fx, athena) = gate_fixture(&model);
+        let head = fx.head();
+        log(
+            &athena,
+            "Shipped with a check too strict",
+            "docs",
+            "mistake",
+        );
+        let [record] = introspections(&fx)
+            .try_into()
+            .unwrap_or_else(|_| panic!("one introspection"));
+        assert_eq!(record.status, IntrospectionStatus::Failed, "{gate}");
+        let failure = record.failure.as_deref().unwrap();
+        assert!(failure.contains(why), "{gate}: {failure}");
+        assert!(record.prevention_kind.is_none());
+        assert!(gate_requests(&fx, "test").is_empty(), "{gate}");
+        assert!(gate_requests(&fx, "fmt").is_empty(), "{gate}");
+        // Only the intervention and the failed introspection were added after the fixture records.
+        let changed = fx.git.run(["diff", "--name-only", &head, "HEAD"]).unwrap();
+        assert!(
+            changed.lines().all(|p| p.starts_with("records/")),
+            "{changed}"
+        );
+    }
+}
+
+#[test]
+fn a_second_relax_for_the_same_gate_queues_nothing_while_the_first_request_is_open() {
+    let model = Model::default();
+    say_loosening(&model, "relax", json!("test"));
+    say_loosening(&model, "remove", json!("test"));
+    let (fx, athena) = gate_fixture(&model);
+    log(
+        &athena,
+        "Shipped with a check too strict",
+        "docs",
+        "mistake",
+    );
+    let [first] = gate_requests(&fx, "test")
+        .try_into()
+        .unwrap_or_else(|_| panic!("one review request"));
+    log(
+        &athena,
+        "Shipped with a check too strict again",
+        "docs",
+        "mistake",
+    );
+    let records = introspections(&fx);
+    assert_eq!(records.len(), 2);
+    assert!(
+        records
+            .iter()
+            .all(|r| r.status == IntrospectionStatus::Recorded)
+    );
+    assert_eq!(gate_requests(&fx, "test"), std::slice::from_ref(&first));
+
+    // Once that request is closed, a later introspection of the gate queues a new review.
+    athena
+        .close(first.as_str(), "not needed", &Lines::default())
+        .unwrap();
+    say_loosening(&model, "relax", json!("test"));
+    log(
+        &athena,
+        "Shipped with a check too strict a third time",
+        "docs",
+        "mistake",
+    );
+    assert_eq!(gate_requests(&fx, "test").len(), 2);
+}
+
+#[test]
+fn the_prompt_carries_the_gate_counts_of_the_job_records() {
+    let model = Model::default();
+    say_cause(&model, "Nothing runs the docs test.", "code-check");
+    let (_fx, athena) = gate_fixture(&model);
+    log(&athena, "Shipped without the docs test", "docs", "mistake");
+    let prompts = model.prompts.lock().unwrap();
+    assert_eq!(
+        prompts[0]["gate_counts"],
+        json!([
+            { "gate": "test", "ends": 5, "disagreements": 5 },
+            { "gate": "fmt", "ends": 2, "disagreements": 0 }
+        ])
+    );
+}
+
+#[test]
+fn status_shows_gate_counts_most_overruled_first() {
+    let (fx, _athena) = gate_fixture(&Model::default());
+    let out = athena_bin(&fx).arg("status").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("\ngates       ended / overruled"), "{text}");
+    // `fmt` sorts first by name and `test` ended more jobs, so only the overruled count puts `test` first.
+    let test = text.find("test: ended 5 · overruled 5").expect(&text);
+    let fmt = text.find("fmt: ended 2 · overruled 0").expect(&text);
+    assert!(test < fmt, "{text}");
+
+    let out = athena_bin(&fx).args(["status", "--json"]).output().unwrap();
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["invalid_records"], json!([]));
+    assert_eq!(
+        json["gate_counts"],
+        json!([
+            { "gate": "test", "ends": 5, "disagreements": 5 },
+            { "gate": "fmt", "ends": 2, "disagreements": 0 }
+        ])
+    );
+}
+
+#[test]
+fn status_has_no_gate_section_when_no_gate_has_ended_a_job() {
+    let (fx, _athena) = setup(Scenario::default(), &Model::default());
+    let out = athena_bin(&fx).arg("status").output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(!text.contains("ended / overruled"), "{text}");
+    let out = athena_bin(&fx).args(["status", "--json"]).output().unwrap();
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(json.get("gate_counts").is_none(), "{json}");
 }

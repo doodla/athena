@@ -40,6 +40,14 @@
 //! again until a new introspection of that cause is recorded after the close ([`addressing_request`]); a
 //! request Hestia closed to queue it again, or one that was rejected or failed, does not hold the cause back.
 //!
+//! A rule or check can be wrong. An introspection of kind `relax` or `remove` names a gate in its prevention
+//! text (`[gate: NAME] ...`, see [`crate::gate_counts`]) and is accepted only for a gate that a later try overruled
+//! at least once. It is not a cause: [`cause_key`] leaves it out, so it never joins a root-cause request.
+//! [`Athena::gate_review`] queues one normal-priority request for it ([`gate_request`]) that cites the gate's
+//! end and disagreement counts as the evidence; an open request that holds the line `Gate under review: NAME.`
+//! stops a second one for the same gate ([`open_gate_request`]). Nothing is relaxed or removed by Athena: the
+//! request asks for a reviewed change.
+//!
 //! The throughput review (`docs/design/hestia.md`, "Throughput review") asks a different question: not what
 //! failed but what the pipeline waits on. It runs in [`Athena::review_passes`] when [`throughput_due`] says so:
 //! every [`crate::code_health::REVIEW_EVERY`] landings, or when the median minutes per landed job grew by more
@@ -76,6 +84,7 @@
 use crate::capability::{JobConfig, ToolGrant};
 use crate::commits::{NewFile, message};
 use crate::disk::{CargoBuild, CargoBuilder, GB, cargo_lock_blob};
+use crate::gate_counts::{GateCount, gate_counts, gate_of_prevention, prevention_without_gate};
 use crate::plan::{Improvement, Priority};
 use crate::state::format_bytes;
 use crate::status::{
@@ -91,8 +100,8 @@ use athena_context::briefs::plain_boundary_text;
 use athena_context::{CONTRACT, Component, Composed, compose};
 use athena_data::records::{
     AnyRecord, BuildMeasurement, HestiaCheckResult, IntrospectionRecord, IntrospectionStatus,
-    Invocation, InvocationOutcome, OutcomeState, Role, ThroughputFollowup, ThroughputProposal,
-    ThroughputReview, ThroughputTrigger, WasteFigures,
+    Invocation, InvocationOutcome, OutcomeState, PreventionKind, Role, ThroughputFollowup,
+    ThroughputProposal, ThroughputReview, ThroughputTrigger, WasteFigures,
 };
 use athena_data::{JobId, RecordId};
 use jiff::Timestamp;
@@ -260,10 +269,15 @@ fn one_line(text: &str) -> String {
 /// The key two introspections share when they have the same cause: the failure class they resolve to
 /// ([`class_of`], through the class registry or Jev's class answer), and, for one that resolves to none, its
 /// cause text with case and punctuation ignored ([`crate::introspect::normalise`]). `None` for an
-/// introspection that is not a case: one that failed, has no job, or has no cause.
+/// introspection that is not a case: one that failed, has no job, or has no cause, or that proposes relaxing or
+/// removing a gate. The last is a challenge to a check, reviewed apart from the root-cause requests
+/// ([`Athena::gate_review`]); in a cause group it would hide a code-check of the same cause from the backfill.
 pub fn cause_key(records: &Records, i: &IntrospectionRecord) -> Option<String> {
     let cause = i.cause.as_deref()?;
-    if i.status != IntrospectionStatus::Recorded || i.job.is_none() {
+    if i.status != IntrospectionStatus::Recorded
+        || i.job.is_none()
+        || i.prevention_kind.is_some_and(PreventionKind::loosens)
+    {
         return None;
     }
     if let Some(class) = class_of(records, i) {
@@ -504,6 +518,82 @@ fn root_cause_request_at(
     .map(|r| r.render())?;
     // A last check of the finished text: what is returned is what admission scans.
     plain_boundary_text(&request)
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Gate review
+
+/// The start of the line that ties a request to the gate it reviews. A request job that is not closed and
+/// holds a line equal to `Gate under review: NAME.` is the open review of that gate.
+const GATE_LINE: &str = "Gate under review: ";
+
+/// The line of a gate request that names its gate.
+fn gate_line(gate: &str) -> String {
+    format!("{GATE_LINE}{gate}.")
+}
+
+/// The text of the normal-priority request that reviews one gate, built with [`StewardRequest`]. It cites
+/// the gate's counts (the jobs it ended and the times a later try landed the same change) and the
+/// introspection that proposed `kind`, and asks for a reviewed change; it does not say the gate is wrong. No
+/// body line starts like a bullet.
+pub fn gate_request(
+    count: &GateCount,
+    kind: PreventionKind,
+    introspection: &IntrospectionRecord,
+) -> Result<String, String> {
+    let proposed = introspection
+        .prevention
+        .as_deref()
+        .map(|p| one_line(prevention_without_gate(p)))
+        .unwrap_or_default();
+    let body = format!(
+        "Athena counts, for each gate (a check or rule that ends a job), the jobs it ended and the times a later \
+         try at the same request landed the same change the gate had ended. For the {gate} gate, an \
+         introspection proposed to {kind} it. Decide from these counts, and from what the gate checks, whether \
+         it is wrong; change it only if the evidence supports that, and keep it if it does not.\n\n\
+         {line}\n\
+         Counts: {counts}.\n\
+         Proposal: {kind}.\n\
+         Introspection {id} proposed: {proposed}\n\n\
+         A relaxed or removed gate must leave a test that shows what the loosened gate still refuses, or the \
+         change must say why none is needed.",
+        gate = count.gate,
+        kind = kind.as_str(),
+        line = gate_line(&count.gate),
+        counts = count.describe(),
+        id = introspection.id,
+    );
+    let acceptance = [
+        "The change names the gate and the counts it rests on, and says whether the gate was relaxed, removed or kept"
+            .to_string(),
+        "fmt, clippy and test pass".to_string(),
+    ];
+    let title = format!(
+        "Review the {} gate: a later try landed the same change after it ended a job",
+        count.gate
+    );
+    let request = StewardRequest::new(
+        Some(Priority::Normal),
+        &title,
+        &body,
+        &acceptance,
+        &["crates/".to_string(), "docs/".to_string()],
+    )
+    .map(|r| r.render())?;
+    plain_boundary_text(&request)
+}
+
+/// The open request job, if any, that reviews `gate`: a request that is not closed and has a line equal to
+/// `Gate under review: <gate>.` The match is the whole line, so the review of `test` is not the review of
+/// `test-all`. A closed one (landed, rejected, failed or dropped) does not count.
+fn open_gate_request<'a>(records: &'a Records, gate: &str) -> Option<&'a JobRecords> {
+    let wanted = gate_line(gate);
+    records.request_jobs().into_iter().find(|j| {
+        !matches!(j.state(), JobState::Closed(_))
+            && j.request
+                .as_ref()
+                .is_some_and(|r| r.text.lines().any(|l| l.trim_end() == wanted))
+    })
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -2345,6 +2435,30 @@ impl Athena {
     /// landed request cites it, queues one high-priority root-cause request citing the introspection ids. Returns the
     /// job queued, if any. Never fails: a problem is a line to the user, since the review never blocks a job.
     pub fn error_review(&self, recorded: &IntrospectionRecord, ui: &dyn Ui) -> Option<JobId> {
+        // A proposal to relax or remove a gate is not a cause: its evidence is the gate's own counts, and it
+        // queues a review of that gate instead of a root-cause request.
+        if recorded
+            .prevention_kind
+            .is_some_and(PreventionKind::loosens)
+        {
+            return match self.gate_review(recorded) {
+                Ok(Some((job, count))) => {
+                    ui.line(&format!(
+                        "hestia     gate {} ({}); review request {job} queued at normal priority",
+                        count.gate,
+                        count.describe()
+                    ));
+                    Some(job)
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    ui.line(&format!(
+                        "hestia     the gate review could not run: {error:#}"
+                    ));
+                    None
+                }
+            };
+        }
         match self.try_error_review(recorded) {
             Ok(Some((job, cause))) => {
                 ui.line(&format!(
@@ -2362,6 +2476,44 @@ impl Athena {
                 None
             }
         }
+    }
+
+    /// The gate review of a recorded `relax` or `remove` introspection: queues one request that reviews the
+    /// gate it names, citing the gate's counts, and returns the job and the counts. Queues nothing (None)
+    /// when the introspection is not of those kinds, names no gate, names a gate that no later try overruled
+    /// (checked again here, on the records at HEAD), when a request already cites the introspection, or when
+    /// an open request already reviews the gate ([`open_gate_request`]); a gate whose review has closed may be
+    /// reviewed again.
+    pub fn gate_review(
+        &self,
+        recorded: &IntrospectionRecord,
+    ) -> Result<Option<(JobId, GateCount)>> {
+        let Some(kind) = recorded.prevention_kind.filter(|k| k.loosens()) else {
+            return Ok(None);
+        };
+        if recorded.status != IntrospectionStatus::Recorded {
+            return Ok(None);
+        }
+        let Some(gate) = recorded.prevention.as_deref().and_then(gate_of_prevention) else {
+            return Ok(None);
+        };
+        let records = Records::load(&self.git, &self.head()?)?;
+        let Some(count) = gate_counts(&records)
+            .into_iter()
+            .find(|c| c.gate == gate && c.ends >= 1 && c.disagreements >= 1)
+        else {
+            return Ok(None);
+        };
+        if addressing_request(&records, &[recorded.id.to_string()]).is_some()
+            || open_gate_request(&records, gate).is_some()
+        {
+            return Ok(None);
+        }
+        let text = gate_request(&count, kind, recorded)
+            .and_then(|text| plain_boundary_text(&text))
+            .map_err(|e| anyhow::anyhow!("the gate request: {e}"))?;
+        let (job, _) = self.queue(&text)?;
+        Ok(Some((job, count)))
     }
 
     fn try_error_review(
@@ -3241,6 +3393,265 @@ mod tests {
         let text = spec_request(&gaps[0]).unwrap();
         assert!(text.starts_with("Priority: high\n"), "{text}");
         assert!(text.contains("Spec requirement: OLY-A-22\n"), "{text}");
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // Gate review
+
+    use crate::gate_counts::{fixtures as gate_fixtures, mark_prevention};
+
+    /// A recorded relax or remove introspection `n` of the gate, about the job of the same number.
+    fn loosening(n: u32, gate: &str, kind: PreventionKind) -> IntrospectionRecord {
+        let mut i = introspection(n, 'a', None, "The gate is stricter than its rule.");
+        i.job = Some(gate_fixtures::job_id(n));
+        i.prevention_kind = Some(kind);
+        i.prevention = Some(mark_prevention(gate, "Loosen the check."));
+        i
+    }
+
+    /// `test` ended five jobs and a later try landed the same change each time; `fmt` ended two and was
+    /// never overruled; `test-all` ended two and was overruled once.
+    fn put_gate_chains(dir: &std::path::Path, athena: &Athena) {
+        let mut records = gate_fixtures::chain("test", 1, 5, 5);
+        records.extend(gate_fixtures::chain("fmt", 20, 2, 0));
+        records.extend(gate_fixtures::chain("test-all", 40, 2, 1));
+        put(dir, athena, records);
+    }
+
+    fn request_text(athena: &Athena, job: &JobId) -> String {
+        records(athena)
+            .jobs
+            .get(job.as_str())
+            .and_then(|j| j.request.as_ref())
+            .map(|r| r.text.clone())
+            .expect("the queued request")
+    }
+
+    /// The request jobs whose text holds the review line for `gate`.
+    fn gate_requests(athena: &Athena, gate: &str) -> Vec<JobId> {
+        let line = format!("Gate under review: {gate}.");
+        records(athena)
+            .request_jobs()
+            .iter()
+            .filter(|j| {
+                j.request
+                    .as_ref()
+                    .is_some_and(|r| r.text.lines().any(|l| l == line))
+            })
+            .map(|j| j.id().clone())
+            .collect()
+    }
+
+    #[test]
+    fn gate_review_queues_one_request_with_counts() {
+        for (kind, word) in [
+            (PreventionKind::Relax, "relax"),
+            (PreventionKind::Remove, "remove"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = tempfile::tempdir().unwrap();
+            let athena = athena_in(dir.path(), state.path());
+            put_gate_chains(dir.path(), &athena);
+            let i = loosening(60, "test", kind);
+            put_introspection(dir.path(), &athena, &i);
+
+            let job = athena
+                .error_review(&i, &crate::Quiet)
+                .expect("the gate was overruled, so a review is queued");
+            let text = request_text(&athena, &job);
+            assert!(text.starts_with("Priority: normal\n"), "{text}");
+            assert!(
+                text.lines().any(|l| l == "Gate under review: test."),
+                "{text}"
+            );
+            assert!(
+                text.contains("ended 5 job(s), overruled 5 time(s)"),
+                "{text}"
+            );
+            assert!(text.contains(i.id.as_str()), "{text}");
+            assert!(text.contains(&format!("Proposal: {word}.")), "{text}");
+            assert!(text.contains("Loosen the check."), "{text}");
+            assert!(!text.contains("[gate:"), "the prefix is not copied: {text}");
+            assert_eq!(gate_requests(&athena, "test"), [job]);
+            // Only the Acceptance bullets are bullets, so `athena plan` finds acceptance and files.
+            assert_eq!(crate::reading::request_text_acceptance(&text).len(), 2);
+        }
+    }
+
+    #[test]
+    fn gate_review_not_requeued_on_second_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        put_gate_chains(dir.path(), &athena);
+        let i = loosening(60, "test", PreventionKind::Relax);
+        put_introspection(dir.path(), &athena, &i);
+        assert!(athena.error_review(&i, &crate::Quiet).is_some());
+        assert!(athena.error_review(&i, &crate::Quiet).is_none());
+        assert!(athena.gate_review(&i).unwrap().is_none());
+        assert_eq!(gate_requests(&athena, "test").len(), 1);
+    }
+
+    #[test]
+    fn gate_review_one_open_request_per_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        put_gate_chains(dir.path(), &athena);
+        let first = loosening(60, "test", PreventionKind::Relax);
+        put_introspection(dir.path(), &athena, &first);
+        let queued = athena.error_review(&first, &crate::Quiet).unwrap();
+
+        // A second introspection of the same gate, in another job, queues nothing while the first is open.
+        let second = loosening(61, "test", PreventionKind::Remove);
+        put_introspection(dir.path(), &athena, &second);
+        assert!(athena.error_review(&second, &crate::Quiet).is_none());
+        assert_eq!(gate_requests(&athena, "test").len(), 1);
+
+        // A gate whose name starts with this one is another gate.
+        let other = loosening(62, "test-all", PreventionKind::Relax);
+        put_introspection(dir.path(), &athena, &other);
+        assert!(athena.error_review(&other, &crate::Quiet).is_some());
+        assert_eq!(gate_requests(&athena, "test-all").len(), 1);
+        assert_eq!(gate_requests(&athena, "test").len(), 1);
+
+        // Once the first review is closed, a later introspection of the gate queues a new one.
+        athena
+            .close(queued.as_str(), "not needed", &crate::Quiet)
+            .unwrap();
+        let third = loosening(63, "test", PreventionKind::Relax);
+        put_introspection(dir.path(), &athena, &third);
+        assert!(athena.error_review(&third, &crate::Quiet).is_some());
+        assert_eq!(gate_requests(&athena, "test").len(), 2);
+    }
+
+    #[test]
+    fn gate_review_refuses_gate_with_no_disagreements() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        put_gate_chains(dir.path(), &athena);
+        // `fmt` ended two jobs and no later try overruled it; `nothing` ended none.
+        for (n, gate) in [(60, "fmt"), (61, "nothing")] {
+            let i = loosening(n, gate, PreventionKind::Relax);
+            put_introspection(dir.path(), &athena, &i);
+            assert!(athena.gate_review(&i).unwrap().is_none(), "{gate}");
+            assert!(athena.error_review(&i, &crate::Quiet).is_none(), "{gate}");
+        }
+        // A prevention with no gate prefix, and another kind, name no gate to review.
+        let mut bare = loosening(62, "test", PreventionKind::Relax);
+        bare.prevention = Some("Loosen the check.".into());
+        put_introspection(dir.path(), &athena, &bare);
+        assert!(athena.gate_review(&bare).unwrap().is_none());
+        let mut other = loosening(63, "test", PreventionKind::CodeCheck);
+        other.prevention = Some(mark_prevention("test", "Add a check."));
+        put_introspection(dir.path(), &athena, &other);
+        assert!(athena.gate_review(&other).unwrap().is_none());
+        assert!(records(&athena).request_jobs().iter().all(|j| {
+            !j.request
+                .as_ref()
+                .is_some_and(|r| r.text.contains("Gate under review"))
+        }));
+    }
+
+    #[test]
+    fn gate_request_text_has_no_bullet_body_lines_and_names_gate_and_counts() {
+        let count = GateCount {
+            gate: "test".into(),
+            ends: 5,
+            disagreements: 3,
+        };
+        let mut i = loosening(60, "test", PreventionKind::Relax);
+        i.prevention = Some(mark_prevention(
+            "test",
+            "First line.\n- a bullet of the model's\n1. a numbered one",
+        ));
+        let text = gate_request(&count, PreventionKind::Relax, &i).unwrap();
+        assert!(
+            text.lines().any(|l| l == "Gate under review: test."),
+            "{text}"
+        );
+        assert!(
+            text.contains("ended 5 job(s), overruled 3 time(s)"),
+            "{text}"
+        );
+        // The model's own lines are flattened into one line, so only the two Acceptance bullets are bullets.
+        assert_eq!(crate::reading::request_text_acceptance(&text).len(), 2);
+        assert!(text.contains("Files: crates/, docs/"), "{text}");
+        assert!(!text.contains("athena.toml"), "{text}");
+    }
+
+    #[test]
+    fn relax_introspection_is_in_no_repeated_cause_or_improvement() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        put_gate_chains(dir.path(), &athena);
+        let c = class(1, "A check is too strict");
+        put(
+            dir.path(),
+            &athena,
+            vec![AnyRecord::FailureClass(c.clone())],
+        );
+        let mut first = loosening(60, "test", PreventionKind::Relax);
+        first.failure_class = Some(c.id.clone());
+        let mut second = loosening(61, "test", PreventionKind::Remove);
+        second.failure_class = Some(c.id.clone());
+        for i in [&first, &second] {
+            put_introspection(dir.path(), &athena, i);
+        }
+        let known = records(&athena);
+        assert_eq!(cause_key(&known, &first), None);
+        assert_eq!(cause_key(&known, &second), None);
+        // The same two as code checks do form a repeated cause.
+        let mut as_check = first.clone();
+        as_check.prevention_kind = Some(PreventionKind::CodeCheck);
+        assert!(cause_key(&known, &as_check).is_some());
+        assert!(repeated_causes(&known).is_empty());
+        assert!(improvement_of(&known).items.is_empty());
+
+        // Their review request is not an improvement item either: nothing links it to a cause.
+        assert!(athena.error_review(&first, &crate::Quiet).is_some());
+        let known = records(&athena);
+        assert!(repeated_causes(&known).is_empty());
+        assert!(improvement_of(&known).items.is_empty());
+    }
+
+    #[test]
+    fn gate_review_does_not_hide_code_check_cause_from_backfill() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let athena = athena_in(dir.path(), state.path());
+        put_gate_chains(dir.path(), &athena);
+        let c = class(1, "The verdict is not read");
+        put(
+            dir.path(),
+            &athena,
+            vec![AnyRecord::FailureClass(c.clone())],
+        );
+        // The same cause as a code-check in two jobs: a repeated cause nobody has queued yet.
+        let a = introspection(10, 'a', Some(&c.id), "The verdict is not read.");
+        let b = introspection(11, 'b', Some(&c.id), "The verdict is not read.");
+        // And a relax introspection of the same class in a third job, whose gate review is queued.
+        let mut r = loosening(12, "test", PreventionKind::Relax);
+        r.failure_class = Some(c.id.clone());
+        r.cause = Some("The verdict is not read.".into());
+        for i in [&a, &b, &r] {
+            put_introspection(dir.path(), &athena, i);
+        }
+        assert!(athena.error_review(&r, &crate::Quiet).is_some());
+        assert_eq!(gate_requests(&athena, "test").len(), 1);
+
+        let report = athena.error_review_backfill(&crate::Quiet).unwrap();
+        assert_eq!(report.count(BackfillAction::Queued), 1, "{report:?}");
+        let cause = repeated_causes(&records(&athena));
+        assert_eq!(cause.len(), 1);
+        assert_eq!(
+            cause[0].jobs.len(),
+            2,
+            "the relax record is not in the group"
+        );
+        assert!(cause[0].request.is_some());
     }
 
     fn landed(job: &JobId) -> AnyRecord {
