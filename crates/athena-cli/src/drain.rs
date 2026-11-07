@@ -5133,21 +5133,78 @@ mod tests {
         assert_eq!(commit_in_version("athena 0.1.0"), None);
     }
 
-    #[test]
-    fn status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain() {
+    /// A stand-in drain whose command line reads `athena drain ...`. It exits only when both the stop file and
+    /// the release file exist, so a test decides when it ends.
+    fn stand_in_drain(root: &Path, release: &Path) -> Reaped {
         use std::os::unix::process::CommandExt;
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        // Two processes whose command lines read `athena drain ...`. Only one is named in the pid file.
-        let script = r#"while [ ! -e "$1" ]; do sleep 0.05; done"#;
-        let drain_child = Reaped(
+        let script = r#"while [ ! -e "$1" ] || [ ! -e "$2" ]; do sleep 0.05; done"#;
+        Reaped(
             std::process::Command::new("sh")
                 .arg0("athena drain --budget 5")
                 .args(["-c", script, "sh"])
                 .arg(stop_file(root))
+                .arg(release)
                 .spawn()
                 .unwrap(),
+        )
+    }
+
+    /// Real processes, except that the first lookup, once it has read the process, creates the release file.
+    /// The lookup that `stop_and_wait` makes before it waits therefore sees the stand-in alive, and the
+    /// stand-in can only exit after the wait has begun.
+    struct ReleaseAfterFirstLookup {
+        release: PathBuf,
+        released: std::sync::atomic::AtomicBool,
+    }
+
+    impl Procs for ReleaseAfterFirstLookup {
+        fn start_marker(&self, pid: u32) -> Option<String> {
+            let marker = RealProcs.start_marker(pid);
+            if !self
+                .released
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                std::fs::write(&self.release, "go\n").unwrap();
+            }
+            marker
+        }
+    }
+
+    #[test]
+    fn a_stand_in_drain_that_exited_before_the_waiting_stop_reads_as_dead_not_exited() {
+        // The shape the stop test had before the release file: the stand-in is gone by the time the waiting
+        // call looks, so the call finds no running drain. A dead pid with no earlier sighting is
+        // indistinguishable from a crashed or stale drain, so it stays NotRunning(Dead).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let release = root.join("release");
+        let mut drain_child = stand_in_drain(root, &release);
+        let record = record_of(drain_child.id(), BUILD);
+        write_record(root, &record).unwrap();
+        let asked = stop_and_wait(root, &RealProcs, None, &Quiet).unwrap();
+        assert_eq!(asked, StopOutcome::Asked(record.clone()));
+        std::fs::write(&release, "go\n").unwrap();
+        drain_child.0.wait().unwrap();
+        let waited = stop_and_wait(
+            root,
+            &RealProcs,
+            Some(&quick(Some(Duration::from_secs(20)))),
+            &Quiet,
+        )
+        .unwrap();
+        assert_eq!(
+            waited,
+            StopOutcome::NotRunning(NotRunning::Dead(record.pid))
         );
+    }
+
+    #[test]
+    fn status_and_stop_find_the_drain_by_pid_file_when_command_lines_contain_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let release = root.join("release");
+        // Two processes whose command lines read `athena drain ...`. Only one is named in the pid file.
+        let drain_child = stand_in_drain(root, &release);
         let decoy = sleeper("athena drain --budget 9");
         let record = record_of(drain_child.id(), BUILD);
         write_record(root, &record).unwrap();
@@ -5171,10 +5228,14 @@ mod tests {
         let asked = stop_and_wait(root, &RealProcs, None, &Quiet).unwrap();
         assert_eq!(asked, StopOutcome::Asked(record.clone()));
         assert!(stop_file(root).exists());
-        // Asking again with a wait returns once the drain has exited, which its loop does at the stop file.
+        // Asking again with a wait returns once the drain has exited. The stand-in exits at the stop file only
+        // once the release file exists, and the release is made after this call has seen it running.
         let waited = stop_and_wait(
             root,
-            &RealProcs,
+            &ReleaseAfterFirstLookup {
+                release: release.clone(),
+                released: std::sync::atomic::AtomicBool::new(false),
+            },
             Some(&quick(Some(Duration::from_secs(20)))),
             &Quiet,
         )
